@@ -197,21 +197,27 @@ def create_router(generator: PosterGenerator = generate_vision_boards) -> Router
         await context.clear()
         await event.message.answer("Сбор данных отменён.", attachments=[main_keyboard()])
 
-    @router.message_callback(F.callback.payload.in_({"create_poster", "examples", "help"}))
+    @router.message_callback(F.callback.payload == "create_poster")
+    async def begin_poster(event: MessageCallback, context: MemoryContext) -> None:
+        if event.message is None:
+            await event.ack(notification="Меню недоступно. Отправьте /start.")
+            return
+        if await context.get_state() == PosterStates.generating:
+            await event.ack(notification="Плакат уже создаётся. Пожалуйста, подождите.")
+            return
+        await event.ack(notification="Загружаю…")
+        await context.clear()
+        await context.set_state(PosterStates.waiting_for_photo)
+        await event.send("Отправьте одно фото для плаката. /cancel — отмена.")
+
+    @router.message_callback(F.callback.payload.in_({"examples", "help"}))
     async def menu_callback(event: MessageCallback, context: MemoryContext) -> None:
         if event.message is None:
             await event.ack(notification="Меню недоступно. Отправьте /start.")
             return
-        await event.ack()
+        await event.ack(notification="Открываю…")
 
-        if event.callback.payload == "create_poster":
-            if await context.get_state() == PosterStates.generating:
-                await event.send("Плакат уже создаётся. Пожалуйста, подождите.")
-                return
-            await context.clear()
-            await context.set_state(PosterStates.waiting_for_photo)
-            await event.send("Отправьте одно фото для плаката. /cancel — отмена.")
-        elif event.callback.payload == "examples":
+        if event.callback.payload == "examples":
             await event.send(
                 "Примеры идей: ваше фото в образе успешного предпринимателя, "
                 "спортсмена или путешественника. Сферы жизни: карьера, здоровье, путешествия."
@@ -285,13 +291,13 @@ def create_router(generator: PosterGenerator = generate_vision_boards) -> Router
             except (ValueError, KeyError, IndexError, TypeError):
                 await event.ack(notification="Вариант недоступен. Отправьте /start.")
                 return
-            await event.ack()
+            await event.ack(notification="Готовлю ссылку…")
             await event.send(f"Скопируйте и отправьте эту ссылку:\n{url}")
         elif len(parts) == 2:
             if await context.get_state() == PosterStates.generating:
                 await event.ack(notification="Варианты уже создаются. Подождите.")
                 return
-            await event.ack()
+            await event.ack(notification="Создаю варианты…")
             await generate_and_send(
                 event, context, new_batch=data.get("sent_count", 0) == 3
             )

@@ -12,6 +12,7 @@ from maxapi.context import MemoryContext
 from maxapi.context.isolation import SimpleEventIsolation
 
 from config import Config, MAX_API_URL
+from database import init_db
 from handlers import create_router
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,7 @@ def configure_logging() -> None:
 async def main() -> None:
     configure_logging()
     config = Config.from_env()
+    await init_db()
     # maxapi не закрывает переданный извне connector: контекст закрывает его здесь.
     async with MaxAPIConnector() as connector:
         bot = Bot(

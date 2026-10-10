@@ -22,6 +22,8 @@ class Config:
     storage_access_key_id: str | None = field(default=None, repr=False)
     storage_secret_access_key: str | None = field(default=None, repr=False)
     storage_public_base_url: str | None = None
+    prodamus_domain: str | None = None
+    prodamus_secret_key: str | None = field(default=None, repr=False)
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -48,4 +50,6 @@ class Config:
             storage_access_key_id=os.environ.get("STORAGE_ACCESS_KEY_ID", "").strip() or None,
             storage_secret_access_key=os.environ.get("STORAGE_SECRET_ACCESS_KEY", "").strip() or None,
             storage_public_base_url=os.environ.get("STORAGE_PUBLIC_BASE_URL", "").strip() or None,
+            prodamus_domain=os.environ.get("PRODAMUS_DOMAIN", "").strip() or None,
+            prodamus_secret_key=os.environ.get("PRODAMUS_SECRET_KEY", "").strip() or None,
         )

@@ -147,11 +147,12 @@ async def test_upload_photo_rejects_empty_token(config, max_bot):
     bot.close_session.assert_awaited_once()
 
 
-@pytest.mark.parametrize("count", [1, 3])
-async def test_generation_uploads_photo_and_parses_response(config, storage, api, count):
+@pytest.mark.parametrize("entrypoint", ["single", "list"])
+async def test_generation_uploads_photo_and_parses_response(config, storage, api, entrypoint):
+    count = 1
     register_generation(api, count=count)
 
-    if count == 1:
+    if entrypoint == "single":
         urls = [await service.generate_vision_board(PHOTO_URL, "Карьера")]
     else:
         urls = await service.generate_vision_boards(PHOTO_URL, "Карьера")

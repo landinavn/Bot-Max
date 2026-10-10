@@ -1,8 +1,10 @@
 """Меню и FSM: фото → сфера жизни → генерация плаката."""
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from uuid import uuid4
+from weakref import WeakValueDictionary
 
 from maxapi import F, Router
 from maxapi.context import MemoryContext
@@ -17,6 +19,7 @@ from maxapi.types import (
 )
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
+from database import deduct_credit, get_user, grant_free_trial
 from image_service import (
     GenerationLimitError,
     GenerationNotConfigured,
@@ -32,6 +35,22 @@ WELCOME_TEXT = (
     "Привет! Я бот для создания плакатов. "
     "Выберите действие: создать плакат, посмотреть примеры или получить помощь."
 )
+PACKAGES_TEXT = (
+    "💎 Доступные пакеты:\n"
+    "5 генераций — 299 ₽\n"
+    "15 генераций — 699 ₽\n\n"
+    "Оплата временно недоступна. Скоро!"
+)
+PACKAGE_OFFER_TEXT = "Понравился результат? Хотите создать ещё?\n\n" + PACKAGES_TEXT
+
+
+def packages_keyboard():
+    return (
+        InlineKeyboardBuilder()
+        .row(CallbackButton(text="Купить 5 генераций", payload="buy_5"))
+        .row(CallbackButton(text="Купить 15 генераций", payload="buy_15"))
+        .as_markup()
+    )
 
 
 class PosterStates(StatesGroup):
@@ -67,11 +86,31 @@ def result_keyboard(url: str, batch_id: str, index: int):
 
 def create_router(generator: PosterGenerator = generate_vision_boards) -> Router:
     router = Router()
+    # FSM изолирован по чату, а баланс общий для всех чатов пользователя.
+    generation_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
 
     async def generate_and_send(
         event: MessageCreated | MessageCallback,
         context: MemoryContext,
         *,
+        new_batch: bool = False,
+    ) -> None:
+        credit_user_id = event.get_ids()[1]
+        if credit_user_id is None:
+            if event.message is not None:
+                await event.message.answer("Не удалось определить пользователя. Отправьте /start.")
+            return
+        lock = generation_locks.setdefault(credit_user_id, asyncio.Lock())
+        async with lock:
+            await generate_with_credits(
+                event, context, credit_user_id=credit_user_id, new_batch=new_batch
+            )
+
+    async def generate_with_credits(
+        event: MessageCreated | MessageCallback,
+        context: MemoryContext,
+        *,
+        credit_user_id: int,
         new_batch: bool = False,
     ) -> None:
         message = event.message
@@ -102,30 +141,46 @@ def create_router(generator: PosterGenerator = generate_vision_boards) -> Router
             if new_batch:
                 data = await context.update_data(new_batch_requested=True)
             if data.get("new_batch_requested") or not urls:
-                await message.answer("Создаю три варианта плаката…")
+                user = await get_user(credit_user_id)
+                if user is None or user["balance"] < 1:
+                    await context.set_state(PosterStates.waiting_for_sphere)
+                    await message.answer("У вас закончились кредиты. Купите пакет: /buy")
+                    return
+                await message.answer("Создаю плакат…")
                 urls = await generator(photo["url"], sphere)
-                if len(urls) != 3 or not all(isinstance(url, str) and url.startswith("https://") for url in urls):
-                    raise RuntimeError("Генератор должен вернуть три HTTPS URL.")
+                if len(urls) != 1 or not all(isinstance(url, str) and url.startswith("https://") for url in urls):
+                    raise RuntimeError("Генератор должен вернуть один HTTPS URL.")
+                if not await deduct_credit(credit_user_id):
+                    raise RuntimeError("Не удалось списать кредит после генерации.")
+                user = await get_user(credit_user_id)
                 data = await context.update_data(
                     variants=urls, batch_id=uuid4().hex[:12], sent_count=0,
                     new_batch_requested=False,
+                    package_offer_pending=user is not None and user["balance"] == 0,
                 )
             else:
-                await message.answer("Отправляю готовые варианты…")
+                await message.answer("Отправляю готовый плакат…")
             batch_id = data["batch_id"]
-            for index in range(data.get("sent_count", 0), 3):
+            for index in range(data.get("sent_count", 0), 1):
                 image = image_from_url(urls[index])
                 keyboard = result_keyboard(urls[index], batch_id, index)
-                logger.info("Запрос MAX API: отправка варианта %d из 3.", index + 1)
+                logger.info("Запрос MAX API: отправка плаката.")
                 sent = await bot.send_message(
                     chat_id=chat_id,
                     user_id=user_id,
-                    text=f"Вариант {index + 1} из 3",
+                    text="Ваш плакат готов!",
                     attachments=[image, keyboard],
                 )
                 if sent is None:
                     raise RuntimeError("MAX не подтвердил отправку плаката.")
                 await context.update_data(sent_count=index + 1)
+            user = await get_user(credit_user_id)
+            await message.answer(f"Осталось кредитов: {user['balance'] if user else 0}.")
+            if data.get("package_offer_pending"):
+                await message.answer(
+                    PACKAGE_OFFER_TEXT, attachments=[packages_keyboard()]
+                )
+                await context.update_data(package_offer_pending=False)
         except GenerationTimeoutError:
             logger.error("Таймаут API при создании или сохранении плаката.")
             await context.set_state(PosterStates.waiting_for_sphere)
@@ -173,10 +228,10 @@ def create_router(generator: PosterGenerator = generate_vision_boards) -> Router
             )
             return
         except Exception as exc:
-            logger.error("Не удалось создать или отправить варианты плаката (%s).", type(exc).__name__)
+            logger.error("Не удалось создать или отправить плакат (%s).", type(exc).__name__)
             await context.set_state(PosterStates.waiting_for_sphere)
             await message.answer(
-                "Не удалось завершить создание или отправку вариантов. "
+                "Не удалось завершить создание или отправку плаката. "
                 "Повторите сферу жизни или /cancel."
             )
             return
@@ -187,8 +242,30 @@ def create_router(generator: PosterGenerator = generate_vision_boards) -> Router
     async def start(event: MessageCreated, context: MemoryContext) -> None:
         if is_bot_message(event):
             return
+        user_id = event.get_ids()[1]
+        if user_id is None:
+            await event.message.answer("Не удалось определить пользователя.")
+            return
+        trial_granted = await grant_free_trial(user_id)
         await context.clear()
         await event.message.answer(text=WELCOME_TEXT, attachments=[main_keyboard()])
+        if trial_granted:
+            await event.message.answer("Вам начислен 1 бесплатный кредит!")
+
+    @router.message_created(Command("buy"))
+    async def buy(event: MessageCreated) -> None:
+        if is_bot_message(event):
+            return
+        await event.message.answer(
+            PACKAGES_TEXT + "\n1 кредит — одно сгенерированное изображение.",
+            attachments=[packages_keyboard()],
+        )
+
+    @router.message_callback(F.callback.payload.in_({"buy_5", "buy_15"}))
+    async def buy_callback(event: MessageCallback) -> None:
+        await event.ack(notification="Оплата временно недоступна. Скоро!")
+        if event.message is not None:
+            await event.send(PACKAGES_TEXT, attachments=[packages_keyboard()])
 
     @router.message_created(Command("cancel"))
     async def cancel(event: MessageCreated, context: MemoryContext) -> None:
@@ -226,7 +303,7 @@ def create_router(generator: PosterGenerator = generate_vision_boards) -> Router
             await event.send(
                 "Нажмите «Создать плакат», отправьте одно фото, затем укажите сферу жизни: "
                 "например, карьера, семья, здоровье или путешествия.\n"
-                "Бот предложит три варианта с кнопками «Скачать», «Ещё» и «Поделиться».\n"
+                "Бот создаст один плакат с кнопками «Скачать», «Ещё» и «Поделиться».\n"
                 "/cancel — отменить сбор данных, /start — вернуться в меню."
             )
 
@@ -285,7 +362,7 @@ def create_router(generator: PosterGenerator = generate_vision_boards) -> Router
         if parts[0] == "share":
             try:
                 index = int(parts[2]) if len(parts) == 3 else -1
-                if not 0 <= index < 3:
+                if index != 0:
                     raise ValueError("Invalid index")
                 url = data["variants"][index]
             except (ValueError, KeyError, IndexError, TypeError):
@@ -295,11 +372,11 @@ def create_router(generator: PosterGenerator = generate_vision_boards) -> Router
             await event.send(f"Скопируйте и отправьте эту ссылку:\n{url}")
         elif len(parts) == 2:
             if await context.get_state() == PosterStates.generating:
-                await event.ack(notification="Варианты уже создаются. Подождите.")
+                await event.ack(notification="Плакат уже создаётся. Подождите.")
                 return
-            await event.ack(notification="Создаю варианты…")
+            await event.ack(notification="Создаю плакат…")
             await generate_and_send(
-                event, context, new_batch=data.get("sent_count", 0) == 3
+                event, context, new_batch=data.get("sent_count", 0) == 1
             )
         else:
             await event.ack(notification="Кнопка недоступна.")

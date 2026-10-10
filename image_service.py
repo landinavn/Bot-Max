@@ -314,8 +314,8 @@ async def generate_vision_board(photo_url: str, sphere: str) -> str:
 
 
 async def generate_vision_boards(photo_url: str, sphere: str) -> list[str]:
-    """Получить три варианта одним запросом n=3 и вернуть их публичные URL."""
-    return await _generate_and_store(photo_url, sphere, count=3)
+    """Получить одно изображение (n=1), сохранив интерфейс списка URL."""
+    return await _generate_and_store(photo_url, sphere, count=1)
 
 
 def image_from_url(url: str) -> Attachment:

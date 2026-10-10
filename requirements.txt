@@ -2,3 +2,4 @@ maxapi>=1.2.3
 aiohttp>=3.13
 boto3>=1.35
 python-dotenv>=1.0
+aiosqlite>=0.20

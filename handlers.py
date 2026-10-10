@@ -1,8 +1,10 @@
 """Меню и FSM: фото → сфера жизни → генерация плаката."""
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from uuid import uuid4
+from weakref import WeakValueDictionary
 
 from maxapi import F, Router
 from maxapi.context import MemoryContext
@@ -17,6 +19,7 @@ from maxapi.types import (
 )
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
+from database import deduct_credit, get_user, grant_free_trial
 from image_service import (
     GenerationLimitError,
     GenerationNotConfigured,
@@ -67,11 +70,31 @@ def result_keyboard(url: str, batch_id: str, index: int):
 
 def create_router(generator: PosterGenerator = generate_vision_boards) -> Router:
     router = Router()
+    # FSM изолирован по чату, а баланс общий для всех чатов пользователя.
+    generation_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
 
     async def generate_and_send(
         event: MessageCreated | MessageCallback,
         context: MemoryContext,
         *,
+        new_batch: bool = False,
+    ) -> None:
+        credit_user_id = event.get_ids()[1]
+        if credit_user_id is None:
+            if event.message is not None:
+                await event.message.answer("Не удалось определить пользователя. Отправьте /start.")
+            return
+        lock = generation_locks.setdefault(credit_user_id, asyncio.Lock())
+        async with lock:
+            await generate_with_credits(
+                event, context, credit_user_id=credit_user_id, new_batch=new_batch
+            )
+
+    async def generate_with_credits(
+        event: MessageCreated | MessageCallback,
+        context: MemoryContext,
+        *,
+        credit_user_id: int,
         new_batch: bool = False,
     ) -> None:
         message = event.message
@@ -102,10 +125,17 @@ def create_router(generator: PosterGenerator = generate_vision_boards) -> Router
             if new_batch:
                 data = await context.update_data(new_batch_requested=True)
             if data.get("new_batch_requested") or not urls:
+                user = await get_user(credit_user_id)
+                if user is None or user["balance"] < 1:
+                    await context.set_state(PosterStates.waiting_for_sphere)
+                    await message.answer("У вас закончились кредиты. Купите пакет: /buy")
+                    return
                 await message.answer("Создаю три варианта плаката…")
                 urls = await generator(photo["url"], sphere)
                 if len(urls) != 3 or not all(isinstance(url, str) and url.startswith("https://") for url in urls):
                     raise RuntimeError("Генератор должен вернуть три HTTPS URL.")
+                if not await deduct_credit(credit_user_id):
+                    raise RuntimeError("Не удалось списать кредит после генерации.")
                 data = await context.update_data(
                     variants=urls, batch_id=uuid4().hex[:12], sent_count=0,
                     new_batch_requested=False,
@@ -126,6 +156,8 @@ def create_router(generator: PosterGenerator = generate_vision_boards) -> Router
                 if sent is None:
                     raise RuntimeError("MAX не подтвердил отправку плаката.")
                 await context.update_data(sent_count=index + 1)
+            user = await get_user(credit_user_id)
+            await message.answer(f"Осталось кредитов: {user['balance'] if user else 0}.")
         except GenerationTimeoutError:
             logger.error("Таймаут API при создании или сохранении плаката.")
             await context.set_state(PosterStates.waiting_for_sphere)
@@ -187,8 +219,24 @@ def create_router(generator: PosterGenerator = generate_vision_boards) -> Router
     async def start(event: MessageCreated, context: MemoryContext) -> None:
         if is_bot_message(event):
             return
+        user_id = event.get_ids()[1]
+        if user_id is None:
+            await event.message.answer("Не удалось определить пользователя.")
+            return
+        trial_granted = await grant_free_trial(user_id)
         await context.clear()
         await event.message.answer(text=WELCOME_TEXT, attachments=[main_keyboard()])
+        if trial_granted:
+            await event.message.answer("Вам начислен 1 бесплатный кредит!")
+
+    @router.message_created(Command("buy"))
+    async def buy(event: MessageCreated) -> None:
+        if is_bot_message(event):
+            return
+        await event.message.answer(
+            "Пакеты кредитов:\n5 кредитов — 299 ₽\n15 кредитов — 699 ₽\n"
+            "1 кредит — одна генерация трёх вариантов.\nОплата временно недоступна"
+        )
 
     @router.message_created(Command("cancel"))
     async def cancel(event: MessageCreated, context: MemoryContext) -> None:

@@ -1,0 +1,281 @@
+"""Проверки MAX/OpenAI с моками HTTP и хранилища, без реальных ключей."""
+
+import asyncio
+import base64
+import re
+from dataclasses import replace
+from email.parser import BytesParser
+from email.policy import default
+from pathlib import Path
+from unittest.mock import AsyncMock, Mock
+
+import pytest
+from aioresponses import aioresponses
+from maxapi.enums.upload_type import UploadType
+from maxapi.types import AttachmentPayload, AttachmentUpload
+
+import image_service as service
+from config import Config
+
+PHOTO_URL = "https://photos.example.com/source.png"
+PUBLIC_URL = re.compile(
+    r"https://storage\.yandexcloud\.net/test-bucket/vision-boards/[a-f0-9]{32}\.png"
+)
+PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/"
+    "x8AAwMCAO+aH1sAAAAASUVORK5CYII="
+)
+ENCODED_PNG = base64.b64encode(PNG).decode()
+
+
+@pytest.fixture
+def config(monkeypatch):
+    settings = Config(
+        token="test-max-token",
+        photo_path=Path("unused.png"),
+        image_api_key="test-openai-key",
+        storage_bucket="test-bucket",
+        storage_access_key_id="test-storage-access",
+        storage_secret_access_key="test-storage-secret",
+    )
+    monkeypatch.setattr(service.Config, "from_env", lambda: settings)
+    return settings
+
+
+@pytest.fixture
+def max_bot(monkeypatch):
+    bot = Mock()
+    bot.upload_media = AsyncMock(
+        return_value=AttachmentUpload(
+            type=UploadType.IMAGE, payload=AttachmentPayload(token="media-token")
+        )
+    )
+    bot.close_session = AsyncMock()
+    factory = Mock(return_value=bot)
+    monkeypatch.setattr(service, "Bot", factory)
+    return bot, factory
+
+
+@pytest.fixture
+def storage(monkeypatch):
+    client = Mock()
+    factory = Mock(return_value=client)
+    monkeypatch.setattr(service, "_storage_client", factory)
+    return client
+
+
+@pytest.fixture
+def api():
+    # Неописанный HTTP-запрос завершается ошибкой, а не уходит в сеть.
+    with aioresponses() as mock:
+        yield mock
+
+
+def register_generation(api, *, count=1, payload=None, status=200, headers=None):
+    api.get(PHOTO_URL, body=PNG, content_type="image/png")
+    if payload is None:
+        payload = {"data": [{"b64_json": ENCODED_PNG} for _ in range(count)]}
+    api.post(service.OPENAI_IMAGE_EDIT_URL, payload=payload, status=status, headers=headers)
+    api.head(PUBLIC_URL, status=200, repeat=True)
+
+
+def post_requests(api):
+    return [call for (method, _), calls in api.requests.items() if method == "POST" for call in calls]
+
+
+async def multipart_fields(form):
+    """Разобрать настоящий multipart, который aiohttp отправляет в API."""
+    payload = form()
+
+    class Writer:
+        def __init__(self):
+            self.data = bytearray()
+
+        async def write(self, chunk):
+            self.data.extend(chunk)
+
+    writer = Writer()
+    await payload.write(writer)
+    message = BytesParser(policy=default).parsebytes(
+        f"Content-Type: {payload.content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode()
+        + bytes(writer.data)
+    )
+    return {
+        part.get_param("name", header="content-disposition"): part
+        for part in message.iter_parts()
+    }
+
+
+async def test_upload_photo_returns_media_token(config, max_bot):
+    bot, factory = max_bot
+
+    assert await service.upload_photo(PNG) == "media-token"
+
+    factory.assert_called_once_with(token=config.token, auto_requests=False)
+    bot.upload_media.assert_awaited_once()
+    media = bot.upload_media.call_args.args[0]
+    assert media.buffer == PNG
+    assert media.type == UploadType.IMAGE
+    bot.close_session.assert_awaited_once()
+
+
+@pytest.mark.parametrize("value,error", [(b"", ValueError), ("image", TypeError), (None, TypeError)])
+async def test_upload_photo_rejects_invalid_input(value, error, max_bot):
+    _, factory = max_bot
+    with pytest.raises(error):
+        await service.upload_photo(value)
+    factory.assert_not_called()
+
+
+async def test_upload_photo_closes_session_after_api_error(config, max_bot):
+    bot, _ = max_bot
+    failure = RuntimeError("Ошибка MAX API")
+    bot.upload_media.side_effect = failure
+
+    with pytest.raises(RuntimeError) as caught:
+        await service.upload_photo(PNG)
+
+    assert caught.value is failure
+    bot.close_session.assert_awaited_once()
+
+
+async def test_upload_photo_rejects_empty_token(config, max_bot):
+    bot, _ = max_bot
+    bot.upload_media.return_value.payload.token = ""
+    with pytest.raises(RuntimeError, match="пустой media token"):
+        await service.upload_photo(PNG)
+    bot.close_session.assert_awaited_once()
+
+
+@pytest.mark.parametrize("count", [1, 3])
+async def test_generation_uploads_photo_and_parses_response(config, storage, api, count):
+    register_generation(api, count=count)
+
+    if count == 1:
+        urls = [await service.generate_vision_board(PHOTO_URL, "Карьера")]
+    else:
+        urls = await service.generate_vision_boards(PHOTO_URL, "Карьера")
+
+    assert len(urls) == count
+    assert len(set(urls)) == count
+    assert all(PUBLIC_URL.fullmatch(url) for url in urls)
+    requests = post_requests(api)
+    assert len(requests) == 1
+    request = requests[0].kwargs
+    assert request["headers"]["Authorization"] == f"Bearer {config.image_api_key}"
+    assert request["allow_redirects"] is False
+    fields = await multipart_fields(request["data"])
+    assert fields["image"].get_payload(decode=True) == PNG
+    assert fields["image"].get_content_type() == "image/png"
+    assert fields["image"].get_filename() == "photo.png"
+    assert fields["model"].get_content() == config.image_model
+    assert fields["n"].get_content() == str(count)
+    assert "Карьера" in fields["prompt"].get_content()
+    assert fields["output_format"].get_content() == "png"
+    assert storage.put_object.call_count == count
+    for call, url in zip(storage.put_object.call_args_list, urls):
+        assert call.kwargs["Body"] == PNG
+        assert call.kwargs["ContentType"] == "image/png"
+        assert url == f"https://storage.yandexcloud.net/test-bucket/{call.kwargs['Key']}"
+    for (method, _), calls in api.requests.items():
+        if method in {"GET", "HEAD"}:
+            assert all("Authorization" not in call.kwargs.get("headers", {}) for call in calls)
+    storage.close.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {}, {"data": []}, {"data": [{}]},
+        {"data": [{"b64_json": "invalid!"}]},
+        {"data": [{"b64_json": 123}]},
+        {"data": [{"b64_json": base64.b64encode(b"not a PNG").decode()}]},
+    ],
+    ids=["missing-data", "empty-data", "missing-image", "bad-base64", "wrong-type", "not-png"],
+)
+async def test_generation_rejects_invalid_response(config, storage, api, payload):
+    register_generation(api, payload=payload)
+    with pytest.raises(service.ImageGenerationError, match="корректного PNG"):
+        await service.generate_vision_board(PHOTO_URL, "Карьера")
+    storage.put_object.assert_not_called()
+    storage.close.assert_called_once()
+
+
+async def test_generation_rejects_incomplete_batch(config, storage, api):
+    register_generation(api, count=2)
+    with pytest.raises(service.ImageGenerationError):
+        await service.generate_vision_boards(PHOTO_URL, "Карьера")
+    storage.put_object.assert_not_called()
+
+
+async def test_generation_rejects_invalid_json(config, storage, api):
+    api.get(PHOTO_URL, body=PNG)
+    api.post(service.OPENAI_IMAGE_EDIT_URL, body="{", content_type="application/json")
+    with pytest.raises(service.ImageGenerationError, match="некорректный JSON"):
+        await service.generate_vision_board(PHOTO_URL, "Карьера")
+    storage.put_object.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "status,code,error",
+    [
+        (429, "rate_limit_exceeded", service.GenerationLimitError),
+        (429, "insufficient_quota", service.GenerationLimitError),
+        (400, "billing_hard_limit_reached", service.GenerationLimitError),
+        (400, "invalid_image_format", service.UnsupportedPhotoFormatError),
+        (415, None, service.UnsupportedPhotoFormatError),
+        (500, None, service.ImageGenerationError),
+    ],
+)
+async def test_generation_classifies_api_errors(config, storage, api, status, code, error):
+    register_generation(
+        api, status=status, payload={"error": {"code": code}}, headers={"Retry-After": "30"}
+    )
+    with pytest.raises(error) as caught:
+        await service.generate_vision_board(PHOTO_URL, "Карьера")
+    if isinstance(caught.value, service.GenerationLimitError):
+        assert caught.value.retry_after == 30
+        assert caught.value.quota_exhausted == (code != "rate_limit_exceeded")
+    assert len(post_requests(api)) == 1
+    storage.put_object.assert_not_called()
+    storage.close.assert_called_once()
+
+
+@pytest.mark.parametrize("stage", ["download", "generation"])
+async def test_generation_handles_timeout(config, storage, api, stage):
+    if stage == "download":
+        api.get(PHOTO_URL, exception=asyncio.TimeoutError())
+    else:
+        api.get(PHOTO_URL, body=PNG)
+        api.post(service.OPENAI_IMAGE_EDIT_URL, exception=asyncio.TimeoutError())
+    with pytest.raises(service.GenerationTimeoutError):
+        await service.generate_vision_board(PHOTO_URL, "Карьера")
+    storage.put_object.assert_not_called()
+    storage.close.assert_called_once()
+
+
+@pytest.mark.parametrize("body,error", [(b"", service.ImageGenerationError), (b"GIF89a", service.UnsupportedPhotoFormatError)])
+async def test_generation_rejects_invalid_photo(config, storage, api, body, error):
+    api.get(PHOTO_URL, body=body)
+    with pytest.raises(error):
+        await service.generate_vision_board(PHOTO_URL, "Карьера")
+    assert not post_requests(api)
+    storage.put_object.assert_not_called()
+
+
+async def test_generation_does_not_return_private_url(config, storage, api):
+    api.get(PHOTO_URL, body=PNG)
+    api.post(service.OPENAI_IMAGE_EDIT_URL, payload={"data": [{"b64_json": ENCODED_PNG}]})
+    api.head(PUBLIC_URL, status=403)
+    with pytest.raises(service.ImageGenerationError, match="публичная ссылка недоступна"):
+        await service.generate_vision_board(PHOTO_URL, "Карьера")
+    storage.put_object.assert_called_once()
+    storage.close.assert_called_once()
+
+
+async def test_generation_requires_key_before_http(config, storage, api, monkeypatch):
+    monkeypatch.setattr(service.Config, "from_env", lambda: replace(config, image_api_key=None))
+    with pytest.raises(service.GenerationNotConfigured):
+        await service.generate_vision_board(PHOTO_URL, "Карьера")
+    assert not api.requests
+    storage.put_object.assert_not_called()

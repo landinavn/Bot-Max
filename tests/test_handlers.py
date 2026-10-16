@@ -1,14 +1,16 @@
 """Callback не должен отправлять пустое подтверждение в MAX."""
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock, call
 from inspect import signature
 
 import pytest
 from maxapi.context import MemoryContext
 from maxapi.enums.update import UpdateType
+from maxapi.types import AttachmentUpload
 
-from handlers import PACKAGE_OFFER_TEXT, PACKAGES_TEXT, PosterStates, create_router
+import handlers
+from handlers import EXAMPLE_TEXT, PACKAGE_OFFER_TEXT, PACKAGES_TEXT, PosterStates, create_router
 
 
 @pytest.fixture(autouse=True)
@@ -80,13 +82,90 @@ async def test_create_poster_handles_deleted_message():
     assert await context.get_state() is None
 
 
-@pytest.mark.parametrize("payload", ["examples", "help"])
-async def test_menu_acknowledges_and_sends_response(payload):
+async def test_help_acknowledges_and_sends_response():
     context = MemoryContext(chat_id=123, user_id=456)
-    event = callback_event(payload)
+    event = callback_event("help")
     await dispatch_callback(create_router(), event, context)
     event.ack.assert_awaited_once_with(notification="Открываю…")
     event.send.assert_awaited_once()
+
+
+@pytest.fixture
+def example_photos(tmp_path, monkeypatch):
+    directory = tmp_path / "project" / "examples"
+    directory.mkdir(parents=True)
+    for filename in ("before.jpg", "after.jpg"):
+        (directory / filename).write_bytes(b"local-photo")
+    monkeypatch.setattr(handlers, "EXAMPLES_DIR", directory)
+    # Файлы ищутся относительно проекта, а не рабочей директории процесса.
+    monkeypatch.chdir(tmp_path)
+    return directory
+
+
+async def test_examples_uploads_local_photos_and_sends_in_order(example_photos):
+    context = MemoryContext(chat_id=123, user_id=456)
+    await context.set_state(PosterStates.generating)
+    await context.update_data(photo={"url": "original"}, sphere="карьера")
+    event = callback_event("examples")
+    images = [
+        AttachmentUpload(type="image", payload={"token": token})
+        for token in ("before-token", "after-token")
+    ]
+    event.bot.upload_media = AsyncMock(side_effect=images)
+    timeline = Mock()
+    timeline.attach_mock(event.send, "send")
+    timeline.attach_mock(event.bot.upload_media, "upload")
+    generator = AsyncMock()
+
+    await dispatch_callback(create_router(generator), event, context)
+
+    uploads = event.bot.upload_media.await_args_list
+    assert [entry.args[0].path for entry in uploads] == [
+        str(example_photos / "before.jpg"), str(example_photos / "after.jpg")
+    ]
+    assert all(entry.args[0].type == "image" for entry in uploads)
+    assert timeline.mock_calls == [
+        call.send(EXAMPLE_TEXT),
+        call.upload(uploads[0].args[0]),
+        call.send("Фото до:", attachments=[images[0]]),
+        call.upload(uploads[1].args[0]),
+        call.send("Результат:", attachments=[images[1]]),
+    ]
+    event.ack.assert_awaited_once_with(notification="Открываю…")
+    generator.assert_not_awaited()
+    assert await context.get_state() == PosterStates.generating
+    assert await context.get_data() == {"photo": {"url": "original"}, "sphere": "карьера"}
+
+
+@pytest.mark.parametrize("missing", ["before.jpg", "after.jpg"])
+async def test_examples_missing_photo_sends_fallback(example_photos, missing):
+    (example_photos / missing).unlink()
+    event = callback_event("examples")
+    event.bot.upload_media = AsyncMock()
+    await dispatch_callback(create_router(), event, MemoryContext(chat_id=123, user_id=456))
+    event.send.assert_awaited_once_with("Пример временно недоступен. Попробуйте позже.")
+    event.bot.upload_media.assert_not_awaited()
+
+
+@pytest.mark.parametrize("failure", ["upload", "empty_token", "send"])
+async def test_examples_reports_upload_and_send_failures(example_photos, failure):
+    event = callback_event("examples")
+    image = AttachmentUpload(type="image", payload={"token": "" if failure == "empty_token" else "token"})
+    event.bot.upload_media = AsyncMock(return_value=image)
+    if failure == "upload":
+        event.bot.upload_media.side_effect = RuntimeError("upload failed")
+    elif failure == "send":
+        event.send.side_effect = [object(), None, object()]
+    await dispatch_callback(create_router(), event, MemoryContext(chat_id=123, user_id=456))
+    assert event.send.await_args.args == ("Не удалось отправить пример. Попробуйте позже.",)
+    assert event.bot.upload_media.await_count == 1
+
+
+async def test_examples_handles_deleted_menu():
+    event = callback_event("examples", deleted=True)
+    await dispatch_callback(create_router(), event, MemoryContext(chat_id=123, user_id=456))
+    event.ack.assert_awaited_once_with(notification="Меню недоступно. Отправьте /start.")
+    event.send.assert_not_awaited()
 
 
 async def test_share_acknowledges_and_sends_link():

@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
@@ -10,8 +11,10 @@ from maxapi import F, Router
 from maxapi.context import MemoryContext
 from maxapi.context.state_machine import State, StatesGroup
 from maxapi.filters.command import Command, CommandStart
+from maxapi.enums.upload_type import UploadType
 from maxapi.types import (
     CallbackButton,
+    InputMedia,
     LinkButton,
     MessageCallback,
     MessageCreated,
@@ -44,6 +47,11 @@ PACKAGES_TEXT = (
 )
 PAYMENT_PACKAGES_TEXT = PACKAGES_TEXT.split("\n\n", 1)[0]
 PACKAGE_OFFER_TEXT = "Понравился результат? Хотите создать ещё?\n\n" + PACKAGES_TEXT
+EXAMPLES_DIR = Path(__file__).resolve().parent / "examples"
+EXAMPLE_TEXT = (
+    "📸 Реальный пример работы:\n\n"
+    "Промпт: «Машина тесла с бордовым салоном, я за рулем»"
+)
 
 
 def packages_keyboard():
@@ -330,10 +338,31 @@ def create_router(
         await event.ack(notification="Открываю…")
 
         if event.callback.payload == "examples":
-            await event.send(
-                "Примеры идей: ваше фото в образе успешного предпринимателя, "
-                "спортсмена или путешественника. Сферы жизни: карьера, здоровье, путешествия."
+            photos = (
+                (EXAMPLES_DIR / "before.jpg", "Фото до:"),
+                (EXAMPLES_DIR / "after.jpg", "Результат:"),
             )
+            if not all(path.is_file() for path, _ in photos):
+                logger.warning("Не найдены локальные фотографии примера.")
+                await event.send("Пример временно недоступен. Попробуйте позже.")
+                return
+            try:
+                if event.bot is None:
+                    raise RuntimeError("Бот не привязан к событию.")
+                await event.send(EXAMPLE_TEXT)
+                for path, caption in photos:
+                    image = await event.bot.upload_media(
+                        InputMedia(path=str(path), type=UploadType.IMAGE)
+                    )
+                    token = image.payload.token
+                    if not isinstance(token, str) or not token.strip():
+                        raise RuntimeError("MAX вернул пустой media token.")
+                    sent = await event.send(caption, attachments=[image])
+                    if sent is None:
+                        raise RuntimeError("MAX не подтвердил отправку примера.")
+            except Exception as exc:
+                logger.error("Не удалось отправить пример (%s).", type(exc).__name__)
+                await event.send("Не удалось отправить пример. Попробуйте позже.")
         else:
             await event.send(
                 "Нажмите «Создать плакат», отправьте одно фото, затем укажите сферу жизни: "

@@ -11,6 +11,7 @@ from maxapi import F, Router
 from maxapi.context import MemoryContext
 from maxapi.context.state_machine import State, StatesGroup
 from maxapi.filters.command import Command, CommandStart
+from maxapi.enums.parse_mode import ParseMode
 from maxapi.enums.upload_type import UploadType
 from maxapi.types import (
     CallbackButton,
@@ -74,7 +75,10 @@ HELP_ANSWERS = {
         "Попробуйте отправить другое фото или повторите позже. "
         "Если ошибка повторяется, напишите в поддержку: @ваш_ник"
     ),
-    "help_support": "Напишите мне: @ваш_ник_в_MAX",
+    "help_support": (
+        'Напишите нам: <a href="https://max.ru/u/f9LHodD0cOL0i7XGM4uyyUo-bFy4nt4Hqc-XMNmvGygT83X2wUkr6O7DRXo">'
+        'ваша ссылка</a>'
+    ),
 }
 
 
@@ -407,7 +411,10 @@ def create_router(
             await event.ack(notification="Меню недоступно. Отправьте /start.")
             return
         await event.ack(notification="Открываю…")
-        await event.send(HELP_ANSWERS[event.callback.payload])
+        if event.callback.payload == "help_support":
+            await event.send(HELP_ANSWERS[event.callback.payload], parse_mode=ParseMode.HTML)
+        else:
+            await event.send(HELP_ANSWERS[event.callback.payload])
 
     @router.message_created(PosterStates.waiting_for_photo)
     async def collect_photo(event: MessageCreated, context: MemoryContext) -> None:

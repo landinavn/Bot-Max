@@ -48,7 +48,7 @@ PACKAGES_TEXT = (
     "Оплата временно недоступна. Скоро!"
 )
 PAYMENT_PACKAGES_TEXT = PACKAGES_TEXT.split("\n\n", 1)[0]
-PACKAGE_OFFER_TEXT = "Понравился результат? Хотите создать ещё?\n\n" + PACKAGES_TEXT
+NO_CREDITS_TEXT = "У вас закончились кредиты. Купите пакет: /buy"
 EXAMPLES_DIR = Path(__file__).resolve().parent / "examples"
 EXAMPLE_TEXT = (
     "📸 Реальный пример работы:\n\n"
@@ -97,8 +97,8 @@ def help_keyboard():
 def packages_keyboard():
     return (
         InlineKeyboardBuilder()
-        .row(CallbackButton(text="Купить 5 генераций", payload="buy_5"))
-        .row(CallbackButton(text="Купить 15 генераций", payload="buy_15"))
+        .row(CallbackButton(text="Купить 5 генераций — 299 ₽", payload="buy_5"))
+        .row(CallbackButton(text="Купить 15 генераций — 699 ₽", payload="buy_15"))
         .as_markup()
     )
 
@@ -198,7 +198,7 @@ def create_router(
                 user = await get_user(credit_user_id)
                 if user is None or user["balance"] < 1:
                     await context.set_state(PosterStates.waiting_for_sphere)
-                    await message.answer("У вас закончились кредиты. Купите пакет: /buy")
+                    await message.answer(NO_CREDITS_TEXT, attachments=[packages_keyboard()])
                     return
                 await message.answer("Создаю плакат…")
                 urls = await generator(photo["url"], sphere)
@@ -232,10 +232,7 @@ def create_router(
             await message.answer(f"Осталось кредитов: {user['balance'] if user else 0}.")
             if data.get("package_offer_pending"):
                 await message.answer(
-                    (
-                        "Понравился результат? Хотите создать ещё?\n\n" + PAYMENT_PACKAGES_TEXT
-                        if payments else PACKAGE_OFFER_TEXT
-                    ),
+                    NO_CREDITS_TEXT,
                     attachments=[packages_keyboard()],
                 )
                 await context.update_data(package_offer_pending=False)
@@ -413,7 +410,14 @@ def create_router(
             await event.ack(notification="Меню недоступно. Отправьте /start.")
             return
         await event.ack(notification="Открываю…")
-        if event.callback.payload in {"help_support", "help_generation"}:
+        if event.callback.payload == "help_payment":
+            text = (
+                "Выберите пакет ниже и нажмите «Оплатить» в следующем сообщении.\n\n"
+                + PAYMENT_PACKAGES_TEXT
+                if payments else HELP_ANSWERS["help_payment"]
+            )
+            await event.send(text, attachments=[packages_keyboard()])
+        elif event.callback.payload in {"help_support", "help_generation"}:
             await event.send(HELP_ANSWERS[event.callback.payload], parse_mode=ParseMode.HTML)
         else:
             await event.send(HELP_ANSWERS[event.callback.payload])

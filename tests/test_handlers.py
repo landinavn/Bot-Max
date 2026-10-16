@@ -10,12 +10,22 @@ from maxapi.enums.update import UpdateType
 from maxapi.types import AttachmentUpload, PhotoAttachmentPayload
 
 import handlers
-from handlers import EXAMPLE_TEXT, PACKAGE_OFFER_TEXT, PACKAGES_TEXT, PosterStates, create_router
+from handlers import EXAMPLE_TEXT, NO_CREDITS_TEXT, PACKAGES_TEXT, PosterStates, create_router
 
 
 @pytest.fixture(autouse=True)
 async def isolated_database(credit_db):
     return credit_db
+
+
+def assert_purchase_keyboard(keyboard):
+    markup = keyboard.model_dump()
+    assert markup["type"] == "inline_keyboard"
+    buttons = [button for row in markup["payload"]["buttons"] for button in row]
+    assert [(button["text"], button["payload"], button["type"]) for button in buttons] == [
+        ("Купить 5 генераций — 299 ₽", "buy_5", "callback"),
+        ("Купить 15 генераций — 699 ₽", "buy_15", "callback"),
+    ]
 
 
 def callback_event(payload, *, deleted=False):
@@ -126,7 +136,9 @@ async def test_help_buttons_respond_without_affecting_generation(payload, answer
     if payload in {"help_support", "help_generation"}:
         event.send.assert_awaited_once_with(answer, parse_mode="html")
     else:
-        event.send.assert_awaited_once_with(answer)
+        event.send.assert_awaited_once()
+        assert event.send.await_args.args == (answer,)
+        assert_purchase_keyboard(event.send.await_args.kwargs["attachments"][0])
     generator.assert_not_awaited()
     assert await context.get_state() == PosterStates.generating
     assert await context.get_data() == data
@@ -354,21 +366,19 @@ async def test_buy_describes_packages_without_adding_credits(credit_db):
     assert await credit_db.get_user(456) is None
 
 
-async def test_no_credits_prevents_generation(credit_db):
+@pytest.mark.parametrize("payments_enabled", [False, True])
+async def test_no_credits_prevents_generation(credit_db, payments_enabled):
     generator = AsyncMock()
     event = message_event()
     context = await ready_context()
-    await call_handler(create_router(generator), "collect_sphere", event, context)
+    payments = SimpleNamespace(create_payment_link=AsyncMock()) if payments_enabled else None
+    await call_handler(create_router(generator, payments=payments), "collect_sphere", event, context)
     generator.assert_not_awaited()
     event.bot.send_message.assert_not_awaited()
-    event.message.answer.assert_awaited_once_with(
-        "У вас закончились кредиты. Купите пакет: /buy"
-    )
+    event.message.answer.assert_awaited_once()
+    assert event.message.answer.await_args.args == (NO_CREDITS_TEXT,)
+    assert_purchase_keyboard(event.message.answer.await_args.kwargs["attachments"][0])
     assert await context.get_state() == PosterStates.waiting_for_sphere
-    assert not any(
-        call.args and call.args[0] == PACKAGE_OFFER_TEXT
-        for call in event.message.answer.await_args_list
-    )
 
 
 async def test_one_image_costs_one_credit_and_shows_balance_without_offer(credit_db):
@@ -382,7 +392,7 @@ async def test_one_image_costs_one_credit_and_shows_balance_without_offer(credit
     event.message.answer.assert_any_await("Осталось кредитов: 1.")
     assert await context.get_state() is None
     assert not any(
-        call.args and call.args[0] == PACKAGE_OFFER_TEXT
+        call.args and call.args[0] == NO_CREDITS_TEXT
         for call in event.message.answer.await_args_list
     )
 
@@ -418,7 +428,7 @@ async def test_failed_image_send_retry_uses_paid_image_and_offers_once(credit_db
     assert (await credit_db.get_user(456))["balance"] == 0
     assert await context.get_state() is None
     assert sum(
-        bool(call.args and call.args[0] == PACKAGE_OFFER_TEXT)
+        bool(call.args and call.args[0] == NO_CREDITS_TEXT)
         for call in event.message.answer.await_args_list
     ) == 1
 
@@ -438,38 +448,67 @@ async def test_concurrent_generations_across_chats_share_one_balance(credit_db):
     assert (await credit_db.get_user(456))["balance"] == 0
 
 
-async def test_last_free_credit_offers_packages_once_and_not_on_zero_balance(credit_db):
+@pytest.mark.parametrize("payments_enabled", [False, True])
+async def test_last_free_credit_offers_packages_once_and_not_on_zero_balance(credit_db, payments_enabled):
     await credit_db.grant_free_trial(456)
     generator = AsyncMock(return_value=["https://storage.example.com/photo.png"])
-    router = create_router(generator)
+    payments = SimpleNamespace(create_payment_link=AsyncMock()) if payments_enabled else None
+    router = create_router(generator, payments=payments)
     event = message_event()
     context = await ready_context()
     await call_handler(router, "collect_sphere", event, context)
     assert (await credit_db.get_user(456))["balance"] == 0
     offer = next(
         call for call in event.message.answer.await_args_list
-        if call.args and call.args[0] == PACKAGE_OFFER_TEXT
+        if call.args and call.args[0] == NO_CREDITS_TEXT
     )
+    assert_purchase_keyboard(offer.kwargs["attachments"][0])
     keyboard = offer.kwargs["attachments"][0].model_dump()
     buttons = [button for row in keyboard["payload"]["buttons"] for button in row]
     assert [button["text"] for button in buttons] == [
-        "Купить 5 генераций", "Купить 15 генераций",
+        "Купить 5 генераций — 299 ₽", "Купить 15 генераций — 699 ₽",
     ]
     assert [button["payload"] for button in buttons] == ["buy_5", "buy_15"]
     # Повторное сообщение о той же сфере использует готовый оплаченный результат.
     await call_handler(router, "collect_sphere", event, context)
     assert sum(
-        bool(call.args and call.args[0] == PACKAGE_OFFER_TEXT)
+        bool(call.args and call.args[0] == NO_CREDITS_TEXT)
         for call in event.message.answer.await_args_list
     ) == 1
     more = callback_event("more:" + (await context.get_data())["batch_id"])
     await dispatch_callback(router, more, context)
-    more.message.answer.assert_awaited_once_with(
-        "У вас закончились кредиты. Купите пакет: /buy"
-    )
+    more.message.answer.assert_awaited_once()
+    assert more.message.answer.await_args.args == (NO_CREDITS_TEXT,)
+    assert_purchase_keyboard(more.message.answer.await_args.kwargs["attachments"][0])
     generator.assert_awaited_once()
     assert event.bot.send_message.await_count == 1
     more.bot.send_message.assert_not_awaited()
+
+
+@pytest.mark.parametrize("credits", [5, 15])
+async def test_payment_help_opens_packages_and_creates_selected_link(credit_db, credits):
+    payments = SimpleNamespace(create_payment_link=AsyncMock(return_value="https://test-shop.payform.ru/pay"))
+    generator = AsyncMock()
+    router = create_router(generator, payments=payments)
+    context = await ready_context()
+    original = dict(await context.get_data())
+    event = callback_event("help_payment")
+    await dispatch_callback(router, event, context)
+    text = event.send.await_args.args[0]
+    assert "Выберите пакет" in text
+    assert "недоступна" not in text
+    keyboard = event.send.await_args.kwargs["attachments"][0]
+    assert_purchase_keyboard(keyboard)
+    buttons = [button for row in keyboard.model_dump()["payload"]["buttons"] for button in row]
+    selected = next(button for button in buttons if button["payload"] == f"buy_{credits}")
+    purchase = callback_event(selected["payload"])
+    await dispatch_callback(router, purchase, context)
+    payments.create_payment_link.assert_awaited_once_with(456, credits)
+    assert "https://test-shop.payform.ru/pay" in purchase.send.await_args.args[0]
+    assert await context.get_data() == original
+    assert await context.get_state() == PosterStates.waiting_for_sphere
+    assert await credit_db.get_user(456) is None
+    generator.assert_not_awaited()
 
 
 @pytest.mark.parametrize("payload", ["buy_5", "buy_15"])

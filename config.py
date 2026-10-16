@@ -24,6 +24,10 @@ class Config:
     storage_public_base_url: str | None = None
     prodamus_domain: str | None = None
     prodamus_secret_key: str | None = field(default=None, repr=False)
+    prodamus_return_url: str | None = None
+    prodamus_webhook_url: str | None = None
+    webhook_host: str = "0.0.0.0"
+    webhook_port: int = 8080
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -52,4 +56,8 @@ class Config:
             storage_public_base_url=os.environ.get("STORAGE_PUBLIC_BASE_URL", "").strip() or None,
             prodamus_domain=os.environ.get("PRODAMUS_DOMAIN", "").strip() or None,
             prodamus_secret_key=os.environ.get("PRODAMUS_SECRET_KEY", "").strip() or None,
+            prodamus_return_url=os.environ.get("PRODAMUS_RETURN_URL", "").strip() or None,
+            prodamus_webhook_url=os.environ.get("PRODAMUS_WEBHOOK_URL", "").strip() or None,
+            webhook_host=os.environ.get("WEBHOOK_HOST", "0.0.0.0").strip(),
+            webhook_port=int(os.environ.get("WEBHOOK_PORT", "8080")),
         )

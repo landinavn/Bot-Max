@@ -52,6 +52,39 @@ EXAMPLE_TEXT = (
     "📸 Реальный пример работы:\n\n"
     "Промпт: «Машина тесла с бордовым салоном, я за рулем»"
 )
+HELP_TEXT = (
+    "🆘 Помощь\n\n"
+    "Я бот для создания персональных плакатов желаний с твоим фото. "
+    "Вот как это работает:\n\n"
+    "1. Нажми «Создать плакат».\n"
+    "2. Отправь своё фото (селфи).\n"
+    "3. Опиши свою мечту или желание текстом — например, "
+    "«Машина тесла с бордовым салоном, я за рулем» или «Я на пляже на Мальдивах».\n"
+    "4. Получи готовый плакат с тобой в мечте!\n\n"
+    "💎 Стоимость:\n"
+    "• 1 бесплатная генерация — для новых пользователей.\n"
+    "• Пакет 5 генераций — 299 ₽.\n"
+    "• Пакет 15 генераций — 699 ₽.\n\n"
+    "❓ Частые вопросы:"
+)
+HELP_ANSWERS = {
+    "help_payment": "Оплата временно недоступна, скоро подключим!",
+    "help_generation": (
+        "Попробуйте отправить другое фото или повторите позже. "
+        "Если ошибка повторяется, напишите в поддержку: @ваш_ник"
+    ),
+    "help_support": "Напишите мне: @ваш_ник_в_MAX",
+}
+
+
+def help_keyboard():
+    return (
+        InlineKeyboardBuilder()
+        .row(CallbackButton(text="Как оплатить?", payload="help_payment"))
+        .row(CallbackButton(text="Не работает генерация", payload="help_generation"))
+        .row(CallbackButton(text="Связаться с поддержкой", payload="help_support"))
+        .as_markup()
+    )
 
 
 def packages_keyboard():
@@ -364,12 +397,15 @@ def create_router(
                 logger.error("Не удалось отправить пример (%s).", type(exc).__name__)
                 await event.send("Не удалось отправить пример. Попробуйте позже.")
         else:
-            await event.send(
-                "Нажмите «Создать плакат», отправьте одно фото, затем укажите сферу жизни: "
-                "например, карьера, семья, здоровье или путешествия.\n"
-                "Бот создаст один плакат с кнопками «Скачать», «Ещё» и «Поделиться».\n"
-                "/cancel — отменить сбор данных, /start — вернуться в меню."
-            )
+            await event.send(HELP_TEXT, attachments=[help_keyboard()])
+
+    @router.message_callback(F.callback.payload.in_(set(HELP_ANSWERS)))
+    async def help_callback(event: MessageCallback) -> None:
+        if event.message is None:
+            await event.ack(notification="Меню недоступно. Отправьте /start.")
+            return
+        await event.ack(notification="Открываю…")
+        await event.send(HELP_ANSWERS[event.callback.payload])
 
     @router.message_created(PosterStates.waiting_for_photo)
     async def collect_photo(event: MessageCreated, context: MemoryContext) -> None:

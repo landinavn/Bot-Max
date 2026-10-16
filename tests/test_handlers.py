@@ -88,6 +88,51 @@ async def test_help_acknowledges_and_sends_response():
     await dispatch_callback(create_router(), event, context)
     event.ack.assert_awaited_once_with(notification="Открываю…")
     event.send.assert_awaited_once()
+    assert event.send.await_args.args == (handlers.HELP_TEXT,)
+    text = event.send.await_args.args[0]
+    assert text.startswith("🆘 Помощь\n\n")
+    assert "Машина тесла с бордовым салоном, я за рулем" in text
+    assert "Я на пляже на Мальдивах" in text
+    assert "1 бесплатная генерация — для новых пользователей." in text
+    assert "Пакет 5 генераций — 299 ₽." in text
+    assert "Пакет 15 генераций — 699 ₽." in text
+    assert text.endswith("❓ Частые вопросы:")
+    keyboard = event.send.await_args.kwargs["attachments"][0].model_dump()
+    buttons = [button for row in keyboard["payload"]["buttons"] for button in row]
+    assert [(button["text"], button["payload"]) for button in buttons] == [
+        ("Как оплатить?", "help_payment"),
+        ("Не работает генерация", "help_generation"),
+        ("Связаться с поддержкой", "help_support"),
+    ]
+
+
+@pytest.mark.parametrize("payload,answer", [
+    ("help_payment", "Оплата временно недоступна, скоро подключим!"),
+    ("help_generation", "Попробуйте отправить другое фото или повторите позже. "
+     "Если ошибка повторяется, напишите в поддержку: @ваш_ник"),
+    ("help_support", "Напишите мне: @ваш_ник_в_MAX"),
+])
+async def test_help_buttons_respond_without_affecting_generation(payload, answer):
+    context = MemoryContext(chat_id=123, user_id=456)
+    await context.set_state(PosterStates.generating)
+    data = {"photo": {"url": "original"}, "sphere": "мечта"}
+    await context.update_data(**data)
+    event = callback_event(payload)
+    generator = AsyncMock()
+    await dispatch_callback(create_router(generator), event, context)
+    event.ack.assert_awaited_once_with(notification="Открываю…")
+    event.send.assert_awaited_once_with(answer)
+    generator.assert_not_awaited()
+    assert await context.get_state() == PosterStates.generating
+    assert await context.get_data() == data
+
+
+@pytest.mark.parametrize("payload", ["help", "help_payment", "help_generation", "help_support"])
+async def test_help_buttons_handle_deleted_message(payload):
+    event = callback_event(payload, deleted=True)
+    await dispatch_callback(create_router(), event, MemoryContext(chat_id=123, user_id=456))
+    event.ack.assert_awaited_once_with(notification="Меню недоступно. Отправьте /start.")
+    event.send.assert_not_awaited()
 
 
 @pytest.fixture

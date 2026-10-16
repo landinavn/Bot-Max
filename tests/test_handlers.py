@@ -109,7 +109,9 @@ async def test_help_acknowledges_and_sends_response():
 @pytest.mark.parametrize("payload,answer", [
     ("help_payment", "Оплата временно недоступна, скоро подключим!"),
     ("help_generation", "Попробуйте отправить другое фото или повторите позже. "
-     "Если ошибка повторяется, напишите в поддержку: @ваш_ник"),
+     'Если ошибка повторяется, напишите в поддержку: '
+     '<a href="https://max.ru/u/f9LHodD0cOL0i7XGM4uyyUo-bFy4nt4Hqc-XMNmvGygT83X2wUkr6O7DRXo">'
+     'Связаться с поддержкой</a>'),
     ("help_support", 'Напишите нам: <a href="https://max.ru/u/f9LHodD0cOL0i7XGM4uyyUo-bFy4nt4Hqc-XMNmvGygT83X2wUkr6O7DRXo">ваша ссылка</a>'),
 ])
 async def test_help_buttons_respond_without_affecting_generation(payload, answer):
@@ -121,7 +123,7 @@ async def test_help_buttons_respond_without_affecting_generation(payload, answer
     generator = AsyncMock()
     await dispatch_callback(create_router(generator), event, context)
     event.ack.assert_awaited_once_with(notification="Открываю…")
-    if payload == "help_support":
+    if payload in {"help_support", "help_generation"}:
         event.send.assert_awaited_once_with(answer, parse_mode="html")
     else:
         event.send.assert_awaited_once_with(answer)

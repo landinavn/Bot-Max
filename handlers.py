@@ -73,7 +73,9 @@ HELP_ANSWERS = {
     "help_payment": "Оплата временно недоступна, скоро подключим!",
     "help_generation": (
         "Попробуйте отправить другое фото или повторите позже. "
-        "Если ошибка повторяется, напишите в поддержку: @ваш_ник"
+        'Если ошибка повторяется, напишите в поддержку: '
+        '<a href="https://max.ru/u/f9LHodD0cOL0i7XGM4uyyUo-bFy4nt4Hqc-XMNmvGygT83X2wUkr6O7DRXo">'
+        'Связаться с поддержкой</a>'
     ),
     "help_support": (
         'Напишите нам: <a href="https://max.ru/u/f9LHodD0cOL0i7XGM4uyyUo-bFy4nt4Hqc-XMNmvGygT83X2wUkr6O7DRXo">'
@@ -411,7 +413,7 @@ def create_router(
             await event.ack(notification="Меню недоступно. Отправьте /start.")
             return
         await event.ack(notification="Открываю…")
-        if event.callback.payload == "help_support":
+        if event.callback.payload in {"help_support", "help_generation"}:
             await event.send(HELP_ANSWERS[event.callback.payload], parse_mode=ParseMode.HTML)
         else:
             await event.send(HELP_ANSWERS[event.callback.payload])

@@ -79,7 +79,7 @@ HELP_ANSWERS = {
     ),
     "help_support": (
         'Напишите нам: <a href="https://max.ru/u/f9LHodD0cOL0i7XGM4uyyUo-bFy4nt4Hqc-XMNmvGygT83X2wUkr6O7DRXo">'
-        'ваша ссылка</a>'
+        'Связаться с поддержкой</a>'
     ),
 }
 

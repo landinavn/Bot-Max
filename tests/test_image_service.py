@@ -148,14 +148,18 @@ async def test_upload_photo_rejects_empty_token(config, max_bot):
 
 
 @pytest.mark.parametrize("entrypoint", ["single", "list"])
-async def test_generation_uploads_photo_and_parses_response(config, storage, api, entrypoint):
+@pytest.mark.parametrize("dream", [
+    "Машина тесла с бордовым салоном, я за рулем",
+    "Я на пляже на Мальдивах",
+])
+async def test_generation_uploads_photo_and_parses_response(config, storage, api, entrypoint, dream):
     count = 1
     register_generation(api, count=count)
 
     if entrypoint == "single":
-        urls = [await service.generate_vision_board(PHOTO_URL, "Карьера")]
+        urls = [await service.generate_vision_board(PHOTO_URL, dream)]
     else:
-        urls = await service.generate_vision_boards(PHOTO_URL, "Карьера")
+        urls = await service.generate_vision_boards(PHOTO_URL, dream)
 
     assert len(urls) == count
     assert len(set(urls)) == count
@@ -171,7 +175,13 @@ async def test_generation_uploads_photo_and_parses_response(config, storage, api
     assert fields["image"].get_filename() == "photo.png"
     assert fields["model"].get_content() == config.image_model
     assert fields["n"].get_content() == str(count)
-    assert "Карьера" in fields["prompt"].get_content()
+    prompt = fields["prompt"].get_content()
+    assert dream in prompt
+    assert "keep the face exactly as in the original photo" in prompt
+    assert "natural head position" in prompt
+    assert "photorealistic portrait" in prompt
+    assert "do not change facial features" in prompt
+    assert "Сфера жизни" not in prompt
     assert fields["output_format"].get_content() == "png"
     assert storage.put_object.call_count == count
     for call, url in zip(storage.put_object.call_args_list, urls):

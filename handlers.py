@@ -1,4 +1,4 @@
-"""Меню и FSM: фото → сфера жизни → генерация плаката."""
+"""Меню и FSM: фото → описание мечты → генерация плаката."""
 
 import asyncio
 import logging
@@ -36,7 +36,8 @@ from image_service import (
 logger = logging.getLogger(__name__)
 PosterGenerator = Callable[[str, str], Awaitable[list[str]]]
 WELCOME_TEXT = (
-    "Привет! Я бот для создания плакатов. "
+    "Привет! Я бот для создания персональных плакатов желаний с твоим фото. "
+    "Отправь фото и опиши свою мечту. "
     "Выберите действие: создать плакат, посмотреть примеры или получить помощь."
 )
 PACKAGES_TEXT = (
@@ -98,6 +99,7 @@ def packages_keyboard():
 
 class PosterStates(StatesGroup):
     waiting_for_photo = State()
+    # Старое имя состояния сохранено для совместимости; ожидается описание мечты.
     waiting_for_sphere = State()
     generating = State()
 
@@ -235,8 +237,8 @@ def create_router(
             logger.error("Таймаут API при создании или сохранении плаката.")
             await context.set_state(PosterStates.waiting_for_sphere)
             await message.answer(
-                "Сервис не ответил вовремя. Фото и сфера сохранены. "
-                "Повторите сферу жизни позже или отправьте /cancel."
+                "Сервис не ответил вовремя. Фото и описание мечты сохранены. "
+                "Повторите описание мечты позже или отправьте /cancel."
             )
             return
         except UnsupportedPhotoFormatError:
@@ -259,12 +261,12 @@ def create_router(
             if exc.quota_exhausted:
                 text = (
                     "Лимит генераций исчерпан. Попробуйте позже или обратитесь "
-                    "к администратору бота. Фото и сфера сохранены."
+                    "к администратору бота. Фото и описание мечты сохранены."
                 )
             else:
                 wait = f"Подождите {exc.retry_after} секунд" if exc.retry_after else "Подождите немного"
                 text = (
-                    f"Слишком много запросов генерации. {wait} и повторите сферу жизни. "
+                    f"Слишком много запросов генерации. {wait} и повторите описание мечты. "
                     "Фото сохранено."
                 )
             await message.answer(text)
@@ -273,8 +275,8 @@ def create_router(
             logger.error("Не настроен API генерации или хранилище изображений.")
             await context.set_state(PosterStates.waiting_for_sphere)
             await message.answer(
-                "Фото и сфера сохранены, но сервис генерации пока не настроен. "
-                "После настройки повторите сферу жизни или /cancel."
+                "Фото и описание мечты сохранены, но сервис генерации пока не настроен. "
+                "После настройки повторите описание мечты или /cancel."
             )
             return
         except Exception as exc:
@@ -282,7 +284,7 @@ def create_router(
             await context.set_state(PosterStates.waiting_for_sphere)
             await message.answer(
                 "Не удалось завершить создание или отправку плаката. "
-                "Повторите сферу жизни или /cancel."
+                "Повторите описание мечты или /cancel."
             )
             return
         # Данные нужны кнопкам «Ещё» и «Поделиться»; завершаем только состояние.
@@ -422,12 +424,15 @@ def create_router(
         if len(photos) != 1 or not photos[0].payload.url:
             await event.message.answer("Нужно одно фото, отправленное как изображение. /cancel — отмена.")
             return
-        # Сохраняем метаданные фото, а не скачиваем его до выбора сферы.
+        # Скачиваем фото только после получения описания мечты.
         await context.update_data(photo=photos[0].payload.model_dump())
         await context.set_state(PosterStates.waiting_for_sphere)
         await event.message.answer(
-            "Фото получено! Укажите сферу жизни (до 200 символов): "
-            "карьера, семья, здоровье, путешествия или другая."
+            "✅ Фото получено!\n\n"
+            "Теперь опиши свою мечту или желание (до 200 символов). "
+            "Например: «Машина тесла с бордовым салоном, я за рулем» "
+            "или «Я на пляже на Мальдивах».\n\n"
+            "/cancel — отмена"
         )
 
     @router.message_created(PosterStates.waiting_for_sphere)
@@ -436,8 +441,11 @@ def create_router(
             return
         body = event.message.body
         sphere = (body.text or "").strip() if body else ""
-        if not sphere or len(sphere) > 200 or sphere.startswith("/"):
-            await event.message.answer("Введите сферу жизни текстом от 1 до 200 символов. /cancel — отмена.")
+        if len(sphere) > 200:
+            await event.message.answer("Слишком длинное описание. Пожалуйста, уложись в 200 символов")
+            return
+        if not sphere:
+            await event.message.answer("Напиши свою мечту или желание текстом. /cancel — отмена")
             return
         data = await context.get_data()
         if data.get("sphere") != sphere:

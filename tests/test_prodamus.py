@@ -2,16 +2,17 @@ import asyncio
 import json
 import sqlite3
 from pathlib import Path
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, urlsplit, urlencode, quote
 from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from aioresponses import aioresponses
 
 from config import Config
 from prodamus import (
-    ProdamusPayments, flatten_fields, parse_form_fields, sign_payload, verify_signature,
+    ProdamusPayments, flatten_fields, parse_form_fields, sign_payload, sign_link_payload, verify_signature,
 )
 from webhook import create_webhook_app
 
@@ -30,7 +31,12 @@ def payment_config():
 
 @pytest.fixture
 def payments(payment_config):
-    return ProdamusPayments(payment_config)
+    payments = ProdamusPayments(payment_config)
+    # Webhook-тесты получают эхо исходящего payload вместо обращения к провайдеру.
+    async def echo(data):
+        return payments.domain + "?" + urlencode(flatten_fields(data), quote_via=quote)
+    payments._request_payment_link = AsyncMock(side_effect=echo)
+    return payments
 
 
 @pytest.fixture
@@ -48,6 +54,7 @@ async def notification(payments, credits=5, *, payment_id="provider-1", user_id=
         "domain": "test-shop.payform.ru", "payment_status": "success",
         "products": fields["products"], "customer_extra": fields["customer_extra"],
         "_param_user_id": str(user_id), "_param_credits": str(credits),
+        "_param_package_id": f"package_{credits}",
     }
 
 
@@ -85,16 +92,92 @@ async def test_signed_link_persists_bound_order(payments, credit_db, credits, pr
     link = await payments.create_payment_link(456, credits)
     assert link.startswith("https://test-shop.payform.ru/?")
     data = parse_form_fields(parse_qsl(urlsplit(link).query))
-    assert verify_signature(data, data["signature"], SECRET)
-    assert data["do"] == "pay"
+    assert sign_link_payload({key: value for key, value in data.items() if key != "sign"}, SECRET) == data["sign"]
+    assert data["do"] == "link"
     assert data["urlNotification"] == payments.webhook_url
     assert data["urlSuccess"] == data["urlReturn"] == payments.return_url
     assert data["products"] == [{"name": f"{credits} генераций", "price": price, "quantity": "1"}]
-    assert json.loads(data["customer_extra"]) == {"user_id": 456, "credits": credits}
+    assert data["_param_package_id"] == f"package_{credits}"
+    assert json.loads(data["customer_extra"]) == {"user_id": 456, "credits": credits, "package_id": f"package_{credits}"}
     order = await credit_db.get_payment_order(data["order_id"])
     assert order["user_id"] == 456 and order["credits"] == credits
     assert order["status"] == "pending"
     assert await credit_db.get_user(456) is None  # Ссылка ещё не означает оплату.
+
+
+@pytest.mark.parametrize("body", [
+    " https://test-shop.payform.ru/payment/abc\n",
+    '{"payment_link":"https://test-shop.payform.ru/payment/abc"}',
+    '{"link":"https://test-shop.payform.ru/payment/abc"}',
+])
+async def test_link_api_returns_provider_url(payment_config, credit_db, body):
+    import re
+    payments = ProdamusPayments(payment_config)
+    with aioresponses() as api:
+        api.get(re.compile(r"https://test-shop\.payform\.ru/\?.*"), body=body)
+        link = await payments.create_payment_link(456, 5)
+        assert link == "https://test-shop.payform.ru/payment/abc"
+        calls = [call for requests in api.requests.values() for call in requests]
+        assert len(calls) == 1
+        request_url = next(iter(api.requests))[1]
+        fields = parse_form_fields(parse_qsl(request_url.query_string))
+        assert fields["do"] == "link"
+        assert fields["_param_user_id"] == "456"
+        assert fields["_param_package_id"] == "package_5"
+        clean = {key: value for key, value in fields.items() if key != "sign"}
+        assert fields["sign"] == sign_link_payload(clean, SECRET)
+        assert calls[0].kwargs["allow_redirects"] is True
+        assert (await credit_db.get_payment_order(fields["order_id"]))["status"] == "pending"
+    assert await credit_db.get_user(456) is None
+
+
+async def test_link_api_follows_payform_redirect(payment_config, credit_db):
+    import re
+    with aioresponses() as api:
+        api.get(re.compile(r"https://test-shop\.payform\.ru/\?.*"), status=302,
+                headers={"Location": "https://a.payform.ru/create-link"})
+        api.get("https://a.payform.ru/create-link", body="https://a.payform.ru/payment/abc")
+        assert await ProdamusPayments(payment_config).create_payment_link(456, 5) == "https://a.payform.ru/payment/abc"
+
+
+@pytest.mark.parametrize("body,status", [
+    ("denied", 403), ("failure", 500), ("", 200),
+    ('{"error":"invalid secret"}', 200), ('{"link":42}', 200),
+    ("http://test-shop.payform.ru/payment/abc", 200),
+])
+async def test_link_api_errors_never_return_payment_link(payment_config, credit_db, body, status):
+    import re
+    with aioresponses() as api:
+        api.get(re.compile(r"https://test-shop\.payform\.ru/\?.*"), body=body, status=status)
+        with pytest.raises((ValueError, RuntimeError)):
+            await ProdamusPayments(payment_config).create_payment_link(456, 5)
+    assert await credit_db.get_user(456) is None
+
+
+async def test_link_api_timeout_is_not_retried(payment_config, credit_db):
+    import re
+    with aioresponses() as api:
+        api.get(re.compile(r"https://test-shop\.payform\.ru/\?.*"), exception=asyncio.TimeoutError())
+        with pytest.raises(asyncio.TimeoutError):
+            await ProdamusPayments(payment_config).create_payment_link(456, 5)
+        assert sum(len(calls) for calls in api.requests.values()) == 1
+    assert await credit_db.get_user(456) is None
+
+
+async def test_existing_links_without_package_id_still_credit(client, payments, credit_db):
+    data = await notification(payments)
+    data.pop("_param_package_id")
+    extra = json.loads(data["customer_extra"])
+    extra.pop("package_id")
+    data["customer_extra"] = json.dumps(extra)
+    assert (await post_notification(client, data)).status == 200
+    assert (await credit_db.get_user(456))["balance"] == 5
+
+
+def test_only_domain_and_secret_are_not_enough_for_payment_webhook(payment_config):
+    from dataclasses import replace
+    with pytest.raises(ValueError, match="PRODAMUS_RETURN_URL и PRODAMUS_WEBHOOK_URL"):
+        ProdamusPayments(replace(payment_config, prodamus_return_url=None, prodamus_webhook_url=None))
 
 
 @pytest.mark.parametrize("credits", [5, 15])
@@ -139,6 +222,8 @@ async def test_tampered_notification_fails_signature(client, payments, credit_db
     ("sum", "1.00"), ("sum", "NaN"), ("sum", "1e99999999"),
     ("currency", "usd"), ("order_num", "unknown"),
     ("_param_user_id", "999"), ("_param_credits", "15"),
+    ("_param_package_id", "package_15"),
+    ("customer_extra", '{"user_id":456,"credits":5,"package_id":"package_15"}'),
     ("domain", "other.payform.ru"), ("customer_extra", '{"user_id":999,"credits":5}'),
     ("products", [{"name": "15 генераций", "price": "299.00", "quantity": "1"}]),
     ("products", [{"name": "5 генераций", "price": "299.00", "quantity": "2"}]),

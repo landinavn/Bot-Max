@@ -117,7 +117,7 @@ async def test_help_acknowledges_and_sends_response():
 
 
 @pytest.mark.parametrize("payload,answer", [
-    ("help_payment", "Оплата временно недоступна, скоро подключим!"),
+    ("help_payment", "Выберите пакет для оплаты."),
     ("help_generation", "Попробуйте отправить другое фото или повторите позже. "
      'Если ошибка повторяется, напишите в поддержку: '
      '<a href="https://max.ru/u/f9LHodD0cOL0i7XGM4uyyUo-bFy4nt4Hqc-XMNmvGygT83X2wUkr6O7DRXo">'
@@ -362,7 +362,9 @@ async def test_buy_describes_packages_without_adding_credits(credit_db):
     text = event.message.answer.await_args.args[0]
     assert "5 генераций — 299 ₽" in text
     assert "15 генераций — 699 ₽" in text
-    assert "Оплата временно недоступна" in text
+    assert "недоступна" not in text
+    event.message.answer.assert_awaited_once()
+    assert_purchase_keyboard(event.message.answer.await_args.kwargs["attachments"][0])
     assert await credit_db.get_user(456) is None
 
 
@@ -512,13 +514,12 @@ async def test_payment_help_opens_packages_and_creates_selected_link(credit_db, 
 
 
 @pytest.mark.parametrize("payload", ["buy_5", "buy_15"])
-async def test_package_buttons_show_payment_stub_without_charging(credit_db, payload):
+async def test_package_buttons_report_missing_configuration_without_duplicate_menu(credit_db, payload):
     await credit_db.add_credits(456, 2)
     event = callback_event(payload)
     await dispatch_callback(create_router(), event, await ready_context())
-    event.ack.assert_awaited_once()
-    assert event.send.await_args.args[0] == PACKAGES_TEXT
-    assert event.send.await_args.kwargs["attachments"]
+    event.ack.assert_awaited_once_with(notification="Создаю ссылку…")
+    event.send.assert_awaited_once_with("Не удалось создать ссылку на оплату. Обратитесь в поддержку.")
     assert (await credit_db.get_user(456))["balance"] == 2
 
 
@@ -526,9 +527,11 @@ async def test_package_buttons_show_payment_stub_without_charging(credit_db, pay
 async def test_purchase_button_creates_signed_link_for_callback_user(credit_db, payload, credits, price):
     from pathlib import Path
     from urllib.parse import parse_qsl, urlsplit
+    import re
+    from aioresponses import aioresponses
 
     from config import Config
-    from prodamus import ProdamusPayments, parse_form_fields, verify_signature
+    from prodamus import ProdamusPayments, parse_form_fields, sign_link_payload
 
     payments = ProdamusPayments(Config(
         token="test-token", photo_path=Path("unused.png"),
@@ -537,14 +540,24 @@ async def test_purchase_button_creates_signed_link_for_callback_user(credit_db, 
         prodamus_webhook_url="https://bot.example.com/prodamus/webhook",
     ))
     event = callback_event(payload)
-    await dispatch_callback(create_router(payments=payments), event, await ready_context())
-    event.ack.assert_awaited_once_with(notification="Готовлю ссылку на оплату…")
+    with aioresponses() as api:
+        api.get(re.compile(r"https://test-shop\.payform\.ru/\?.*"), body="https://test-shop.payform.ru/payment/abc")
+        await dispatch_callback(create_router(payments=payments), event, await ready_context())
+        requests = [call for calls in api.requests.values() for call in calls]
+        assert len(requests) == 1
+        request_url = next(iter(api.requests))[1]
+        data = parse_form_fields(parse_qsl(request_url.query_string))
+    event.ack.assert_awaited_once_with(notification="Создаю ссылку…")
+    event.send.assert_awaited_once()
     sent = event.send.await_args
     keyboard = sent.kwargs["attachments"][0].model_dump()
     link = keyboard["payload"]["buttons"][0][0]["url"]
     assert link in sent.args[0]
-    data = parse_form_fields(parse_qsl(urlsplit(link).query))
-    assert verify_signature(data, data["signature"], "test-secret")
+    assert link == "https://test-shop.payform.ru/payment/abc"
+    assert sent.args[0].startswith(f"Для оплаты пакета «{credits} генераций")
+    assert data["sign"] == sign_link_payload({key: value for key, value in data.items() if key != "sign"}, "test-secret")
+    assert data["_param_user_id"] == "456"
+    assert data["_param_package_id"] == f"package_{credits}"
     assert data["products"][0]["price"] == price
     order = await credit_db.get_payment_order(data["order_id"])
     assert order["user_id"] == 456

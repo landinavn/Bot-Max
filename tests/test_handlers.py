@@ -297,3 +297,43 @@ async def test_package_buttons_show_payment_stub_without_charging(credit_db, pay
     assert event.send.await_args.args[0] == PACKAGES_TEXT
     assert event.send.await_args.kwargs["attachments"]
     assert (await credit_db.get_user(456))["balance"] == 2
+
+
+@pytest.mark.parametrize("payload,credits,price", [("buy_5", 5, "299.00"), ("buy_15", 15, "699.00")])
+async def test_purchase_button_creates_signed_link_for_callback_user(credit_db, payload, credits, price):
+    from pathlib import Path
+    from urllib.parse import parse_qsl, urlsplit
+
+    from config import Config
+    from prodamus import ProdamusPayments, parse_form_fields, verify_signature
+
+    payments = ProdamusPayments(Config(
+        token="test-token", photo_path=Path("unused.png"),
+        prodamus_domain="test-shop.payform.ru", prodamus_secret_key="test-secret",
+        prodamus_return_url="https://max.ru/test_bot",
+        prodamus_webhook_url="https://bot.example.com/prodamus/webhook",
+    ))
+    event = callback_event(payload)
+    await dispatch_callback(create_router(payments=payments), event, await ready_context())
+    event.ack.assert_awaited_once_with(notification="Готовлю ссылку на оплату…")
+    sent = event.send.await_args
+    keyboard = sent.kwargs["attachments"][0].model_dump()
+    link = keyboard["payload"]["buttons"][0][0]["url"]
+    assert link in sent.args[0]
+    data = parse_form_fields(parse_qsl(urlsplit(link).query))
+    assert verify_signature(data, data["signature"], "test-secret")
+    assert data["products"][0]["price"] == price
+    order = await credit_db.get_payment_order(data["order_id"])
+    assert order["user_id"] == 456
+    assert order["credits"] == credits
+    assert await credit_db.get_user(456) is None
+
+
+async def test_purchase_link_error_is_reported_without_charging(credit_db):
+    payments = SimpleNamespace(create_payment_link=AsyncMock(side_effect=RuntimeError("test")))
+    event = callback_event("buy_5")
+    await dispatch_callback(create_router(payments=payments), event, await ready_context())
+    event.send.assert_awaited_once_with(
+        "Не удалось создать ссылку на оплату. Попробуйте /buy позже."
+    )
+    assert await credit_db.get_user(456) is None

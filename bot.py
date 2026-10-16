@@ -14,6 +14,8 @@ from maxapi.context.isolation import SimpleEventIsolation
 from config import Config, MAX_API_URL
 from database import init_db
 from handlers import create_router
+from prodamus import ProdamusPayments
+from webhook import start_webhook_server
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,14 @@ async def main() -> None:
     configure_logging()
     config = Config.from_env()
     await init_db()
+    payments = None
+    if any((config.prodamus_domain, config.prodamus_secret_key,
+            config.prodamus_return_url, config.prodamus_webhook_url)):
+        try:
+            payments = ProdamusPayments(config)
+        except ValueError as exc:
+            logger.error("Ошибка настройки Prodamus: %s", exc)
+            raise
     # maxapi не закрывает переданный извне connector: контекст закрывает его здесь.
     async with MaxAPIConnector() as connector:
         bot = Bot(
@@ -57,15 +67,24 @@ async def main() -> None:
             use_create_task=True,
             event_isolation=SimpleEventIsolation(),
         )
-        dispatcher.include_routers(create_router())
+        dispatcher.include_routers(create_router(payments=payments))
+        webhook_runner = None
         try:
+            if payments is not None:
+                webhook_runner = await start_webhook_server(
+                    payments, config.webhook_host, config.webhook_port,
+                )
             logger.info("Запуск получения обновлений MAX.")
             await dispatcher.start_polling(bot)
         finally:
             try:
-                await dispatcher.shutdown()
+                if webhook_runner is not None:
+                    await webhook_runner.cleanup()
             finally:
-                await bot.close_session()
+                try:
+                    await dispatcher.shutdown()
+                finally:
+                    await bot.close_session()
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ from maxapi.types import (
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
 from database import deduct_credit, get_user, grant_free_trial
+from prodamus import PACKAGES, ProdamusPayments
 from image_service import (
     GenerationLimitError,
     GenerationNotConfigured,
@@ -41,6 +42,7 @@ PACKAGES_TEXT = (
     "15 генераций — 699 ₽\n\n"
     "Оплата временно недоступна. Скоро!"
 )
+PAYMENT_PACKAGES_TEXT = PACKAGES_TEXT.split("\n\n", 1)[0]
 PACKAGE_OFFER_TEXT = "Понравился результат? Хотите создать ещё?\n\n" + PACKAGES_TEXT
 
 
@@ -84,7 +86,10 @@ def result_keyboard(url: str, batch_id: str, index: int):
     ).as_markup()
 
 
-def create_router(generator: PosterGenerator = generate_vision_boards) -> Router:
+def create_router(
+    generator: PosterGenerator = generate_vision_boards,
+    *, payments: ProdamusPayments | None = None,
+) -> Router:
     router = Router()
     # FSM изолирован по чату, а баланс общий для всех чатов пользователя.
     generation_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
@@ -178,7 +183,11 @@ def create_router(generator: PosterGenerator = generate_vision_boards) -> Router
             await message.answer(f"Осталось кредитов: {user['balance'] if user else 0}.")
             if data.get("package_offer_pending"):
                 await message.answer(
-                    PACKAGE_OFFER_TEXT, attachments=[packages_keyboard()]
+                    (
+                        "Понравился результат? Хотите создать ещё?\n\n" + PAYMENT_PACKAGES_TEXT
+                        if payments else PACKAGE_OFFER_TEXT
+                    ),
+                    attachments=[packages_keyboard()],
                 )
                 await context.update_data(package_offer_pending=False)
         except GenerationTimeoutError:
@@ -257,15 +266,41 @@ def create_router(generator: PosterGenerator = generate_vision_boards) -> Router
         if is_bot_message(event):
             return
         await event.message.answer(
-            PACKAGES_TEXT + "\n1 кредит — одно сгенерированное изображение.",
+            (PAYMENT_PACKAGES_TEXT if payments else PACKAGES_TEXT)
+            + "\n1 кредит — одно сгенерированное изображение.",
             attachments=[packages_keyboard()],
         )
 
     @router.message_callback(F.callback.payload.in_({"buy_5", "buy_15"}))
     async def buy_callback(event: MessageCallback) -> None:
-        await event.ack(notification="Оплата временно недоступна. Скоро!")
-        if event.message is not None:
+        if event.message is None:
+            await event.ack(notification="Сообщение удалено. Отправьте /buy.")
+            return
+        if payments is None:
+            await event.ack(notification="Оплата временно недоступна. Скоро!")
             await event.send(PACKAGES_TEXT, attachments=[packages_keyboard()])
+            return
+        await event.ack(notification="Готовлю ссылку на оплату…")
+        user_id = event.get_ids()[1]
+        if user_id is None:
+            await event.send("Не удалось определить пользователя. Отправьте /start.")
+            return
+        credits = 5 if event.callback.payload == "buy_5" else 15
+        try:
+            link = await payments.create_payment_link(user_id, credits)
+        except Exception as exc:
+            logger.error("Не удалось создать ссылку Prodamus (%s).", type(exc).__name__)
+            await event.send("Не удалось создать ссылку на оплату. Попробуйте /buy позже.")
+            return
+        amount, title = PACKAGES[credits]
+        keyboard = InlineKeyboardBuilder().row(
+            LinkButton(text=f"Оплатить {amount // 100} ₽", url=link)
+        ).as_markup()
+        await event.send(
+            f"{title} — {amount // 100} ₽\nСсылка на оплату Prodamus:\n{link}\n\n"
+            "Кредиты начислятся автоматически после подтверждения оплаты.",
+            attachments=[keyboard],
+        )
 
     @router.message_created(Command("cancel"))
     async def cancel(event: MessageCreated, context: MemoryContext) -> None:

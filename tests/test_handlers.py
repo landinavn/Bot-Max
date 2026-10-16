@@ -110,7 +110,7 @@ async def test_help_acknowledges_and_sends_response():
     ("help_payment", "Оплата временно недоступна, скоро подключим!"),
     ("help_generation", "Попробуйте отправить другое фото или повторите позже. "
      "Если ошибка повторяется, напишите в поддержку: @ваш_ник"),
-    ("help_support", "Напишите мне: @ваш_ник_в_MAX"),
+    ("help_support", 'Напишите нам: <a href="https://max.ru/u/f9LHodD0cOL0i7XGM4uyyUo-bFy4nt4Hqc-XMNmvGygT83X2wUkr6O7DRXo">ваша ссылка</a>'),
 ])
 async def test_help_buttons_respond_without_affecting_generation(payload, answer):
     context = MemoryContext(chat_id=123, user_id=456)
@@ -121,7 +121,10 @@ async def test_help_buttons_respond_without_affecting_generation(payload, answer
     generator = AsyncMock()
     await dispatch_callback(create_router(generator), event, context)
     event.ack.assert_awaited_once_with(notification="Открываю…")
-    event.send.assert_awaited_once_with(answer)
+    if payload == "help_support":
+        event.send.assert_awaited_once_with(answer, parse_mode="html")
+    else:
+        event.send.assert_awaited_once_with(answer)
     generator.assert_not_awaited()
     assert await context.get_state() == PosterStates.generating
     assert await context.get_data() == data

@@ -151,7 +151,7 @@ def _validate_inputs(photo_url: str, sphere: str) -> None:
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
         raise ValueError("photo_url должен быть HTTPS URL без учётных данных.")
     if not isinstance(sphere, str) or not 1 <= len(sphere.strip()) <= 200:
-        raise ValueError("Сфера жизни должна содержать от 1 до 200 символов.")
+        raise ValueError("Описание мечты должно содержать от 1 до 200 символов.")
 
 
 async def _generate_image_bytes(
@@ -161,7 +161,7 @@ async def _generate_image_bytes(
         raise GenerationNotConfigured("Задайте IMAGE_API_KEY и IMAGE_MODEL.")
     prompt = (
         "Создай вдохновляющий плакат — карту желаний — на основе приложенного фото. "
-        f"Сфера жизни: {sphere.strip()}. "
+        f"Описание мечты пользователя: {sphere.strip()}\n\n"
         "Обязательные требования к портрету: keep the face exactly as in the original photo; "
         "natural head position; photorealistic portrait; do not change facial features. "
         "Сохрани исходный ракурс и положение головы, направление взгляда, выражение лица, "
@@ -169,7 +169,8 @@ async def _generate_image_bytes(
         "не искажай шею и не стилизуй лицо. "
         "Приоритет — точное сохранение лица; меняй окружение и тематические детали, "
         "а не лицо или позу головы. "
-        "Покажи его в позитивном образе желаемого будущего, связанном с этой сферой. "
+        "Изобрази человека с исходного фото в сцене, описанной пользователем. "
+        "Точно следуй деталям его мечты или желания. "
         "Добавь тематические элементы коллажа, гармоничные цвета и выразительную композицию. "
         "Без надписей и водяных знаков."
     )
@@ -305,7 +306,7 @@ async def generate_vision_board(photo_url: str, sphere: str) -> str:
     """Создать плакат через OpenAI и вернуть постоянный публичный HTTPS URL.
 
     Входное фото скачивается по HTTPS и передаётся в OpenAI Images API вместе
-    с промптом из сферы жизни. Ответ base64 декодируется и загружается
+    с описанием мечты в промпте. Ответ base64 декодируется и загружается
     в Yandex Object Storage. Бакет должен разрешать публичное чтение объектов.
     Для собственного CDN можно задать STORAGE_PUBLIC_BASE_URL.
     Генерация не повторяется автоматически, чтобы не создавать дубликаты.

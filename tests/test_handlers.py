@@ -7,7 +7,7 @@ from inspect import signature
 import pytest
 from maxapi.context import MemoryContext
 from maxapi.enums.update import UpdateType
-from maxapi.types import AttachmentUpload
+from maxapi.types import AttachmentUpload, PhotoAttachmentPayload
 
 import handlers
 from handlers import EXAMPLE_TEXT, PACKAGE_OFFER_TEXT, PACKAGES_TEXT, PosterStates, create_router
@@ -267,6 +267,61 @@ async def ready_context(*, chat_id=123):
     await context.update_data(photo={"url": "https://photos.example.com/source.png"})
     await context.set_state(PosterStates.waiting_for_sphere)
     return context
+
+
+async def test_photo_requests_free_text_dream_without_sphere_buttons():
+    context = MemoryContext(chat_id=123, user_id=456)
+    event = message_event()
+    photo = PhotoAttachmentPayload(photo_id=1, token="photo-token", url="https://photos.example.com/source.png")
+    event.message.body = SimpleNamespace(attachments=[SimpleNamespace(type="image", payload=photo)])
+    await call_handler(create_router(), "collect_photo", event, context)
+    event.message.answer.assert_awaited_once_with(
+        "✅ Фото получено!\n\n"
+        "Теперь опиши свою мечту или желание (до 200 символов). "
+        "Например: «Машина тесла с бордовым салоном, я за рулем» "
+        "или «Я на пляже на Мальдивах».\n\n/cancel — отмена"
+    )
+    assert await context.get_state() == PosterStates.waiting_for_sphere
+    assert (await context.get_data())["photo"] == photo.model_dump()
+
+
+@pytest.mark.parametrize("description", [
+    "Машина тесла с бордовым салоном, я за рулем",
+    "Я на пляже на Мальдивах",
+    "/мечта о полёте в космос",
+    "я" * 200,
+])
+async def test_any_valid_dream_is_passed_to_generator(credit_db, description):
+    await credit_db.add_credits(456, 2)
+    context = await ready_context()
+    generator = AsyncMock(return_value=["https://storage.example.com/dream.png"])
+    event = message_event("  " + description + "  ")
+    await call_handler(create_router(generator), "collect_sphere", event, context)
+    generator.assert_awaited_once_with("https://photos.example.com/source.png", description)
+    assert (await context.get_data())["sphere"] == description
+    assert (await credit_db.get_user(456))["balance"] == 1
+    assert event.bot.send_message.await_count == 1
+
+
+@pytest.mark.parametrize("description,reply", [
+    ("я" * 201, "Слишком длинное описание. Пожалуйста, уложись в 200 символов"),
+    ("", "Напиши свою мечту или желание текстом. /cancel — отмена"),
+    (" \n\t ", "Напиши свою мечту или желание текстом. /cancel — отмена"),
+    (None, "Напиши свою мечту или желание текстом. /cancel — отмена"),
+])
+async def test_invalid_dream_preserves_photo_and_does_not_charge(credit_db, description, reply):
+    await credit_db.add_credits(456, 1)
+    context = await ready_context()
+    before = dict(await context.get_data())
+    generator = AsyncMock()
+    event = message_event(description)
+    await call_handler(create_router(generator), "collect_sphere", event, context)
+    event.message.answer.assert_awaited_once_with(reply)
+    generator.assert_not_awaited()
+    event.bot.send_message.assert_not_awaited()
+    assert await context.get_state() == PosterStates.waiting_for_sphere
+    assert await context.get_data() == before
+    assert (await credit_db.get_user(456))["balance"] == 1
 
 
 async def test_start_grants_only_one_credit_across_chats_and_restart(credit_db):

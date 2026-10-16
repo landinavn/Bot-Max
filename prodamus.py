@@ -1,4 +1,4 @@
-"""Подписанные ссылки Prodamus Payform (do=pay) и проверка HMAC webhook.
+"""Ссылки через API Prodamus Payform (do=link) и проверка HMAC webhook.
 
 Протокол: https://github.com/PRODAMUS/integration-expert/tree/main/
 prodamus-integration-expert/references (payform-protocol.md, hmac.md).
@@ -12,6 +12,9 @@ from decimal import Decimal, InvalidOperation
 from html import unescape
 from urllib.parse import quote, urlencode, urlsplit
 from uuid import uuid4
+
+import aiohttp
+from yarl import URL
 
 from config import Config
 from database import create_payment_order, get_payment_order
@@ -37,6 +40,12 @@ def sign_payload(data: dict, secret: str) -> str:
     canonical = json.dumps(_prepare(data), ensure_ascii=False, separators=(",", ":"))
     canonical = canonical.replace("/", "\\/").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
     return hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
+
+
+def sign_link_payload(data: dict, secret: str) -> str:
+    """Исходящий sign для do=link: отсортированный query RFC3986, не webhook HMAC."""
+    query = urlencode(flatten_fields(_prepare(data)), quote_via=quote)
+    return hmac.new(secret.encode(), query.encode(), hashlib.sha256).hexdigest()
 
 
 def verify_signature(data: dict, signature: str, secret: str) -> bool:
@@ -124,6 +133,8 @@ class ProdamusPayments:
             for suffix in ("payform.ru", "prodamus.ru", "prodamus.tech")
         ):
             raise ValueError("PRODAMUS_DOMAIN должен быть доменом платёжной формы Prodamus.")
+        if not config.prodamus_return_url or not config.prodamus_webhook_url:
+            raise ValueError("Для приёма оплаты задайте PRODAMUS_RETURN_URL и PRODAMUS_WEBHOOK_URL.")
         self.return_url = _https_url(config.prodamus_return_url)
         self.webhook_url = _https_url(config.prodamus_webhook_url)
         webhook = urlsplit(self.webhook_url)
@@ -137,17 +148,40 @@ class ProdamusPayments:
         amount, title = PACKAGES[credits]
         order_id = f"max-{user_id}-{uuid4().hex}"
         data = {
-            "do": "pay", "order_id": order_id,
+            "do": "link", "order_id": order_id,
             "products": [{"name": title, "price": f"{amount // 100}.00", "quantity": "1"}],
-            "customer_extra": json.dumps({"user_id": user_id, "credits": credits}, separators=(",", ":")),
+            "customer_extra": json.dumps(
+                {"user_id": user_id, "credits": credits, "package_id": f"package_{credits}"},
+                separators=(",", ":"),
+            ),
             "_param_user_id": str(user_id), "_param_credits": str(credits),
+            "_param_package_id": f"package_{credits}",
             "urlReturn": self.return_url, "urlSuccess": self.return_url,
             "urlNotification": self.webhook_url, "payments_limit": "1",
         }
-        data["signature"] = sign_payload(data, self.secret)
+        data["sign"] = sign_link_payload(data, self.secret)
         # Заказ должен существовать ДО передачи ссылки покупателю.
         await create_payment_order(order_id, user_id, credits, amount, title)
-        return self.domain + "?" + urlencode(flatten_fields(data), quote_via=quote)
+        return await self._request_payment_link(data)
+
+    async def _request_payment_link(self, data: dict) -> str:
+        query = urlencode(flatten_fields(data), quote_via=quote)
+        # Не повторяем запрос автоматически: Prodamus мог создать ссылку до таймаута.
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=30), trust_env=True,
+        ) as session:
+            async with session.get(
+                URL(self.domain + "?" + query, encoded=True), allow_redirects=True,
+            ) as response:
+                if response.status != 200:
+                    raise RuntimeError("Prodamus не подтвердил создание платёжной ссылки.")
+                body = (await response.text()).strip()
+        if body.startswith("{"):
+            result = json.loads(body)
+            body = result.get("payment_link") or result.get("link")
+        if not isinstance(body, str):
+            raise ValueError("Prodamus не вернул платёжную ссылку.")
+        return _https_url(body.strip())
 
     async def validate_payment(self, data: dict):
         order_id = data.get("order_num")
@@ -179,10 +213,14 @@ class ProdamusPayments:
             raise ValueError("Пользователь не соответствует заказу.")
         if "_param_credits" in data and str(data["_param_credits"]) != str(order["credits"]):
             raise ValueError("Пакет не соответствует заказу.")
+        if "_param_package_id" in data and data["_param_package_id"] != f"package_{order['credits']}":
+            raise ValueError("Идентификатор пакета не соответствует заказу.")
         if "customer_extra" in data:
             extra = json.loads(data["customer_extra"])
             if not isinstance(extra, dict) or extra.get("user_id") != order["user_id"] or extra.get("credits") != order["credits"]:
                 raise ValueError("Метаданные покупателя не соответствуют заказу.")
+            if "package_id" in extra and extra["package_id"] != f"package_{order['credits']}":
+                raise ValueError("Метаданные пакета не соответствуют заказу.")
         if order["credits"] not in PACKAGES or PACKAGES[order["credits"]] != (
             order["amount_kopecks"], order["product_name"],
         ):

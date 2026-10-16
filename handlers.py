@@ -44,8 +44,7 @@ WELCOME_TEXT = (
 PACKAGES_TEXT = (
     "💎 Доступные пакеты:\n"
     "5 генераций — 299 ₽\n"
-    "15 генераций — 699 ₽\n\n"
-    "Оплата временно недоступна. Скоро!"
+    "15 генераций — 699 ₽"
 )
 PAYMENT_PACKAGES_TEXT = PACKAGES_TEXT.split("\n\n", 1)[0]
 NO_CREDITS_TEXT = "У вас закончились кредиты. Купите пакет: /buy"
@@ -70,7 +69,7 @@ HELP_TEXT = (
     "❓ Частые вопросы:"
 )
 HELP_ANSWERS = {
-    "help_payment": "Оплата временно недоступна, скоро подключим!",
+    "help_payment": "Выберите пакет для оплаты.",
     "help_generation": (
         "Попробуйте отправить другое фото или повторите позже. "
         'Если ошибка повторяется, напишите в поддержку: '
@@ -322,11 +321,11 @@ def create_router(
         if event.message is None:
             await event.ack(notification="Сообщение удалено. Отправьте /buy.")
             return
+        await event.ack(notification="Создаю ссылку…")
         if payments is None:
-            await event.ack(notification="Оплата временно недоступна. Скоро!")
-            await event.send(PACKAGES_TEXT, attachments=[packages_keyboard()])
+            logger.error("Не настроен Prodamus для создания платёжной ссылки.")
+            await event.send("Не удалось создать ссылку на оплату. Обратитесь в поддержку.")
             return
-        await event.ack(notification="Готовлю ссылку на оплату…")
         user_id = event.get_ids()[1]
         if user_id is None:
             await event.send("Не удалось определить пользователя. Отправьте /start.")
@@ -343,8 +342,7 @@ def create_router(
             LinkButton(text=f"Оплатить {amount // 100} ₽", url=link)
         ).as_markup()
         await event.send(
-            f"{title} — {amount // 100} ₽\nСсылка на оплату Prodamus:\n{link}\n\n"
-            "Кредиты начислятся автоматически после подтверждения оплаты.",
+            f"Для оплаты пакета «{title} — {amount // 100} ₽» перейдите по ссылке:\n{link}",
             attachments=[keyboard],
         )
 

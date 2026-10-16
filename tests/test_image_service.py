@@ -151,6 +151,7 @@ async def test_upload_photo_rejects_empty_token(config, max_bot):
 @pytest.mark.parametrize("dream", [
     "Машина тесла с бордовым салоном, я за рулем",
     "Я на пляже на Мальдивах",
+    "я" * 200,
 ])
 async def test_generation_uploads_photo_and_parses_response(config, storage, api, entrypoint, dream):
     count = 1
@@ -181,6 +182,24 @@ async def test_generation_uploads_photo_and_parses_response(config, storage, api
     assert "natural head position" in prompt
     assert "photorealistic portrait" in prompt
     assert "do not change facial features" in prompt
+    anatomy = "ANATOMY REQUIREMENTS (critical):"
+    dream_label = "Описание мечты пользователя:"
+    assert prompt.index("do not change facial features") < prompt.index(anatomy) < prompt.index(dream_label)
+    anatomy_block = prompt[prompt.index(anatomy):prompt.index(dream_label)]
+    for requirement in (
+        "Correct human anatomy and realistic body proportions",
+        "Exactly 5 fingers on each hand, correctly shaped and positioned",
+        "Exactly 2 arms and 2 legs, all visible limbs must be complete",
+        "Natural, anatomically correct pose",
+        "Correct ratio of head to body (no oversized or undersized head)",
+        "Correct placement of limbs relative to the torso",
+        "No extra limbs, no missing limbs, no deformed hands or feet",
+        "Realistic skin texture and natural joint articulation",
+        "Hands and feet must not be cropped awkwardly unless part of natural composition",
+    ):
+        assert requirement in anatomy_block
+    # https://developers.openai.com/api/reference/resources/images/methods/edit
+    assert len(prompt) <= 32000
     assert "Сфера жизни" not in prompt
     assert fields["output_format"].get_content() == "png"
     assert storage.put_object.call_count == count

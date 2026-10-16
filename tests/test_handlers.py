@@ -112,7 +112,7 @@ async def test_help_acknowledges_and_sends_response():
      'Если ошибка повторяется, напишите в поддержку: '
      '<a href="https://max.ru/u/f9LHodD0cOL0i7XGM4uyyUo-bFy4nt4Hqc-XMNmvGygT83X2wUkr6O7DRXo">'
      'Связаться с поддержкой</a>'),
-    ("help_support", 'Напишите нам: <a href="https://max.ru/u/f9LHodD0cOL0i7XGM4uyyUo-bFy4nt4Hqc-XMNmvGygT83X2wUkr6O7DRXo">ваша ссылка</a>'),
+    ("help_support", 'Напишите нам: <a href="https://max.ru/u/f9LHodD0cOL0i7XGM4uyyUo-bFy4nt4Hqc-XMNmvGygT83X2wUkr6O7DRXo">Связаться с поддержкой</a>'),
 ])
 async def test_help_buttons_respond_without_affecting_generation(payload, answer):
     context = MemoryContext(chat_id=123, user_id=456)

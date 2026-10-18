@@ -16,7 +16,7 @@ class Config:
     token: str = field(repr=False)
     photo_path: Path
     image_api_key: str | None = field(default=None, repr=False)
-    image_model: str = "openai/gpt-image-1"
+    image_model: str = ""
     storage_bucket: str | None = None
     storage_endpoint_url: str = "https://storage.yandexcloud.net"
     storage_region: str = "ru-central1"
@@ -43,7 +43,7 @@ class Config:
         if not photo_path.is_absolute():
             photo_path = BASE_DIR / photo_path
         image_api_key = os.environ.get("IMAGE_API_KEY", "").strip() or None
-        image_model = os.environ.get("IMAGE_MODEL", "openai/gpt-image-1").strip()
+        image_model = os.environ.get("IMAGE_MODEL", "").strip()
         return cls(
             token=token,
             photo_path=photo_path,

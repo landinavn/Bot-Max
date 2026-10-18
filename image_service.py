@@ -24,7 +24,8 @@ from maxapi.enums.upload_type import UploadType
 from maxapi.types import AttachmentUpload, InputMedia, InputMediaBuffer, Message
 from PIL import Image, ImageOps
 
-from config import Config, MAX_API_URL
+from config import Config
+from max_client import create_max_bot, log_max_error
 
 MAX_PHOTO_BYTES = 50 * 1024 * 1024
 MAX_UPLOAD_BYTES = 1_000_000
@@ -44,26 +45,23 @@ async def upload_photo(file_bytes: bytes) -> str:
         raise ValueError("Фото не должно быть пустым.")
 
     config = Config.from_env()
-    bot = Bot(token=config.token, auto_requests=False)
-    bot.set_api_url(MAX_API_URL)
-    try:
-        logger.info("Запрос MAX API: загрузка фото (%d байт).", len(file_bytes))
-        attachment = await bot.upload_media(
-            InputMediaBuffer(
-                buffer=file_bytes,
-                filename="photo",
-                type=UploadType.IMAGE,
+    async with create_max_bot(config.token, auto_requests=False) as bot:
+        try:
+            logger.info("Запрос MAX API: загрузка фото (%d байт).", len(file_bytes))
+            attachment = await bot.upload_media(
+                InputMediaBuffer(
+                    buffer=file_bytes,
+                    filename="photo",
+                    type=UploadType.IMAGE,
+                )
             )
-        )
-        token = attachment.payload.token
-        if not token.strip():
-            raise RuntimeError("MAX вернул пустой media token.")
-        return token
-    except Exception as exc:
-        logger.error("Ошибка загрузки фото в MAX (%s).", type(exc).__name__)
-        raise
-    finally:
-        await bot.close_session()
+            token = attachment.payload.token
+            if not token.strip():
+                raise RuntimeError("MAX вернул пустой media token.")
+            return token
+        except Exception as exc:
+            await log_max_error(exc, logger)
+            raise
 
 
 class GenerationNotConfigured(RuntimeError):
@@ -427,12 +425,8 @@ async def generate_poster(photo_url: str, sphere: str) -> AttachmentUpload:
     """Создать плакат и вернуть вложение с media token MAX."""
     result_url = await generate_vision_board(photo_url, sphere)
     config = Config.from_env()
-    bot = Bot(token=config.token, auto_requests=False)
-    bot.set_api_url(MAX_API_URL)
-    try:
+    async with create_max_bot(config.token, auto_requests=False) as bot:
         return await upload_image_for_max(bot, result_url)
-    finally:
-        await bot.close_session()
 
 
 class ImageService:

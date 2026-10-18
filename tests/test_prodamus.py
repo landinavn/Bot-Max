@@ -297,6 +297,7 @@ async def test_bot_closes_webhook_and_sessions_when_polling_fails(payment_config
     from unittest.mock import Mock
 
     import bot as bot_module
+    import max_client
 
     client = Mock(close_session=AsyncMock())
     dispatcher = Mock(start_polling=AsyncMock(side_effect=RuntimeError("test")), shutdown=AsyncMock())
@@ -304,7 +305,7 @@ async def test_bot_closes_webhook_and_sessions_when_polling_fails(payment_config
     start_server = AsyncMock(return_value=runner)
     monkeypatch.setattr(bot_module.Config, "from_env", lambda: payment_config)
     monkeypatch.setattr(bot_module, "init_db", AsyncMock())
-    monkeypatch.setattr(bot_module, "Bot", Mock(return_value=client))
+    monkeypatch.setattr(max_client, "Bot", Mock(return_value=client))
     monkeypatch.setattr(bot_module, "Dispatcher", Mock(return_value=dispatcher))
     monkeypatch.setattr(bot_module, "start_webhook_server", start_server)
     with pytest.raises(RuntimeError, match="test"):

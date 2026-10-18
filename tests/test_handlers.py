@@ -3,10 +3,12 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call
 from inspect import signature
+import logging
 
 import pytest
 from maxapi.context import MemoryContext
 from maxapi.enums.update import UpdateType
+from maxapi.exceptions import MaxApiError
 from maxapi.types import AttachmentUpload, PhotoAttachmentPayload
 
 import handlers
@@ -16,6 +18,14 @@ from handlers import EXAMPLE_TEXT, NO_CREDITS_TEXT, PACKAGES_TEXT, PosterStates,
 @pytest.fixture(autouse=True)
 async def isolated_database(credit_db):
     return credit_db
+
+
+@pytest.fixture(autouse=True)
+def max_image_upload(monkeypatch):
+    image = AttachmentUpload(type="image", payload={"token": "uploaded-poster-token"})
+    upload = AsyncMock(return_value=image)
+    monkeypatch.setattr(handlers, "upload_image_for_max", upload)
+    return upload
 
 
 def assert_purchase_keyboard(keyboard):
@@ -411,6 +421,55 @@ async def test_failed_generation_does_not_charge(credit_db, failure):
     await call_handler(create_router(generator), "collect_sphere", message_event(), context)
     assert (await credit_db.get_user(456))["balance"] == 1
     assert await context.get_state() == PosterStates.waiting_for_sphere
+
+
+async def test_image_upload_precedes_send_and_uses_token(credit_db, max_image_upload):
+    await credit_db.add_credits(456, 1)
+    url = "https://storage.example.com/photo.png"
+    generator = AsyncMock(return_value=[url])
+    event = message_event()
+    context = await ready_context()
+    timeline = Mock()
+    timeline.attach_mock(max_image_upload, "upload")
+    timeline.attach_mock(event.bot.send_message, "send")
+
+    await call_handler(create_router(generator), "collect_sphere", event, context)
+
+    max_image_upload.assert_awaited_once_with(event.bot, url)
+    assert [call[0] for call in timeline.mock_calls] == ["upload", "send"]
+    image, keyboard = event.bot.send_message.await_args.kwargs["attachments"]
+    assert image.model_dump()["payload"] == {"token": "uploaded-poster-token"}
+    assert keyboard.model_dump()["type"] == "inline_keyboard"
+
+
+@pytest.mark.parametrize("stage", ["upload", "send"])
+async def test_max_error_logs_body_and_retry_uses_paid_image(
+    credit_db, max_image_upload, caplog, stage,
+):
+    await credit_db.add_credits(456, 1)
+    generator = AsyncMock(return_value=["https://storage.example.com/photo.png"])
+    event = message_event()
+    router = create_router(generator)
+    context = await ready_context()
+    failing_call = max_image_upload if stage == "upload" else event.bot.send_message
+    failing_call.side_effect = MaxApiError(code=400, raw={"message": "MAX rejected media"})
+
+    with caplog.at_level(logging.ERROR, logger=handlers.__name__):
+        await call_handler(router, "collect_sphere", event, context)
+
+    assert "Детали ошибки MAX:" in caplog.text
+    assert "Ответ сервера MAX (код 400):" in caplog.text
+    assert "MAX rejected media" in caplog.text
+    if stage == "upload":
+        event.bot.send_message.assert_not_awaited()
+    assert (await context.get_data())["sent_count"] == 0
+    failing_call.reset_mock(side_effect=True)
+
+    await call_handler(router, "collect_sphere", event, context)
+
+    generator.assert_awaited_once()
+    assert (await credit_db.get_user(456))["balance"] == 0
+    assert await context.get_state() is None
 
 
 async def test_failed_image_send_retry_uses_paid_image_and_offers_once(credit_db):

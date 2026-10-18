@@ -31,7 +31,7 @@ from image_service import (
     GenerationTimeoutError,
     UnsupportedPhotoFormatError,
     generate_vision_boards,
-    image_from_url,
+    upload_image_for_max,
 )
 
 logger = logging.getLogger(__name__)
@@ -215,15 +215,22 @@ def create_router(
                 await message.answer("Отправляю готовый плакат…")
             batch_id = data["batch_id"]
             for index in range(data.get("sent_count", 0), 1):
-                image = image_from_url(urls[index])
                 keyboard = result_keyboard(urls[index], batch_id, index)
-                logger.info("Запрос MAX API: отправка плаката.")
-                sent = await bot.send_message(
-                    chat_id=chat_id,
-                    user_id=user_id,
-                    text="Ваш плакат готов!",
-                    attachments=[image, keyboard],
-                )
+                try:
+                    image = await upload_image_for_max(bot, urls[index])
+                    logger.info("Запрос MAX API: отправка плаката с media token.")
+                    sent = await bot.send_message(
+                        chat_id=chat_id,
+                        user_id=user_id,
+                        text="Ваш плакат готов!",
+                        attachments=[image, keyboard],
+                    )
+                except Exception as exc:
+                    logger.error("Детали ошибки MAX: %s", exc, exc_info=True)
+                    raw = getattr(exc, "raw", None)
+                    if raw is not None:
+                        logger.error("Ответ сервера MAX (код %s): %s", getattr(exc, "code", None), raw)
+                    raise
                 if sent is None:
                     raise RuntimeError("MAX не подтвердил отправку плаката.")
                 await context.update_data(sent_count=index + 1)

@@ -4,6 +4,7 @@ import asyncio
 import base64
 import binascii
 import logging
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import quote, urlsplit
@@ -19,13 +20,14 @@ from botocore.exceptions import (
 )
 from botocore.session import Session as BotocoreSession
 from maxapi import Bot
-from maxapi.enums.attachment import AttachmentType
 from maxapi.enums.upload_type import UploadType
-from maxapi.types import Attachment, InputMedia, InputMediaBuffer, Message, OtherAttachmentPayload
+from maxapi.types import AttachmentUpload, InputMedia, InputMediaBuffer, Message
+from PIL import Image, ImageOps
 
 from config import Config, MAX_API_URL
 
 MAX_PHOTO_BYTES = 50 * 1024 * 1024
+MAX_UPLOAD_BYTES = 1_000_000
 logger = logging.getLogger(__name__)
 
 
@@ -377,16 +379,60 @@ async def generate_vision_boards(photo_url: str, sphere: str) -> list[str]:
     return await _generate_and_store(photo_url, sphere, count=1)
 
 
-def image_from_url(url: str) -> Attachment:
-    """Вложение image по публичному URL для MAX."""
-    return Attachment(type=AttachmentType.IMAGE, payload=OtherAttachmentPayload(url=url))
+def _prepare_max_image(data: bytes) -> tuple[bytes, str]:
+    """Сохранить небольшое изображение или сжать большую копию для MAX."""
+    filename, _ = _photo_format(data)
+    if len(data) <= MAX_UPLOAD_BYTES:
+        return data, filename
+    with Image.open(BytesIO(data)) as source:
+        image = ImageOps.exif_transpose(source).convert("RGBA")
+        background = Image.new("RGB", image.size, "white")
+        background.paste(image, mask=image.getchannel("A"))
+    while True:
+        for quality in (90, 80, 70):
+            buffer = BytesIO()
+            background.save(buffer, format="JPEG", quality=quality, optimize=True)
+            result = buffer.getvalue()
+            if len(result) <= MAX_UPLOAD_BYTES:
+                logger.info("Сжатие для MAX: %d → %d байт.", len(data), len(result))
+                return result, "poster.jpg"
+        background = background.resize(
+            (max(1, background.width * 3 // 4), max(1, background.height * 3 // 4)),
+            Image.Resampling.LANCZOS,
+        )
 
 
-async def generate_poster(photo_url: str, sphere: str) -> Attachment:
-    """Фото по публичному URL для bot.send_message(attachments=[image])."""
+async def upload_image_for_max(bot: Bot, image_url: str) -> AttachmentUpload:
+    """Скачать результат из S3 и загрузить байты в MAX, получив media token."""
+    _validate_inputs(image_url, "poster")
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+            data = await _download_photo(session, image_url)
+    except asyncio.TimeoutError as exc:
+        raise GenerationTimeoutError("Не удалось вовремя скачать плакат для MAX.") from exc
+    except aiohttp.ClientError as exc:
+        raise ImageGenerationError("Не удалось скачать плакат для MAX.") from exc
+    data, filename = await asyncio.to_thread(_prepare_max_image, data)
+    logger.info("Запрос MAX API: загрузка плаката (%d байт).", len(data))
+    attachment = await bot.upload_media(
+        InputMediaBuffer(buffer=data, filename=filename, type=UploadType.IMAGE)
+    )
+    token = attachment.payload.token
+    if not isinstance(token, str) or not token.strip():
+        raise ImageGenerationError("MAX вернул пустой media token.")
+    return attachment
+
+
+async def generate_poster(photo_url: str, sphere: str) -> AttachmentUpload:
+    """Создать плакат и вернуть вложение с media token MAX."""
     result_url = await generate_vision_board(photo_url, sphere)
-    # Python-эквивалент Attachment::image(url): type=image, payload.url.
-    return image_from_url(result_url)
+    config = Config.from_env()
+    bot = Bot(token=config.token, auto_requests=False)
+    bot.set_api_url(MAX_API_URL)
+    try:
+        return await upload_image_for_max(bot, result_url)
+    finally:
+        await bot.close_session()
 
 
 class ImageService:

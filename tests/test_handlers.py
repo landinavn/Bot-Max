@@ -21,6 +21,19 @@ async def isolated_database(credit_db):
 
 
 @pytest.fixture(autouse=True)
+def event_replies(monkeypatch):
+    # Сценарии FSM проверяют содержание ответов; маршрутизация проверяется отдельно.
+    real_reply = handlers._reply
+
+    async def reply(event, *args, **kwargs):
+        sender = event.send if hasattr(event, "send") else event.message.answer
+        return await sender(*args, **kwargs)
+
+    monkeypatch.setattr(handlers, "_reply", reply)
+    return real_reply
+
+
+@pytest.fixture(autouse=True)
 def max_image_upload(monkeypatch):
     image = AttachmentUpload(type="image", payload={"token": "uploaded-poster-token"})
     upload = AsyncMock(return_value=image)
@@ -43,14 +56,15 @@ def callback_event(payload, *, deleted=False):
         if not notification:
             raise AssertionError("MAX требует notification для ack")
 
+    reply = AsyncMock()
     return SimpleNamespace(
         get_ids=lambda: (123, 456),
         callback=SimpleNamespace(payload=payload),
         message=None if deleted else SimpleNamespace(
-            recipient=SimpleNamespace(chat_id=123), answer=AsyncMock(),
+            recipient=SimpleNamespace(chat_id=123, chat_type="dialog"), answer=reply,
         ),
         ack=AsyncMock(side_effect=acknowledge),
-        send=AsyncMock(),
+        send=reply,
         bot=SimpleNamespace(send_message=AsyncMock(return_value=object())),
     )
 
@@ -268,12 +282,12 @@ async def test_more_acknowledges_before_generating_one_image(credit_db):
     assert await context.get_state() is None
 
 
-def message_event(text="карьера", *, chat_id=123):
+def message_event(text="карьера", *, chat_id=123, chat_type="dialog"):
     return SimpleNamespace(
         get_ids=lambda: (chat_id, 456),
         message=SimpleNamespace(
             sender=SimpleNamespace(is_bot=False, user_id=456),
-            recipient=SimpleNamespace(chat_id=chat_id),
+            recipient=SimpleNamespace(chat_id=chat_id, chat_type=chat_type),
             body=SimpleNamespace(text=text),
             answer=AsyncMock(),
         ),
@@ -438,8 +452,35 @@ async def test_image_upload_precedes_send_and_uses_token(credit_db, max_image_up
     max_image_upload.assert_awaited_once_with(event.bot, url)
     assert [call[0] for call in timeline.mock_calls] == ["upload", "send"]
     image, keyboard = event.bot.send_message.await_args.kwargs["attachments"]
+    assert event.bot.send_message.await_args.kwargs["user_id"] == 456
+    assert "chat_id" not in event.bot.send_message.await_args.kwargs
     assert image.model_dump()["payload"] == {"token": "uploaded-poster-token"}
     assert keyboard.model_dump()["type"] == "inline_keyboard"
+
+
+@pytest.mark.parametrize("event_kind", ["message", "callback"])
+async def test_private_replies_use_user_id_even_with_chat_id(event_replies, event_kind):
+    event = message_event() if event_kind == "message" else callback_event("help")
+
+    await event_replies(event, "Ответ")
+
+    event.bot.send_message.assert_awaited_once_with(user_id=456, text="Ответ")
+
+
+async def test_group_replies_keep_chat_id(event_replies):
+    event = message_event(chat_type="chat")
+    await event_replies(event, "Ответ группе")
+    event.bot.send_message.assert_awaited_once_with(chat_id=123, text="Ответ группе")
+
+
+async def test_poster_in_group_keeps_chat_id(credit_db):
+    await credit_db.add_credits(456, 1)
+    generator = AsyncMock(return_value=["https://storage.example.com/photo.png"])
+    event = message_event(chat_type="chat")
+    await call_handler(create_router(generator), "collect_sphere", event, await ready_context())
+    kwargs = event.bot.send_message.await_args.kwargs
+    assert kwargs["chat_id"] == 123
+    assert "user_id" not in kwargs
 
 
 @pytest.mark.parametrize("stage", ["upload", "send"])

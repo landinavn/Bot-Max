@@ -2,35 +2,19 @@
 
 import asyncio
 import logging
-import ssl
 
-from aiohttp import ClientRequest, TCPConnector
-from maxapi import Bot, Dispatcher
-from maxapi.client.default import DefaultConnectionProperties
-from maxapi.client.ssl import create_default_ssl_context
+from maxapi import Dispatcher
 from maxapi.context import MemoryContext
 from maxapi.context.isolation import SimpleEventIsolation
 
-from config import Config, MAX_API_URL
+from config import Config
+from max_client import MaxAPIConnector, create_max_bot
 from database import init_db
 from handlers import create_router
 from prodamus import ProdamusPayments
 from webhook import start_webhook_server
 
 logger = logging.getLogger(__name__)
-
-
-class MaxAPIConnector(TCPConnector):
-    """Исключение проверки сертификата только для HTTPS API MAX."""
-
-    def __init__(self) -> None:
-        super().__init__(ssl=create_default_ssl_context())
-        self._max_ssl_context = ssl._create_unverified_context()
-
-    def _get_ssl_context(self, req: ClientRequest) -> ssl.SSLContext | None:
-        if req.url.scheme == "https" and req.url.host == "platform-api.max.ru":
-            return self._max_ssl_context
-        return super()._get_ssl_context(req)
 
 
 def configure_logging() -> None:
@@ -53,15 +37,7 @@ async def main() -> None:
         except ValueError as exc:
             logger.error("Ошибка настройки Prodamus: %s", exc)
             raise
-    # maxapi не закрывает переданный извне connector: контекст закрывает его здесь.
-    async with MaxAPIConnector() as connector:
-        bot = Bot(
-            token=config.token,
-            default_connection=DefaultConnectionProperties(
-                trust_env=True, connector=connector,
-            ),
-        )
-        bot.set_api_url(MAX_API_URL)
+    async with create_max_bot(config.token) as bot:
         dispatcher = Dispatcher(
             storage=MemoryContext,
             use_create_task=True,
@@ -81,10 +57,7 @@ async def main() -> None:
                 if webhook_runner is not None:
                     await webhook_runner.cleanup()
             finally:
-                try:
-                    await dispatcher.shutdown()
-                finally:
-                    await bot.close_session()
+                await dispatcher.shutdown()
 
 
 if __name__ == "__main__":
@@ -94,5 +67,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         pass
     except Exception as exc:
-        logger.error("Бот остановлен из-за ошибки (%s).", type(exc).__name__)
+        logger.error("Бот остановлен из-за ошибки: %s", exc, exc_info=True)
         raise SystemExit(1) from None

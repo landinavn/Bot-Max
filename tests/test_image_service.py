@@ -37,6 +37,7 @@ def config(monkeypatch):
         token="test-max-token",
         photo_path=Path("unused.png"),
         image_api_key="test-proxyapi-key",
+        image_model="test-image-model",
         storage_bucket="test-bucket",
         storage_access_key_id="test-storage-access",
         storage_secret_access_key="test-storage-secret",
@@ -353,14 +354,20 @@ async def test_generation_uses_configured_base_url(config, api, base_url):
 
 
 @pytest.mark.parametrize("quality", ["low", "high"])
-async def test_generation_sends_configured_quality(config, api, quality):
-    settings = replace(config, image_quality=quality)
+async def test_generation_sends_configured_quality(config, api, caplog, quality):
+    settings = replace(config, image_model="configured-image-model", image_quality=quality)
     register_generation(api)
 
-    assert await service._generate_image_bytes(PHOTO_URL, "Карьера", settings) == [PNG]
+    with caplog.at_level(logging.INFO, logger=service.__name__):
+        assert await service._generate_image_bytes(PHOTO_URL, "Карьера", settings) == [PNG]
 
     fields = await multipart_fields(post_requests(api)[0].kwargs["data"])
+    assert fields["model"].get_content() == "configured-image-model"
     assert fields["quality"].get_content() == quality
+    assert (
+        service.__name__, logging.INFO,
+        f"Отправляю запрос с моделью: configured-image-model, качество: {quality}",
+    ) in caplog.record_tuples
 
 
 async def test_generation_rejects_invalid_json(config, storage, api, caplog):
@@ -474,8 +481,9 @@ async def test_generation_does_not_return_private_url(config, storage, api):
     storage.close.assert_called_once()
 
 
-async def test_generation_requires_key_before_http(config, storage, api, monkeypatch):
-    monkeypatch.setattr(service.Config, "from_env", lambda: replace(config, image_api_key=None))
+@pytest.mark.parametrize("missing_setting", ["image_api_key", "image_model"])
+async def test_generation_requires_key_and_model_before_http(config, storage, api, monkeypatch, missing_setting):
+    monkeypatch.setattr(service.Config, "from_env", lambda: replace(config, **{missing_setting: None}))
     with pytest.raises(service.GenerationNotConfigured):
         await service.generate_vision_board(PHOTO_URL, "Карьера")
     assert not api.requests

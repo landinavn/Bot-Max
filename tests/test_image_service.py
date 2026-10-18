@@ -8,6 +8,8 @@ from dataclasses import replace
 from email.parser import BytesParser
 from email.policy import default
 from pathlib import Path
+import random
+from io import BytesIO
 from unittest.mock import AsyncMock, Mock
 
 import aiohttp
@@ -15,6 +17,7 @@ import pytest
 from aioresponses import aioresponses
 from maxapi.enums.upload_type import UploadType
 from maxapi.types import AttachmentPayload, AttachmentUpload
+from PIL import Image
 
 import image_service as service
 from config import Config
@@ -142,6 +145,76 @@ async def test_upload_photo_closes_session_after_api_error(config, max_bot):
         await service.upload_photo(PNG)
 
     assert caught.value is failure
+    bot.close_session.assert_awaited_once()
+
+
+async def test_upload_result_to_max_uses_bytes_and_token(api, max_bot):
+    bot, _ = max_bot
+    url = "https://storage.example.com/result.png"
+    api.get(url, body=PNG)
+
+    attachment = await service.upload_image_for_max(bot, url)
+
+    assert attachment is bot.upload_media.return_value
+    assert attachment.model_dump()["payload"] == {"token": "media-token"}
+    media = bot.upload_media.await_args.args[0]
+    assert media.buffer == PNG
+    assert media.filename.endswith(".png")
+    assert media.type == UploadType.IMAGE
+    bot.close_session.assert_not_awaited()
+    for calls in api.requests.values():
+        assert all("Authorization" not in call.kwargs.get("headers", {}) for call in calls)
+
+
+async def test_upload_result_compresses_large_image(api, max_bot):
+    bot, _ = max_bot
+    source = Image.frombytes("RGB", (2048, 1536), random.Random(42).randbytes(2048 * 1536 * 3))
+    buffer = BytesIO()
+    source.save(buffer, format="PNG")
+    data = buffer.getvalue()
+    assert len(data) > 2_500_000
+    url = "https://storage.example.com/large.png"
+    api.get(url, body=data)
+
+    await service.upload_image_for_max(bot, url)
+
+    media = bot.upload_media.await_args.args[0]
+    assert len(media.buffer) <= 1_000_000
+    assert media.filename.endswith(".jpg")
+    with Image.open(BytesIO(media.buffer)) as compressed:
+        assert compressed.format == "JPEG"
+        assert compressed.width <= source.width
+        assert compressed.height <= source.height
+
+
+async def test_upload_result_rejects_empty_token(api, max_bot):
+    bot, _ = max_bot
+    bot.upload_media.return_value.payload.token = ""
+    url = "https://storage.example.com/result.png"
+    api.get(url, body=PNG)
+    with pytest.raises(service.ImageGenerationError, match="пустой media token"):
+        await service.upload_image_for_max(bot, url)
+
+
+async def test_upload_result_does_not_upload_after_download_error(api, max_bot):
+    bot, _ = max_bot
+    url = "https://storage.example.com/result.png"
+    api.get(url, status=404)
+    with pytest.raises(service.ImageGenerationError, match="HTTP 404"):
+        await service.upload_image_for_max(bot, url)
+    bot.upload_media.assert_not_awaited()
+
+
+async def test_generate_poster_returns_uploaded_token_and_closes_bot(config, api, max_bot, monkeypatch):
+    bot, _ = max_bot
+    url = "https://storage.example.com/result.png"
+    generator = AsyncMock(return_value=url)
+    monkeypatch.setattr(service, "generate_vision_board", generator)
+    api.get(url, body=PNG)
+
+    image = await service.generate_poster(PHOTO_URL, "Карьера")
+
+    assert image is bot.upload_media.return_value
     bot.close_session.assert_awaited_once()
 
 

@@ -25,6 +25,7 @@ from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
 from database import deduct_credit, get_user, grant_free_trial
 from prodamus import PACKAGES, ProdamusPayments
+from max_client import log_max_error
 from image_service import (
     GenerationLimitError,
     GenerationNotConfigured,
@@ -35,6 +36,32 @@ from image_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _recipient(event: MessageCreated | MessageCallback) -> dict[str, int]:
+    if event.message is None:
+        raise RuntimeError("Не определён получатель сообщения.")
+    if event.message.recipient.chat_type == "dialog":
+        user_id = event.get_ids()[1]
+        if user_id is None:
+            raise RuntimeError("Не определён user_id получателя.")
+        return {"user_id": user_id}
+    chat_id = event.message.recipient.chat_id
+    if chat_id is None:
+        raise RuntimeError("Не определён chat_id группы.")
+    return {"chat_id": chat_id}
+
+
+async def _reply(event: MessageCreated | MessageCallback, text=None, **kwargs):
+    if event.bot is None:
+        raise RuntimeError("Бот не привязан к событию.")
+    try:
+        return await event.bot.send_message(**_recipient(event), text=text, **kwargs)
+    except Exception as exc:
+        await log_max_error(exc, logger)
+        raise
+
+
 PosterGenerator = Callable[[str, str], Awaitable[list[str]]]
 WELCOME_TEXT = (
     "Привет! Я бот для создания персональных плакатов желаний с твоим фото. "
@@ -151,7 +178,7 @@ def create_router(
         credit_user_id = event.get_ids()[1]
         if credit_user_id is None:
             if event.message is not None:
-                await event.message.answer("Не удалось определить пользователя. Отправьте /start.")
+                await _reply(event, "Не удалось определить пользователя. Отправьте /start.")
             return
         lock = generation_locks.setdefault(credit_user_id, asyncio.Lock())
         async with lock:
@@ -175,20 +202,14 @@ def create_router(
         if not isinstance(photo, dict) or not photo.get("url") or not sphere:
             await context.clear()
             await context.set_state(PosterStates.waiting_for_photo)
-            await message.answer("Начнём заново: отправьте одно фото.")
+            await _reply(event, "Начнём заново: отправьте одно фото.")
             return
         await context.set_state(PosterStates.generating)
         try:
             bot = event.bot
             if bot is None:
                 raise RuntimeError("Бот не привязан к событию.")
-            chat_id = message.recipient.chat_id
-            user_id = None
-            if chat_id is None:
-                actor = event.callback.user if isinstance(event, MessageCallback) else message.sender
-                if message.recipient.chat_type != "dialog" or actor is None:
-                    raise RuntimeError("Не определён получатель плаката.")
-                user_id = actor.user_id
+            recipient = _recipient(event)
 
             urls = data.get("variants")
             if new_batch:
@@ -197,9 +218,9 @@ def create_router(
                 user = await get_user(credit_user_id)
                 if user is None or user["balance"] < 1:
                     await context.set_state(PosterStates.waiting_for_sphere)
-                    await message.answer(NO_CREDITS_TEXT, attachments=[packages_keyboard()])
+                    await _reply(event, NO_CREDITS_TEXT, attachments=[packages_keyboard()])
                     return
-                await message.answer("Создаю плакат…")
+                await _reply(event, "Создаю плакат…")
                 urls = await generator(photo["url"], sphere)
                 if len(urls) != 1 or not all(isinstance(url, str) and url.startswith("https://") for url in urls):
                     raise RuntimeError("Генератор должен вернуть один HTTPS URL.")
@@ -212,7 +233,7 @@ def create_router(
                     package_offer_pending=user is not None and user["balance"] == 0,
                 )
             else:
-                await message.answer("Отправляю готовый плакат…")
+                await _reply(event, "Отправляю готовый плакат…")
             batch_id = data["batch_id"]
             for index in range(data.get("sent_count", 0), 1):
                 keyboard = result_keyboard(urls[index], batch_id, index)
@@ -220,24 +241,20 @@ def create_router(
                     image = await upload_image_for_max(bot, urls[index])
                     logger.info("Запрос MAX API: отправка плаката с media token.")
                     sent = await bot.send_message(
-                        chat_id=chat_id,
-                        user_id=user_id,
+                        **recipient,
                         text="Ваш плакат готов!",
                         attachments=[image, keyboard],
                     )
                 except Exception as exc:
-                    logger.error("Детали ошибки MAX: %s", exc, exc_info=True)
-                    raw = getattr(exc, "raw", None)
-                    if raw is not None:
-                        logger.error("Ответ сервера MAX (код %s): %s", getattr(exc, "code", None), raw)
+                    await log_max_error(exc, logger)
                     raise
                 if sent is None:
                     raise RuntimeError("MAX не подтвердил отправку плаката.")
                 await context.update_data(sent_count=index + 1)
             user = await get_user(credit_user_id)
-            await message.answer(f"Осталось кредитов: {user['balance'] if user else 0}.")
+            await _reply(event, f"Осталось кредитов: {user['balance'] if user else 0}.")
             if data.get("package_offer_pending"):
-                await message.answer(
+                await _reply(event,
                     NO_CREDITS_TEXT,
                     attachments=[packages_keyboard()],
                 )
@@ -245,7 +262,7 @@ def create_router(
         except GenerationTimeoutError:
             logger.error("Таймаут API при создании или сохранении плаката.")
             await context.set_state(PosterStates.waiting_for_sphere)
-            await message.answer(
+            await _reply(event,
                 "Сервис не ответил вовремя. Фото и описание мечты сохранены. "
                 "Повторите описание мечты позже или отправьте /cancel."
             )
@@ -256,7 +273,7 @@ def create_router(
                 variants=[], sent_count=0, batch_id=None, new_batch_requested=False
             )
             await context.set_state(PosterStates.waiting_for_photo)
-            await message.answer(
+            await _reply(event,
                 "Формат фото не поддерживается или изображение повреждено. "
                 "Отправьте новое фото в формате PNG, JPEG или WebP."
             )
@@ -278,12 +295,12 @@ def create_router(
                     f"Слишком много запросов генерации. {wait} и повторите описание мечты. "
                     "Фото сохранено."
                 )
-            await message.answer(text)
+            await _reply(event, text)
             return
         except GenerationNotConfigured:
             logger.error("Не настроен API генерации или хранилище изображений.")
             await context.set_state(PosterStates.waiting_for_sphere)
-            await message.answer(
+            await _reply(event,
                 "Фото и описание мечты сохранены, но сервис генерации пока не настроен. "
                 "После настройки повторите описание мечты или /cancel."
             )
@@ -291,7 +308,7 @@ def create_router(
         except Exception as exc:
             logger.error("Не удалось создать или отправить плакат (%s).", type(exc).__name__)
             await context.set_state(PosterStates.waiting_for_sphere)
-            await message.answer(
+            await _reply(event,
                 "Не удалось завершить создание или отправку плаката. "
                 "Повторите описание мечты или /cancel."
             )
@@ -305,19 +322,19 @@ def create_router(
             return
         user_id = event.get_ids()[1]
         if user_id is None:
-            await event.message.answer("Не удалось определить пользователя.")
+            await _reply(event, "Не удалось определить пользователя.")
             return
         trial_granted = await grant_free_trial(user_id)
         await context.clear()
-        await event.message.answer(text=WELCOME_TEXT, attachments=[main_keyboard()])
+        await _reply(event, text=WELCOME_TEXT, attachments=[main_keyboard()])
         if trial_granted:
-            await event.message.answer("Вам начислен 1 бесплатный кредит!")
+            await _reply(event, "Вам начислен 1 бесплатный кредит!")
 
     @router.message_created(Command("buy"))
     async def buy(event: MessageCreated) -> None:
         if is_bot_message(event):
             return
-        await event.message.answer(
+        await _reply(event,
             (PAYMENT_PACKAGES_TEXT if payments else PACKAGES_TEXT)
             + "\n1 кредит — одно сгенерированное изображение.",
             attachments=[packages_keyboard()],
@@ -331,24 +348,24 @@ def create_router(
         await event.ack(notification="Создаю ссылку…")
         if payments is None:
             logger.error("Не настроен Prodamus для создания платёжной ссылки.")
-            await event.send("Не удалось создать ссылку на оплату. Обратитесь в поддержку.")
+            await _reply(event, "Не удалось создать ссылку на оплату. Обратитесь в поддержку.")
             return
         user_id = event.get_ids()[1]
         if user_id is None:
-            await event.send("Не удалось определить пользователя. Отправьте /start.")
+            await _reply(event, "Не удалось определить пользователя. Отправьте /start.")
             return
         credits = 5 if event.callback.payload == "buy_5" else 15
         try:
             link = await payments.create_payment_link(user_id, credits)
         except Exception as exc:
             logger.error("Не удалось создать ссылку Prodamus (%s).", type(exc).__name__)
-            await event.send("Не удалось создать ссылку на оплату. Попробуйте /buy позже.")
+            await _reply(event, "Не удалось создать ссылку на оплату. Попробуйте /buy позже.")
             return
         amount, title = PACKAGES[credits]
         keyboard = InlineKeyboardBuilder().row(
             LinkButton(text=f"Оплатить {amount // 100} ₽", url=link)
         ).as_markup()
-        await event.send(
+        await _reply(event,
             f"Для оплаты пакета «{title} — {amount // 100} ₽» перейдите по ссылке:\n{link}",
             attachments=[keyboard],
         )
@@ -358,7 +375,7 @@ def create_router(
         if is_bot_message(event):
             return
         await context.clear()
-        await event.message.answer("Сбор данных отменён.", attachments=[main_keyboard()])
+        await _reply(event, "Сбор данных отменён.", attachments=[main_keyboard()])
 
     @router.message_callback(F.callback.payload == "create_poster")
     async def begin_poster(event: MessageCallback, context: MemoryContext) -> None:
@@ -371,7 +388,7 @@ def create_router(
         await event.ack(notification="Загружаю…")
         await context.clear()
         await context.set_state(PosterStates.waiting_for_photo)
-        await event.send("Отправьте одно фото для плаката. /cancel — отмена.")
+        await _reply(event, "Отправьте одно фото для плаката. /cancel — отмена.")
 
     @router.message_callback(F.callback.payload.in_({"examples", "help"}))
     async def menu_callback(event: MessageCallback, context: MemoryContext) -> None:
@@ -387,12 +404,12 @@ def create_router(
             )
             if not all(path.is_file() for path, _ in photos):
                 logger.warning("Не найдены локальные фотографии примера.")
-                await event.send("Пример временно недоступен. Попробуйте позже.")
+                await _reply(event, "Пример временно недоступен. Попробуйте позже.")
                 return
             try:
                 if event.bot is None:
                     raise RuntimeError("Бот не привязан к событию.")
-                await event.send(EXAMPLE_TEXT)
+                await _reply(event, EXAMPLE_TEXT)
                 for path, caption in photos:
                     image = await event.bot.upload_media(
                         InputMedia(path=str(path), type=UploadType.IMAGE)
@@ -400,14 +417,14 @@ def create_router(
                     token = image.payload.token
                     if not isinstance(token, str) or not token.strip():
                         raise RuntimeError("MAX вернул пустой media token.")
-                    sent = await event.send(caption, attachments=[image])
+                    sent = await _reply(event, caption, attachments=[image])
                     if sent is None:
                         raise RuntimeError("MAX не подтвердил отправку примера.")
             except Exception as exc:
                 logger.error("Не удалось отправить пример (%s).", type(exc).__name__)
-                await event.send("Не удалось отправить пример. Попробуйте позже.")
+                await _reply(event, "Не удалось отправить пример. Попробуйте позже.")
         else:
-            await event.send(HELP_TEXT, attachments=[help_keyboard()])
+            await _reply(event, HELP_TEXT, attachments=[help_keyboard()])
 
     @router.message_callback(F.callback.payload.in_(set(HELP_ANSWERS)))
     async def help_callback(event: MessageCallback) -> None:
@@ -421,11 +438,11 @@ def create_router(
                 + PAYMENT_PACKAGES_TEXT
                 if payments else HELP_ANSWERS["help_payment"]
             )
-            await event.send(text, attachments=[packages_keyboard()])
+            await _reply(event, text, attachments=[packages_keyboard()])
         elif event.callback.payload in {"help_support", "help_generation"}:
-            await event.send(HELP_ANSWERS[event.callback.payload], parse_mode=ParseMode.HTML)
+            await _reply(event, HELP_ANSWERS[event.callback.payload], parse_mode=ParseMode.HTML)
         else:
-            await event.send(HELP_ANSWERS[event.callback.payload])
+            await _reply(event, HELP_ANSWERS[event.callback.payload])
 
     @router.message_created(PosterStates.waiting_for_photo)
     async def collect_photo(event: MessageCreated, context: MemoryContext) -> None:
@@ -440,12 +457,12 @@ def create_router(
             and isinstance(attachment.payload, PhotoAttachmentPayload)
         ]
         if len(photos) != 1 or not photos[0].payload.url:
-            await event.message.answer("Нужно одно фото, отправленное как изображение. /cancel — отмена.")
+            await _reply(event, "Нужно одно фото, отправленное как изображение. /cancel — отмена.")
             return
         # Скачиваем фото только после получения описания мечты.
         await context.update_data(photo=photos[0].payload.model_dump())
         await context.set_state(PosterStates.waiting_for_sphere)
-        await event.message.answer(
+        await _reply(event,
             "✅ Фото получено!\n\n"
             "Теперь опиши свою мечту или желание (до 200 символов). "
             "Например: «Машина тесла с бордовым салоном, я за рулем» "
@@ -460,10 +477,10 @@ def create_router(
         body = event.message.body
         sphere = (body.text or "").strip() if body else ""
         if len(sphere) > 200:
-            await event.message.answer("Слишком длинное описание. Пожалуйста, уложись в 200 символов")
+            await _reply(event, "Слишком длинное описание. Пожалуйста, уложись в 200 символов")
             return
         if not sphere:
-            await event.message.answer("Напиши свою мечту или желание текстом. /cancel — отмена")
+            await _reply(event, "Напиши свою мечту или желание текстом. /cancel — отмена")
             return
         data = await context.get_data()
         if data.get("sphere") != sphere:
@@ -495,7 +512,7 @@ def create_router(
                 await event.ack(notification="Вариант недоступен. Отправьте /start.")
                 return
             await event.ack(notification="Готовлю ссылку…")
-            await event.send(f"Скопируйте и отправьте эту ссылку:\n{url}")
+            await _reply(event, f"Скопируйте и отправьте эту ссылку:\n{url}")
         elif len(parts) == 2:
             if await context.get_state() == PosterStates.generating:
                 await event.ack(notification="Плакат уже создаётся. Подождите.")
@@ -510,7 +527,7 @@ def create_router(
     @router.message_created(PosterStates.generating)
     async def generating(event: MessageCreated) -> None:
         if not is_bot_message(event):
-            await event.message.answer("Плакат уже создаётся. Пожалуйста, подождите.")
+            await _reply(event, "Плакат уже создаётся. Пожалуйста, подождите.")
 
     @router.message_created()
     async def echo(event: MessageCreated) -> None:
@@ -518,6 +535,6 @@ def create_router(
             return
         body = event.message.body
         if body is not None and body.text is not None and body.text != "":
-            await event.message.answer(text=body.text)
+            await _reply(event, text=body.text)
 
     return router

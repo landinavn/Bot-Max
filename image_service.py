@@ -209,11 +209,24 @@ async def _generate_image_bytes(
                 try:
                     payload = await response.json()
                 except (ValueError, aiohttp.ContentTypeError) as exc:
+                    body = await response.text(errors="replace")
+                    logger.error(
+                        "OpenAI Images API invalid JSON: HTTP %s; response body: %s",
+                        response.status, body,
+                    )
                     raise ImageGenerationError("OpenAI вернул некорректный JSON.") from exc
     except asyncio.TimeoutError as exc:
+        logger.error("Подробная ошибка OpenAI: %r", exc)
         raise GenerationTimeoutError("Превышено время ожидания ответа API.") from exc
     except aiohttp.ClientError as exc:
-        raise ImageGenerationError("Не удалось связаться с API генерации.") from exc
+        logger.error("Подробная ошибка OpenAI: %r", exc)
+        raise ImageGenerationError(f"Ошибка API: {exc}") from exc
+    except ImageGenerationError:
+        # HTTP-ответ уже записан в _raise_api_error; сохранить тип ошибки.
+        raise
+    except Exception as exc:
+        logger.error("Подробная ошибка OpenAI: %r", exc)
+        raise ImageGenerationError(f"Ошибка API: {exc}") from exc
 
     try:
         items = payload["data"]

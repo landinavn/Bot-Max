@@ -47,7 +47,7 @@ PACKAGES_TEXT = (
     "15 генераций — 699 ₽"
 )
 PAYMENT_PACKAGES_TEXT = PACKAGES_TEXT.split("\n\n", 1)[0]
-NO_CREDITS_TEXT = "У вас закончились кредиты. Купите пакет: /buy"
+NO_CREDITS_TEXT = "У вас закончились кредиты. Пожалуйста, выберите пакет для продолжения:"
 EXAMPLES_DIR = Path(__file__).resolve().parent / "examples"
 EXAMPLE_TEXT = (
     "📸 Реальный пример работы:\n\n"

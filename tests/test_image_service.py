@@ -10,6 +10,7 @@ from email.policy import default
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
+import aiohttp
 import pytest
 from aioresponses import aioresponses
 from maxapi.enums.upload_type import UploadType
@@ -258,11 +259,15 @@ async def test_generation_uses_configured_base_url(config, api, base_url):
     assert request.kwargs["allow_redirects"] is False
 
 
-async def test_generation_rejects_invalid_json(config, storage, api):
+async def test_generation_rejects_invalid_json(config, storage, api, caplog):
     api.get(PHOTO_URL, body=PNG)
     api.post(IMAGE_EDIT_URL, body="{", content_type="application/json")
     with pytest.raises(service.ImageGenerationError, match="некорректный JSON"):
         await service.generate_vision_board(PHOTO_URL, "Карьера")
+    assert (
+        service.__name__, logging.ERROR,
+        "OpenAI Images API invalid JSON: HTTP 200; response body: {",
+    ) in caplog.record_tuples
     storage.put_object.assert_not_called()
 
 
@@ -311,6 +316,26 @@ async def test_generation_logs_full_api_error(config, storage, api, caplog, stat
         f"OpenAI Images API error: HTTP {status}; response body: {body}",
     ) in caplog.record_tuples
     storage.put_object.assert_not_called()
+
+
+@pytest.mark.parametrize("failure,error", [
+    (aiohttp.ClientConnectionError("ProxyAPI connection failed"), service.ImageGenerationError),
+    (asyncio.TimeoutError("ProxyAPI timed out"), service.GenerationTimeoutError),
+    (RuntimeError("Unexpected ProxyAPI failure"), service.ImageGenerationError),
+])
+async def test_generation_logs_exception_details(config, storage, api, caplog, failure, error):
+    api.get(PHOTO_URL, body=PNG)
+    api.post(IMAGE_EDIT_URL, exception=failure)
+
+    with pytest.raises(error) as caught:
+        await service.generate_vision_board(PHOTO_URL, "Карьера")
+
+    assert caught.value.__cause__ is failure
+    assert (
+        service.__name__, logging.ERROR, f"Подробная ошибка OpenAI: {failure!r}",
+    ) in caplog.record_tuples
+    storage.put_object.assert_not_called()
+    storage.close.assert_called_once()
 
 
 @pytest.mark.parametrize("stage", ["download", "generation"])

@@ -20,6 +20,7 @@ from maxapi.types import AttachmentPayload, AttachmentUpload
 from PIL import Image
 
 import image_service as service
+import max_client
 from config import Config
 
 IMAGE_EDIT_URL = "https://api.proxyapi.ru/openai/v1/images/edits"
@@ -59,7 +60,7 @@ def max_bot(monkeypatch):
     )
     bot.close_session = AsyncMock()
     factory = Mock(return_value=bot)
-    monkeypatch.setattr(service, "Bot", factory)
+    monkeypatch.setattr(max_client, "Bot", factory)
     return bot, factory
 
 
@@ -120,7 +121,12 @@ async def test_upload_photo_returns_media_token(config, max_bot):
 
     assert await service.upload_photo(PNG) == "media-token"
 
-    factory.assert_called_once_with(token=config.token, auto_requests=False)
+    factory.assert_called_once()
+    assert factory.call_args.kwargs["token"] == config.token
+    assert factory.call_args.kwargs["auto_requests"] is False
+    connector = factory.call_args.kwargs["default_connection"].kwargs["connector"]
+    assert connector._ssl is False
+    assert connector.closed
     bot.upload_media.assert_awaited_once()
     media = bot.upload_media.call_args.args[0]
     assert media.buffer == PNG

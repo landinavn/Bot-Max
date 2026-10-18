@@ -202,6 +202,10 @@ async def _generate_image_bytes(
             form.add_field("image", photo_bytes, filename=filename, content_type=mime_type)
             # Ключ ProxyAPI отправляется только на настроенный адрес API.
             logger.info("HTTP POST OpenAI Images API: генерация %d изображений.", count)
+            logger.info(
+                "Отправляю запрос с моделью: %s, качество: %s",
+                config.image_model, config.image_quality,
+            )
             async with session.post(
                 f"{config.openai_base_url.rstrip('/')}/images/edits",
                 data=form,

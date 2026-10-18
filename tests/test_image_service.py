@@ -180,9 +180,16 @@ async def test_generation_uploads_photo_and_parses_response(config, storage, api
     assert fields["image"].get_content_type() == "image/png"
     assert fields["image"].get_filename() == "photo.png"
     assert fields["model"].get_content() == config.image_model
+    assert fields["quality"].get_content() == "medium"
     assert fields["n"].get_content() == str(count)
     prompt = fields["prompt"].get_content()
     assert dream in prompt
+    face_requirement = (
+        "Preserve the original face, hairstyle, and facial features of the person "
+        "in the reference photo exactly. High facial resemblance is the top priority."
+    )
+    assert prompt.startswith(face_requirement)
+    assert prompt.index(face_requirement) < prompt.index("Описание мечты пользователя:")
     assert "keep the face exactly as in the original photo" in prompt
     assert "natural head position" in prompt
     assert "photorealistic portrait" in prompt
@@ -343,6 +350,17 @@ async def test_generation_uses_configured_base_url(config, api, base_url):
     request = post_requests(api)[0]
     assert request.kwargs["headers"]["Authorization"] == "Bearer test-proxyapi-key"
     assert request.kwargs["allow_redirects"] is False
+
+
+@pytest.mark.parametrize("quality", ["low", "high"])
+async def test_generation_sends_configured_quality(config, api, quality):
+    settings = replace(config, image_quality=quality)
+    register_generation(api)
+
+    assert await service._generate_image_bytes(PHOTO_URL, "Карьера", settings) == [PNG]
+
+    fields = await multipart_fields(post_requests(api)[0].kwargs["data"])
+    assert fields["quality"].get_content() == quality
 
 
 async def test_generation_rejects_invalid_json(config, storage, api, caplog):

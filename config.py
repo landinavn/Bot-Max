@@ -16,7 +16,7 @@ class Config:
     token: str = field(repr=False)
     photo_path: Path
     image_api_key: str | None = field(default=None, repr=False)
-    image_model: str = "dall-e-3"
+    image_model: str = "openai/gpt-image-1"
     storage_bucket: str | None = None
     storage_endpoint_url: str = "https://storage.yandexcloud.net"
     storage_region: str = "ru-central1"
@@ -30,6 +30,7 @@ class Config:
     webhook_host: str = "0.0.0.0"
     webhook_port: int = 8080
     openai_base_url: str = DEFAULT_OPENAI_BASE_URL
+    image_quality: str = "medium"
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -42,12 +43,13 @@ class Config:
         if not photo_path.is_absolute():
             photo_path = BASE_DIR / photo_path
         image_api_key = os.environ.get("IMAGE_API_KEY", "").strip() or None
-        image_model = os.environ.get("IMAGE_MODEL", "dall-e-3").strip()
+        image_model = os.environ.get("IMAGE_MODEL", "openai/gpt-image-1").strip()
         return cls(
             token=token,
             photo_path=photo_path,
             image_api_key=image_api_key,
             image_model=image_model,
+            image_quality=os.environ.get("IMAGE_QUALITY", "").strip() or "medium",
             openai_base_url=os.environ.get("OPENAI_BASE_URL", "").strip() or DEFAULT_OPENAI_BASE_URL,
             storage_bucket=os.environ.get("STORAGE_BUCKET", "").strip() or None,
             storage_endpoint_url=os.environ.get(

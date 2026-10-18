@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import logging
 import re
 from dataclasses import replace
 from email.parser import BytesParser
@@ -269,6 +270,28 @@ async def test_generation_classifies_api_errors(config, storage, api, status, co
     assert len(post_requests(api)) == 1
     storage.put_object.assert_not_called()
     storage.close.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "status,body,error",
+    [
+        (401, '{"error":{"code":"invalid_api_key","message":"Incorrect API key"}}', service.ImageGenerationError),
+        (429, '{"error":{"code":"insufficient_quota","message":"Quota exceeded"}}', service.GenerationLimitError),
+        (400, '{"error":{"code":"moderation_blocked","message":"Request blocked by moderation"}}', service.ImageGenerationError),
+        (502, "<html>Bad gateway</html>\nUpstream unavailable", service.ImageGenerationError),
+    ],
+)
+async def test_generation_logs_full_api_error(config, storage, api, caplog, status, body, error):
+    api.get(PHOTO_URL, body=PNG)
+    api.post(service.OPENAI_IMAGE_EDIT_URL, status=status, body=body)
+    with caplog.at_level(logging.ERROR, logger=service.__name__):
+        with pytest.raises(error):
+            await service.generate_vision_board(PHOTO_URL, "Карьера")
+    assert (
+        service.__name__, logging.ERROR,
+        f"OpenAI Images API error: HTTP {status}; response body: {body}",
+    ) in caplog.record_tuples
+    storage.put_object.assert_not_called()
 
 
 @pytest.mark.parametrize("stage", ["download", "generation"])

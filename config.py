@@ -16,7 +16,7 @@ class Config:
     token: str = field(repr=False)
     photo_path: Path
     image_api_key: str | None = field(default=None, repr=False)
-    image_model: str = "gpt-image-2.5-sunburst"
+    image_model: str = "dall-e-3"
     storage_bucket: str | None = None
     storage_endpoint_url: str = "https://storage.yandexcloud.net"
     storage_region: str = "ru-central1"
@@ -42,7 +42,7 @@ class Config:
         if not photo_path.is_absolute():
             photo_path = BASE_DIR / photo_path
         image_api_key = os.environ.get("IMAGE_API_KEY", "").strip() or None
-        image_model = os.environ.get("IMAGE_MODEL", "gpt-image-2.5-sunburst").strip()
+        image_model = os.environ.get("IMAGE_MODEL", "dall-e-3").strip()
         return cls(
             token=token,
             photo_path=photo_path,

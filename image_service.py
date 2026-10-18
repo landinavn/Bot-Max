@@ -93,7 +93,9 @@ class GenerationLimitError(ImageGenerationError):
 
 
 async def _raise_api_error(response: aiohttp.ClientResponse) -> None:
-    """Классифицировать ошибку API, не выводя исходный ответ с данными пользователя."""
+    """Записать полный ответ OpenAI в лог и классифицировать ошибку API."""
+    body = await response.text(errors="replace")
+    logger.error("OpenAI Images API error: HTTP %s; response body: %s", response.status, body)
     code = ""
     try:
         payload = await response.json()

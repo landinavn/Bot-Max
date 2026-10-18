@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
 MAX_API_URL = "https://platform-api.max.ru"
+DEFAULT_OPENAI_BASE_URL = "https://api.proxyapi.ru/openai/v1"
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,7 @@ class Config:
     prodamus_webhook_url: str | None = None
     webhook_host: str = "0.0.0.0"
     webhook_port: int = 8080
+    openai_base_url: str = DEFAULT_OPENAI_BASE_URL
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -46,6 +48,7 @@ class Config:
             photo_path=photo_path,
             image_api_key=image_api_key,
             image_model=image_model,
+            openai_base_url=os.environ.get("OPENAI_BASE_URL", "").strip() or DEFAULT_OPENAI_BASE_URL,
             storage_bucket=os.environ.get("STORAGE_BUCKET", "").strip() or None,
             storage_endpoint_url=os.environ.get(
                 "STORAGE_ENDPOINT_URL", "https://storage.yandexcloud.net"

@@ -72,6 +72,6 @@ def test_missing_image_model_and_default_quality(tmp_path, monkeypatch, quality)
     settings = config.Config.from_env()
 
     assert settings.image_model == ""
-    assert settings.image_quality == "medium"
-    assert config.Config(token="test-token", photo_path=tmp_path).image_quality == "medium"
+    assert settings.image_quality == "high"
+    assert config.Config(token="test-token", photo_path=tmp_path).image_quality == "high"
     assert config.Config(token="test-token", photo_path=tmp_path).image_model == ""

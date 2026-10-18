@@ -162,8 +162,9 @@ async def _generate_image_bytes(
     if not config.image_api_key or not config.image_model:
         raise GenerationNotConfigured("Задайте IMAGE_API_KEY и IMAGE_MODEL.")
     prompt = (
-        "Preserve the original face, hairstyle, and facial features of the person "
-        "in the reference photo exactly. High facial resemblance is the top priority.\n\n"
+        "CRITICAL INSTRUCTION: You must preserve the person's face, facial features, "
+        "hairstyle, and identity EXACTLY as in the provided reference image. "
+        "Do not alter the face. The highest priority is 100% facial resemblance.\n\n"
         "Создай вдохновляющий плакат — карту желаний — на основе приложенного фото. "
         "Обязательные требования к портрету: keep the face exactly as in the original photo; "
         "natural head position; photorealistic portrait; do not change facial features. "
@@ -206,8 +207,10 @@ async def _generate_image_bytes(
                 "Отправляю запрос с моделью: %s, качество: %s",
                 config.image_model, config.image_quality,
             )
+            endpoint = f"{config.openai_base_url.rstrip('/')}/images/edits"
+            logger.info("Эндпоинт API: %s, quality: %s", endpoint, config.image_quality)
             async with session.post(
-                f"{config.openai_base_url.rstrip('/')}/images/edits",
+                endpoint,
                 data=form,
                 headers={"Authorization": f"Bearer {config.image_api_key}"},
                 allow_redirects=False,

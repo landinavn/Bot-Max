@@ -181,13 +181,14 @@ async def test_generation_uploads_photo_and_parses_response(config, storage, api
     assert fields["image"].get_content_type() == "image/png"
     assert fields["image"].get_filename() == "photo.png"
     assert fields["model"].get_content() == config.image_model
-    assert fields["quality"].get_content() == "medium"
+    assert fields["quality"].get_content() == "high"
     assert fields["n"].get_content() == str(count)
     prompt = fields["prompt"].get_content()
     assert dream in prompt
     face_requirement = (
-        "Preserve the original face, hairstyle, and facial features of the person "
-        "in the reference photo exactly. High facial resemblance is the top priority."
+        "CRITICAL INSTRUCTION: You must preserve the person's face, facial features, "
+        "hairstyle, and identity EXACTLY as in the provided reference image. "
+        "Do not alter the face. The highest priority is 100% facial resemblance."
     )
     assert prompt.startswith(face_requirement)
     assert prompt.index(face_requirement) < prompt.index("Описание мечты пользователя:")
@@ -353,7 +354,7 @@ async def test_generation_uses_configured_base_url(config, api, base_url):
     assert request.kwargs["allow_redirects"] is False
 
 
-@pytest.mark.parametrize("quality", ["low", "high"])
+@pytest.mark.parametrize("quality", ["low", "medium", "high"])
 async def test_generation_sends_configured_quality(config, api, caplog, quality):
     settings = replace(config, image_model="configured-image-model", image_quality=quality)
     register_generation(api)
@@ -367,6 +368,10 @@ async def test_generation_sends_configured_quality(config, api, caplog, quality)
     assert (
         service.__name__, logging.INFO,
         f"Отправляю запрос с моделью: configured-image-model, качество: {quality}",
+    ) in caplog.record_tuples
+    assert (
+        service.__name__, logging.INFO,
+        f"Эндпоинт API: {IMAGE_EDIT_URL}, quality: {quality}",
     ) in caplog.record_tuples
 
 

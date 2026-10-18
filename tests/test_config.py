@@ -18,7 +18,7 @@ def test_proxyapi_is_default_base_url(tmp_path, monkeypatch, base_url):
 
 def test_proxyapi_settings_are_loaded_from_dotenv(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "BASE_DIR", tmp_path)
-    for name in ("MAX_BOT_TOKEN", "IMAGE_API_KEY", "OPENAI_BASE_URL"):
+    for name in ("MAX_BOT_TOKEN", "IMAGE_API_KEY", "OPENAI_BASE_URL", "IMAGE_QUALITY", "IMAGE_MODEL"):
         # Зарегистрировать восстановление даже для изначально отсутствующих переменных.
         monkeypatch.setenv(name, "")
         monkeypatch.delenv(name, raising=False)
@@ -26,12 +26,16 @@ def test_proxyapi_settings_are_loaded_from_dotenv(tmp_path, monkeypatch):
         "MAX_BOT_TOKEN=test-token\n"
         "IMAGE_API_KEY=test-proxyapi-key\n"
         "OPENAI_BASE_URL=https://api.proxyapi.ru/openai/v1\n"
+        "IMAGE_MODEL=openai/gpt-image-1\n"
+        "IMAGE_QUALITY=low\n"
     )
 
     settings = config.Config.from_env()
 
     assert settings.openai_base_url == "https://api.proxyapi.ru/openai/v1"
     assert settings.image_api_key == "test-proxyapi-key"
+    assert settings.image_model == "openai/gpt-image-1"
+    assert settings.image_quality == "low"
 
 
 def test_environment_overrides_dotenv(tmp_path, monkeypatch):
@@ -39,12 +43,31 @@ def test_environment_overrides_dotenv(tmp_path, monkeypatch):
     (tmp_path / ".env").write_text(
         "IMAGE_API_KEY=dotenv-key\n"
         "OPENAI_BASE_URL=https://api.proxyapi.ru/openai/v1\n"
+        "IMAGE_QUALITY=low\n"
     )
     monkeypatch.setenv("MAX_BOT_TOKEN", "test-token")
     monkeypatch.setenv("IMAGE_API_KEY", "environment-key")
     monkeypatch.setenv("OPENAI_BASE_URL", " https://custom-api.example.com/v1/ ")
+    monkeypatch.setenv("IMAGE_QUALITY", " high ")
 
     settings = config.Config.from_env()
 
     assert settings.openai_base_url == "https://custom-api.example.com/v1/"
     assert settings.image_api_key == "environment-key"
+    assert settings.image_quality == "high"
+
+
+@pytest.mark.parametrize("quality", [None, "", "   "])
+def test_default_image_model_and_quality(tmp_path, monkeypatch, quality):
+    monkeypatch.setattr(config, "BASE_DIR", tmp_path)
+    monkeypatch.setenv("MAX_BOT_TOKEN", "test-token")
+    monkeypatch.delenv("IMAGE_MODEL", raising=False)
+    monkeypatch.delenv("IMAGE_QUALITY", raising=False)
+    if quality is not None:
+        monkeypatch.setenv("IMAGE_QUALITY", quality)
+
+    settings = config.Config.from_env()
+
+    assert settings.image_model == "openai/gpt-image-1"
+    assert settings.image_quality == "medium"
+    assert config.Config(token="test-token", photo_path=tmp_path).image_quality == "medium"

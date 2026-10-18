@@ -162,6 +162,8 @@ async def _generate_image_bytes(
     if not config.image_api_key or not config.image_model:
         raise GenerationNotConfigured("Задайте IMAGE_API_KEY и IMAGE_MODEL.")
     prompt = (
+        "Preserve the original face, hairstyle, and facial features of the person "
+        "in the reference photo exactly. High facial resemblance is the top priority.\n\n"
         "Создай вдохновляющий плакат — карту желаний — на основе приложенного фото. "
         "Обязательные требования к портрету: keep the face exactly as in the original photo; "
         "natural head position; photorealistic portrait; do not change facial features. "
@@ -192,6 +194,7 @@ async def _generate_image_bytes(
             filename, mime_type = _photo_format(photo_bytes)
             form = aiohttp.FormData()
             form.add_field("model", config.image_model)
+            form.add_field("quality", config.image_quality)
             form.add_field("prompt", prompt)
             form.add_field("n", str(count))
             form.add_field("size", "1024x1536")

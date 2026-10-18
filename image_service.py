@@ -24,7 +24,6 @@ from maxapi.types import Attachment, InputMedia, InputMediaBuffer, Message, Othe
 
 from config import Config, MAX_API_URL
 
-OPENAI_IMAGE_EDIT_URL = "https://api.openai.com/v1/images/edits"
 MAX_PHOTO_BYTES = 50 * 1024 * 1024
 logger = logging.getLogger(__name__)
 
@@ -197,10 +196,10 @@ async def _generate_image_bytes(
             form.add_field("size", "1024x1536")
             form.add_field("output_format", "png")
             form.add_field("image", photo_bytes, filename=filename, content_type=mime_type)
-            # Ключ отправляется только OpenAI, а не на сервер исходного фото.
+            # Ключ ProxyAPI отправляется только на настроенный адрес API.
             logger.info("HTTP POST OpenAI Images API: генерация %d изображений.", count)
             async with session.post(
-                OPENAI_IMAGE_EDIT_URL,
+                f"{config.openai_base_url.rstrip('/')}/images/edits",
                 data=form,
                 headers={"Authorization": f"Bearer {config.image_api_key}"},
                 allow_redirects=False,

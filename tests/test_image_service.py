@@ -18,6 +18,7 @@ from maxapi.types import AttachmentPayload, AttachmentUpload
 import image_service as service
 from config import Config
 
+IMAGE_EDIT_URL = "https://api.proxyapi.ru/openai/v1/images/edits"
 PHOTO_URL = "https://photos.example.com/source.png"
 PUBLIC_URL = re.compile(
     r"https://storage\.yandexcloud\.net/test-bucket/vision-boards/[a-f0-9]{32}\.png"
@@ -34,7 +35,7 @@ def config(monkeypatch):
     settings = Config(
         token="test-max-token",
         photo_path=Path("unused.png"),
-        image_api_key="test-openai-key",
+        image_api_key="test-proxyapi-key",
         storage_bucket="test-bucket",
         storage_access_key_id="test-storage-access",
         storage_secret_access_key="test-storage-secret",
@@ -76,7 +77,7 @@ def register_generation(api, *, count=1, payload=None, status=200, headers=None)
     api.get(PHOTO_URL, body=PNG, content_type="image/png")
     if payload is None:
         payload = {"data": [{"b64_json": ENCODED_PNG} for _ in range(count)]}
-    api.post(service.OPENAI_IMAGE_EDIT_URL, payload=payload, status=status, headers=headers)
+    api.post(IMAGE_EDIT_URL, payload=payload, status=status, headers=headers)
     api.head(PUBLIC_URL, status=200, repeat=True)
 
 
@@ -239,9 +240,27 @@ async def test_generation_rejects_incomplete_batch(config, storage, api):
     storage.put_object.assert_not_called()
 
 
+@pytest.mark.parametrize("base_url", [
+    "https://api.proxyapi.ru/openai/v1",
+    "https://api.proxyapi.ru/openai/v1/",
+    "https://custom-api.example.com/v1/",
+])
+async def test_generation_uses_configured_base_url(config, api, base_url):
+    settings = replace(config, openai_base_url=base_url)
+    endpoint = base_url.rstrip("/") + "/images/edits"
+    api.get(PHOTO_URL, body=PNG, content_type="image/png")
+    api.post(endpoint, payload={"data": [{"b64_json": ENCODED_PNG}]})
+
+    assert await service._generate_image_bytes(PHOTO_URL, "Карьера", settings) == [PNG]
+
+    request = post_requests(api)[0]
+    assert request.kwargs["headers"]["Authorization"] == "Bearer test-proxyapi-key"
+    assert request.kwargs["allow_redirects"] is False
+
+
 async def test_generation_rejects_invalid_json(config, storage, api):
     api.get(PHOTO_URL, body=PNG)
-    api.post(service.OPENAI_IMAGE_EDIT_URL, body="{", content_type="application/json")
+    api.post(IMAGE_EDIT_URL, body="{", content_type="application/json")
     with pytest.raises(service.ImageGenerationError, match="некорректный JSON"):
         await service.generate_vision_board(PHOTO_URL, "Карьера")
     storage.put_object.assert_not_called()
@@ -283,7 +302,7 @@ async def test_generation_classifies_api_errors(config, storage, api, status, co
 )
 async def test_generation_logs_full_api_error(config, storage, api, caplog, status, body, error):
     api.get(PHOTO_URL, body=PNG)
-    api.post(service.OPENAI_IMAGE_EDIT_URL, status=status, body=body)
+    api.post(IMAGE_EDIT_URL, status=status, body=body)
     with caplog.at_level(logging.ERROR, logger=service.__name__):
         with pytest.raises(error):
             await service.generate_vision_board(PHOTO_URL, "Карьера")
@@ -300,7 +319,7 @@ async def test_generation_handles_timeout(config, storage, api, stage):
         api.get(PHOTO_URL, exception=asyncio.TimeoutError())
     else:
         api.get(PHOTO_URL, body=PNG)
-        api.post(service.OPENAI_IMAGE_EDIT_URL, exception=asyncio.TimeoutError())
+        api.post(IMAGE_EDIT_URL, exception=asyncio.TimeoutError())
     with pytest.raises(service.GenerationTimeoutError):
         await service.generate_vision_board(PHOTO_URL, "Карьера")
     storage.put_object.assert_not_called()
@@ -318,7 +337,7 @@ async def test_generation_rejects_invalid_photo(config, storage, api, body, erro
 
 async def test_generation_does_not_return_private_url(config, storage, api):
     api.get(PHOTO_URL, body=PNG)
-    api.post(service.OPENAI_IMAGE_EDIT_URL, payload={"data": [{"b64_json": ENCODED_PNG}]})
+    api.post(IMAGE_EDIT_URL, payload={"data": [{"b64_json": ENCODED_PNG}]})
     api.head(PUBLIC_URL, status=403)
     with pytest.raises(service.ImageGenerationError, match="публичная ссылка недоступна"):
         await service.generate_vision_board(PHOTO_URL, "Карьера")

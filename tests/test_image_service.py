@@ -62,6 +62,8 @@ def max_bot(monkeypatch):
 @pytest.fixture
 def storage(monkeypatch):
     client = Mock()
+    client.uploaded_images = []
+    client.put_object.side_effect = lambda **kwargs: client.uploaded_images.append(kwargs["Body"].read())
     factory = Mock(return_value=client)
     monkeypatch.setattr(service, "_storage_client", factory)
     return client
@@ -207,7 +209,8 @@ async def test_generation_uploads_photo_and_parses_response(config, storage, api
     assert fields["output_format"].get_content() == "png"
     assert storage.put_object.call_count == count
     for call, url in zip(storage.put_object.call_args_list, urls):
-        assert call.kwargs["Body"] == PNG
+        assert storage.uploaded_images == [PNG] * count
+        assert call.kwargs["Body"].closed
         assert call.kwargs["ContentType"] == "image/png"
         assert url == f"https://storage.yandexcloud.net/test-bucket/{call.kwargs['Key']}"
     for (method, _), calls in api.requests.items():
@@ -229,6 +232,89 @@ async def test_generation_uploads_photo_and_parses_response(config, storage, api
 async def test_generation_rejects_invalid_response(config, storage, api, payload):
     register_generation(api, payload=payload)
     with pytest.raises(service.ImageGenerationError, match="корректного PNG"):
+        await service.generate_vision_board(PHOTO_URL, "Карьера")
+    storage.put_object.assert_not_called()
+    storage.close.assert_called_once()
+
+
+@pytest.mark.parametrize("response_format", ["b64_json", "url", "both"])
+async def test_generation_uploads_temp_file_and_removes_it(
+    config, storage, api, tmp_path, monkeypatch, response_format,
+):
+    result_url = "https://cdn.example.com/generated.png"
+    item = {"b64_json": ENCODED_PNG} if response_format == "b64_json" else {"url": result_url}
+    if response_format == "both":
+        item["b64_json"] = ENCODED_PNG
+    register_generation(api, payload={"data": [item]})
+    if response_format == "url":
+        api.get(result_url, body=PNG)
+    original_temp_directory = service.TemporaryDirectory
+    monkeypatch.setattr(
+        service, "TemporaryDirectory", lambda **kwargs: original_temp_directory(dir=tmp_path, **kwargs),
+    )
+    paths = []
+
+    def upload(**kwargs):
+        path = Path(kwargs["Body"].name)
+        assert path.is_file()
+        assert path.read_bytes() == PNG
+        assert kwargs["Body"].read() == PNG
+        paths.append(path)
+
+    storage.put_object.side_effect = upload
+
+    public_url = await service.generate_vision_board(PHOTO_URL, "Карьера")
+
+    assert PUBLIC_URL.fullmatch(public_url)
+    assert len(paths) == 1
+    assert not paths[0].exists()
+    assert not list(tmp_path.iterdir())
+    for (method, _), calls in api.requests.items():
+        if method == "GET":
+            assert all("Authorization" not in call.kwargs.get("headers", {}) for call in calls)
+    storage.close.assert_called_once()
+
+
+async def test_generation_removes_temp_file_after_storage_error(config, storage, api, tmp_path, monkeypatch):
+    register_generation(api)
+    original_temp_directory = service.TemporaryDirectory
+    monkeypatch.setattr(
+        service, "TemporaryDirectory", lambda **kwargs: original_temp_directory(dir=tmp_path, **kwargs),
+    )
+    paths = []
+
+    def upload(**kwargs):
+        paths.append(Path(kwargs["Body"].name))
+        assert paths[0].is_file()
+        raise service.ClientError({"Error": {"Code": "AccessDenied"}}, "PutObject")
+
+    storage.put_object.side_effect = upload
+    with pytest.raises(service.ImageGenerationError, match="сохранить плакат"):
+        await service.generate_vision_board(PHOTO_URL, "Карьера")
+
+    assert paths and not paths[0].exists()
+    assert not list(tmp_path.iterdir())
+    assert storage.put_object.call_args.kwargs["Body"].closed
+    storage.close.assert_called_once()
+
+
+@pytest.mark.parametrize("url", [None, 123, "http://cdn.example.com/image.png", "https://user:pass@cdn.example.com/image.png"])
+async def test_generation_rejects_invalid_image_url(config, storage, api, url):
+    register_generation(api, payload={"data": [{"url": url}]})
+    with pytest.raises(service.ImageGenerationError, match="корректного PNG"):
+        await service.generate_vision_board(PHOTO_URL, "Карьера")
+    storage.put_object.assert_not_called()
+
+
+@pytest.mark.parametrize("failure,error", [
+    (asyncio.TimeoutError(), service.GenerationTimeoutError),
+    (aiohttp.ClientConnectionError("CDN unavailable"), service.ImageGenerationError),
+])
+async def test_generation_handles_result_download_error(config, storage, api, failure, error):
+    result_url = "https://cdn.example.com/generated.png"
+    register_generation(api, payload={"data": [{"url": result_url}]})
+    api.get(result_url, exception=failure)
+    with pytest.raises(error):
         await service.generate_vision_board(PHOTO_URL, "Карьера")
     storage.put_object.assert_not_called()
     storage.close.assert_called_once()

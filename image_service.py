@@ -5,6 +5,7 @@ import base64
 import binascii
 import logging
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
@@ -121,7 +122,7 @@ async def _raise_api_error(response: aiohttp.ClientResponse) -> None:
 
 
 async def _download_photo(session: aiohttp.ClientSession, photo_url: str) -> bytes:
-    logger.info("HTTP GET: загрузка исходного фото.")
+    logger.info("HTTP GET: загрузка изображения.")
     async with session.get(photo_url, timeout=aiohttp.ClientTimeout(total=60)) as response:
         if response.status != 200:
             raise ImageGenerationError(f"Не удалось скачать фото: HTTP {response.status}.")
@@ -234,10 +235,28 @@ async def _generate_image_bytes(
             raise ValueError("Unexpected number of images")
         images = []
         for item in items:
-            encoded = item["b64_json"]
-            if not isinstance(encoded, str):
-                raise ValueError("Invalid base64 type")
-            image_bytes = base64.b64decode(encoded, validate=True)
+            if not isinstance(item, dict):
+                raise ValueError("Invalid image response")
+            if "b64_json" in item:
+                encoded = item["b64_json"]
+                if not isinstance(encoded, str):
+                    raise ValueError("Invalid base64 type")
+                image_bytes = base64.b64decode(encoded, validate=True)
+            else:
+                image_url = item["url"]
+                if not isinstance(image_url, str):
+                    raise ValueError("Invalid image URL")
+                parsed = urlsplit(image_url)
+                if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+                    raise ValueError("Invalid image URL")
+                try:
+                    # Отдельная сессия без ключа API: ссылка может вести на CDN.
+                    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+                        image_bytes = await _download_photo(session, image_url)
+                except asyncio.TimeoutError as exc:
+                    raise GenerationTimeoutError("Превышено время скачивания результата API.") from exc
+                except aiohttp.ClientError as exc:
+                    raise ImageGenerationError("Не удалось скачать результат API.") from exc
             if not image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
                 raise ValueError("Invalid PNG response")
             images.append(image_bytes)
@@ -272,12 +291,13 @@ def _storage_client(config: Config):
     return session.client("s3", endpoint_url=config.storage_endpoint_url)
 
 
-def _store_image(client, config: Config, image_bytes: bytes) -> str:
+def _store_image(client, config: Config, image_path: Path) -> str:
     key = f"vision-boards/{uuid4().hex}.png"
-    logger.info("Запрос Yandex Object Storage: сохранение изображения (%d байт).", len(image_bytes))
-    client.put_object(
-        Bucket=config.storage_bucket, Key=key, Body=image_bytes, ContentType="image/png"
-    )
+    logger.info("Запрос Yandex Object Storage: сохранение изображения (%d байт).", image_path.stat().st_size)
+    with image_path.open("rb") as image_file:
+        client.put_object(
+            Bucket=config.storage_bucket, Key=key, Body=image_file, ContentType="image/png"
+        )
     public_base = (
         config.storage_public_base_url
         or f"https://storage.yandexcloud.net/{quote(config.storage_bucket, safe='')}"
@@ -298,7 +318,10 @@ async def _generate_and_store(
         images = await _generate_image_bytes(photo_url, sphere, config, count=count)
         result_urls = []
         for image_bytes in images:
-            result_url = await asyncio.to_thread(_store_image, client, config, image_bytes)
+            with TemporaryDirectory(prefix="botmax-images-") as directory:
+                image_path = Path(directory) / "generated.png"
+                await asyncio.to_thread(image_path.write_bytes, image_bytes)
+                result_url = await asyncio.to_thread(_store_image, client, config, image_path)
             if urlsplit(result_url).scheme != "https":
                 raise ImageGenerationError("Хранилище вернуло ссылку без HTTPS.")
             result_urls.append(result_url)
@@ -330,8 +353,9 @@ async def generate_vision_board(photo_url: str, sphere: str) -> str:
     """Создать плакат через OpenAI и вернуть постоянный публичный HTTPS URL.
 
     Входное фото скачивается по HTTPS и передаётся в OpenAI Images API вместе
-    с описанием мечты в промпте. Ответ base64 декодируется и загружается
-    в Yandex Object Storage. Бакет должен разрешать публичное чтение объектов.
+    с описанием мечты в промпте. Результат из b64_json или url сохраняется
+    во временный файл и загружается в Yandex Object Storage; файл удаляется
+    после загрузки или ошибки. Бакет должен разрешать публичное чтение объектов.
     Для собственного CDN можно задать STORAGE_PUBLIC_BASE_URL.
     Генерация не повторяется автоматически, чтобы не создавать дубликаты.
     """

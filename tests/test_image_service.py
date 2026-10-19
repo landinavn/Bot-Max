@@ -603,3 +603,20 @@ async def test_generation_requires_key_and_model_before_http(config, storage, ap
         await service.generate_vision_board(PHOTO_URL, "Карьера")
     assert not api.requests
     storage.put_object.assert_not_called()
+
+
+async def test_postcard_uses_template_in_edit_request_without_vision_board_prompt(config, storage, api):
+    from handlers import POSTCARD_PROMPTS
+    template = POSTCARD_PROMPTS["mode_ny"]
+    assert len(template) > 200  # Ready templates are not limited as user dream descriptions.
+    register_generation(api)
+    urls = await service.generate_postcards(PHOTO_URL, template)
+    assert len(urls) == 1
+    assert storage.uploaded_images == [PNG]
+    fields = await multipart_fields(post_requests(api)[0])
+    prompt = fields["prompt"].get_content()
+    assert prompt.startswith(template)
+    assert "Preserve the reference person's identity" in prompt
+    assert "Keep the reserved greeting area blank" in prompt
+    assert "COLLAGE LAYOUT" not in prompt
+    assert set(fields) == {"model", "image", "prompt", "size", "quality"}

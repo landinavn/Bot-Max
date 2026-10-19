@@ -1,4 +1,4 @@
-"""Меню и FSM: фото → описание мечты → генерация плаката."""
+"""Меню и FSM: режим → фото → мечта или готовый праздничный шаблон."""
 
 import asyncio
 import logging
@@ -34,6 +34,7 @@ from image_service import (
     GenerationTimeoutError,
     UnsupportedPhotoFormatError,
     generate_vision_boards,
+    generate_postcards,
     upload_image_for_max,
 )
 
@@ -66,10 +67,28 @@ async def _reply(event: MessageCreated | MessageCallback, text=None, **kwargs):
 
 PosterGenerator = Callable[[str, str], Awaitable[list[str]]]
 WELCOME_TEXT = (
-    "Привет! Я бот для создания персональных плакатов желаний с твоим фото. "
-    "Отправь фото и опиши свою мечту. "
-    "Выберите действие: создать плакат, посмотреть примеры или получить помощь."
+    "Привет! Я создаю волшебные открытки и карты желаний с твоим лицом. "
+    "Выбери, что хочешь создать:"
 )
+POSTCARD_PROMPTS = {
+    "mode_ny": "Create a beautiful New Year greeting card. Add festive Christmas tree, snow, garlands. Place the person from the reference photo in a cozy winter outfit. Leave empty space at the bottom for a greeting text.",
+    "mode_bday": "Create a beautiful Birthday greeting card. Add balloons, confetti, festive cake. Place the person from the reference photo in a celebratory pose. Leave empty space for text.",
+    "mode_8march": "Create a beautiful 8 March greeting card. Add spring flowers, tulips, mimosa. Place the person from the reference photo in a spring atmosphere. Leave empty space for text.",
+}
+MODE_BUTTONS = (
+    ("🖼 Карта желаний", "mode_vision"),
+    ("🎄 Открытка: Новый год", "mode_ny"),
+    ("🎂 Открытка: День рождения", "mode_bday"),
+    ("🌹 Открытка: 8 Марта", "mode_8march"),
+)
+
+
+def postcard_retry_keyboard():
+    return InlineKeyboardBuilder().row(
+        CallbackButton(text="Повторить отправку / генерацию", payload="postcard_retry")
+    ).as_markup()
+
+
 PACKAGES_TEXT = (
     "💎 Доступные пакеты:\n"
     "5 генераций — 299 ₽\n"
@@ -79,16 +98,18 @@ PAYMENT_PACKAGES_TEXT = PACKAGES_TEXT.split("\n\n", 1)[0]
 NO_CREDITS_TEXT = "У вас закончились кредиты. Пожалуйста, выберите пакет для продолжения:"
 EXAMPLES_DIR = Path(__file__).resolve().parent / "examples"
 EXAMPLE_TEXT = (
-    "📸 Реальный пример работы:\n\n"
+    "📸 Можно создать карту желаний или открытку по шаблону: Новый год, День рождения, 8 Марта.\n"
+    "Ниже пример превращения фото в карту желаний — до и после.\n\n"
     "Промпт: «Машина тесла с бордовым салоном, я за рулем»"
 )
 HELP_TEXT = (
     "🆘 Помощь\n\n"
-    "Я бот для создания персональных плакатов желаний с твоим фото. "
+    "Я создаю карты желаний и праздничные открытки с твоим фото. "
     "Вот как это работает:\n\n"
-    "1. Нажми «Создать плакат».\n"
+    "1. Выбери «Карта желаний» или открытку: Новый год, День рождения, 8 Марта.\n"
     "2. Отправь своё фото (селфи).\n"
-    "3. Опиши свою мечту или желание текстом — например, "
+    "3. Для открытки генерация начнётся сразу после фото, текст вводить не нужно. "
+    "Для карты желаний опиши свою мечту или желание текстом — например, "
     "«Машина тесла с бордовым салоном, я за рулем» или «Я на пляже на Мальдивах».\n"
     "4. Получи готовый плакат с тобой в мечте!\n\n"
     "💎 Стоимость:\n"
@@ -132,6 +153,7 @@ def packages_keyboard():
 
 
 class PosterStates(StatesGroup):
+    waiting_for_mode = State()
     waiting_for_photo = State()
     waiting_for_prompt = State()
     # Принимать описание и из состояния, сохранённого прежней версией.
@@ -140,9 +162,11 @@ class PosterStates(StatesGroup):
 
 
 def main_keyboard():
+    keyboard = InlineKeyboardBuilder()
+    for text, payload in MODE_BUTTONS:
+        keyboard.row(CallbackButton(text=text, payload=payload))
     return (
-        InlineKeyboardBuilder()
-        .row(CallbackButton(text="Создать плакат", payload="create_poster"))
+        keyboard
         .row(
             CallbackButton(text="Примеры", payload="examples"),
             CallbackButton(text="Помощь", payload="help"),
@@ -168,6 +192,7 @@ def create_router(
     generator: PosterGenerator = generate_vision_boards,
     *, payments: ProdamusPayments | None = None,
     admin_user_id: int | None = None,
+    postcard_generator: PosterGenerator = generate_postcards,
 ) -> Router:
     router = Router()
     # FSM изолирован по чату, а баланс общий для всех чатов пользователя.
@@ -204,8 +229,21 @@ def create_router(
         data = await context.get_data()
         photo = data.get("photo")
         sphere = data.get("sphere")
+        is_postcard = data.get("mode") in POSTCARD_PROMPTS
+        retry_state = PosterStates.waiting_for_mode if is_postcard else PosterStates.waiting_for_prompt
+
+        async def problem(text):
+            if is_postcard:
+                await _reply(event, "Не удалось завершить создание или отправку открытки. "
+                             "Фото и выбранный праздник сохранены. Нажмите повторить или /cancel.",
+                             attachments=[postcard_retry_keyboard()])
+            else:
+                await _reply(event, text)
+
         if not isinstance(photo, dict) or not photo.get("url") or not sphere:
+            mode = data.get("mode", "mode_vision")
             await context.clear()
+            await context.update_data(mode=mode)
             await context.set_state(PosterStates.waiting_for_photo)
             await _reply(event, "Начнём заново: отправьте одно фото.")
             return
@@ -223,11 +261,12 @@ def create_router(
                 if not is_admin:
                     user = await get_user(credit_user_id)
                     if user is None or user["balance"] < 1:
-                        await context.set_state(PosterStates.waiting_for_prompt)
-                        await _reply(event, NO_CREDITS_TEXT, attachments=[packages_keyboard()])
+                        await context.set_state(retry_state)
+                        await _reply(event, NO_CREDITS_TEXT, attachments=[packages_keyboard()] + ([postcard_retry_keyboard()] if is_postcard else []))
                         return
-                await _reply(event, "Создаю плакат…")
-                urls = await generator(photo["url"], sphere)
+                await _reply(event, "Создаю открытку…" if is_postcard else "Создаю плакат…")
+                selected_generator = postcard_generator if is_postcard else generator
+                urls = await selected_generator(photo["url"], sphere)
                 if len(urls) != 1 or not all(isinstance(url, str) and url.startswith("https://") for url in urls):
                     raise RuntimeError("Генератор должен вернуть один HTTPS URL.")
                 user = None
@@ -251,7 +290,7 @@ def create_router(
                     logger.info("Запрос MAX API: отправка плаката с media token.")
                     sent = await bot.send_message(
                         **recipient,
-                        text="Ваш плакат готов!",
+                        text="Ваша открытка готов!" if is_postcard else "Ваш плакат готов!",
                         attachments=[image, keyboard],
                     )
                 except Exception as exc:
@@ -274,8 +313,8 @@ def create_router(
                     await context.update_data(package_offer_pending=False)
         except GenerationTimeoutError:
             logger.error("Таймаут API при создании или сохранении плаката.")
-            await context.set_state(PosterStates.waiting_for_prompt)
-            await _reply(event,
+            await context.set_state(retry_state)
+            await problem(
                 "Сервис не ответил вовремя. Фото и описание мечты сохранены. "
                 "Повторите описание мечты позже или отправьте /cancel."
             )
@@ -296,7 +335,7 @@ def create_router(
                 "Лимит генераций: %s.",
                 "квота исчерпана" if exc.quota_exhausted else "слишком много запросов",
             )
-            await context.set_state(PosterStates.waiting_for_prompt)
+            await context.set_state(retry_state)
             if exc.quota_exhausted:
                 text = (
                     "Лимит генераций исчерпан. Попробуйте позже или обратитесь "
@@ -308,20 +347,20 @@ def create_router(
                     f"Слишком много запросов генерации. {wait} и повторите описание мечты. "
                     "Фото сохранено."
                 )
-            await _reply(event, text)
+            await problem(text)
             return
         except GenerationNotConfigured:
             logger.error("Не настроен API генерации или хранилище изображений.")
-            await context.set_state(PosterStates.waiting_for_prompt)
-            await _reply(event,
+            await context.set_state(retry_state)
+            await problem(
                 "Фото и описание мечты сохранены, но сервис генерации пока не настроен. "
                 "После настройки повторите описание мечты или /cancel."
             )
             return
         except Exception as exc:
             logger.error("Не удалось создать или отправить плакат (%s).", type(exc).__name__)
-            await context.set_state(PosterStates.waiting_for_prompt)
-            await _reply(event,
+            await context.set_state(retry_state)
+            await problem(
                 "Не удалось завершить создание или отправку плаката. "
                 "Повторите описание мечты или /cancel."
             )
@@ -339,7 +378,21 @@ def create_router(
             return
         trial_granted = await grant_free_trial(user_id)
         await context.clear()
-        await _reply(event, text=WELCOME_TEXT, attachments=[main_keyboard()])
+        await context.set_state(PosterStates.waiting_for_mode)
+        examples = []
+        for filename in ("before.jpg", "after.jpg"):
+            path = EXAMPLES_DIR / filename
+            try:
+                if not path.is_file():
+                    raise FileNotFoundError(filename)
+                image = await event.bot.upload_media(InputMedia(path=str(path), type=UploadType.IMAGE))
+                if not isinstance(image.payload.token, str) or not image.payload.token.strip():
+                    raise RuntimeError("MAX вернул пустой media token.")
+                examples.append(image)
+            except Exception as exc:
+                logger.error("Не удалось загрузить пример %s: %s", filename, exc)
+        await _reply(event, text=WELCOME_TEXT + ("\n\nПример карты желаний: исходное фото и результат." if examples else ""),
+                     attachments=[*examples, main_keyboard()])
         if trial_granted:
             await _reply(event, "Вам начислен 1 бесплатный кредит!")
 
@@ -388,9 +441,10 @@ def create_router(
         if is_bot_message(event):
             return
         await context.clear()
+        await context.set_state(PosterStates.waiting_for_mode)
         await _reply(event, "Сбор данных отменён.", attachments=[main_keyboard()])
 
-    @router.message_callback(F.callback.payload == "create_poster")
+    @router.message_callback(F.callback.payload.in_({"create_poster", *(payload for _, payload in MODE_BUTTONS)}))
     async def begin_poster(event: MessageCallback, context: MemoryContext) -> None:
         if event.message is None:
             await event.ack(notification="Меню недоступно. Отправьте /start.")
@@ -400,8 +454,11 @@ def create_router(
             return
         await event.ack(notification="Загружаю…")
         await context.clear()
+        mode = "mode_vision" if event.callback.payload == "create_poster" else event.callback.payload
+        await context.update_data(mode=mode)
         await context.set_state(PosterStates.waiting_for_photo)
-        await _reply(event, "Отправьте одно фото для плаката. /cancel — отмена.")
+        await _reply(event, "Отправьте одно фото для плаката. /cancel — отмена." if mode == "mode_vision"
+                     else "Отправьте одно фото для открытки. После фото сразу начнётся генерация. /cancel — отмена.")
 
     @router.message_callback(F.callback.payload.in_({"examples", "help"}))
     async def menu_callback(event: MessageCallback, context: MemoryContext) -> None:
@@ -472,8 +529,13 @@ def create_router(
         if len(photos) != 1 or not photos[0].payload.url:
             await _reply(event, "Нужно одно фото, отправленное как изображение. /cancel — отмена.")
             return
-        # Скачиваем фото только после получения описания мечты.
-        await context.update_data(photo=photos[0].payload.model_dump())
+        data = await context.get_data()
+        await context.update_data(photo=photos[0].payload.model_dump(), variants=[], sent_count=0,
+                                  batch_id=None, new_batch_requested=False)
+        if data.get("mode") in POSTCARD_PROMPTS:
+            await context.update_data(sphere=POSTCARD_PROMPTS[data["mode"]])
+            await generate_and_send(event, context)
+            return
         await context.set_state(PosterStates.waiting_for_prompt)
         await _reply(event,
             "✅ Фото получено!\n\n"
@@ -487,6 +549,9 @@ def create_router(
     @router.message_created(PosterStates.waiting_for_prompt)
     async def collect_sphere(event: MessageCreated, context: MemoryContext) -> None:
         if is_bot_message(event):
+            return
+        if (await context.get_data()).get("mode") in POSTCARD_PROMPTS:
+            await _reply(event, "Для открытки текст не нужен. Используйте кнопки или /start.")
             return
         body = event.message.body
         sphere = (body.text or "").strip() if body else ""
@@ -523,12 +588,18 @@ def create_router(
             if await context.get_state() == PosterStates.generating:
                 await event.ack(notification="Плакат уже создаётся. Подождите.")
                 return
-            await event.ack(notification="Жду новое описание мечты.")
+            is_postcard = data.get("mode") in POSTCARD_PROMPTS
+            await event.ack(notification="Создаю ещё одну открытку." if is_postcard else "Жду новое описание мечты.")
             photo = data.get("photo")
             if not isinstance(photo, dict) or not isinstance(photo.get("url"), str) or not photo["url"]:
+                mode = data.get("mode", "mode_vision")
                 await context.clear()
+                await context.update_data(mode=mode)
                 await context.set_state(PosterStates.waiting_for_photo)
                 await _reply(event, "Фото не сохранилось. Пожалуйста, загрузите фото заново.")
+                return
+            if is_postcard:
+                await generate_and_send(event, context, new_batch=True)
                 return
             variants = data.get("variants") or []
             await context.update_data(
@@ -572,6 +643,22 @@ def create_router(
             f'Вы можете скачать картинку или поделиться ссылкой:\n<a href="{safe_url}">{safe_url}</a>',
             parse_mode=ParseMode.HTML,
         )
+
+    @router.message_callback(F.callback.payload == "postcard_retry")
+    async def retry_postcard(event: MessageCallback, context: MemoryContext) -> None:
+        if event.message is None or (await context.get_data()).get("mode") not in POSTCARD_PROMPTS:
+            await event.ack(notification="Выберите открытку в /start.")
+            return
+        if await context.get_state() != PosterStates.waiting_for_mode:
+            await event.ack(notification="Повтор недоступен. Используйте последнее меню.")
+            return
+        await event.ack(notification="Повторяю…")
+        await generate_and_send(event, context)
+
+    @router.message_created(PosterStates.waiting_for_mode)
+    async def choose_mode(event: MessageCreated) -> None:
+        if not is_bot_message(event):
+            await _reply(event, "Выберите карту желаний или открытку кнопкой.", attachments=[main_keyboard()])
 
     @router.message_created(PosterStates.generating)
     async def generating(event: MessageCreated) -> None:

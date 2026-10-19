@@ -160,7 +160,7 @@ def _validate_inputs(photo_url: str, sphere: str) -> None:
 
 
 async def _generate_image_bytes(
-    photo_url: str, sphere: str, config: Config, count: int = 1
+    photo_url: str, sphere: str, config: Config, count: int = 1, *, prompt_override: str | None = None
 ) -> list[bytes]:
     if not config.image_api_key or not config.image_model:
         raise GenerationNotConfigured("Задайте IMAGE_API_KEY и IMAGE_MODEL.")
@@ -218,6 +218,8 @@ async def _generate_image_bytes(
 
         f"User's dream description: {sphere.strip()}"
     )
+    if prompt_override is not None:
+        prompt = prompt_override
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
             photo_bytes = await _download_photo(session, photo_url)
@@ -343,16 +345,17 @@ def _store_image(client, config: Config, image_path: Path) -> str:
 
 
 async def _generate_and_store(
-    photo_url: str, sphere: str, count: int = 1
+    photo_url: str, sphere: str, count: int = 1, *, prompt_override: str | None = None
 ) -> list[str]:
-    _validate_inputs(photo_url, sphere)
+    _validate_inputs(photo_url, sphere if prompt_override is None else "Открытка")
     config = Config.from_env()
     if not config.image_api_key or not config.image_model:
         raise GenerationNotConfigured("Задайте IMAGE_API_KEY и IMAGE_MODEL.")
     client = None
     try:
         client = await asyncio.to_thread(_storage_client, config)
-        images = await _generate_image_bytes(photo_url, sphere, config, count=count)
+        kwargs = {"prompt_override": prompt_override} if prompt_override is not None else {}
+        images = await _generate_image_bytes(photo_url, sphere, config, count=count, **kwargs)
         result_urls = []
         for image_bytes in images:
             with TemporaryDirectory(prefix="botmax-images-") as directory:
@@ -402,6 +405,18 @@ async def generate_vision_board(photo_url: str, sphere: str) -> str:
 async def generate_vision_boards(photo_url: str, sphere: str) -> list[str]:
     """Получить одно изображение (n=1), сохранив интерфейс списка URL."""
     return await _generate_and_store(photo_url, sphere, count=1)
+
+
+async def generate_postcards(photo_url: str, template_prompt: str) -> list[str]:
+    """Открытка по готовому шаблону, без промпта карты желаний."""
+    if not isinstance(template_prompt, str) or not template_prompt.strip():
+        raise ValueError("Нужен промпт шаблона открытки.")
+    prompt = (
+        template_prompt + "\n\nPreserve the reference person's identity, facial features, "
+        "hairstyle, age and skin tone. Use photorealistic photography, vivid harmonious colors "
+        "and natural anatomy. Keep the reserved greeting area blank; do not add text or watermarks."
+    )
+    return await _generate_and_store(photo_url, template_prompt, prompt_override=prompt)
 
 
 def _prepare_max_image(data: bytes) -> tuple[bytes, str]:

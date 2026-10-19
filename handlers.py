@@ -3,7 +3,9 @@
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from html import escape
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
@@ -131,7 +133,8 @@ def packages_keyboard():
 
 class PosterStates(StatesGroup):
     waiting_for_photo = State()
-    # Старое имя состояния сохранено для совместимости; ожидается описание мечты.
+    waiting_for_prompt = State()
+    # Принимать описание и из состояния, сохранённого прежней версией.
     waiting_for_sphere = State()
     generating = State()
 
@@ -153,11 +156,11 @@ def is_bot_message(event: MessageCreated) -> bool:
     return sender is not None and sender.is_bot
 
 
-def result_keyboard(url: str, batch_id: str, index: int):
+def result_keyboard(url: str):
     return InlineKeyboardBuilder().row(
         LinkButton(text="Скачать", url=url),
-        CallbackButton(text="Ещё", payload=f"more:{batch_id}"),
-        CallbackButton(text="Поделиться", payload=f"share:{batch_id}:{index}"),
+        CallbackButton(text="Ещё", payload="more"),
+        CallbackButton(text="Поделиться", payload="share"),
     ).as_markup()
 
 
@@ -220,7 +223,7 @@ def create_router(
                 if not is_admin:
                     user = await get_user(credit_user_id)
                     if user is None or user["balance"] < 1:
-                        await context.set_state(PosterStates.waiting_for_sphere)
+                        await context.set_state(PosterStates.waiting_for_prompt)
                         await _reply(event, NO_CREDITS_TEXT, attachments=[packages_keyboard()])
                         return
                 await _reply(event, "Создаю плакат…")
@@ -241,9 +244,8 @@ def create_router(
                 )
             else:
                 await _reply(event, "Отправляю готовый плакат…")
-            batch_id = data["batch_id"]
             for index in range(data.get("sent_count", 0), 1):
-                keyboard = result_keyboard(urls[index], batch_id, index)
+                keyboard = result_keyboard(urls[index])
                 try:
                     image = await upload_image_for_max(bot, urls[index])
                     logger.info("Запрос MAX API: отправка плаката с media token.")
@@ -257,7 +259,10 @@ def create_router(
                     raise
                 if sent is None:
                     raise RuntimeError("MAX не подтвердил отправку плаката.")
-                await context.update_data(sent_count=index + 1)
+                await context.update_data(
+                    sent_count=index + 1, last_image_url=urls[index],
+                    last_image_batch_id=data["batch_id"],
+                )
             if not is_admin:
                 user = await get_user(credit_user_id)
                 await _reply(event, f"Осталось кредитов: {user['balance'] if user else 0}.")
@@ -269,7 +274,7 @@ def create_router(
                     await context.update_data(package_offer_pending=False)
         except GenerationTimeoutError:
             logger.error("Таймаут API при создании или сохранении плаката.")
-            await context.set_state(PosterStates.waiting_for_sphere)
+            await context.set_state(PosterStates.waiting_for_prompt)
             await _reply(event,
                 "Сервис не ответил вовремя. Фото и описание мечты сохранены. "
                 "Повторите описание мечты позже или отправьте /cancel."
@@ -291,7 +296,7 @@ def create_router(
                 "Лимит генераций: %s.",
                 "квота исчерпана" if exc.quota_exhausted else "слишком много запросов",
             )
-            await context.set_state(PosterStates.waiting_for_sphere)
+            await context.set_state(PosterStates.waiting_for_prompt)
             if exc.quota_exhausted:
                 text = (
                     "Лимит генераций исчерпан. Попробуйте позже или обратитесь "
@@ -307,7 +312,7 @@ def create_router(
             return
         except GenerationNotConfigured:
             logger.error("Не настроен API генерации или хранилище изображений.")
-            await context.set_state(PosterStates.waiting_for_sphere)
+            await context.set_state(PosterStates.waiting_for_prompt)
             await _reply(event,
                 "Фото и описание мечты сохранены, но сервис генерации пока не настроен. "
                 "После настройки повторите описание мечты или /cancel."
@@ -315,7 +320,7 @@ def create_router(
             return
         except Exception as exc:
             logger.error("Не удалось создать или отправить плакат (%s).", type(exc).__name__)
-            await context.set_state(PosterStates.waiting_for_sphere)
+            await context.set_state(PosterStates.waiting_for_prompt)
             await _reply(event,
                 "Не удалось завершить создание или отправку плаката. "
                 "Повторите описание мечты или /cancel."
@@ -469,7 +474,7 @@ def create_router(
             return
         # Скачиваем фото только после получения описания мечты.
         await context.update_data(photo=photos[0].payload.model_dump())
-        await context.set_state(PosterStates.waiting_for_sphere)
+        await context.set_state(PosterStates.waiting_for_prompt)
         await _reply(event,
             "✅ Фото получено!\n\n"
             "Теперь опиши свою мечту или желание (до 200 символов). "
@@ -479,6 +484,7 @@ def create_router(
         )
 
     @router.message_created(PosterStates.waiting_for_sphere)
+    @router.message_created(PosterStates.waiting_for_prompt)
     async def collect_sphere(event: MessageCreated, context: MemoryContext) -> None:
         if is_bot_message(event):
             return
@@ -499,38 +505,73 @@ def create_router(
         await generate_and_send(event, context)
 
     @router.message_callback(
-        F.callback.payload.startswith("more:") | F.callback.payload.startswith("share:")
+        F.callback.payload.in_({"more", "share"})
+        | F.callback.payload.startswith("more:")
+        | F.callback.payload.startswith("share:")
     )
     async def result_callback(event: MessageCallback, context: MemoryContext) -> None:
         if event.message is None:
             await event.ack(notification="Сообщение удалено. Отправьте /start.")
             return
         parts = (event.callback.payload or "").split(":")
+        action = parts[0]
         data = await context.get_data()
-        if len(parts) < 2 or parts[1] != data.get("batch_id"):
-            await event.ack(notification="Эта кнопка устарела. Используйте последнее меню.")
-            return
-        if parts[0] == "share":
-            try:
-                index = int(parts[2]) if len(parts) == 3 else -1
-                if index != 0:
-                    raise ValueError("Invalid index")
-                url = data["variants"][index]
-            except (ValueError, KeyError, IndexError, TypeError):
-                await event.ack(notification="Вариант недоступен. Отправьте /start.")
+        if action == "more":
+            if len(parts) not in {1, 2}:
+                await event.ack(notification="Кнопка недоступна.")
                 return
-            await event.ack(notification="Готовлю ссылку…")
-            await _reply(event, f"Скопируйте и отправьте эту ссылку:\n{url}")
-        elif len(parts) == 2:
             if await context.get_state() == PosterStates.generating:
                 await event.ack(notification="Плакат уже создаётся. Подождите.")
                 return
-            await event.ack(notification="Создаю плакат…")
-            await generate_and_send(
-                event, context, new_batch=data.get("sent_count", 0) == 1
+            await event.ack(notification="Жду новое описание мечты.")
+            photo = data.get("photo")
+            if not isinstance(photo, dict) or not isinstance(photo.get("url"), str) or not photo["url"]:
+                await context.clear()
+                await context.set_state(PosterStates.waiting_for_photo)
+                await _reply(event, "Фото не сохранилось. Пожалуйста, загрузите фото заново.")
+                return
+            variants = data.get("variants") or []
+            await context.update_data(
+                sphere=None, new_batch_requested=True, package_offer_pending=False,
+                last_image_url=data.get("last_image_url") or (variants[0] if variants else None),
+                last_image_batch_id=data.get("last_image_batch_id") or data.get("batch_id"),
             )
-        else:
-            await event.ack(notification="Кнопка недоступна.")
+            await context.set_state(PosterStates.waiting_for_prompt)
+            await _reply(event, "Опишите новую мечту или желание (до 200 символов). Ваше фото сохранено. /cancel — отмена.")
+            return
+
+        # Поддержать и новые кнопки share, и уже отправленные share:<batch>:0.
+        if len(parts) != 1:
+            batch_id = data.get("last_image_batch_id") or data.get("batch_id")
+            if len(parts) != 3 or parts[1] != batch_id or parts[2] != "0":
+                await event.ack(notification="Эта кнопка устарела. Используйте последнее меню.")
+                return
+        variants = data.get("variants") or []
+        url = data.get("last_image_url") or (variants[0] if variants else None)
+        # Кнопка «Скачать» хранит ссылку именно на изображение этого сообщения.
+        body = getattr(event.message, "body", None)
+        for attachment in getattr(body, "attachments", None) or []:
+            payload = getattr(attachment, "payload", None)
+            for row in getattr(payload, "buttons", None) or []:
+                for button in row:
+                    if getattr(button, "text", None) == "Скачать" and getattr(button, "url", None):
+                        url = button.url
+        try:
+            parsed = urlsplit(url) if isinstance(url, str) else None
+            valid = parsed is not None and parsed.scheme == "https" and bool(parsed.hostname)
+        except ValueError:
+            valid = False
+        if not valid:
+            await event.ack(notification="Ссылка недоступна.")
+            await _reply(event, "Ссылка на картинку не сохранилась. Создайте изображение заново.")
+            return
+        await event.ack(notification="Готовлю ссылку…")
+        safe_url = escape(url, quote=True)
+        await _reply(
+            event,
+            f'Вы можете скачать картинку или поделиться ссылкой:\n<a href="{safe_url}">{safe_url}</a>',
+            parse_mode=ParseMode.HTML,
+        )
 
     @router.message_created(PosterStates.generating)
     async def generating(event: MessageCreated) -> None:

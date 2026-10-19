@@ -84,7 +84,7 @@ async def dispatch_callback(router, event, context):
 async def test_create_poster_acknowledges_and_requests_photo():
     context = MemoryContext(chat_id=123, user_id=456)
     await context.update_data(photo={"url": "old"}, sphere="old")
-    await context.set_state(PosterStates.waiting_for_sphere)
+    await context.set_state(PosterStates.waiting_for_prompt)
     event = callback_event("create_poster")
     await dispatch_callback(create_router(), event, context)
     event.ack.assert_awaited_once_with(notification="Загружаю…")
@@ -254,32 +254,145 @@ async def test_examples_handles_deleted_menu():
     event.send.assert_not_awaited()
 
 
-async def test_share_acknowledges_and_sends_link():
+@pytest.mark.parametrize("payload", ["share", "share:batch:0"])
+async def test_share_acknowledges_and_sends_link(payload):
     context = MemoryContext(chat_id=123, user_id=456)
     url = "https://storage.example.com/photo.png"
     await context.update_data(batch_id="batch", variants=[url])
-    event = callback_event("share:batch:0")
+    event = callback_event(payload)
     await dispatch_callback(create_router(), event, context)
     event.ack.assert_awaited_once_with(notification="Готовлю ссылку…")
-    event.send.assert_awaited_once_with(f"Скопируйте и отправьте эту ссылку:\n{url}")
+    event.send.assert_awaited_once_with(
+        f'Вы можете скачать картинку или поделиться ссылкой:\n<a href="{url}">{url}</a>',
+        parse_mode=handlers.ParseMode.HTML,
+    )
 
 
-async def test_more_acknowledges_before_generating_one_image(credit_db):
+@pytest.mark.parametrize("payload", ["more", "more:batch"])
+async def test_more_requests_new_dream_and_keeps_photo(credit_db, payload):
     await credit_db.add_credits(456, 1)
     context = MemoryContext(chat_id=123, user_id=456)
     await context.update_data(
         batch_id="batch", sent_count=1,
         photo={"url": "https://photos.example.com/source.png"}, sphere="карьера",
     )
-    event = callback_event("more:batch")
+    event = callback_event(payload)
     generator = AsyncMock(return_value=["https://storage.example.com/new.png"])
     await dispatch_callback(create_router(generator), event, context)
-    event.ack.assert_awaited_once_with(notification="Создаю плакат…")
-    generator.assert_awaited_once_with(
-        "https://photos.example.com/source.png", "карьера"
+    event.ack.assert_awaited_once_with(notification="Жду новое описание мечты.")
+    generator.assert_not_awaited()
+    event.bot.send_message.assert_not_awaited()
+    assert await context.get_state() == PosterStates.waiting_for_prompt
+    data = await context.get_data()
+    assert data["photo"] == {"url": "https://photos.example.com/source.png"}
+    assert data["sphere"] is None
+    assert data["new_batch_requested"] is True
+    assert (await credit_db.get_user(456))["balance"] == 1
+    event.send.assert_awaited_once()
+
+
+@pytest.mark.parametrize("payload", ["more", "more:old-batch"])
+@pytest.mark.parametrize("photo", [None, {}, {"token": "old-token"}])
+async def test_more_without_photo_requests_new_upload(payload, photo):
+    context = MemoryContext(chat_id=123, user_id=456)
+    await context.update_data(photo=photo)
+    event = callback_event(payload)
+    generator = AsyncMock()
+    await dispatch_callback(create_router(generator), event, context)
+    event.ack.assert_awaited_once()
+    assert await context.get_state() == PosterStates.waiting_for_photo
+    assert await context.get_data() == {}
+    event.send.assert_awaited_once_with("Фото не сохранилось. Пожалуйста, загрузите фото заново.")
+    generator.assert_not_awaited()
+
+
+async def test_more_does_not_interrupt_generation():
+    context = MemoryContext(chat_id=123, user_id=456)
+    await context.set_state(PosterStates.generating)
+    await context.update_data(photo={"url": "https://photos.example.com/source.png"})
+    before = await context.get_data()
+    event = callback_event("more")
+    await dispatch_callback(create_router(), event, context)
+    event.ack.assert_awaited_once_with(notification="Плакат уже создаётся. Подождите.")
+    assert await context.get_state() == PosterStates.generating
+    assert await context.get_data() == before
+    event.send.assert_not_awaited()
+
+
+async def test_more_then_same_dream_generates_fresh_image(credit_db):
+    await credit_db.add_credits(456, 2)
+    context = await ready_context()
+    await context.update_data(
+        sphere="карьера", variants=["https://storage.example.com/old.png"],
+        batch_id="old", sent_count=1,
     )
-    assert event.bot.send_message.await_count == 1
+    generator = AsyncMock(return_value=["https://storage.example.com/new.png"])
+    router = create_router(generator)
+    more = callback_event("more")
+    await dispatch_callback(router, more, context)
+    generator.assert_not_awaited()
+
+    await call_handler(router, "collect_sphere", message_event("карьера"), context)
+
+    generator.assert_awaited_once_with("https://photos.example.com/source.png", "карьера")
+    assert (await credit_db.get_user(456))["balance"] == 1
+    assert (await context.get_data())["last_image_url"] == "https://storage.example.com/new.png"
     assert await context.get_state() is None
+
+
+async def test_share_after_more_keeps_previous_public_link():
+    context = await ready_context()
+    url = "https://storage.example.com/photo.png?a=1&b=2"
+    await context.update_data(batch_id="batch", variants=[url], sent_count=1)
+    router = create_router()
+    await dispatch_callback(router, callback_event("more"), context)
+    await context.update_data(variants=[])
+    share = callback_event("share")
+    await dispatch_callback(router, share, context)
+    share.ack.assert_awaited_once()
+    text = share.send.await_args.args[0]
+    assert 'href="https://storage.example.com/photo.png?a=1&amp;b=2"' in text
+    assert share.send.await_args.kwargs["parse_mode"] == handlers.ParseMode.HTML
+    assert await context.get_state() == PosterStates.waiting_for_prompt
+
+
+@pytest.mark.parametrize("payload", ["more", "share"])
+async def test_result_buttons_ack_deleted_message(payload):
+    event = callback_event(payload, deleted=True)
+    await dispatch_callback(create_router(), event, await ready_context())
+    event.ack.assert_awaited_once()
+    event.send.assert_not_awaited()
+
+
+@pytest.mark.parametrize("cached_url", [None, "https://storage.example.com/another-photo.png"])
+async def test_share_recovers_clicked_image_url_from_message_after_session_reset(cached_url):
+    url = "https://storage.example.com/clicked-photo.png"
+    event = callback_event("share")
+    keyboard = handlers.result_keyboard(url)
+    event.message.body = SimpleNamespace(attachments=[keyboard])
+    context = MemoryContext(chat_id=123, user_id=456)
+    if cached_url:
+        await context.update_data(last_image_url=cached_url)
+
+    await dispatch_callback(create_router(), event, context)
+
+    event.ack.assert_awaited_once()
+    assert f'href="{url}"' in event.send.await_args.args[0]
+    assert "another-photo" not in event.send.await_args.args[0]
+
+
+async def test_share_without_result_explains_missing_link():
+    event = callback_event("share")
+    await dispatch_callback(create_router(), event, await ready_context())
+    event.ack.assert_awaited_once_with(notification="Ссылка недоступна.")
+    event.send.assert_awaited_once_with("Ссылка на картинку не сохранилась. Создайте изображение заново.")
+
+
+def test_result_buttons_use_plain_more_and_share_payloads():
+    markup = handlers.result_keyboard("https://storage.example.com/photo.png").model_dump()
+    buttons = markup["payload"]["buttons"][0]
+    assert buttons[0]["url"] == "https://storage.example.com/photo.png"
+    assert [button["payload"] for button in buttons[1:]] == ["more", "share"]
 
 
 def message_event(text="карьера", *, chat_id=123, chat_type="dialog"):
@@ -306,7 +419,7 @@ async def call_handler(router, name, event, context=None):
 async def ready_context(*, chat_id=123):
     context = MemoryContext(chat_id=chat_id, user_id=456)
     await context.update_data(photo={"url": "https://photos.example.com/source.png"})
-    await context.set_state(PosterStates.waiting_for_sphere)
+    await context.set_state(PosterStates.waiting_for_prompt)
     return context
 
 
@@ -322,7 +435,7 @@ async def test_photo_requests_free_text_dream_without_sphere_buttons():
         "Например: «Машина тесла с бордовым салоном, я за рулем» "
         "или «Я на пляже на Мальдивах».\n\n/cancel — отмена"
     )
-    assert await context.get_state() == PosterStates.waiting_for_sphere
+    assert await context.get_state() == PosterStates.waiting_for_prompt
     assert (await context.get_data())["photo"] == photo.model_dump()
 
 
@@ -360,7 +473,7 @@ async def test_invalid_dream_preserves_photo_and_does_not_charge(credit_db, desc
     event.message.answer.assert_awaited_once_with(reply)
     generator.assert_not_awaited()
     event.bot.send_message.assert_not_awaited()
-    assert await context.get_state() == PosterStates.waiting_for_sphere
+    assert await context.get_state() == PosterStates.waiting_for_prompt
     assert await context.get_data() == before
     assert (await credit_db.get_user(456))["balance"] == 1
 
@@ -404,7 +517,7 @@ async def test_no_credits_prevents_generation(credit_db, payments_enabled):
     event.message.answer.assert_awaited_once()
     assert event.message.answer.await_args.args == (NO_CREDITS_TEXT,)
     assert_purchase_keyboard(event.message.answer.await_args.kwargs["attachments"][0])
-    assert await context.get_state() == PosterStates.waiting_for_sphere
+    assert await context.get_state() == PosterStates.waiting_for_prompt
 
 
 @pytest.mark.parametrize("initial_balance", [None, 0, 3])
@@ -430,8 +543,11 @@ async def test_admin_can_generate_repeatedly_without_balance_or_deduction(
         for _ in range(2):
             data = await context.get_data()
             event = callback_event(f"more:{data['batch_id']}")
-            events.append(event)
             await dispatch_callback(router, event, context)
+            event.bot.send_message.assert_not_awaited()
+            next_dream = message_event()
+            events.append(next_dream)
+            await call_handler(router, "collect_sphere", next_dream, context)
 
     assert generator.await_count == 3
     assert all(event.bot.send_message.await_count == 1 for event in events)
@@ -499,7 +615,7 @@ async def test_failed_generation_does_not_charge(credit_db, failure):
     context = await ready_context()
     await call_handler(create_router(generator), "collect_sphere", message_event(), context)
     assert (await credit_db.get_user(456))["balance"] == 1
-    assert await context.get_state() == PosterStates.waiting_for_sphere
+    assert await context.get_state() == PosterStates.waiting_for_prompt
 
 
 async def test_image_upload_precedes_send_and_uses_token(credit_db, max_image_upload):
@@ -645,8 +761,11 @@ async def test_last_free_credit_offers_packages_once_and_not_on_zero_balance(cre
     more = callback_event("more:" + (await context.get_data())["batch_id"])
     await dispatch_callback(router, more, context)
     more.message.answer.assert_awaited_once()
-    assert more.message.answer.await_args.args == (NO_CREDITS_TEXT,)
-    assert_purchase_keyboard(more.message.answer.await_args.kwargs["attachments"][0])
+    assert await context.get_state() == PosterStates.waiting_for_prompt
+    next_dream = message_event()
+    await call_handler(router, "collect_sphere", next_dream, context)
+    assert next_dream.message.answer.await_args.args == (NO_CREDITS_TEXT,)
+    assert_purchase_keyboard(next_dream.message.answer.await_args.kwargs["attachments"][0])
     generator.assert_awaited_once()
     assert event.bot.send_message.await_count == 1
     more.bot.send_message.assert_not_awaited()
@@ -673,7 +792,7 @@ async def test_payment_help_opens_packages_and_creates_selected_link(credit_db, 
     payments.create_payment_link.assert_awaited_once_with(456, credits)
     assert "https://test-shop.payform.ru/pay" in purchase.send.await_args.args[0]
     assert await context.get_data() == original
-    assert await context.get_state() == PosterStates.waiting_for_sphere
+    assert await context.get_state() == PosterStates.waiting_for_prompt
     assert await credit_db.get_user(456) is None
     generator.assert_not_awaited()
 

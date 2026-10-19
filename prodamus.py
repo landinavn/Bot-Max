@@ -19,7 +19,7 @@ from yarl import URL
 from config import Config
 from database import create_payment_order, get_payment_order
 
-PACKAGES = {5: (29900, "5 генераций"), 15: (69900, "15 генераций")}
+PACKAGES = {5: (29900, "5 генераций"), 15: (79900, "15 генераций")}
 SIGN_FIELDS = {"signature", "sign", "_payform_sign"}
 
 
@@ -221,8 +221,8 @@ class ProdamusPayments:
                 raise ValueError("Метаданные покупателя не соответствуют заказу.")
             if "package_id" in extra and extra["package_id"] != f"package_{order['credits']}":
                 raise ValueError("Метаданные пакета не соответствуют заказу.")
-        if order["credits"] not in PACKAGES or PACKAGES[order["credits"]] != (
-            order["amount_kopecks"], order["product_name"],
-        ):
+        # Сумма уже сверена с сохранённым заказом выше: смена прайса не должна
+        # блокировать оплату ссылки, выданной до изменения цены.
+        if order["credits"] not in PACKAGES or PACKAGES[order["credits"]][1] != order["product_name"]:
             raise ValueError("Неизвестный пакет.")
         return order, payment_id

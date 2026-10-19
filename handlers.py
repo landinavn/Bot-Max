@@ -73,7 +73,7 @@ WELCOME_TEXT = (
 PACKAGES_TEXT = (
     "💎 Доступные пакеты:\n"
     "5 генераций — 299 ₽\n"
-    "15 генераций — 699 ₽"
+    "15 генераций — 799 ₽"
 )
 PAYMENT_PACKAGES_TEXT = PACKAGES_TEXT.split("\n\n", 1)[0]
 NO_CREDITS_TEXT = "У вас закончились кредиты. Пожалуйста, выберите пакет для продолжения:"
@@ -94,7 +94,7 @@ HELP_TEXT = (
     "💎 Стоимость:\n"
     "• 1 бесплатная генерация — для новых пользователей.\n"
     "• Пакет 5 генераций — 299 ₽.\n"
-    "• Пакет 15 генераций — 699 ₽.\n\n"
+    "• Пакет 15 генераций — 799 ₽.\n\n"
     "❓ Частые вопросы:"
 )
 HELP_ANSWERS = {
@@ -126,7 +126,7 @@ def packages_keyboard():
     return (
         InlineKeyboardBuilder()
         .row(CallbackButton(text="Купить 5 генераций — 299 ₽", payload="buy_5"))
-        .row(CallbackButton(text="Купить 15 генераций — 699 ₽", payload="buy_15"))
+        .row(CallbackButton(text="Купить 15 генераций — 799 ₽", payload="buy_15"))
         .as_markup()
     )
 

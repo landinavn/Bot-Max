@@ -47,7 +47,7 @@ def assert_purchase_keyboard(keyboard):
     buttons = [button for row in markup["payload"]["buttons"] for button in row]
     assert [(button["text"], button["payload"], button["type"]) for button in buttons] == [
         ("Купить 5 генераций — 299 ₽", "buy_5", "callback"),
-        ("Купить 15 генераций — 699 ₽", "buy_15", "callback"),
+        ("Купить 15 генераций — 799 ₽", "buy_15", "callback"),
     ]
 
 
@@ -129,7 +129,7 @@ async def test_help_acknowledges_and_sends_response():
     assert "Я на пляже на Мальдивах" in text
     assert "1 бесплатная генерация — для новых пользователей." in text
     assert "Пакет 5 генераций — 299 ₽." in text
-    assert "Пакет 15 генераций — 699 ₽." in text
+    assert "Пакет 15 генераций — 799 ₽." in text
     assert text.endswith("❓ Частые вопросы:")
     keyboard = event.send.await_args.kwargs["attachments"][0].model_dump()
     buttons = [button for row in keyboard["payload"]["buttons"] for button in row]
@@ -498,7 +498,7 @@ async def test_buy_describes_packages_without_adding_credits(credit_db):
     await call_handler(create_router(), "buy", event)
     text = event.message.answer.await_args.args[0]
     assert "5 генераций — 299 ₽" in text
-    assert "15 генераций — 699 ₽" in text
+    assert "15 генераций — 799 ₽" in text
     assert "недоступна" not in text
     event.message.answer.assert_awaited_once()
     assert_purchase_keyboard(event.message.answer.await_args.kwargs["attachments"][0])
@@ -749,7 +749,7 @@ async def test_last_free_credit_offers_packages_once_and_not_on_zero_balance(cre
     keyboard = offer.kwargs["attachments"][0].model_dump()
     buttons = [button for row in keyboard["payload"]["buttons"] for button in row]
     assert [button["text"] for button in buttons] == [
-        "Купить 5 генераций — 299 ₽", "Купить 15 генераций — 699 ₽",
+        "Купить 5 генераций — 299 ₽", "Купить 15 генераций — 799 ₽",
     ]
     assert [button["payload"] for button in buttons] == ["buy_5", "buy_15"]
     # Повторное сообщение о той же сфере использует готовый оплаченный результат.
@@ -807,7 +807,7 @@ async def test_package_buttons_report_missing_configuration_without_duplicate_me
     assert (await credit_db.get_user(456))["balance"] == 2
 
 
-@pytest.mark.parametrize("payload,credits,price", [("buy_5", 5, "299.00"), ("buy_15", 15, "699.00")])
+@pytest.mark.parametrize("payload,credits,price", [("buy_5", 5, "299.00"), ("buy_15", 15, "799.00")])
 async def test_purchase_button_creates_signed_link_for_callback_user(credit_db, payload, credits, price):
     from pathlib import Path
     from urllib.parse import parse_qsl, urlsplit

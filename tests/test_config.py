@@ -1,31 +1,31 @@
-"""Загрузка адреса ProxyAPI и ключа из .env и окружения."""
+"""Загрузка ключа OpenAI, прокси и других настроек из .env и окружения."""
 
 import pytest
 
 import config
 
 
-@pytest.mark.parametrize("base_url", [None, "", "   "])
-def test_proxyapi_is_default_base_url(tmp_path, monkeypatch, base_url):
+@pytest.mark.parametrize("proxy_url", [None, "", "   "])
+def test_openai_proxy_is_optional(tmp_path, monkeypatch, proxy_url):
     monkeypatch.setattr(config, "BASE_DIR", tmp_path)
     monkeypatch.setenv("MAX_BOT_TOKEN", "test-token")
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    if base_url is not None:
-        monkeypatch.setenv("OPENAI_BASE_URL", base_url)
+    monkeypatch.delenv("OPENAI_PROXY_URL", raising=False)
+    if proxy_url is not None:
+        monkeypatch.setenv("OPENAI_PROXY_URL", proxy_url)
 
-    assert config.Config.from_env().openai_base_url == "https://api.proxyapi.ru/openai/v1"
+    assert config.Config.from_env().openai_proxy_url is None
 
 
-def test_proxyapi_settings_are_loaded_from_dotenv(tmp_path, monkeypatch):
+def test_openai_settings_are_loaded_from_dotenv(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "BASE_DIR", tmp_path)
-    for name in ("MAX_BOT_TOKEN", "IMAGE_API_KEY", "OPENAI_BASE_URL", "IMAGE_QUALITY", "IMAGE_MODEL", "ADMIN_USER_ID"):
+    for name in ("MAX_BOT_TOKEN", "IMAGE_API_KEY", "OPENAI_PROXY_URL", "IMAGE_QUALITY", "IMAGE_MODEL", "ADMIN_USER_ID"):
         # Зарегистрировать восстановление даже для изначально отсутствующих переменных.
         monkeypatch.setenv(name, "")
         monkeypatch.delenv(name, raising=False)
     (tmp_path / ".env").write_text(
         "MAX_BOT_TOKEN=test-token\n"
-        "IMAGE_API_KEY=test-proxyapi-key\n"
-        "OPENAI_BASE_URL=https://api.proxyapi.ru/openai/v1\n"
+        "IMAGE_API_KEY=test-openai-key\n"
+        "OPENAI_PROXY_URL=http://94.249.177.108:8888\n"
         "IMAGE_MODEL=test-dotenv-model\n"
         "IMAGE_QUALITY=low\n"
         "ADMIN_USER_ID=456\n"
@@ -33,8 +33,8 @@ def test_proxyapi_settings_are_loaded_from_dotenv(tmp_path, monkeypatch):
 
     settings = config.Config.from_env()
 
-    assert settings.openai_base_url == "https://api.proxyapi.ru/openai/v1"
-    assert settings.image_api_key == "test-proxyapi-key"
+    assert settings.openai_proxy_url == "http://94.249.177.108:8888"
+    assert settings.image_api_key == "test-openai-key"
     assert settings.image_model == "test-dotenv-model"
     assert settings.image_quality == "low"
     assert settings.admin_user_id == 456
@@ -44,21 +44,21 @@ def test_environment_overrides_dotenv(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "BASE_DIR", tmp_path)
     (tmp_path / ".env").write_text(
         "IMAGE_API_KEY=dotenv-key\n"
-        "OPENAI_BASE_URL=https://api.proxyapi.ru/openai/v1\n"
+        "OPENAI_PROXY_URL=http://94.249.177.108:8888\n"
         "IMAGE_QUALITY=low\n"
         "IMAGE_MODEL=test-dotenv-model\n"
         "ADMIN_USER_ID=456\n"
     )
     monkeypatch.setenv("MAX_BOT_TOKEN", "test-token")
     monkeypatch.setenv("IMAGE_API_KEY", "environment-key")
-    monkeypatch.setenv("OPENAI_BASE_URL", " https://custom-api.example.com/v1/ ")
+    monkeypatch.setenv("OPENAI_PROXY_URL", " http://custom-proxy.example.com:8080 ")
     monkeypatch.setenv("IMAGE_QUALITY", " high ")
     monkeypatch.setenv("IMAGE_MODEL", " test-environment-model ")
     monkeypatch.setenv("ADMIN_USER_ID", " 789 ")
 
     settings = config.Config.from_env()
 
-    assert settings.openai_base_url == "https://custom-api.example.com/v1/"
+    assert settings.openai_proxy_url == "http://custom-proxy.example.com:8080"
     assert settings.image_api_key == "environment-key"
     assert settings.image_quality == "high"
     assert settings.image_model == "test-environment-model"

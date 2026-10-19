@@ -605,18 +605,80 @@ async def test_generation_requires_key_and_model_before_http(config, storage, ap
     storage.put_object.assert_not_called()
 
 
-async def test_postcard_uses_template_in_edit_request_without_vision_board_prompt(config, storage, api):
-    from handlers import POSTCARD_PROMPTS
-    template = POSTCARD_PROMPTS["mode_ny"]
-    assert len(template) > 200  # Ready templates are not limited as user dream descriptions.
-    register_generation(api)
-    urls = await service.generate_postcards(PHOTO_URL, template)
+@pytest.mark.parametrize("mode", list(service.POSTCARD_PROMPTS))
+async def test_postcard_uses_template_and_stores_text_overlay(config, storage, api, mode):
+    buffer = BytesIO()
+    Image.new("RGB", (1024, 1536), "#243c58").save(buffer, format="PNG")
+    generated = buffer.getvalue()
+    register_generation(api, payload={"data": [{"b64_json": base64.b64encode(generated).decode()}]})
+    urls = await service.generate_postcards(PHOTO_URL, mode)
     assert len(urls) == 1
-    assert storage.uploaded_images == [PNG]
+    assert storage.uploaded_images == [service.add_text_to_image(generated, mode)]
+    assert storage.uploaded_images[0] != generated
     fields = await multipart_fields(post_requests(api)[0])
     prompt = fields["prompt"].get_content()
-    assert prompt.startswith(template)
-    assert "Preserve the reference person's identity" in prompt
-    assert "Keep the reserved greeting area blank" in prompt
+    assert prompt.startswith(service.POSTCARD_PROMPTS[mode])
+    assert "Preserve every reference person's identity" in prompt
+    assert "Keep the bottom 22% empty" in prompt
     assert "COLLAGE LAYOUT" not in prompt
     assert set(fields) == {"model", "image", "prompt", "size", "quality"}
+
+
+@pytest.mark.parametrize("mode,greeting", [
+    ("ny", "С Новым Годом!"),
+    ("mode_ny_family", "С Новым Годом!"),
+    ("bday_young", "С Днём Рождения!"),
+    ("mode_bday_old", "С Днём Рождения!"),
+    ("8march", "С 8 Марта!"),
+])
+@pytest.mark.parametrize("size", [(1024, 1536), (256, 768), (640, 360)])
+def test_greeting_is_legible_centered_and_does_not_cover_portrait(monkeypatch, mode, greeting, size):
+    from PIL import ImageChops
+    source = Image.new("RGB", size, "#306080")
+    buffer = BytesIO()
+    source.save(buffer, format="PNG")
+    drawn = []
+    real_text = service.ImageDraw.ImageDraw.text
+
+    def record_text(self, xy, text, *args, **kwargs):
+        drawn.append(text)
+        return real_text(self, xy, text, *args, **kwargs)
+
+    monkeypatch.setattr(service.ImageDraw.ImageDraw, "text", record_text)
+    result = Image.open(BytesIO(service.add_text_to_image(buffer.getvalue(), mode))).convert("RGB")
+    assert drawn == [greeting]
+    assert result.size == source.size
+    box = ImageChops.difference(result, source).getbbox()
+    assert box is not None
+    left, top, right, bottom = box
+    width, height = size
+    assert top >= height * 0.78  # The portrait area above stays unchanged.
+    assert bottom <= height * 0.99
+    assert left >= width * 0.04 and right <= width * 0.96
+    assert abs((left + right) / 2 - width / 2) <= max(2, width * 0.01)  # Font side bearings.
+    colors = {color for _, color in result.crop(box).getcolors(maxcolors=width * height)}
+    assert (255, 255, 255) in colors
+    assert (0, 0, 0) in colors
+
+
+async def test_missing_font_prevents_paid_generation(monkeypatch, config, storage, tmp_path):
+    monkeypatch.setattr(service, "FONT_PATH", tmp_path / "missing-font.ttf")
+    generate = AsyncMock()
+    monkeypatch.setattr(service, "_generate_image_bytes", generate)
+    with pytest.raises(service.GenerationNotConfigured, match="font.ttf"):
+        await service.generate_postcards(PHOTO_URL, "mode_ny")
+    generate.assert_not_awaited()
+    storage.put_object.assert_not_called()
+
+
+def test_font_path_does_not_depend_on_working_directory(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    assert service._postcard_font(32).getbbox("С Днём Рождения!")[2] > 0
+
+
+async def test_unknown_postcard_mode_does_not_call_api(monkeypatch):
+    generate = AsyncMock()
+    monkeypatch.setattr(service, "_generate_and_store", generate)
+    with pytest.raises(ValueError, match="Неизвестный режим"):
+        await service.generate_postcards(PHOTO_URL, "mode_unknown")
+    generate.assert_not_awaited()

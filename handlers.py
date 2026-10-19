@@ -35,6 +35,7 @@ from image_service import (
     UnsupportedPhotoFormatError,
     generate_vision_boards,
     generate_postcards,
+    POSTCARD_PROMPTS,
     upload_image_for_max,
 )
 
@@ -70,15 +71,12 @@ WELCOME_TEXT = (
     "Привет! Я создаю волшебные открытки и карты желаний с твоим лицом. "
     "Выбери, что хочешь создать:"
 )
-POSTCARD_PROMPTS = {
-    "mode_ny": "Create a beautiful New Year greeting card. Add festive Christmas tree, snow, garlands. Place the person from the reference photo in a cozy winter outfit. Leave empty space at the bottom for a greeting text.",
-    "mode_bday": "Create a beautiful Birthday greeting card. Add balloons, confetti, festive cake. Place the person from the reference photo in a celebratory pose. Leave empty space for text.",
-    "mode_8march": "Create a beautiful 8 March greeting card. Add spring flowers, tulips, mimosa. Place the person from the reference photo in a spring atmosphere. Leave empty space for text.",
-}
 MODE_BUTTONS = (
     ("🖼 Карта желаний", "mode_vision"),
     ("🎄 Открытка: Новый год", "mode_ny"),
-    ("🎂 Открытка: День рождения", "mode_bday"),
+    ("👨‍👩‍👧‍👦 Семейный Новый год", "mode_ny_family"),
+    ("🎂 День рождения (Молодым)", "mode_bday_young"),
+    ("🎂 День рождения (Старшим)", "mode_bday_old"),
     ("🌹 Открытка: 8 Марта", "mode_8march"),
 )
 
@@ -98,7 +96,7 @@ PAYMENT_PACKAGES_TEXT = PACKAGES_TEXT.split("\n\n", 1)[0]
 NO_CREDITS_TEXT = "У вас закончились кредиты. Пожалуйста, выберите пакет для продолжения:"
 EXAMPLES_DIR = Path(__file__).resolve().parent / "examples"
 EXAMPLE_TEXT = (
-    "📸 Можно создать карту желаний или открытку по шаблону: Новый год, День рождения, 8 Марта.\n"
+    "📸 Можно создать карту желаний или открытку по шаблону: Новый год (личный или семейный), День рождения (молодым или старшим), 8 Марта.\n"
     "Ниже пример превращения фото в карту желаний — до и после.\n\n"
     "Промпт: «Машина тесла с бордовым салоном, я за рулем»"
 )
@@ -106,7 +104,7 @@ HELP_TEXT = (
     "🆘 Помощь\n\n"
     "Я создаю карты желаний и праздничные открытки с твоим фото. "
     "Вот как это работает:\n\n"
-    "1. Выбери «Карта желаний» или открытку: Новый год, День рождения, 8 Марта.\n"
+    "1. Выбери «Карта желаний» или открытку: Новый год (личный или семейный), День рождения (молодым или старшим), 8 Марта.\n"
     "2. Отправь своё фото (селфи).\n"
     "3. Для открытки генерация начнётся сразу после фото, текст вводить не нужно. "
     "Для карты желаний опиши свою мечту или желание текстом — например, "
@@ -265,8 +263,10 @@ def create_router(
                         await _reply(event, NO_CREDITS_TEXT, attachments=[packages_keyboard()] + ([postcard_retry_keyboard()] if is_postcard else []))
                         return
                 await _reply(event, "Создаю открытку…" if is_postcard else "Создаю плакат…")
-                selected_generator = postcard_generator if is_postcard else generator
-                urls = await selected_generator(photo["url"], sphere)
+                if is_postcard:
+                    urls = await postcard_generator(photo["url"], data["mode"])
+                else:
+                    urls = await generator(photo["url"], sphere)
                 if len(urls) != 1 or not all(isinstance(url, str) and url.startswith("https://") for url in urls):
                     raise RuntimeError("Генератор должен вернуть один HTTPS URL.")
                 user = None
@@ -444,7 +444,7 @@ def create_router(
         await context.set_state(PosterStates.waiting_for_mode)
         await _reply(event, "Сбор данных отменён.", attachments=[main_keyboard()])
 
-    @router.message_callback(F.callback.payload.in_({"create_poster", *(payload for _, payload in MODE_BUTTONS)}))
+    @router.message_callback(F.callback.payload.in_({"create_poster", "mode_bday", *(payload for _, payload in MODE_BUTTONS)}))
     async def begin_poster(event: MessageCallback, context: MemoryContext) -> None:
         if event.message is None:
             await event.ack(notification="Меню недоступно. Отправьте /start.")
@@ -455,10 +455,17 @@ def create_router(
         await event.ack(notification="Загружаю…")
         await context.clear()
         mode = "mode_vision" if event.callback.payload == "create_poster" else event.callback.payload
+        if mode == "mode_bday":  # Кнопки из меню предыдущей версии.
+            mode = "mode_bday_young"
         await context.update_data(mode=mode)
         await context.set_state(PosterStates.waiting_for_photo)
-        await _reply(event, "Отправьте одно фото для плаката. /cancel — отмена." if mode == "mode_vision"
-                     else "Отправьте одно фото для открытки. После фото сразу начнётся генерация. /cancel — отмена.")
+        if mode == "mode_ny_family":
+            text = "Отправьте одно общее фото семьи, где видны лица всех участников. После фото сразу начнётся генерация. /cancel — отмена."
+        elif mode == "mode_vision":
+            text = "Отправьте одно фото для плаката. /cancel — отмена."
+        else:
+            text = "Отправьте одно фото для открытки. После фото сразу начнётся генерация. /cancel — отмена."
+        await _reply(event, text)
 
     @router.message_callback(F.callback.payload.in_({"examples", "help"}))
     async def menu_callback(event: MessageCallback, context: MemoryContext) -> None:

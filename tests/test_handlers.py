@@ -871,7 +871,7 @@ async def test_start_shows_examples_and_four_modes(example_photos):
     assert event.bot.upload_media.await_count == 2
     assert len(greeting.kwargs["attachments"]) == 3
     buttons = greeting.kwargs["attachments"][-1].model_dump()["payload"]["buttons"]
-    assert [(row[0]["text"], row[0]["payload"]) for row in buttons[:4]] == list(handlers.MODE_BUTTONS)
+    assert [(row[0]["text"], row[0]["payload"]) for row in buttons[:6]] == list(handlers.MODE_BUTTONS)
 
 
 async def test_start_still_offers_menu_if_examples_fail(example_photos):
@@ -916,7 +916,7 @@ async def test_postcard_photo_generates_without_text_and_uses_shared_balance(cre
     await call_handler(router, "collect_photo", event, context)
     vision.assert_not_awaited()
     if balance or admin:
-        postcard.assert_awaited_once_with("https://photos.example.com/source.png", handlers.POSTCARD_PROMPTS[mode])
+        postcard.assert_awaited_once_with("https://photos.example.com/source.png", mode)
         assert (await credit_db.get_user(456))["balance"] == (balance if admin else balance - 1)
         assert await context.get_state() is None
     else:
@@ -948,7 +948,7 @@ async def test_postcard_send_retry_reuses_paid_result_and_more_creates_new(credi
 async def test_postcard_generation_failure_does_not_charge_and_can_retry(credit_db):
     await credit_db.add_credits(456, 2)
     context = await ready_context()
-    await context.update_data(mode="mode_bday")
+    await context.update_data(mode="mode_bday_young")
     postcard = AsyncMock(side_effect=[RuntimeError("API error"), ["https://cdn.example/card.png"]])
     router = create_router(postcard_generator=postcard)
     await call_handler(router, "collect_photo", photo_event(), context)
@@ -971,3 +971,15 @@ async def test_vision_mode_still_requires_dream_after_photo(credit_db):
     generator.assert_awaited_once_with("https://photos.example.com/source.png", "Я на Мальдивах")
     postcard.assert_not_awaited()
     assert (await credit_db.get_user(456))["balance"] == 1
+
+
+async def test_family_mode_requests_one_group_photo():
+    event = callback_event("mode_ny_family")
+    await dispatch_callback(create_router(), event, await ready_context())
+    assert "общее фото семьи" in event.send.await_args.args[0]
+
+
+async def test_old_birthday_button_opens_young_template():
+    context = await ready_context()
+    await dispatch_callback(create_router(), callback_event("mode_bday"), context)
+    assert (await context.get_data())["mode"] == "mode_bday_young"

@@ -625,8 +625,8 @@ async def test_postcard_uses_template_and_stores_text_overlay(config, storage, a
 
 
 @pytest.mark.parametrize("mode,greeting", [
-    ("ny", "С Новым Годом!"),
-    ("mode_ny_family", "С Новым Годом!"),
+    ("ny", "С Новым 2027 годом!"),
+    ("mode_ny_family", "С Новым 2027 годом!"),
     ("bday_young", "С Днём Рождения!"),
     ("mode_bday_old", "С Днём Рождения!"),
     ("8march", "С 8 Марта!"),

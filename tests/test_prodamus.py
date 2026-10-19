@@ -88,7 +88,7 @@ def test_signature_matches_prodamus_reference_vectors(data, expected):
     assert not verify_signature(data, expected, "wrong-secret")
 
 
-@pytest.mark.parametrize("credits,price", [(5, "299.00"), (15, "799.00")])
+@pytest.mark.parametrize("credits,price", [(1, "99.00"), (5, "299.00"), (15, "799.00")])
 async def test_signed_link_persists_bound_order(payments, credit_db, credits, price):
     link = await payments.create_payment_link(456, credits)
     assert link.startswith("https://test-shop.payform.ru/?")
@@ -97,12 +97,12 @@ async def test_signed_link_persists_bound_order(payments, credit_db, credits, pr
     assert data["do"] == "link"
     assert data["urlNotification"] == payments.webhook_url
     assert data["urlSuccess"] == data["urlReturn"] == payments.return_url
-    assert data["products"] == [{"name": f"{credits} генераций", "price": price, "quantity": "1"}]
+    assert data["products"] == [{"name": "1 генерация (Открытка)" if credits == 1 else f"{credits} генераций", "price": price, "quantity": "1"}]
     assert data["_param_package_id"] == f"package_{credits}"
     assert json.loads(data["customer_extra"]) == {"user_id": 456, "credits": credits, "package_id": f"package_{credits}"}
     order = await credit_db.get_payment_order(data["order_id"])
     assert order["user_id"] == 456 and order["credits"] == credits
-    assert order["amount_kopecks"] == {5: 29900, 15: 79900}[credits]
+    assert order["amount_kopecks"] == {1: 9900, 5: 29900, 15: 79900}[credits]
     assert order["status"] == "pending"
     assert await credit_db.get_user(456) is None  # Ссылка ещё не означает оплату.
 
@@ -182,7 +182,7 @@ def test_only_domain_and_secret_are_not_enough_for_payment_webhook(payment_confi
         ProdamusPayments(replace(payment_config, prodamus_return_url=None, prodamus_webhook_url=None))
 
 
-@pytest.mark.parametrize("credits", [5, 15])
+@pytest.mark.parametrize("credits", [1, 5, 15])
 @pytest.mark.parametrize("encoding", ["form", "multipart", "json"])
 async def test_webhook_credits_paid_order_once(client, payments, credit_db, credits, encoding):
     await credit_db.grant_free_trial(456)
@@ -365,3 +365,23 @@ def test_payment_domain_validation(payment_config, domain):
 
     with pytest.raises(ValueError):
         ProdamusPayments(replace(payment_config, prodamus_domain=domain))
+
+
+async def test_single_generation_payment_adds_exactly_one_credit(client, payments, credit_db):
+    data = await notification(payments, credits=1)
+    assert data["sum"] == "99.00"
+    assert data["products"][0]["name"] == "1 генерация (Открытка)"
+    assert (await post_notification(client, data)).status == 200
+    assert (await credit_db.get_user(456))["balance"] == 1
+    assert (await post_notification(client, data)).status == 200
+    assert (await credit_db.get_user(456))["balance"] == 1
+
+
+@pytest.mark.parametrize("field,value", [("sum", "1.00"), ("_param_credits", "15"), ("_param_package_id", "package_5")])
+async def test_single_generation_payment_rejects_wrong_amount_or_package(client, payments, credit_db, field, value):
+    data = await notification(payments, credits=1)
+    data[field] = value
+    response = await post_notification(client, data)
+    assert response.status == 400
+    assert await credit_db.get_user(456) is None
+    assert (await credit_db.get_payment_order(data["order_num"]))["status"] == "pending"

@@ -19,7 +19,11 @@ from yarl import URL
 from config import Config
 from database import create_payment_order, get_payment_order
 
-PACKAGES = {5: (29900, "5 генераций"), 15: (79900, "15 генераций")}
+PACKAGES = {
+    1: (9900, "1 генерация (Открытка)"),
+    5: (29900, "5 генераций"),
+    15: (79900, "15 генераций"),
+}
 SIGN_FIELDS = {"signature", "sign", "_payform_sign"}
 
 

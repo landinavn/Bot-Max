@@ -89,8 +89,9 @@ def postcard_retry_keyboard():
 
 PACKAGES_TEXT = (
     "💎 Доступные пакеты:\n"
-    "5 генераций — 299 ₽\n"
-    "15 генераций — 799 ₽"
+    "• 1 генерация (открытка) — 99 ₽\n"
+    "• 5 генераций — 299 ₽\n"
+    "• 15 генераций — 799 ₽"
 )
 PAYMENT_PACKAGES_TEXT = PACKAGES_TEXT.split("\n\n", 1)[0]
 NO_CREDITS_TEXT = "У вас закончились кредиты. Пожалуйста, выберите пакет для продолжения:"
@@ -112,6 +113,7 @@ HELP_TEXT = (
     "4. Получи готовый плакат с тобой в мечте!\n\n"
     "💎 Стоимость:\n"
     "• 1 бесплатная генерация — для новых пользователей.\n"
+    "• 1 генерация (открытка) — 99 ₽.\n"
     "• Пакет 5 генераций — 299 ₽.\n"
     "• Пакет 15 генераций — 799 ₽.\n\n"
     "❓ Частые вопросы:"
@@ -144,6 +146,7 @@ def help_keyboard():
 def packages_keyboard():
     return (
         InlineKeyboardBuilder()
+        .row(CallbackButton(text="Купить 1 генерацию — 99 ₽", payload="buy_1"))
         .row(CallbackButton(text="Купить 5 генераций — 299 ₽", payload="buy_5"))
         .row(CallbackButton(text="Купить 15 генераций — 799 ₽", payload="buy_15"))
         .as_markup()
@@ -406,7 +409,7 @@ def create_router(
             attachments=[packages_keyboard()],
         )
 
-    @router.message_callback(F.callback.payload.in_({"buy_5", "buy_15"}))
+    @router.message_callback(F.callback.payload.in_({"buy_1", "buy_5", "buy_15"}))
     async def buy_callback(event: MessageCallback) -> None:
         if event.message is None:
             await event.ack(notification="Сообщение удалено. Отправьте /buy.")
@@ -420,7 +423,7 @@ def create_router(
         if user_id is None:
             await _reply(event, "Не удалось определить пользователя. Отправьте /start.")
             return
-        credits = 5 if event.callback.payload == "buy_5" else 15
+        credits = int(event.callback.payload.removeprefix("buy_"))
         try:
             link = await payments.create_payment_link(user_id, credits)
         except Exception as exc:

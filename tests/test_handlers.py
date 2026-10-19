@@ -46,6 +46,7 @@ def assert_purchase_keyboard(keyboard):
     assert markup["type"] == "inline_keyboard"
     buttons = [button for row in markup["payload"]["buttons"] for button in row]
     assert [(button["text"], button["payload"], button["type"]) for button in buttons] == [
+        ("Купить 1 генерацию — 99 ₽", "buy_1", "callback"),
         ("Купить 5 генераций — 299 ₽", "buy_5", "callback"),
         ("Купить 15 генераций — 799 ₽", "buy_15", "callback"),
     ]
@@ -498,6 +499,7 @@ async def test_buy_describes_packages_without_adding_credits(credit_db):
     event = message_event("/buy")
     await call_handler(create_router(), "buy", event)
     text = event.message.answer.await_args.args[0]
+    assert "1 генерация (открытка) — 99 ₽" in text
     assert "5 генераций — 299 ₽" in text
     assert "15 генераций — 799 ₽" in text
     assert "недоступна" not in text
@@ -750,9 +752,9 @@ async def test_last_free_credit_offers_packages_once_and_not_on_zero_balance(cre
     keyboard = offer.kwargs["attachments"][0].model_dump()
     buttons = [button for row in keyboard["payload"]["buttons"] for button in row]
     assert [button["text"] for button in buttons] == [
-        "Купить 5 генераций — 299 ₽", "Купить 15 генераций — 799 ₽",
+        "Купить 1 генерацию — 99 ₽", "Купить 5 генераций — 299 ₽", "Купить 15 генераций — 799 ₽",
     ]
-    assert [button["payload"] for button in buttons] == ["buy_5", "buy_15"]
+    assert [button["payload"] for button in buttons] == ["buy_1", "buy_5", "buy_15"]
     # Повторное сообщение о той же сфере использует готовый оплаченный результат.
     await call_handler(router, "collect_sphere", event, context)
     assert sum(
@@ -772,7 +774,7 @@ async def test_last_free_credit_offers_packages_once_and_not_on_zero_balance(cre
     more.bot.send_message.assert_not_awaited()
 
 
-@pytest.mark.parametrize("credits", [5, 15])
+@pytest.mark.parametrize("credits", [1, 5, 15])
 async def test_payment_help_opens_packages_and_creates_selected_link(credit_db, credits):
     payments = SimpleNamespace(create_payment_link=AsyncMock(return_value="https://test-shop.payform.ru/pay"))
     generator = AsyncMock()
@@ -798,7 +800,7 @@ async def test_payment_help_opens_packages_and_creates_selected_link(credit_db, 
     generator.assert_not_awaited()
 
 
-@pytest.mark.parametrize("payload", ["buy_5", "buy_15"])
+@pytest.mark.parametrize("payload", ["buy_1", "buy_5", "buy_15"])
 async def test_package_buttons_report_missing_configuration_without_duplicate_menu(credit_db, payload):
     await credit_db.add_credits(456, 2)
     event = callback_event(payload)
@@ -808,7 +810,7 @@ async def test_package_buttons_report_missing_configuration_without_duplicate_me
     assert (await credit_db.get_user(456))["balance"] == 2
 
 
-@pytest.mark.parametrize("payload,credits,price", [("buy_5", 5, "299.00"), ("buy_15", 15, "799.00")])
+@pytest.mark.parametrize("payload,credits,price", [("buy_1", 1, "99.00"), ("buy_5", 5, "299.00"), ("buy_15", 15, "799.00")])
 async def test_purchase_button_creates_signed_link_for_callback_user(credit_db, payload, credits, price):
     from pathlib import Path
     from urllib.parse import parse_qsl, urlsplit
@@ -839,7 +841,7 @@ async def test_purchase_button_creates_signed_link_for_callback_user(credit_db, 
     link = keyboard["payload"]["buttons"][0][0]["url"]
     assert link in sent.args[0]
     assert link == "https://test-shop.payform.ru/payment/abc"
-    assert sent.args[0].startswith(f"Для оплаты пакета «{credits} генераций")
+    assert sent.args[0].startswith(f"Для оплаты пакета «{handlers.PACKAGES[credits][1]}")
     assert data["sign"] == sign_link_payload({key: value for key, value in data.items() if key != "sign"}, "test-secret")
     assert data["_param_user_id"] == "456"
     assert data["_param_package_id"] == f"package_{credits}"

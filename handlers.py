@@ -164,6 +164,7 @@ def result_keyboard(url: str, batch_id: str, index: int):
 def create_router(
     generator: PosterGenerator = generate_vision_boards,
     *, payments: ProdamusPayments | None = None,
+    admin_user_id: int | None = None,
 ) -> Router:
     router = Router()
     # FSM изолирован по чату, а баланс общий для всех чатов пользователя.
@@ -196,6 +197,7 @@ def create_router(
         message = event.message
         if message is None:
             return
+        is_admin = admin_user_id is not None and credit_user_id == admin_user_id
         data = await context.get_data()
         photo = data.get("photo")
         sphere = data.get("sphere")
@@ -215,22 +217,27 @@ def create_router(
             if new_batch:
                 data = await context.update_data(new_batch_requested=True)
             if data.get("new_batch_requested") or not urls:
-                user = await get_user(credit_user_id)
-                if user is None or user["balance"] < 1:
-                    await context.set_state(PosterStates.waiting_for_sphere)
-                    await _reply(event, NO_CREDITS_TEXT, attachments=[packages_keyboard()])
-                    return
+                if not is_admin:
+                    user = await get_user(credit_user_id)
+                    if user is None or user["balance"] < 1:
+                        await context.set_state(PosterStates.waiting_for_sphere)
+                        await _reply(event, NO_CREDITS_TEXT, attachments=[packages_keyboard()])
+                        return
                 await _reply(event, "Создаю плакат…")
                 urls = await generator(photo["url"], sphere)
                 if len(urls) != 1 or not all(isinstance(url, str) and url.startswith("https://") for url in urls):
                     raise RuntimeError("Генератор должен вернуть один HTTPS URL.")
-                if not await deduct_credit(credit_user_id):
-                    raise RuntimeError("Не удалось списать кредит после генерации.")
-                user = await get_user(credit_user_id)
+                user = None
+                if is_admin:
+                    logger.info("Пропущено списание кредитов для администратора %s", credit_user_id)
+                else:
+                    if not await deduct_credit(credit_user_id):
+                        raise RuntimeError("Не удалось списать кредит после генерации.")
+                    user = await get_user(credit_user_id)
                 data = await context.update_data(
                     variants=urls, batch_id=uuid4().hex[:12], sent_count=0,
                     new_batch_requested=False,
-                    package_offer_pending=user is not None and user["balance"] == 0,
+                    package_offer_pending=not is_admin and user is not None and user["balance"] == 0,
                 )
             else:
                 await _reply(event, "Отправляю готовый плакат…")
@@ -251,14 +258,15 @@ def create_router(
                 if sent is None:
                     raise RuntimeError("MAX не подтвердил отправку плаката.")
                 await context.update_data(sent_count=index + 1)
-            user = await get_user(credit_user_id)
-            await _reply(event, f"Осталось кредитов: {user['balance'] if user else 0}.")
-            if data.get("package_offer_pending"):
-                await _reply(event,
-                    NO_CREDITS_TEXT,
-                    attachments=[packages_keyboard()],
-                )
-                await context.update_data(package_offer_pending=False)
+            if not is_admin:
+                user = await get_user(credit_user_id)
+                await _reply(event, f"Осталось кредитов: {user['balance'] if user else 0}.")
+                if data.get("package_offer_pending"):
+                    await _reply(event,
+                        NO_CREDITS_TEXT,
+                        attachments=[packages_keyboard()],
+                    )
+                    await context.update_data(package_offer_pending=False)
         except GenerationTimeoutError:
             logger.error("Таймаут API при создании или сохранении плаката.")
             await context.set_state(PosterStates.waiting_for_sphere)

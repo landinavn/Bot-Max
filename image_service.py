@@ -165,12 +165,58 @@ async def _generate_image_bytes(
     if not config.image_api_key or not config.image_model:
         raise GenerationNotConfigured("Задайте IMAGE_API_KEY и IMAGE_MODEL.")
     prompt = (
-        "Создай вдохновляющий плакат — карту желаний — на основе приложенного фото. "
-        f"Сфера жизни: {sphere.strip()}. "
-        "Сохрани узнаваемые черты и внешность человека с исходного фото. "
-        "Покажи его в позитивном образе желаемого будущего, связанном с этой сферой. "
-        "Добавь тематические элементы коллажа, гармоничные цвета и выразительную композицию. "
-        "Без надписей и водяных знаков."
+        "Create a realistic photographic vision board collage showing the person "
+        "from the reference photo living their described dream.\n\n"
+
+        "IDENTITY — HIGHEST PRIORITY:\n"
+        "Use the uploaded person's photo as the identity reference. "
+        "Preserve their individual facial proportions, face shape, nose, eyes, "
+        "lips, jawline, skin tone, age, hair color, and hairstyle. "
+        "Keep the original head angle and natural expression whenever possible. "
+        "Do not replace their face with a similar-looking person or an idealized model. "
+        "Do not beautify, reshape, smooth, or stylize their facial features. "
+        "Adapt the scene and camera angle to the reference face, rather than "
+        "changing the face to fit the scene. "
+        "If a separate collage example is provided, use it only for layout and visual style, "
+        "never as a source of facial identity.\n\n"
+
+        "COLLAGE LAYOUT:\n"
+        "Create one cohesive vertical collage with a large central photograph "
+        "occupying approximately 60% of the composition. "
+        "In this main photograph, show the person naturally participating in their dream, "
+        "with their face clearly visible and large enough to recognize. "
+        "Surround the main photograph with 5–7 smaller photographic panels "
+        "showing relevant locations, objects, close-up details, and atmospheric moments "
+        "from the same dream. "
+        "Separate the panels with thin white borders and slightly angled edges, "
+        "like an elegant editorial photo collage. "
+        "Keep borders away from the person's face. "
+        "Supporting panels should mainly show scenery and details, "
+        "rather than repeating the person's portrait.\n\n"
+
+        "PHOTOGRAPHIC REALISM:\n"
+        "Every panel must look like a genuine camera photograph. "
+        "Use believable lighting, natural skin texture, realistic materials, "
+        "accurate reflections, and photographic depth of field. "
+        "Make the composition vivid, inspiring, and visually rich, "
+        "with harmonious colors and flattering natural light. "
+        "Avoid illustration, painting, cartoon style, CGI, plastic skin, "
+        "excessive retouching, and artificial HDR effects. "
+        "Maintain correct anatomy, natural hands, and realistic body proportions.\n\n"
+
+        "FOLLOW THE DREAM:\n"
+        "Accurately represent the user's specific setting, activities, objects, "
+        "colors, and other requested details. "
+        "Choose supporting panels that reinforce this particular dream. "
+        "Do not automatically add cars, yachts, or luxury accessories "
+        "unless they are relevant to the description.\n\n"
+
+        "NO TEXT:\n"
+        "Do not add titles, captions, motivational quotes, letters, typography, "
+        "watermarks, or decorative text. "
+        "The result must be a photographic collage, not an advertising poster.\n\n"
+
+        f"User's dream description: {sphere.strip()}"
     )
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:

@@ -1,6 +1,7 @@
 """Callback не должен отправлять пустое подтверждение в MAX."""
 
 from types import SimpleNamespace
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock, call
 from inspect import signature
 import logging
@@ -181,7 +182,7 @@ async def test_help_buttons_handle_deleted_message(payload):
 def example_photos(tmp_path, monkeypatch):
     directory = tmp_path / "project" / "examples"
     directory.mkdir(parents=True)
-    for filename in ("before.jpg", "after.jpg"):
+    for filename in ("before.jpg", "after.jpg", *handlers.START_EXAMPLE_FILES):
         (directory / filename).write_bytes(b"local-photo")
     monkeypatch.setattr(handlers, "EXAMPLES_DIR", directory)
     # Файлы ищутся относительно проекта, а не рабочей директории процесса.
@@ -862,7 +863,7 @@ async def test_purchase_link_error_is_reported_without_charging(credit_db):
     assert await credit_db.get_user(456) is None
 
 
-async def test_start_shows_examples_and_four_modes(example_photos):
+async def test_start_shows_six_finished_examples_and_modes(example_photos):
     event = message_event("/start")
     context = await ready_context()
     await call_handler(create_router(), "start", event, context)
@@ -870,8 +871,14 @@ async def test_start_shows_examples_and_four_modes(example_photos):
     assert await context.get_data() == {}
     greeting = event.message.answer.await_args_list[0]
     assert greeting.kwargs["text"].startswith(handlers.WELCOME_TEXT)
-    assert event.bot.upload_media.await_count == 2
-    assert len(greeting.kwargs["attachments"]) == 3
+    assert event.bot.upload_media.await_count == 6
+    assert [Path(call.args[0].path).name for call in event.bot.upload_media.await_args_list] == [
+        "i (1).webp", "i (18).webp", "i (17).webp",
+        "i (19).webp", "i (16).webp", "i (14).webp",
+    ]
+    assert len(greeting.kwargs["attachments"]) == 7
+    assert "Примеры работ" in greeting.kwargs["text"]
+    assert "исходное фото" not in greeting.kwargs["text"]
     buttons = greeting.kwargs["attachments"][-1].model_dump()["payload"]["buttons"]
     assert [(row[0]["text"], row[0]["payload"]) for row in buttons[:6]] == list(handlers.MODE_BUTTONS)
 

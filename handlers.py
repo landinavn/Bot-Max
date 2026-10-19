@@ -96,6 +96,14 @@ PACKAGES_TEXT = (
 PAYMENT_PACKAGES_TEXT = PACKAGES_TEXT.split("\n\n", 1)[0]
 NO_CREDITS_TEXT = "У вас закончились кредиты. Пожалуйста, выберите пакет для продолжения:"
 EXAMPLES_DIR = Path(__file__).resolve().parent / "examples"
+START_EXAMPLE_FILES = (
+    "i (1).webp",
+    "i (18).webp",
+    "i (17).webp",
+    "i (19).webp",
+    "i (16).webp",
+    "i (14).webp",
+)
 EXAMPLE_TEXT = (
     "📸 Можно создать карту желаний или открытку по шаблону: Новый год (личный или семейный), День рождения (молодым или старшим), 8 Марта.\n"
     "Ниже пример превращения фото в карту желаний — до и после.\n\n"
@@ -383,7 +391,7 @@ def create_router(
         await context.clear()
         await context.set_state(PosterStates.waiting_for_mode)
         examples = []
-        for filename in ("before.jpg", "after.jpg"):
+        for filename in START_EXAMPLE_FILES:
             path = EXAMPLES_DIR / filename
             try:
                 if not path.is_file():
@@ -394,7 +402,7 @@ def create_router(
                 examples.append(image)
             except Exception as exc:
                 logger.error("Не удалось загрузить пример %s: %s", filename, exc)
-        await _reply(event, text=WELCOME_TEXT + ("\n\nПример карты желаний: исходное фото и результат." if examples else ""),
+        await _reply(event, text=WELCOME_TEXT + ("\n\nПримеры работ: карта желаний и праздничные открытки." if examples else ""),
                      attachments=[*examples, main_keyboard()])
         if trial_granted:
             await _reply(event, "Вам начислен 1 бесплатный кредит!")

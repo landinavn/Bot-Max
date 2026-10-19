@@ -11,6 +11,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from aioresponses import aioresponses
 
 from config import Config
+import prodamus
 from prodamus import (
     ProdamusPayments, flatten_fields, parse_form_fields, sign_payload, sign_link_payload, verify_signature,
 )
@@ -87,7 +88,7 @@ def test_signature_matches_prodamus_reference_vectors(data, expected):
     assert not verify_signature(data, expected, "wrong-secret")
 
 
-@pytest.mark.parametrize("credits,price", [(5, "299.00"), (15, "699.00")])
+@pytest.mark.parametrize("credits,price", [(5, "299.00"), (15, "799.00")])
 async def test_signed_link_persists_bound_order(payments, credit_db, credits, price):
     link = await payments.create_payment_link(456, credits)
     assert link.startswith("https://test-shop.payform.ru/?")
@@ -101,6 +102,7 @@ async def test_signed_link_persists_bound_order(payments, credit_db, credits, pr
     assert json.loads(data["customer_extra"]) == {"user_id": 456, "credits": credits, "package_id": f"package_{credits}"}
     order = await credit_db.get_payment_order(data["order_id"])
     assert order["user_id"] == 456 and order["credits"] == credits
+    assert order["amount_kopecks"] == {5: 29900, 15: 79900}[credits]
     assert order["status"] == "pending"
     assert await credit_db.get_user(456) is None  # Ссылка ещё не означает оплату.
 
@@ -196,6 +198,30 @@ async def test_webhook_credits_paid_order_once(client, payments, credit_db, cred
     assert (await credit_db.get_user(456))["balance"] == credits + 1
 
 
+async def test_order_created_before_price_increase_still_credits(client, payments, credit_db, monkeypatch):
+    current_amount, title = prodamus.PACKAGES[15]
+    with monkeypatch.context() as old_catalog:
+        old_catalog.setitem(prodamus.PACKAGES, 15, (current_amount - 10_000, title))
+        data = await notification(payments, credits=15)
+
+    assert prodamus.PACKAGES[15][0] == 79900
+    assert (await post_notification(client, data)).status == 200
+    assert (await post_notification(client, data)).status == 200
+    assert (await credit_db.get_user(456))["balance"] == 15
+    assert (await credit_db.get_payment_order(data["order_num"]))["status"] == "paid"
+
+
+async def test_new_order_rejects_lower_old_price_even_with_valid_signature(client, payments, credit_db):
+    data = await notification(payments, credits=15)
+    lower_price = f"{(prodamus.PACKAGES[15][0] - 10_000) // 100}.00"
+    data["sum"] = lower_price
+    data["products"][0]["price"] = lower_price
+
+    assert (await post_notification(client, data)).status == 400
+    assert await credit_db.get_user(456) is None
+    assert (await credit_db.get_payment_order(data["order_num"]))["status"] == "pending"
+
+
 async def test_concurrent_retries_cannot_double_credit(client, payments, credit_db):
     data = await notification(payments)
     responses = await asyncio.gather(*(post_notification(client, data) for _ in range(10)))
@@ -213,7 +239,7 @@ async def test_invalid_signature_does_not_credit(client, payments, credit_db, si
 async def test_tampered_notification_fails_signature(client, payments, credit_db):
     data = await notification(payments)
     signature = sign_payload(data, SECRET)
-    data["sum"] = "699.00"
+    data["sum"] = "799.00"
     assert (await post_notification(client, data, signature=signature)).status == 403
     assert await credit_db.get_user(456) is None
 

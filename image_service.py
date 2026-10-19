@@ -162,21 +162,12 @@ async def _generate_image_bytes(
     if not config.image_api_key or not config.image_model:
         raise GenerationNotConfigured("Задайте IMAGE_API_KEY и IMAGE_MODEL.")
     prompt = (
-        "CRITICAL INSTRUCTION: Preserve the person's identity EXACTLY as in the provided reference photo. "
-        "Maintain the exact face shape, nose, eyes, lips, skin tone, age, hairstyle, and expression. "
-        "Do NOT generate a new face. The generated person must be 100% recognizable as the person in the reference photo.\n\n"
-        "Create a vibrant, inspiring, and highly aesthetic Vision Board Collage. "
-        "The style should be colorful, magical, and expressive, blending photorealism with beautiful thematic collage elements. "
-        "Surround the person with dreamy aesthetics, rich colors, and luxurious lifestyle elements that represent their dream. "
-        "Make it look like an aspirational mood board, not a boring photo.\n\n"
-        "ANATOMY REQUIREMENTS (critical):\n"
-        "- Correct human anatomy and realistic body proportions\n"
-        "- Exactly 5 fingers on each hand, correctly shaped and positioned\n"
-        "- Exactly 2 arms and 2 legs, all visible limbs must be complete\n"
-        "- Realistic skin texture and natural joint articulation\n\n"
-        f"User's dream description: {sphere.strip()}\n\n"
-        "Blend the person into the dream scene described by the user. "
-        "Create a rich, colorful, and visually stunning composition without any watermarks."
+        "Создай вдохновляющий плакат — карту желаний — на основе приложенного фото. "
+        "Сохрани узнаваемые черты и внешность человека с исходного фото. "
+        "Покажи его в позитивном образе желаемого будущего, связанном с этой сферой. "
+        "Добавь тематические элементы коллажа, гармоничные цвета и выразительную композицию. "
+        "Без надписей и водяных знаков. "
+        f"Сфера жизни: {sphere.strip()}."
     )
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as session:

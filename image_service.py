@@ -38,11 +38,13 @@ FONT_PATH = Path(__file__).resolve().parent / "font.ttf"
 POSTCARD_PROMPTS = {
     "mode_ny": (
         "Beautiful New Year greeting card. Place the person from the reference photo in a cozy winter outfit. "
-        "Add festive elements: Christmas tree, snow, garlands, gifts. Leave a large empty space at the bottom for text."
+        "Add festive elements: Christmas tree, snow, garlands, gifts. Leave a large empty space at the bottom for text. "
+        "If the person in the reference photo is wearing a summer hat, cap, or no hat, replace it with a stylish winter knitted hat (beanie) to match the snowy atmosphere. Keep the person's face exactly as in the reference."
     ),
     "mode_ny_family": (
         "Beautiful New Year family greeting card. Place all people from the reference photo together in a cozy winter atmosphere. "
-        "Keep all faces exactly as in the reference. Add Christmas tree, snow, gifts. Leave a large empty space at the bottom for text."
+        "Keep all faces exactly as in the reference. Add Christmas tree, snow, gifts. Leave a large empty space at the bottom for text. "
+        "If the person in the reference photo is wearing a summer hat, cap, or no hat, replace it with a stylish winter knitted hat (beanie) to match the snowy atmosphere. Keep the person's face exactly as in the reference."
     ),
     "mode_bday_young": (
         "Vibrant Birthday greeting card. Place the young person from the reference photo in a celebratory pose "
@@ -59,8 +61,8 @@ POSTCARD_PROMPTS = {
     ),
 }
 POSTCARD_TEXT = {
-    "ny": "С Новым Годом!",
-    "ny_family": "С Новым Годом!",
+    "ny": "С Новым 2027 годом!",
+    "ny_family": "С Новым 2027 годом!",
     "bday_young": "С Днём Рождения!",
     "bday_old": "С Днём Рождения!",
     "8march": "С 8 Марта!",

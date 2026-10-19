@@ -92,7 +92,7 @@ async def test_create_poster_acknowledges_and_requests_photo():
         "Отправьте одно фото для плаката. /cancel — отмена."
     )
     assert await context.get_state() == PosterStates.waiting_for_photo
-    assert await context.get_data() == {}
+    assert await context.get_data() == {"mode": "mode_vision"}
 
 
 async def test_create_poster_preserves_running_generation():
@@ -301,7 +301,7 @@ async def test_more_without_photo_requests_new_upload(payload, photo):
     await dispatch_callback(create_router(generator), event, context)
     event.ack.assert_awaited_once()
     assert await context.get_state() == PosterStates.waiting_for_photo
-    assert await context.get_data() == {}
+    assert await context.get_data() == {"mode": "mode_vision"}
     event.send.assert_awaited_once_with("Фото не сохранилось. Пожалуйста, загрузите фото заново.")
     generator.assert_not_awaited()
 
@@ -404,7 +404,8 @@ def message_event(text="карьера", *, chat_id=123, chat_type="dialog"):
             body=SimpleNamespace(text=text),
             answer=AsyncMock(),
         ),
-        bot=SimpleNamespace(send_message=AsyncMock(return_value=object())),
+        bot=SimpleNamespace(send_message=AsyncMock(return_value=object()),
+                            upload_media=AsyncMock(return_value=SimpleNamespace(payload=SimpleNamespace(token="example-token")))),
     )
 
 
@@ -857,3 +858,116 @@ async def test_purchase_link_error_is_reported_without_charging(credit_db):
         "Не удалось создать ссылку на оплату. Попробуйте /buy позже."
     )
     assert await credit_db.get_user(456) is None
+
+
+async def test_start_shows_examples_and_four_modes(example_photos):
+    event = message_event("/start")
+    context = await ready_context()
+    await call_handler(create_router(), "start", event, context)
+    assert await context.get_state() == PosterStates.waiting_for_mode
+    assert await context.get_data() == {}
+    greeting = event.message.answer.await_args_list[0]
+    assert greeting.kwargs["text"].startswith(handlers.WELCOME_TEXT)
+    assert event.bot.upload_media.await_count == 2
+    assert len(greeting.kwargs["attachments"]) == 3
+    buttons = greeting.kwargs["attachments"][-1].model_dump()["payload"]["buttons"]
+    assert [(row[0]["text"], row[0]["payload"]) for row in buttons[:4]] == list(handlers.MODE_BUTTONS)
+
+
+async def test_start_still_offers_menu_if_examples_fail(example_photos):
+    event = message_event("/start")
+    event.bot.upload_media.side_effect = RuntimeError("upload failed")
+    await call_handler(create_router(), "start", event, await ready_context())
+    assert len(event.message.answer.await_args_list[0].kwargs["attachments"]) == 1
+
+
+@pytest.mark.parametrize("mode", [payload for _, payload in handlers.MODE_BUTTONS])
+async def test_mode_selection_clears_previous_result_and_requests_photo(mode):
+    context = await ready_context()
+    await context.update_data(variants=["https://old.example/result.png"], sphere="old")
+    event = callback_event(mode)
+    await dispatch_callback(create_router(), event, context)
+    event.ack.assert_awaited_once()
+    assert await context.get_data() == {"mode": mode}
+    assert await context.get_state() == PosterStates.waiting_for_photo
+    assert "фото" in event.send.await_args.args[0]
+
+
+def photo_event():
+    event = message_event()
+    event.message.body = SimpleNamespace(attachments=[SimpleNamespace(
+        type="image", payload=PhotoAttachmentPayload(photo_id=1, token="source-token",
+        url="https://photos.example.com/source.png"))])
+    return event
+
+
+@pytest.mark.parametrize("mode", list(handlers.POSTCARD_PROMPTS))
+@pytest.mark.parametrize("balance,admin", [(2, False), (0, False), (0, True)])
+async def test_postcard_photo_generates_without_text_and_uses_shared_balance(credit_db, mode, balance, admin):
+    await credit_db.add_credits(456, balance or 1)
+    if not balance:
+        await credit_db.deduct_credit(456)
+    context = await ready_context()
+    await context.update_data(mode=mode)
+    vision = AsyncMock()
+    postcard = AsyncMock(return_value=["https://cdn.example/card.png"])
+    router = create_router(vision, postcard_generator=postcard, admin_user_id=456 if admin else None)
+    event = photo_event()
+    await call_handler(router, "collect_photo", event, context)
+    vision.assert_not_awaited()
+    if balance or admin:
+        postcard.assert_awaited_once_with("https://photos.example.com/source.png", handlers.POSTCARD_PROMPTS[mode])
+        assert (await credit_db.get_user(456))["balance"] == (balance if admin else balance - 1)
+        assert await context.get_state() is None
+    else:
+        postcard.assert_not_awaited()
+        assert event.message.answer.await_args.args == (NO_CREDITS_TEXT,)
+        assert await context.get_state() == PosterStates.waiting_for_mode
+    assert all("опиши" not in str(c).lower() for c in event.message.answer.await_args_list)
+
+
+async def test_postcard_send_retry_reuses_paid_result_and_more_creates_new(credit_db):
+    await credit_db.add_credits(456, 3)
+    context = await ready_context()
+    await context.update_data(mode="mode_ny")
+    postcard = AsyncMock(return_value=["https://cdn.example/card.png"])
+    router = create_router(postcard_generator=postcard)
+    event = photo_event()
+    event.bot.send_message.side_effect = RuntimeError("MAX temporarily unavailable")
+    await call_handler(router, "collect_photo", event, context)
+    assert (await credit_db.get_user(456))["balance"] == 2
+    assert await context.get_state() == PosterStates.waiting_for_mode
+    await dispatch_callback(router, callback_event("postcard_retry"), context)
+    assert postcard.await_count == 1
+    assert (await credit_db.get_user(456))["balance"] == 2
+    await dispatch_callback(router, callback_event("more"), context)
+    assert postcard.await_count == 2
+    assert (await credit_db.get_user(456))["balance"] == 1
+
+
+async def test_postcard_generation_failure_does_not_charge_and_can_retry(credit_db):
+    await credit_db.add_credits(456, 2)
+    context = await ready_context()
+    await context.update_data(mode="mode_bday")
+    postcard = AsyncMock(side_effect=[RuntimeError("API error"), ["https://cdn.example/card.png"]])
+    router = create_router(postcard_generator=postcard)
+    await call_handler(router, "collect_photo", photo_event(), context)
+    assert (await credit_db.get_user(456))["balance"] == 2
+    await dispatch_callback(router, callback_event("postcard_retry"), context)
+    assert (await credit_db.get_user(456))["balance"] == 1
+
+
+async def test_vision_mode_still_requires_dream_after_photo(credit_db):
+    await credit_db.add_credits(456, 2)
+    context = await ready_context()
+    await context.update_data(mode="mode_vision")
+    generator = AsyncMock(return_value=["https://cdn.example/vision.png"])
+    postcard = AsyncMock()
+    router = create_router(generator, postcard_generator=postcard)
+    await call_handler(router, "collect_photo", photo_event(), context)
+    generator.assert_not_awaited()
+    assert await context.get_state() == PosterStates.waiting_for_prompt
+    await call_handler(router, "collect_sphere", message_event("Я на Мальдивах"), context)
+    generator.assert_awaited_once_with("https://photos.example.com/source.png", "Я на Мальдивах")
+    postcard.assert_not_awaited()
+    assert (await credit_db.get_user(456))["balance"] == 1

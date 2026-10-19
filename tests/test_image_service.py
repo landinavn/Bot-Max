@@ -11,9 +11,12 @@ from pathlib import Path
 import random
 from io import BytesIO
 from unittest.mock import AsyncMock, Mock
+from types import SimpleNamespace
 
 import aiohttp
+import httpx
 import pytest
+import respx
 from aioresponses import aioresponses
 from maxapi.enums.upload_type import UploadType
 from maxapi.types import AttachmentPayload, AttachmentUpload
@@ -23,7 +26,7 @@ import image_service as service
 import max_client
 from config import Config
 
-IMAGE_EDIT_URL = "https://api.proxyapi.ru/openai/v1/images/edits"
+IMAGE_EDIT_URL = "https://api.openai.com/v1/images/edits"
 PHOTO_URL = "https://photos.example.com/source.png"
 PUBLIC_URL = re.compile(
     r"https://storage\.yandexcloud\.net/test-bucket/vision-boards/[a-f0-9]{32}\.png"
@@ -40,7 +43,7 @@ def config(monkeypatch):
     settings = Config(
         token="test-max-token",
         photo_path=Path("unused.png"),
-        image_api_key="test-proxyapi-key",
+        image_api_key="test-openai-key",
         image_model="test-image-model",
         storage_bucket="test-bucket",
         storage_access_key_id="test-storage-access",
@@ -77,8 +80,22 @@ def storage(monkeypatch):
 @pytest.fixture
 def api():
     # Неописанный HTTP-запрос завершается ошибкой, а не уходит в сеть.
-    with aioresponses() as mock:
-        yield mock
+    with aioresponses() as mock, respx.mock(assert_all_called=False) as http:
+        def post(url, *, payload=None, status=200, headers=None, body=None, content_type=None, exception=None):
+            route = http.post(url)
+            if exception is not None:
+                return route.mock(side_effect=exception)
+            response_headers = dict(headers or {})
+            if content_type:
+                response_headers["Content-Type"] = content_type
+            response = httpx.Response(
+                status, headers=response_headers,
+                **({"content": body} if body is not None else {"json": payload}),
+            )
+            return route.mock(return_value=response)
+        yield SimpleNamespace(
+            get=mock.get, head=mock.head, post=post, requests=mock.requests, http=http,
+        )
 
 
 def register_generation(api, *, count=1, payload=None, status=200, headers=None):
@@ -90,26 +107,20 @@ def register_generation(api, *, count=1, payload=None, status=200, headers=None)
 
 
 def post_requests(api):
-    return [call for (method, _), calls in api.requests.items() if method == "POST" for call in calls]
+    return [call.request for call in api.http.calls if call.request.method == "POST"]
 
 
-async def multipart_fields(form):
-    """Разобрать настоящий multipart, который aiohttp отправляет в API."""
-    payload = form()
-
-    class Writer:
-        def __init__(self):
-            self.data = bytearray()
-
-        async def write(self, chunk):
-            self.data.extend(chunk)
-
-    writer = Writer()
-    await payload.write(writer)
+async def multipart_fields(request):
+    """Разобрать настоящий multipart, который OpenAI SDK отправляет через httpx."""
+    body = await request.aread()
     message = BytesParser(policy=default).parsebytes(
-        f"Content-Type: {payload.content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode()
-        + bytes(writer.data)
+        f"Content-Type: {request.headers['Content-Type']}\r\nMIME-Version: 1.0\r\n\r\n".encode()
+        + body
     )
+    # httpx кодирует текстовые поля UTF-8 без отдельного Content-Type у поля.
+    for part in message.iter_parts():
+        if not part.get_filename():
+            part.set_param("charset", "utf-8", header="Content-Type")
     return {
         part.get_param("name", header="content-disposition"): part
         for part in message.iter_parts()
@@ -252,10 +263,10 @@ async def test_generation_uploads_photo_and_parses_response(config, storage, api
     assert all(PUBLIC_URL.fullmatch(url) for url in urls)
     requests = post_requests(api)
     assert len(requests) == 1
-    request = requests[0].kwargs
-    assert request["headers"]["Authorization"] == f"Bearer {config.image_api_key}"
-    assert request["allow_redirects"] is False
-    fields = await multipart_fields(request["data"])
+    request = requests[0]
+    assert request.headers["Authorization"] == f"Bearer {config.image_api_key}"
+    assert dream.encode("utf-8") in await request.aread()
+    fields = await multipart_fields(request)
     assert fields["image"].get_payload(decode=True) == PNG
     assert fields["image"].get_content_type() == "image/png"
     assert fields["image"].get_filename() == "photo.png"
@@ -264,15 +275,13 @@ async def test_generation_uploads_photo_and_parses_response(config, storage, api
     assert fields["n"].get_content() == str(count)
     prompt = fields["prompt"].get_content()
     assert dream in prompt
-    # Исходный текст из dfb0275; подстановка пользователя перенесена в конец.
-    assert prompt == (
-        "Создай вдохновляющий плакат — карту желаний — на основе приложенного фото. "
-        "Сохрани узнаваемые черты и внешность человека с исходного фото. "
-        "Покажи его в позитивном образе желаемого будущего, связанном с этой сферой. "
-        "Добавь тематические элементы коллажа, гармоничные цвета и выразительную композицию. "
-        "Без надписей и водяных знаков. "
-        f"Сфера жизни: {dream.strip()}."
-    )
+    assert prompt.startswith("Создай вдохновляющий плакат — карту желаний — на основе приложенного фото. ")
+    assert "keep the face exactly as in the original photo; natural head position; photorealistic portrait; do not change facial features." in prompt
+    assert "ANATOMY REQUIREMENTS (critical):\n" in prompt
+    assert "Exactly 5 fingers on each hand, correctly shaped and positioned" in prompt
+    assert "Hands and feet must not be cropped awkwardly unless part of natural composition\n\n" in prompt
+    assert f"Описание мечты пользователя: {dream.strip()}\n\nИзобрази человека" in prompt
+    assert prompt.endswith("Без надписей и водяных знаков.")
     # https://developers.openai.com/api/reference/resources/images/methods/edit
     assert len(prompt) <= 32000
     assert fields["output_format"].get_content() == "png"
@@ -396,22 +405,55 @@ async def test_generation_rejects_incomplete_batch(config, storage, api):
     storage.put_object.assert_not_called()
 
 
-@pytest.mark.parametrize("base_url", [
-    "https://api.proxyapi.ru/openai/v1",
-    "https://api.proxyapi.ru/openai/v1/",
-    "https://custom-api.example.com/v1/",
+@pytest.mark.parametrize("proxy_url", [
+    None,
+    "http://94.249.177.108:8888",
+    "http://custom-proxy.example.com:8080",
 ])
-async def test_generation_uses_configured_base_url(config, api, base_url):
-    settings = replace(config, openai_base_url=base_url)
-    endpoint = base_url.rstrip("/") + "/images/edits"
+@pytest.mark.parametrize("status", [200, 401])
+async def test_generation_uses_direct_openai_and_closes_proxy_client(config, api, monkeypatch, proxy_url, status):
+    settings = replace(config, openai_proxy_url=proxy_url)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://old-api.example.com/v1")
+    original_init = httpx.AsyncClient.__init__
+    clients = []
+
+    def init(client, *args, **kwargs):
+        clients.append((client, kwargs))
+        original_init(client, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", init)
     api.get(PHOTO_URL, body=PNG, content_type="image/png")
-    api.post(endpoint, payload={"data": [{"b64_json": ENCODED_PNG}]})
+    api.post(IMAGE_EDIT_URL, status=status, payload={"data": [{"b64_json": ENCODED_PNG}]})
 
-    assert await service._generate_image_bytes(PHOTO_URL, "Карьера", settings) == [PNG]
+    if status == 200:
+        assert await service._generate_image_bytes(PHOTO_URL, "Карьера", settings) == [PNG]
+    else:
+        with pytest.raises(service.ImageGenerationError):
+            await service._generate_image_bytes(PHOTO_URL, "Карьера", settings)
 
+    assert len(clients) == 1
+    client, kwargs = clients[0]
+    assert kwargs["proxy"] == proxy_url
+    assert kwargs["trust_env"] is False
+    assert kwargs["follow_redirects"] is False
+    assert kwargs.get("verify", True) is True
+    assert client.is_closed
+    assert len(post_requests(api)) == 1
     request = post_requests(api)[0]
-    assert request.kwargs["headers"]["Authorization"] == "Bearer test-proxyapi-key"
-    assert request.kwargs["allow_redirects"] is False
+    assert str(request.url) == IMAGE_EDIT_URL
+    assert request.headers["Authorization"] == "Bearer test-openai-key"
+
+
+async def test_openai_request_does_not_follow_redirects(config, api):
+    api.get(PHOTO_URL, body=PNG)
+    api.post(
+        IMAGE_EDIT_URL, status=302, body="Unexpected redirect",
+        headers={"Location": "https://other-api.example.com/images/edits"},
+    )
+    with pytest.raises(service.ImageGenerationError, match="HTTP 302"):
+        await service._generate_image_bytes(PHOTO_URL, "Карьера", config)
+    assert len(api.http.calls) == 1
+    assert str(api.http.calls[0].request.url) == IMAGE_EDIT_URL
 
 
 @pytest.mark.parametrize("quality", ["low", "medium", "high"])
@@ -422,7 +464,7 @@ async def test_generation_sends_configured_quality(config, api, caplog, quality)
     with caplog.at_level(logging.INFO, logger=service.__name__):
         assert await service._generate_image_bytes(PHOTO_URL, "Карьера", settings) == [PNG]
 
-    fields = await multipart_fields(post_requests(api)[0].kwargs["data"])
+    fields = await multipart_fields(post_requests(api)[0])
     assert fields["model"].get_content() == "configured-image-model"
     assert fields["quality"].get_content() == quality
     assert (
@@ -495,9 +537,9 @@ async def test_generation_logs_full_api_error(config, storage, api, caplog, stat
 
 
 @pytest.mark.parametrize("failure,error", [
-    (aiohttp.ClientConnectionError("ProxyAPI connection failed"), service.ImageGenerationError),
-    (asyncio.TimeoutError("ProxyAPI timed out"), service.GenerationTimeoutError),
-    (RuntimeError("Unexpected ProxyAPI failure"), service.ImageGenerationError),
+    (httpx.ConnectError("OpenAI proxy connection failed"), service.ImageGenerationError),
+    (httpx.ReadTimeout("OpenAI proxy timed out"), service.GenerationTimeoutError),
+    (RuntimeError("Unexpected OpenAI failure"), service.ImageGenerationError),
 ])
 async def test_generation_logs_exception_details(config, storage, api, caplog, failure, error):
     api.get(PHOTO_URL, body=PNG)
@@ -506,10 +548,9 @@ async def test_generation_logs_exception_details(config, storage, api, caplog, f
     with pytest.raises(error) as caught:
         await service.generate_vision_board(PHOTO_URL, "Карьера")
 
-    assert caught.value.__cause__ is failure
-    assert (
-        service.__name__, logging.ERROR, f"Подробная ошибка OpenAI: {failure!r}",
-    ) in caplog.record_tuples
+    assert caught.value.__cause__.__cause__ is failure
+    assert "Подробная ошибка OpenAI:" in caplog.text
+    assert repr(failure) in caplog.text
     storage.put_object.assert_not_called()
     storage.close.assert_called_once()
 
@@ -520,7 +561,7 @@ async def test_generation_handles_timeout(config, storage, api, stage):
         api.get(PHOTO_URL, exception=asyncio.TimeoutError())
     else:
         api.get(PHOTO_URL, body=PNG)
-        api.post(IMAGE_EDIT_URL, exception=asyncio.TimeoutError())
+        api.post(IMAGE_EDIT_URL, exception=httpx.ReadTimeout("OpenAI timed out"))
     with pytest.raises(service.GenerationTimeoutError):
         await service.generate_vision_board(PHOTO_URL, "Карьера")
     storage.put_object.assert_not_called()

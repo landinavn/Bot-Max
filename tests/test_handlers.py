@@ -407,6 +407,71 @@ async def test_no_credits_prevents_generation(credit_db, payments_enabled):
     assert await context.get_state() == PosterStates.waiting_for_sphere
 
 
+@pytest.mark.parametrize("initial_balance", [None, 0, 3])
+async def test_admin_can_generate_repeatedly_without_balance_or_deduction(
+    credit_db, monkeypatch, caplog, initial_balance,
+):
+    if initial_balance == 0:
+        await credit_db.mark_free_trial_used(456)
+    elif initial_balance is not None:
+        await credit_db.add_credits(456, initial_balance)
+    before = await credit_db.get_user(456)
+    get_user = AsyncMock(side_effect=AssertionError("Admin balance must not be checked"))
+    deduct = AsyncMock(return_value=False)
+    monkeypatch.setattr(handlers, "get_user", get_user)
+    monkeypatch.setattr(handlers, "deduct_credit", deduct)
+    generator = AsyncMock(return_value=["https://storage.example.com/photo.png"])
+    router = create_router(generator, admin_user_id=456)
+    context = await ready_context()
+    events = [message_event()]
+
+    with caplog.at_level(logging.INFO, logger=handlers.__name__):
+        await call_handler(router, "collect_sphere", events[0], context)
+        for _ in range(2):
+            data = await context.get_data()
+            event = callback_event(f"more:{data['batch_id']}")
+            events.append(event)
+            await dispatch_callback(router, event, context)
+
+    assert generator.await_count == 3
+    assert all(event.bot.send_message.await_count == 1 for event in events)
+    get_user.assert_not_awaited()
+    deduct.assert_not_awaited()
+    assert await credit_db.get_user(456) == before
+    assert await context.get_state() is None
+    assert (await context.get_data())["package_offer_pending"] is False
+    assert sum(
+        record.getMessage() == "Пропущено списание кредитов для администратора 456"
+        for record in caplog.records
+    ) == 3
+    for event in events:
+        assert not any(
+            call.args and call.args[0] == NO_CREDITS_TEXT
+            for call in event.message.answer.await_args_list
+        )
+
+
+@pytest.mark.parametrize("admin_user_id", [None, 789])
+@pytest.mark.parametrize("initial_balance", [0, 1])
+async def test_normal_users_still_require_and_spend_credits(credit_db, admin_user_id, initial_balance):
+    await credit_db.grant_free_trial(456)
+    if initial_balance == 0:
+        await credit_db.deduct_credit(456)
+    generator = AsyncMock(return_value=["https://storage.example.com/photo.png"])
+    event = message_event()
+    await call_handler(
+        create_router(generator, admin_user_id=admin_user_id),
+        "collect_sphere", event, await ready_context(),
+    )
+    assert generator.await_count == initial_balance
+    assert (await credit_db.get_user(456))["balance"] == 0
+    if initial_balance == 0:
+        event.bot.send_message.assert_not_awaited()
+        event.message.answer.assert_awaited_once()
+        assert event.message.answer.await_args.args == (NO_CREDITS_TEXT,)
+        assert_purchase_keyboard(event.message.answer.await_args.kwargs["attachments"][0])
+
+
 async def test_one_image_costs_one_credit_and_shows_balance_without_offer(credit_db):
     await credit_db.add_credits(456, 2)
     generator = AsyncMock(return_value=["https://storage.example.com/photo.png"])

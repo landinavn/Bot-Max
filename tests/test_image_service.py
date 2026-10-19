@@ -275,15 +275,21 @@ async def test_generation_uploads_photo_and_parses_response(config, storage, api
     assert fields["n"].get_content() == str(count)
     prompt = fields["prompt"].get_content()
     assert dream in prompt
-    # Дословный промпт из первого коммита image_service.py: dfb0275.
-    assert prompt == (
-        "Создай вдохновляющий плакат — карту желаний — на основе приложенного фото. "
-        f"Сфера жизни: {dream.strip()}. "
-        "Сохрани узнаваемые черты и внешность человека с исходного фото. "
-        "Покажи его в позитивном образе желаемого будущего, связанном с этой сферой. "
-        "Добавь тематические элементы коллажа, гармоничные цвета и выразительную композицию. "
-        "Без надписей и водяных знаков."
+    assert prompt.startswith("Create a realistic photographic vision board collage")
+    sections = (
+        "IDENTITY — HIGHEST PRIORITY:", "COLLAGE LAYOUT:",
+        "PHOTOGRAPHIC REALISM:", "FOLLOW THE DREAM:", "NO TEXT:",
+        "User's dream description:",
     )
+    positions = [prompt.index(section) for section in sections]
+    assert positions == sorted(positions)
+    assert "Do not replace their face with a similar-looking person or an idealized model." in prompt
+    assert "occupying approximately 60% of the composition" in prompt
+    assert "5–7 smaller photographic panels" in prompt
+    assert "thin white borders and slightly angled edges" in prompt
+    assert "Every panel must look like a genuine camera photograph." in prompt
+    assert "Do not add titles, captions, motivational quotes, letters, typography, watermarks, or decorative text." in prompt
+    assert prompt.endswith(f"User's dream description: {dream.strip()}")
     # https://developers.openai.com/api/reference/resources/images/methods/edit
     assert len(prompt) <= 32000
     assert fields["output_format"].get_content() == "png"

@@ -267,13 +267,13 @@ async def test_generation_uploads_photo_and_parses_response(config, storage, api
     assert request.headers["Authorization"] == f"Bearer {config.image_api_key}"
     assert dream.encode("utf-8") in await request.aread()
     fields = await multipart_fields(request)
+    assert set(fields) == {"model", "image", "prompt", "size", "quality"}
     assert fields["image"].get_payload(decode=True) == PNG
     assert fields["image"].get_content_type() == "image/png"
     assert fields["image"].get_filename() == "photo.png"
     assert fields["model"].get_content() == config.image_model
     assert fields["quality"].get_content() == "high"
-    assert fields["input_fidelity"].get_content() == "high"
-    assert fields["n"].get_content() == str(count)
+    assert fields["size"].get_content() == "1024x1536"
     prompt = fields["prompt"].get_content()
     assert dream in prompt
     assert prompt.startswith("Create a realistic photographic vision board collage")
@@ -293,7 +293,6 @@ async def test_generation_uploads_photo_and_parses_response(config, storage, api
     assert prompt.endswith(f"User's dream description: {dream.strip()}")
     # https://developers.openai.com/api/reference/resources/images/methods/edit
     assert len(prompt) <= 32000
-    assert fields["output_format"].get_content() == "png"
     assert storage.put_object.call_count == count
     for call, url in zip(storage.put_object.call_args_list, urls):
         assert storage.uploaded_images == [PNG] * count
@@ -476,7 +475,7 @@ async def test_generation_sends_configured_quality(config, api, caplog, quality)
     fields = await multipart_fields(post_requests(api)[0])
     assert fields["model"].get_content() == "configured-image-model"
     assert fields["quality"].get_content() == quality
-    assert fields["input_fidelity"].get_content() == "high"
+    assert set(fields) == {"model", "image", "prompt", "size", "quality"}
     assert (
         service.__name__, logging.INFO,
         f"Отправляю запрос с моделью: configured-image-model, качество: {quality}",

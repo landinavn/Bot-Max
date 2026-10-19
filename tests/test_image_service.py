@@ -272,6 +272,7 @@ async def test_generation_uploads_photo_and_parses_response(config, storage, api
     assert fields["image"].get_filename() == "photo.png"
     assert fields["model"].get_content() == config.image_model
     assert fields["quality"].get_content() == "high"
+    assert fields["input_fidelity"].get_content() == "high"
     assert fields["n"].get_content() == str(count)
     prompt = fields["prompt"].get_content()
     assert dream in prompt
@@ -475,6 +476,7 @@ async def test_generation_sends_configured_quality(config, api, caplog, quality)
     fields = await multipart_fields(post_requests(api)[0])
     assert fields["model"].get_content() == "configured-image-model"
     assert fields["quality"].get_content() == quality
+    assert fields["input_fidelity"].get_content() == "high"
     assert (
         service.__name__, logging.INFO,
         f"Отправляю запрос с моделью: configured-image-model, качество: {quality}",

@@ -237,8 +237,7 @@ async def _generate_image_bytes(
             ) as client:
                 raw = await client.images.with_raw_response.edit(
                     model=config.image_model, quality=config.image_quality,
-                    input_fidelity="high",
-                    prompt=prompt, n=count, size="1024x1536", output_format="png",
+                    prompt=prompt, size="1024x1536",
                     image=(filename, photo_bytes, mime_type),
                 )
                 response = raw.http_response

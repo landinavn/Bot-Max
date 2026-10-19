@@ -275,13 +275,15 @@ async def test_generation_uploads_photo_and_parses_response(config, storage, api
     assert fields["n"].get_content() == str(count)
     prompt = fields["prompt"].get_content()
     assert dream in prompt
-    assert prompt.startswith("Создай вдохновляющий плакат — карту желаний — на основе приложенного фото. ")
-    assert "keep the face exactly as in the original photo; natural head position; photorealistic portrait; do not change facial features." in prompt
-    assert "ANATOMY REQUIREMENTS (critical):\n" in prompt
-    assert "Exactly 5 fingers on each hand, correctly shaped and positioned" in prompt
-    assert "Hands and feet must not be cropped awkwardly unless part of natural composition\n\n" in prompt
-    assert f"Описание мечты пользователя: {dream.strip()}\n\nИзобрази человека" in prompt
-    assert prompt.endswith("Без надписей и водяных знаков.")
+    # Дословный промпт из первого коммита image_service.py: dfb0275.
+    assert prompt == (
+        "Создай вдохновляющий плакат — карту желаний — на основе приложенного фото. "
+        f"Сфера жизни: {dream.strip()}. "
+        "Сохрани узнаваемые черты и внешность человека с исходного фото. "
+        "Покажи его в позитивном образе желаемого будущего, связанном с этой сферой. "
+        "Добавь тематические элементы коллажа, гармоничные цвета и выразительную композицию. "
+        "Без надписей и водяных знаков."
+    )
     # https://developers.openai.com/api/reference/resources/images/methods/edit
     assert len(prompt) <= 32000
     assert fields["output_format"].get_content() == "png"

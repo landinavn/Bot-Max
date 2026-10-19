@@ -43,7 +43,7 @@ async def main() -> None:
             use_create_task=True,
             event_isolation=SimpleEventIsolation(),
         )
-        dispatcher.include_routers(create_router(payments=payments))
+        dispatcher.include_routers(create_router(payments=payments, admin_user_id=config.admin_user_id))
         webhook_runner = None
         try:
             if payments is not None:

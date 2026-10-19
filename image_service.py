@@ -24,7 +24,7 @@ from botocore.session import Session as BotocoreSession
 from maxapi import Bot
 from maxapi.enums.upload_type import UploadType
 from maxapi.types import AttachmentUpload, InputMedia, InputMediaBuffer, Message
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from config import Config
 from max_client import create_max_bot, log_max_error
@@ -33,6 +33,74 @@ MAX_PHOTO_BYTES = 50 * 1024 * 1024
 MAX_UPLOAD_BYTES = 1_000_000
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 logger = logging.getLogger(__name__)
+
+FONT_PATH = Path(__file__).resolve().parent / "font.ttf"
+POSTCARD_PROMPTS = {
+    "mode_ny": (
+        "Beautiful New Year greeting card. Place the person from the reference photo in a cozy winter outfit. "
+        "Add festive elements: Christmas tree, snow, garlands, gifts. Leave a large empty space at the bottom for text."
+    ),
+    "mode_ny_family": (
+        "Beautiful New Year family greeting card. Place all people from the reference photo together in a cozy winter atmosphere. "
+        "Keep all faces exactly as in the reference. Add Christmas tree, snow, gifts. Leave a large empty space at the bottom for text."
+    ),
+    "mode_bday_young": (
+        "Vibrant Birthday greeting card. Place the young person from the reference photo in a celebratory pose "
+        "with balloons, confetti, and a festive cake. Leave a large empty space at the bottom for text."
+    ),
+    "mode_bday_old": (
+        "Elegant Birthday greeting card for a mature person (50-70 years old). Do NOT make the person look younger, "
+        "keep natural wrinkles. Place them in a sophisticated, warm setting with elegant flowers, a cake, and soft lighting. "
+        "Leave a large empty space at the bottom for text."
+    ),
+    "mode_8march": (
+        "Beautiful 8 March greeting card. Place the woman from the reference photo surrounded by spring flowers, "
+        "tulips, and mimosa. Warm spring lighting. Leave a large empty space at the bottom for text."
+    ),
+}
+POSTCARD_TEXT = {
+    "ny": "С Новым Годом!",
+    "ny_family": "С Новым Годом!",
+    "bday_young": "С Днём Рождения!",
+    "bday_old": "С Днём Рождения!",
+    "8march": "С 8 Марта!",
+}
+
+
+def _postcard_font(size: int):
+    try:
+        return ImageFont.truetype(str(FONT_PATH), size=size)
+    except OSError as exc:
+        raise GenerationNotConfigured("Не удалось загрузить шрифт font.ttf для открытки.") from exc
+
+
+def add_text_to_image(image_bytes: bytes, mode: str) -> bytes:
+    """Добавить кириллическое поздравление в нижнюю свободную часть открытки."""
+    text = POSTCARD_TEXT.get(mode.removeprefix("mode_"))
+    if text is None:
+        raise ValueError(f"Неизвестный режим открытки: {mode}")
+    with Image.open(BytesIO(image_bytes)) as source:
+        image = ImageOps.exif_transpose(source).convert("RGB")
+    width, height = image.size
+    draw = ImageDraw.Draw(image)
+    font_size = max(1, height // 15)
+    # Подбирать по ширине и высоте, чтобы длинное поздравление не обрезалось.
+    while True:
+        font = _postcard_font(font_size)
+        stroke = max(1, font_size // 25)
+        left, top, right, bottom = draw.textbbox((0, 0), text, font=font, stroke_width=stroke)
+        if right - left <= width * 0.9 and bottom - top <= height * 0.18:
+            break
+        if font_size == 1:
+            raise ImageGenerationError("Размер открытки слишком мал для поздравления.")
+        font_size -= 1
+    x = (width - (right - left)) / 2 - left
+    y = height * 0.89 - (bottom - top) / 2 - top
+    draw.text((round(x), round(y)), text, font=font, fill="white",
+              stroke_width=stroke, stroke_fill="black")
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 async def upload_photo(file_bytes: bytes) -> str:
@@ -345,12 +413,16 @@ def _store_image(client, config: Config, image_path: Path) -> str:
 
 
 async def _generate_and_store(
-    photo_url: str, sphere: str, count: int = 1, *, prompt_override: str | None = None
+    photo_url: str, sphere: str, count: int = 1, *, prompt_override: str | None = None,
+    postcard_mode: str | None = None
 ) -> list[str]:
     _validate_inputs(photo_url, sphere if prompt_override is None else "Открытка")
     config = Config.from_env()
     if not config.image_api_key or not config.image_model:
         raise GenerationNotConfigured("Задайте IMAGE_API_KEY и IMAGE_MODEL.")
+    if postcard_mode is not None:
+        # Проверить наличие шрифта до платного запроса к модели.
+        await asyncio.to_thread(_postcard_font, 16)
     client = None
     try:
         client = await asyncio.to_thread(_storage_client, config)
@@ -358,6 +430,8 @@ async def _generate_and_store(
         images = await _generate_image_bytes(photo_url, sphere, config, count=count, **kwargs)
         result_urls = []
         for image_bytes in images:
+            if postcard_mode is not None:
+                image_bytes = await asyncio.to_thread(add_text_to_image, image_bytes, postcard_mode)
             with TemporaryDirectory(prefix="botmax-images-") as directory:
                 image_path = Path(directory) / "generated.png"
                 await asyncio.to_thread(image_path.write_bytes, image_bytes)
@@ -407,16 +481,17 @@ async def generate_vision_boards(photo_url: str, sphere: str) -> list[str]:
     return await _generate_and_store(photo_url, sphere, count=1)
 
 
-async def generate_postcards(photo_url: str, template_prompt: str) -> list[str]:
-    """Открытка по готовому шаблону, без промпта карты желаний."""
-    if not isinstance(template_prompt, str) or not template_prompt.strip():
-        raise ValueError("Нужен промпт шаблона открытки.")
+async def generate_postcards(photo_url: str, mode: str) -> list[str]:
+    """Создать открытку по режиму, наложить поздравление и сохранить в S3."""
+    if mode not in POSTCARD_PROMPTS:
+        raise ValueError(f"Неизвестный режим открытки: {mode}")
     prompt = (
-        template_prompt + "\n\nPreserve the reference person's identity, facial features, "
-        "hairstyle, age and skin tone. Use photorealistic photography, vivid harmonious colors "
-        "and natural anatomy. Keep the reserved greeting area blank; do not add text or watermarks."
+        POSTCARD_PROMPTS[mode] + "\n\nPreserve every reference person's identity, facial features, "
+        "hairstyle, age and skin tone. Do not remove or add people. Use photorealistic photography, "
+        "vivid harmonious colors and natural anatomy. Keep the bottom 22% empty for a greeting "
+        "added later by software; keep faces outside this area. Do not add any text or watermarks."
     )
-    return await _generate_and_store(photo_url, template_prompt, prompt_override=prompt)
+    return await _generate_and_store(photo_url, "Открытка", prompt_override=prompt, postcard_mode=mode)
 
 
 def _prepare_max_image(data: bytes) -> tuple[bytes, str]:

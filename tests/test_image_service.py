@@ -264,27 +264,24 @@ async def test_generation_uploads_photo_and_parses_response(config, storage, api
     assert fields["n"].get_content() == str(count)
     prompt = fields["prompt"].get_content()
     assert dream in prompt
-    assert prompt.startswith("Create a highly realistic Vision Board Collage based on the provided reference photo. ")
-    assert "photographic collage, NOT a graphic design poster" in prompt
-    assert "DO NOT ADD ANY TEXT, LETTERS, TYPOGRAPHY, CAPTIONS, OR WATERMARKS ANYWHERE IN THE IMAGE." in prompt
+    assert prompt.startswith("CRITICAL INSTRUCTION: Preserve the person's identity EXACTLY as in the provided reference photo. ")
     face_requirement = (
-        "Perfectly preserve the original: facial proportions, nose shape, eye color and shape, "
-        "lips, skin tone, age, hair color, and hairstyle."
+        "Maintain the exact face shape, nose, eyes, lips, skin tone, age, hairstyle, and expression."
     )
-    identity = "CRITICAL IDENTITY MATCH (Absolute Priority):"
-    anatomy = "ANATOMY REQUIREMENTS (Critical):"
-    composition = "COLLAGE COMPOSITION:"
+    composition = "Create a vibrant, inspiring, and highly aesthetic Vision Board Collage."
+    anatomy = "ANATOMY REQUIREMENTS (critical):"
     dream_label = "User's dream description:"
-    assert prompt.index(identity) < prompt.index(face_requirement) < prompt.index(anatomy)
-    assert prompt.index(anatomy) < prompt.index(composition) < prompt.index(dream_label)
-    assert "Maintain the exact same head angle, pose, and natural expression. Do not alter or stylize the face." in prompt
-    assert "Place the person as the main centerpiece. Surround them with aesthetic thematic collage elements that visually represent their dream." in prompt
-    assert prompt.endswith(f"User's dream description: {dream.strip()}")
-    anatomy_block = prompt[prompt.index(anatomy):prompt.index(composition)]
+    assert prompt.index(face_requirement) < prompt.index(composition) < prompt.index(anatomy) < prompt.index(dream_label)
+    assert "Do NOT generate a new face. The generated person must be 100% recognizable as the person in the reference photo." in prompt
+    assert "colorful, magical, and expressive, blending photorealism with beautiful thematic collage elements" in prompt
+    assert "Make it look like an aspirational mood board, not a boring photo." in prompt
+    assert f"User's dream description: {dream.strip()}\n\nBlend the person into the dream scene described by the user." in prompt
+    assert prompt.endswith("Create a rich, colorful, and visually stunning composition without any watermarks.")
+    anatomy_block = prompt[prompt.index(anatomy):prompt.index(dream_label)]
     for requirement in (
         "Correct human anatomy and realistic body proportions",
-        "Exactly 5 fingers on each hand, correctly shaped",
-        "Exactly 2 arms and 2 legs, no extra limbs",
+        "Exactly 5 fingers on each hand, correctly shaped and positioned",
+        "Exactly 2 arms and 2 legs, all visible limbs must be complete",
         "Realistic skin texture and natural joint articulation",
     ):
         assert requirement in anatomy_block

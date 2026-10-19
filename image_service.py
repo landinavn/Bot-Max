@@ -12,6 +12,8 @@ from uuid import uuid4
 
 import aiohttp
 import boto3
+import httpx
+from openai import AsyncOpenAI, APIConnectionError, APIStatusError, APITimeoutError
 from botocore.exceptions import (
     BotoCoreError,
     ClientError,
@@ -29,6 +31,7 @@ from max_client import create_max_bot, log_max_error
 
 MAX_PHOTO_BYTES = 50 * 1024 * 1024
 MAX_UPLOAD_BYTES = 1_000_000
+OPENAI_BASE_URL = "https://api.openai.com/v1"
 logger = logging.getLogger(__name__)
 
 
@@ -92,33 +95,33 @@ class GenerationLimitError(ImageGenerationError):
         )
 
 
-async def _raise_api_error(response: aiohttp.ClientResponse) -> None:
+def _raise_api_error(response: httpx.Response) -> None:
     """Записать полный ответ OpenAI в лог и классифицировать ошибку API."""
-    body = await response.text(errors="replace")
-    logger.error("OpenAI Images API error: HTTP %s; response body: %s", response.status, body)
+    body = response.text
+    logger.error("OpenAI Images API error: HTTP %s; response body: %s", response.status_code, body)
     code = ""
     try:
-        payload = await response.json()
+        payload = response.json()
         if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
             raw_code = payload["error"].get("code")
             code = raw_code if isinstance(raw_code, str) else ""
-    except (ValueError, aiohttp.ContentTypeError):
+    except ValueError:
         pass
     quota_exhausted = code in {
         "insufficient_quota", "quota_exceeded", "billing_hard_limit_reached",
         "billing_limit_reached", "usage_limit_reached",
     }
-    if response.status == 429 or quota_exhausted:
+    if response.status_code == 429 or quota_exhausted:
         retry_after = response.headers.get("Retry-After", "")
         seconds = int(retry_after) if retry_after.isdigit() and len(retry_after) <= 6 else None
         raise GenerationLimitError(quota_exhausted=quota_exhausted, retry_after=seconds)
-    if response.status in {400, 415, 422} and code in {
+    if response.status_code in {400, 415, 422} and code in {
         "invalid_image", "invalid_image_format", "unsupported_image_format", "image_parse_error",
     }:
         raise UnsupportedPhotoFormatError("Фото не удалось прочитать. Используйте PNG, JPEG или WebP.")
-    if response.status == 415:
+    if response.status_code == 415:
         raise UnsupportedPhotoFormatError("Формат фото не поддерживается API.")
-    raise ImageGenerationError(f"API генерации вернул ошибку HTTP {response.status}.")
+    raise ImageGenerationError(f"API генерации вернул ошибку HTTP {response.status_code}.")
 
 
 async def _download_photo(session: aiohttp.ClientSession, photo_url: str) -> bytes:
@@ -163,54 +166,69 @@ async def _generate_image_bytes(
         raise GenerationNotConfigured("Задайте IMAGE_API_KEY и IMAGE_MODEL.")
     prompt = (
         "Создай вдохновляющий плакат — карту желаний — на основе приложенного фото. "
-        "Сохрани узнаваемые черты и внешность человека с исходного фото. "
-        "Покажи его в позитивном образе желаемого будущего, связанном с этой сферой. "
+        "Обязательные требования к портрету: keep the face exactly as in the original photo; "
+        "natural head position; photorealistic portrait; do not change facial features. "
+        "Сохрани исходный ракурс и положение головы, направление взгляда, выражение лица, "
+        "возраст, пропорции лица и текстуру кожи. Не поворачивай и не наклоняй голову, "
+        "не искажай шею и не стилизуй лицо. "
+        "Приоритет — точное сохранение лица; меняй окружение и тематические детали, "
+        "а не лицо или позу головы.\n\n"
+        "ANATOMY REQUIREMENTS (critical):\n"
+        "- Correct human anatomy and realistic body proportions\n"
+        "- Exactly 5 fingers on each hand, correctly shaped and positioned\n"
+        "- Exactly 2 arms and 2 legs, all visible limbs must be complete\n"
+        "- Natural, anatomically correct pose\n"
+        "- Correct ratio of head to body (no oversized or undersized head)\n"
+        "- Correct placement of limbs relative to the torso\n"
+        "- No extra limbs, no missing limbs, no deformed hands or feet\n"
+        "- Realistic skin texture and natural joint articulation\n"
+        "- Hands and feet must not be cropped awkwardly unless part of natural composition\n\n"
+        f"Описание мечты пользователя: {sphere.strip()}\n\n"
+        "Изобрази человека с исходного фото в сцене, описанной пользователем. "
+        "Точно следуй деталям его мечты или желания. "
         "Добавь тематические элементы коллажа, гармоничные цвета и выразительную композицию. "
-        "Без надписей и водяных знаков. "
-        f"Сфера жизни: {sphere.strip()}."
+        "Без надписей и водяных знаков."
     )
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
             photo_bytes = await _download_photo(session, photo_url)
-            filename, mime_type = _photo_format(photo_bytes)
-            form = aiohttp.FormData()
-            form.add_field("model", config.image_model)
-            form.add_field("quality", config.image_quality)
-            form.add_field("prompt", prompt)
-            form.add_field("n", str(count))
-            form.add_field("size", "1024x1536")
-            form.add_field("output_format", "png")
-            form.add_field("image", photo_bytes, filename=filename, content_type=mime_type)
-            # Ключ ProxyAPI отправляется только на настроенный адрес API.
-            logger.info("HTTP POST OpenAI Images API: генерация %d изображений.", count)
-            logger.info(
-                "Отправляю запрос с моделью: %s, качество: %s",
-                config.image_model, config.image_quality,
-            )
-            endpoint = f"{config.openai_base_url.rstrip('/')}/images/edits"
-            logger.info("Эндпоинт API: %s, quality: %s", endpoint, config.image_quality)
-            async with session.post(
-                endpoint,
-                data=form,
-                headers={"Authorization": f"Bearer {config.image_api_key}"},
-                allow_redirects=False,
-            ) as response:
-                if response.status != 200:
-                    await _raise_api_error(response)
+        filename, mime_type = _photo_format(photo_bytes)
+        logger.info("HTTP POST OpenAI Images API: генерация %d изображений.", count)
+        logger.info(
+            "Отправляю запрос с моделью: %s, качество: %s",
+            config.image_model, config.image_quality,
+        )
+        logger.info("Эндпоинт API: %s/images/edits, quality: %s", OPENAI_BASE_URL, config.image_quality)
+        async with httpx.AsyncClient(
+            proxy=config.openai_proxy_url, timeout=300, trust_env=False, follow_redirects=False,
+        ) as http_client:
+            async with AsyncOpenAI(
+                api_key=config.image_api_key, base_url=OPENAI_BASE_URL,
+                http_client=http_client, max_retries=0,
+            ) as client:
+                raw = await client.images.with_raw_response.edit(
+                    model=config.image_model, quality=config.image_quality,
+                    prompt=prompt, n=count, size="1024x1536", output_format="png",
+                    image=(filename, photo_bytes, mime_type),
+                )
+                response = raw.http_response
+                if response.status_code != 200:
+                    _raise_api_error(response)
                 try:
-                    payload = await response.json()
-                except (ValueError, aiohttp.ContentTypeError) as exc:
-                    body = await response.text(errors="replace")
+                    payload = response.json()
+                except ValueError as exc:
                     logger.error(
                         "OpenAI Images API invalid JSON: HTTP %s; response body: %s",
-                        response.status, body,
+                        response.status_code, response.text,
                     )
                     raise ImageGenerationError("OpenAI вернул некорректный JSON.") from exc
-    except asyncio.TimeoutError as exc:
-        logger.error("Подробная ошибка OpenAI: %r", exc)
+    except APIStatusError as exc:
+        _raise_api_error(exc.response)
+    except (asyncio.TimeoutError, APITimeoutError) as exc:
+        logger.error("Подробная ошибка OpenAI: %r; причина: %r", exc, exc.__cause__)
         raise GenerationTimeoutError("Превышено время ожидания ответа API.") from exc
-    except aiohttp.ClientError as exc:
-        logger.error("Подробная ошибка OpenAI: %r", exc)
+    except (aiohttp.ClientError, APIConnectionError) as exc:
+        logger.error("Подробная ошибка OpenAI: %r; причина: %r", exc, exc.__cause__)
         raise ImageGenerationError(f"Ошибка API: {exc}") from exc
     except ImageGenerationError:
         # HTTP-ответ уже записан в _raise_api_error; сохранить тип ошибки.

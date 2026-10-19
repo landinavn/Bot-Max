@@ -31,6 +31,7 @@ class Config:
     webhook_port: int = 8080
     openai_base_url: str = DEFAULT_OPENAI_BASE_URL
     image_quality: str = "high"
+    admin_user_id: int | None = None
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -44,11 +45,19 @@ class Config:
             photo_path = BASE_DIR / photo_path
         image_api_key = os.environ.get("IMAGE_API_KEY", "").strip() or None
         image_model = os.environ.get("IMAGE_MODEL", "").strip()
+        admin_raw = os.environ.get("ADMIN_USER_ID", "").strip()
+        try:
+            admin_user_id = int(admin_raw) if admin_raw else None
+        except ValueError:
+            raise ValueError("ADMIN_USER_ID должен быть положительным числовым user_id или пустым.") from None
+        if admin_user_id is not None and admin_user_id <= 0:
+            raise ValueError("ADMIN_USER_ID должен быть положительным числовым user_id или пустым.")
         return cls(
             token=token,
             photo_path=photo_path,
             image_api_key=image_api_key,
             image_model=image_model,
+            admin_user_id=admin_user_id,
             image_quality=os.environ.get("IMAGE_QUALITY", "").strip() or "high",
             openai_base_url=os.environ.get("OPENAI_BASE_URL", "").strip() or DEFAULT_OPENAI_BASE_URL,
             storage_bucket=os.environ.get("STORAGE_BUCKET", "").strip() or None,

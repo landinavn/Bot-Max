@@ -264,30 +264,17 @@ async def test_generation_uploads_photo_and_parses_response(config, storage, api
     assert fields["n"].get_content() == str(count)
     prompt = fields["prompt"].get_content()
     assert dream in prompt
-    assert prompt.startswith("CRITICAL INSTRUCTION: Preserve the person's identity EXACTLY as in the provided reference photo. ")
-    face_requirement = (
-        "Maintain the exact face shape, nose, eyes, lips, skin tone, age, hairstyle, and expression."
+    # Исходный текст из dfb0275; подстановка пользователя перенесена в конец.
+    assert prompt == (
+        "Создай вдохновляющий плакат — карту желаний — на основе приложенного фото. "
+        "Сохрани узнаваемые черты и внешность человека с исходного фото. "
+        "Покажи его в позитивном образе желаемого будущего, связанном с этой сферой. "
+        "Добавь тематические элементы коллажа, гармоничные цвета и выразительную композицию. "
+        "Без надписей и водяных знаков. "
+        f"Сфера жизни: {dream.strip()}."
     )
-    composition = "Create a vibrant, inspiring, and highly aesthetic Vision Board Collage."
-    anatomy = "ANATOMY REQUIREMENTS (critical):"
-    dream_label = "User's dream description:"
-    assert prompt.index(face_requirement) < prompt.index(composition) < prompt.index(anatomy) < prompt.index(dream_label)
-    assert "Do NOT generate a new face. The generated person must be 100% recognizable as the person in the reference photo." in prompt
-    assert "colorful, magical, and expressive, blending photorealism with beautiful thematic collage elements" in prompt
-    assert "Make it look like an aspirational mood board, not a boring photo." in prompt
-    assert f"User's dream description: {dream.strip()}\n\nBlend the person into the dream scene described by the user." in prompt
-    assert prompt.endswith("Create a rich, colorful, and visually stunning composition without any watermarks.")
-    anatomy_block = prompt[prompt.index(anatomy):prompt.index(dream_label)]
-    for requirement in (
-        "Correct human anatomy and realistic body proportions",
-        "Exactly 5 fingers on each hand, correctly shaped and positioned",
-        "Exactly 2 arms and 2 legs, all visible limbs must be complete",
-        "Realistic skin texture and natural joint articulation",
-    ):
-        assert requirement in anatomy_block
     # https://developers.openai.com/api/reference/resources/images/methods/edit
     assert len(prompt) <= 32000
-    assert "Сфера жизни" not in prompt
     assert fields["output_format"].get_content() == "png"
     assert storage.put_object.call_count == count
     for call, url in zip(storage.put_object.call_args_list, urls):

@@ -54,6 +54,8 @@ def create_webhook_app(payments: ProdamusPayments) -> web.Application:
                 logger.info("Prodamus: уведомление без успешной оплаты пропущено.")
                 return web.Response(text="OK")
             order, payment_id = await payments.validate_payment(data)
+            # add_credits вызывает increment_purchases в той же транзакции:
+            # повтор webhook не увеличивает ни баланс, ни число покупок.
             credited = await add_credits(
                 order["user_id"], order["credits"],
                 payment_order_id=order["order_id"], provider_payment_id=payment_id,

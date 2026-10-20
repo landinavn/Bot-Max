@@ -25,7 +25,7 @@ from maxapi.types import (
 )
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
-from database import deduct_credit, get_user, grant_free_trial
+from database import deduct_credit, get_user, grant_free_trial, get_global_stats, increment_generations
 from prodamus import PACKAGES, ProdamusPayments
 from max_client import log_max_error
 from image_service import (
@@ -282,9 +282,10 @@ def create_router(
                     raise RuntimeError("Генератор должен вернуть один HTTPS URL.")
                 user = None
                 if is_admin:
+                    await increment_generations(credit_user_id)
                     logger.info("Пропущено списание кредитов для администратора %s", credit_user_id)
                 else:
-                    if not await deduct_credit(credit_user_id):
+                    if not await deduct_credit(credit_user_id, count_generation=True):
                         raise RuntimeError("Не удалось списать кредит после генерации.")
                     user = await get_user(credit_user_id)
                 data = await context.update_data(
@@ -378,6 +379,21 @@ def create_router(
             return
         # Данные нужны кнопкам «Ещё» и «Поделиться»; завершаем только состояние.
         await context.set_state(None)
+
+    @router.message_created(Command("stats"))
+    async def stats(event: MessageCreated) -> None:
+        if is_bot_message(event):
+            return
+        if admin_user_id is None or event.get_ids()[1] != admin_user_id:
+            return
+        data = await get_global_stats()
+        await _reply(event,
+            "📊 Статистика бота:\n\n"
+            f"👥 Всего пользователей: {data['total_users']}\n"
+            f"💳 Покупателей: {data['total_paid_users']}\n"
+            f"🖼 Всего сгенерировано картинок: {data['total_generated']}\n"
+            f"💰 Всего покупок: {data['total_purchases']}"
+        )
 
     @router.message_created(CommandStart())
     async def start(event: MessageCreated, context: MemoryContext) -> None:

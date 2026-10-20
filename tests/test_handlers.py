@@ -557,7 +557,10 @@ async def test_admin_can_generate_repeatedly_without_balance_or_deduction(
     assert all(event.bot.send_message.await_count == 1 for event in events)
     get_user.assert_not_awaited()
     deduct.assert_not_awaited()
-    assert await credit_db.get_user(456) == before
+    after = await credit_db.get_user(456)
+    assert after["balance"] == (before["balance"] if before else 0)
+    assert after["total_generations"] == 3
+    assert after["total_purchases"] == 0
     assert await context.get_state() is None
     assert (await context.get_data())["package_offer_pending"] is False
     assert sum(
@@ -992,3 +995,63 @@ async def test_old_birthday_button_opens_young_template():
     context = await ready_context()
     await dispatch_callback(create_router(), callback_event("mode_bday"), context)
     assert (await context.get_data())["mode"] == "mode_bday_young"
+
+
+@pytest.mark.parametrize("state", [None, PosterStates.waiting_for_photo, PosterStates.waiting_for_prompt, PosterStates.generating])
+async def test_admin_stats_does_not_change_fsm(credit_db, state):
+    await credit_db.grant_free_trial(123)
+    await credit_db.increment_generations(123)
+    await credit_db.create_payment_order("stats-order", 123, 5, 29900, "test")
+    await credit_db.add_credits(123, 5, payment_order_id="stats-order", provider_payment_id="stats-payment")
+    context = await ready_context()
+    await context.set_state(state)
+    before = dict(await context.get_data())
+    event = message_event("/stats")
+    router = create_router(admin_user_id=456)
+    await call_handler(router, "stats", event)
+    event.message.answer.assert_awaited_once_with(
+        "📊 Статистика бота:\n\n👥 Всего пользователей: 1\n💳 Покупателей: 1\n"
+        "🖼 Всего сгенерировано картинок: 1\n💰 Всего покупок: 1"
+    )
+    assert await context.get_state() == state
+    assert await context.get_data() == before
+    names = [h.func_event.__name__ for h in router.event_handlers]
+    assert names.index("stats") < names.index("collect_sphere")
+    assert names.index("stats") < names.index("collect_photo")
+
+
+@pytest.mark.parametrize("configured_admin,actor,is_bot", [(None, 456, False), (789, 456, False), (456, None, False), (456, 456, True)])
+async def test_stats_ignores_unauthorized_or_bot_messages(monkeypatch, configured_admin, actor, is_bot):
+    query = AsyncMock()
+    monkeypatch.setattr(handlers, "get_global_stats", query)
+    event = message_event("/stats")
+    event.get_ids = lambda: (456, actor)  # A matching chat_id must not grant admin access.
+    event.message.sender.is_bot = is_bot
+    await call_handler(create_router(admin_user_id=configured_admin), "stats", event)
+    query.assert_not_awaited()
+    event.message.answer.assert_not_awaited()
+
+
+async def test_generation_stats_count_new_results_not_delivery_retries(credit_db):
+    await credit_db.add_credits(456, 2)
+    generator = AsyncMock(return_value=["https://cdn.example/result.png"])
+    router = create_router(generator)
+    context = await ready_context()
+    event = message_event()
+    event.bot.send_message.side_effect = RuntimeError("delivery failed")
+    await call_handler(router, "collect_sphere", event, context)
+    assert (await credit_db.get_user(456))["total_generations"] == 1
+    event.bot.send_message.side_effect = None
+    await call_handler(router, "collect_sphere", event, context)
+    assert generator.await_count == 1
+    assert (await credit_db.get_user(456))["total_generations"] == 1
+    await dispatch_callback(router, callback_event("more"), context)
+    await call_handler(router, "collect_sphere", message_event("Новая мечта"), context)
+    assert (await credit_db.get_user(456))["total_generations"] == 2
+
+
+async def test_failed_generation_does_not_change_stats(credit_db):
+    await credit_db.add_credits(456, 1)
+    generator = AsyncMock(side_effect=RuntimeError("generation failed"))
+    await call_handler(create_router(generator), "collect_sphere", message_event(), await ready_context())
+    assert (await credit_db.get_global_stats())["total_generated"] == 0

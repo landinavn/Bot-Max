@@ -190,12 +190,16 @@ async def test_webhook_credits_paid_order_once(client, payments, credit_db, cred
     response = await post_notification(client, data, encoding=encoding)
     assert response.status == 200 and await response.text() == "OK"
     assert (await credit_db.get_user(456))["balance"] == credits + 1
+    assert (await credit_db.get_user(456))["total_purchases"] == 1
+    assert (await credit_db.get_global_stats())["total_revenue_credits"] == credits
     assert (await credit_db.get_user(456))["free_trial_used"] == 1
     assert (await credit_db.get_payment_order(data["order_num"]))["status"] == "paid"
     await credit_db.init_db()  # Повтор после перезапуска и с новым attempt.
     data["attempt"] = "2"
     assert (await post_notification(client, data, encoding=encoding)).status == 200
     assert (await credit_db.get_user(456))["balance"] == credits + 1
+    assert (await credit_db.get_user(456))["total_purchases"] == 1
+    assert (await credit_db.get_global_stats())["total_revenue_credits"] == credits
 
 
 async def test_order_created_before_price_increase_still_credits(client, payments, credit_db, monkeypatch):
@@ -385,3 +389,27 @@ async def test_single_generation_payment_rejects_wrong_amount_or_package(client,
     assert response.status == 400
     assert await credit_db.get_user(456) is None
     assert (await credit_db.get_payment_order(data["order_num"]))["status"] == "pending"
+
+
+async def test_purchase_counter_failure_rolls_back_payment_and_balance(client, payments, credit_db, monkeypatch):
+    data = await notification(payments, credits=1)
+    await credit_db.grant_free_trial(456)
+    with monkeypatch.context() as patch:
+        patch.setattr(credit_db, "increment_purchases", AsyncMock(side_effect=sqlite3.OperationalError("counter failed")))
+        assert (await post_notification(client, data)).status == 503
+    assert (await credit_db.get_user(456))["balance"] == 1
+    assert (await credit_db.get_user(456))["total_purchases"] == 0
+    assert (await credit_db.get_payment_order(data["order_num"]))["status"] == "pending"
+    assert (await post_notification(client, data)).status == 200
+    assert (await post_notification(client, data)).status == 200
+    assert (await credit_db.get_user(456))["balance"] == 2
+    assert (await credit_db.get_user(456))["total_purchases"] == 1
+
+
+@pytest.mark.parametrize("field,value", [("is_test", "1"), ("payment_status", "failed"), ("payment_status", "pending")])
+async def test_non_paid_webhooks_do_not_count_as_purchases(client, payments, credit_db, field, value):
+    data = await notification(payments, credits=1)
+    data[field] = value
+    assert (await post_notification(client, data)).status == 200
+    stats = await credit_db.get_global_stats()
+    assert stats["total_purchases"] == stats["total_paid_users"] == stats["total_revenue_credits"] == 0

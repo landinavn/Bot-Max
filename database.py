@@ -9,12 +9,15 @@ DATABASE_PATH = Path(__file__).resolve().parent / "database.sqlite3"
 
 async def init_db() -> None:
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        await db.execute("BEGIN IMMEDIATE")
         await db.execute(
             """CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 balance INTEGER NOT NULL DEFAULT 0 CHECK (balance >= 0),
                 free_trial_used BOOLEAN NOT NULL DEFAULT 0
-                    CHECK (free_trial_used IN (0, 1))
+                    CHECK (free_trial_used IN (0, 1)),
+                total_generations INTEGER NOT NULL DEFAULT 0 CHECK (total_generations >= 0),
+                total_purchases INTEGER NOT NULL DEFAULT 0 CHECK (total_purchases >= 0)
             )"""
         )
         await db.execute(
@@ -30,6 +33,21 @@ async def init_db() -> None:
                 paid_at TEXT
             )"""
         )
+        async with db.execute("PRAGMA table_info(users)") as cursor:
+            columns = {row[1] for row in await cursor.fetchall()}
+        for column in ("total_generations", "total_purchases"):
+            if column not in columns:
+                await db.execute(
+                    f"ALTER TABLE users ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0 CHECK ({column} >= 0)"
+                )
+        if "total_purchases" not in columns:
+            # История оплат уже существует; восстановить её только при миграции.
+            await db.execute(
+                """UPDATE users SET total_purchases = (
+                    SELECT COUNT(*) FROM payment_orders
+                    WHERE payment_orders.user_id = users.user_id AND status = 'paid'
+                )"""
+            )
         await db.commit()
 
 
@@ -77,6 +95,8 @@ async def add_credits(
                ON CONFLICT(user_id) DO UPDATE SET balance = balance + excluded.balance""",
             (user_id, amount),
         )
+        if payment_order_id is not None:
+            await increment_purchases(user_id, connection=db)
         await db.commit()
         return True
 
@@ -103,15 +123,18 @@ async def get_payment_order(order_id: str) -> aiosqlite.Row | None:
             return await cursor.fetchone()
 
 
-async def deduct_credit(user_id: int) -> bool:
-    """Атомарно списать кредит; при нулевом балансе вернуть False."""
+async def deduct_credit(user_id: int, *, count_generation: bool = False) -> bool:
+    """Атомарно списать кредит и при необходимости учесть новую генерацию."""
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         cursor = await db.execute(
             "UPDATE users SET balance = balance - 1 WHERE user_id = ? AND balance >= 1",
             (user_id,),
         )
+        charged = cursor.rowcount == 1
+        if charged and count_generation:
+            await increment_generations(user_id, connection=db)
         await db.commit()
-        return cursor.rowcount == 1
+        return charged
 
 
 async def mark_free_trial_used(user_id: int) -> None:
@@ -139,3 +162,44 @@ async def grant_free_trial(user_id: int) -> bool:
         )
         await db.commit()
         return cursor.rowcount == 1
+
+
+async def _increment_counter(user_id: int, column: str, connection: aiosqlite.Connection | None) -> None:
+    if column not in {"total_generations", "total_purchases"}:
+        raise ValueError("Неизвестный счётчик статистики.")
+    query = (
+        f"INSERT INTO users (user_id, {column}) VALUES (?, 1) "
+        f"ON CONFLICT(user_id) DO UPDATE SET {column} = {column} + 1"
+    )
+    if connection is not None:
+        await connection.execute(query, (user_id,))
+    else:
+        async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+            await db.execute(query, (user_id,))
+            await db.commit()
+
+
+async def increment_generations(user_id: int, *, connection: aiosqlite.Connection | None = None) -> None:
+    """Учесть новую генерацию; connection связывает счётчик со списанием кредита."""
+    await _increment_counter(user_id, "total_generations", connection)
+
+
+async def increment_purchases(user_id: int, *, connection: aiosqlite.Connection | None = None) -> None:
+    """Учесть покупку в транзакции оплаты, без повторного начисления webhook."""
+    await _increment_counter(user_id, "total_purchases", connection)
+
+
+async def get_global_stats() -> dict[str, int]:
+    """Снимок счётчиков и точного количества кредитов из оплаченных заказов."""
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT COUNT(*) AS total_users,
+                COALESCE(SUM(CASE WHEN total_purchases > 0 THEN 1 ELSE 0 END), 0) AS total_paid_users,
+                COALESCE(SUM(total_generations), 0) AS total_generated,
+                COALESCE(SUM(total_purchases), 0) AS total_purchases,
+                (SELECT COALESCE(SUM(credits), 0) FROM payment_orders WHERE status = 'paid')
+                    AS total_revenue_credits
+                FROM users"""
+        ) as cursor:
+            return dict(await cursor.fetchone())

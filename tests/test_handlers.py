@@ -1009,7 +1009,8 @@ async def test_admin_stats_does_not_change_fsm(credit_db, state):
     event = message_event("/stats")
     router = create_router(admin_user_id=456)
     await call_handler(router, "stats", event)
-    event.message.answer.assert_awaited_once_with(
+    event.message.answer.assert_awaited_once()
+    assert event.message.answer.await_args.args[0].startswith(
         "📊 Статистика бота:\n\n👥 Всего пользователей: 1\n💳 Покупателей: 1\n"
         "🖼 Всего сгенерировано картинок: 1\n💰 Всего покупок: 1"
     )
@@ -1055,3 +1056,79 @@ async def test_failed_generation_does_not_change_stats(credit_db):
     generator = AsyncMock(side_effect=RuntimeError("generation failed"))
     await call_handler(create_router(generator), "collect_sphere", message_event(), await ready_context())
     assert (await credit_db.get_global_stats())["total_generated"] == 0
+
+
+def bot_started_event(payload=None, *, user_id=456, timestamp=1792526400000, is_bot=False):
+    from maxapi.types import BotStarted, User
+    return BotStarted(
+        timestamp=timestamp, chat_id=123, payload=payload,
+        user=User(user_id=user_id, first_name="Test", is_bot=is_bot),
+        bot=SimpleNamespace(
+            send_message=AsyncMock(return_value=object()),
+            upload_media=AsyncMock(return_value=AttachmentUpload(type="image", payload={"token": "example-token"})),
+        ),
+    )
+
+
+@pytest.mark.parametrize("payload,source", [("vk_ads", "vk_ads"), ("yandex_ads", "yandex_ads"), (None, "unmarked"), ("", "unmarked"), ("unknown", "unmarked")])
+async def test_real_bot_started_event_tracks_source_and_shows_start(credit_db, example_photos, monkeypatch, event_replies, payload, source):
+    monkeypatch.setattr(handlers, "_reply", event_replies)
+    context = await ready_context()
+    event = bot_started_event(payload)
+    router = create_router()
+    handler = next(h for h in router.event_handlers if h.update_type == UpdateType.BOT_STARTED)
+    await handler.func_event(event, context)
+    user = await credit_db.get_user(456)
+    assert user["first_start_source"] == source
+    assert user["first_started_at"] == "2026-10-20T20:00:00.000+00:00"
+    assert user["balance"] == 1 and user["free_trial_used"] == 1
+    assert await context.get_state() == PosterStates.waiting_for_mode
+    greeting = event.bot.send_message.await_args_list[0]
+    assert greeting.kwargs["user_id"] == 456 and "chat_id" not in greeting.kwargs
+    assert greeting.kwargs["text"].startswith(handlers.WELCOME_TEXT)
+    assert len(greeting.kwargs["attachments"]) == 7
+
+
+async def test_repeated_ad_starts_and_start_command_preserve_first_touch_and_trial(credit_db, example_photos, monkeypatch, event_replies):
+    monkeypatch.setattr(handlers, "_reply", event_replies)
+    router = create_router()
+    context = await ready_context()
+    await call_handler(router, "bot_started", bot_started_event("vk_ads"), context)
+    original = dict(await credit_db.get_user(456))
+    await call_handler(router, "bot_started", bot_started_event("yandex_ads", timestamp=1792612800000), context)
+    await call_handler(router, "start", message_event("/start"), context)
+    assert dict(await credit_db.get_user(456)) == original
+
+
+async def test_plain_start_then_ad_remains_unmarked(credit_db, example_photos, monkeypatch, event_replies):
+    monkeypatch.setattr(handlers, "_reply", event_replies)
+    router = create_router()
+    context = await ready_context()
+    await call_handler(router, "start", message_event("/start"), context)
+    first = (await credit_db.get_user(456))["first_started_at"]
+    await call_handler(router, "bot_started", bot_started_event("vk_ads"), context)
+    user = await credit_db.get_user(456)
+    assert user["first_start_source"] == "unmarked" and user["first_started_at"] == first
+    assert user["balance"] == 1
+
+
+async def test_bot_started_ignores_bot_accounts(credit_db):
+    event = bot_started_event("vk_ads", is_bot=True)
+    await call_handler(create_router(), "bot_started", event, await ready_context())
+    assert await credit_db.get_user(456) is None
+    event.bot.send_message.assert_not_awaited()
+
+
+async def test_source_stats_include_generation_and_actual_paid_amount(credit_db):
+    await credit_db.record_first_start(456, "vk_ads")
+    await credit_db.add_credits(456, 2)
+    router = create_router(AsyncMock(return_value=["https://cdn.example/result.png"]), admin_user_id=789)
+    await call_handler(router, "collect_sphere", message_event(), await ready_context())
+    await credit_db.create_payment_order("ad-purchase", 456, 1, 9900, "1 генерация (Открытка)")
+    await credit_db.add_credits(456, 1, payment_order_id="ad-purchase", provider_payment_id="ad-payment")
+    event = message_event("/stats")
+    event.get_ids = lambda: (123, 789)
+    await call_handler(router, "stats", event)
+    text = event.message.answer.await_args.args[0]
+    assert "Реклама VK\n👥 Новые пользователи: 1\n🖼 Пользователи с генерацией: 1\n💳 Покупатели: 1\n💰 Сумма оплат: 99,00 ₽" in text
+    assert "Реклама Яндекса" in text and "Без метки" in text

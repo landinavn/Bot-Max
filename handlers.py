@@ -16,6 +16,7 @@ from maxapi.filters.command import Command, CommandStart
 from maxapi.enums.parse_mode import ParseMode
 from maxapi.enums.upload_type import UploadType
 from maxapi.types import (
+    BotStarted,
     CallbackButton,
     InputMedia,
     LinkButton,
@@ -25,7 +26,10 @@ from maxapi.types import (
 )
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
-from database import deduct_credit, get_user, grant_free_trial, get_global_stats, increment_generations
+from database import (
+    deduct_credit, get_user, grant_free_trial, get_global_stats, increment_generations,
+    record_first_start, get_source_stats,
+)
 from prodamus import PACKAGES, ProdamusPayments
 from max_client import log_max_error
 from image_service import (
@@ -42,7 +46,9 @@ from image_service import (
 logger = logging.getLogger(__name__)
 
 
-def _recipient(event: MessageCreated | MessageCallback) -> dict[str, int]:
+def _recipient(event: MessageCreated | MessageCallback | BotStarted) -> dict[str, int]:
+    if isinstance(event, BotStarted):
+        return {"user_id": event.user.user_id}
     if event.message is None:
         raise RuntimeError("Не определён получатель сообщения.")
     if event.message.recipient.chat_type == "dialog":
@@ -56,7 +62,7 @@ def _recipient(event: MessageCreated | MessageCallback) -> dict[str, int]:
     return {"chat_id": chat_id}
 
 
-async def _reply(event: MessageCreated | MessageCallback, text=None, **kwargs):
+async def _reply(event: MessageCreated | MessageCallback | BotStarted, text=None, **kwargs):
     if event.bot is None:
         raise RuntimeError("Бот не привязан к событию.")
     try:
@@ -387,22 +393,37 @@ def create_router(
         if admin_user_id is None or event.get_ids()[1] != admin_user_id:
             return
         data = await get_global_stats()
+        sources = await get_source_stats()
+        source_text = "\n\n📍 Источники первого запуска (весь период):"
+        for source in sources:
+            amount = source["revenue_kopecks"]
+            revenue = f"{amount // 100:,}".replace(",", " ") + f",{amount % 100:02d} ₽"
+            source_text += (
+                f"\n\n{source['label']}\n"
+                f"👥 Новые пользователи: {source['new_users']}\n"
+                f"🖼 Пользователи с генерацией: {source['users_with_generation']}\n"
+                f"💳 Покупатели: {source['buyers']}\n"
+                f"💰 Сумма оплат: {revenue}"
+            )
+            if source["source"] == "legacy":
+                source_text += f"\nРанее зарегистрированы, дата и источник неизвестны: {source['total_users']}"
         await _reply(event,
             "📊 Статистика бота:\n\n"
             f"👥 Всего пользователей: {data['total_users']}\n"
             f"💳 Покупателей: {data['total_paid_users']}\n"
             f"🖼 Всего сгенерировано картинок: {data['total_generated']}\n"
-            f"💰 Всего покупок: {data['total_purchases']}"
+            f"💰 Всего покупок: {data['total_purchases']}" + source_text
         )
 
-    @router.message_created(CommandStart())
-    async def start(event: MessageCreated, context: MemoryContext) -> None:
-        if is_bot_message(event):
-            return
+    async def show_start(
+        event: MessageCreated | BotStarted, context: MemoryContext,
+        *, payload: str | None = None, timestamp_ms: int | None = None,
+    ) -> None:
         user_id = event.get_ids()[1]
         if user_id is None:
             await _reply(event, "Не удалось определить пользователя.")
             return
+        await record_first_start(user_id, payload, timestamp_ms=timestamp_ms)
         trial_granted = await grant_free_trial(user_id)
         await context.clear()
         await context.set_state(PosterStates.waiting_for_mode)
@@ -422,6 +443,16 @@ def create_router(
                      attachments=[*examples, main_keyboard()])
         if trial_granted:
             await _reply(event, "Вам начислен 1 бесплатный кредит!")
+
+    @router.bot_started()
+    async def bot_started(event: BotStarted, context: MemoryContext) -> None:
+        if not event.user.is_bot:
+            await show_start(event, context, payload=event.payload, timestamp_ms=event.timestamp)
+
+    @router.message_created(CommandStart())
+    async def start(event: MessageCreated, context: MemoryContext) -> None:
+        if not is_bot_message(event):
+            await show_start(event, context)
 
     @router.message_created(Command("buy"))
     async def buy(event: MessageCreated) -> None:

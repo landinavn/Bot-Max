@@ -1,10 +1,17 @@
 """Постоянный баланс пользователей. Все изменения фиксируются в SQLite."""
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 import aiosqlite
 
 DATABASE_PATH = Path(__file__).resolve().parent / "database.sqlite3"
+SOURCE_LABELS = {
+    "vk_ads": "Реклама VK",
+    "yandex_ads": "Реклама Яндекса",
+    "unmarked": "Без метки",
+    "legacy": "Источник неизвестен (до отслеживания)",
+}
 
 
 async def init_db() -> None:
@@ -17,7 +24,9 @@ async def init_db() -> None:
                 free_trial_used BOOLEAN NOT NULL DEFAULT 0
                     CHECK (free_trial_used IN (0, 1)),
                 total_generations INTEGER NOT NULL DEFAULT 0 CHECK (total_generations >= 0),
-                total_purchases INTEGER NOT NULL DEFAULT 0 CHECK (total_purchases >= 0)
+                total_purchases INTEGER NOT NULL DEFAULT 0 CHECK (total_purchases >= 0),
+                first_start_source TEXT,
+                first_started_at TEXT
             )"""
         )
         await db.execute(
@@ -48,6 +57,13 @@ async def init_db() -> None:
                     WHERE payment_orders.user_id = users.user_id AND status = 'paid'
                 )"""
             )
+        for column in ("first_start_source", "first_started_at"):
+            if column not in columns:
+                await db.execute(f"ALTER TABLE users ADD COLUMN {column} TEXT")
+        if "first_start_source" not in columns:
+            # Не приписывать старых пользователей новой рекламной кампании.
+            # Их точная дата первого запуска до обновления неизвестна.
+            await db.execute("UPDATE users SET first_start_source = 'legacy'")
         await db.commit()
 
 
@@ -203,3 +219,59 @@ async def get_global_stats() -> dict[str, int]:
                 FROM users"""
         ) as cursor:
             return dict(await cursor.fetchone())
+
+
+async def record_first_start(user_id: int, payload: str | None = None, *, timestamp_ms: int | None = None) -> bool:
+    """Атомарно сохранить источник и дату первого запуска, без перезаписи."""
+    if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
+        raise ValueError("Некорректный user_id.")
+    source = payload.strip() if isinstance(payload, str) else None
+    if source not in {"vk_ads", "yandex_ads"}:
+        source = "unmarked"
+    started_at = (
+        datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+        if timestamp_ms is not None else datetime.now(timezone.utc)
+    ).isoformat(timespec="milliseconds")
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        cursor = await db.execute(
+            """INSERT INTO users (user_id, first_start_source, first_started_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET
+                 first_start_source = excluded.first_start_source,
+                 first_started_at = excluded.first_started_at
+               WHERE users.first_start_source IS NULL""",
+            (user_id, source, started_at),
+        )
+        await db.commit()
+        return cursor.rowcount == 1
+
+
+async def get_source_stats() -> list[dict]:
+    """Воронка по первому источнику, выручка в копейках только по paid-заказам."""
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT COALESCE(u.first_start_source, 'legacy') AS source,
+                 COUNT(*) AS total_users,
+                 SUM(CASE WHEN u.first_started_at IS NOT NULL THEN 1 ELSE 0 END) AS new_users,
+                 SUM(CASE WHEN u.total_generations > 0 THEN 1 ELSE 0 END) AS users_with_generation,
+                 SUM(CASE WHEN u.total_purchases > 0 THEN 1 ELSE 0 END) AS buyers,
+                 COALESCE(SUM(p.revenue_kopecks), 0) AS revenue_kopecks
+               FROM users u
+               LEFT JOIN (
+                 SELECT user_id, SUM(amount_kopecks) AS revenue_kopecks
+                 FROM payment_orders WHERE status = 'paid' GROUP BY user_id
+               ) p ON p.user_id = u.user_id
+               GROUP BY COALESCE(u.first_start_source, 'legacy')"""
+        ) as cursor:
+            rows = {row["source"]: dict(row) for row in await cursor.fetchall()}
+    result = []
+    for source, label in SOURCE_LABELS.items():
+        if source == "legacy" and source not in rows:
+            continue
+        row = rows.get(source, {
+            "source": source, "total_users": 0, "new_users": 0,
+            "users_with_generation": 0, "buyers": 0, "revenue_kopecks": 0,
+        })
+        result.append({**row, "label": label})
+    return result

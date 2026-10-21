@@ -413,3 +413,17 @@ async def test_non_paid_webhooks_do_not_count_as_purchases(client, payments, cre
     assert (await post_notification(client, data)).status == 200
     stats = await credit_db.get_global_stats()
     assert stats["total_purchases"] == stats["total_paid_users"] == stats["total_revenue_credits"] == 0
+
+
+@pytest.mark.parametrize("payload,source", [("vk_ads", "vk_ads"), ("yandex_ads", "yandex_ads"), (None, "unmarked")])
+async def test_paid_webhook_remains_linked_to_first_source(client, payments, credit_db, payload, source):
+    await credit_db.record_first_start(456, payload, timestamp_ms=1792526400000)
+    data = await notification(payments, credits=1)
+    assert (await post_notification(client, data)).status == 200
+    assert (await post_notification(client, data)).status == 200
+    await credit_db.record_first_start(456, "yandex_ads", timestamp_ms=1792612800000)
+    rows = {row["source"]: row for row in await credit_db.get_source_stats()}
+    assert rows[source]["new_users"] == rows[source]["buyers"] == 1
+    assert rows[source]["revenue_kopecks"] == 9900
+    assert sum(row["revenue_kopecks"] for row in rows.values()) == 9900
+    assert (await credit_db.get_user(456))["total_purchases"] == 1

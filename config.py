@@ -3,11 +3,22 @@
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
+import re
 
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
 MAX_API_URL = "https://platform-api.max.ru"
+DEFAULT_BOT_LINK = "https://max.ru/se14596751_1_bot"
+
+
+def validate_bot_link(value: str) -> str:
+    parsed = urlsplit(value)
+    if (parsed.scheme != "https" or parsed.netloc != "max.ru" or parsed.query or parsed.fragment
+            or not re.fullmatch(r"/[A-Za-z0-9_.-]+/?", parsed.path)):
+        raise ValueError("BOT_LINK должен быть публичной ссылкой https://max.ru/имя_бота без параметров.")
+    return value.rstrip("/")
 
 
 @dataclass(frozen=True)
@@ -31,6 +42,7 @@ class Config:
     openai_proxy_url: str | None = None
     image_quality: str = "high"
     admin_user_id: int | None = None
+    bot_link: str = DEFAULT_BOT_LINK
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -57,6 +69,7 @@ class Config:
             image_api_key=image_api_key,
             image_model=image_model,
             admin_user_id=admin_user_id,
+            bot_link=validate_bot_link(os.environ.get("BOT_LINK", "").strip() or DEFAULT_BOT_LINK),
             image_quality=os.environ.get("IMAGE_QUALITY", "").strip() or "high",
             openai_proxy_url=os.environ.get("OPENAI_PROXY_URL", "").strip() or None,
             storage_bucket=os.environ.get("STORAGE_BUCKET", "").strip() or None,

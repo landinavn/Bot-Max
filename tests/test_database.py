@@ -217,3 +217,17 @@ async def test_empty_source_stats_include_zero_rows_for_all_ad_labels(credit_db)
     rows = await credit_db.get_source_stats()
     assert [row["label"] for row in rows] == ["Реклама VK", "Реклама Яндекса", "Без метки"]
     assert all(row["new_users"] == row["buyers"] == row["revenue_kopecks"] == 0 for row in rows)
+
+
+async def test_share_tokens_are_persistent_and_do_not_create_users(credit_db):
+    import re
+    url = "https://storage.yandexcloud.net/bucket/vision-boards/example.png"
+    tokens = await asyncio.gather(*(credit_db.register_shared_image(url) for _ in range(8)))
+    assert len(set(tokens)) == 1
+    assert re.fullmatch(r"[A-Za-z0-9_-]+", tokens[0])
+    assert len("share_" + tokens[0]) <= 128
+    await credit_db.init_db()
+    assert await credit_db.get_shared_image(tokens[0]) == url
+    assert await credit_db.get_shared_image(url) == url  # Registered legacy share_<URL>.
+    assert await credit_db.get_shared_image("https://127.0.0.1/private") is None
+    assert (await credit_db.get_global_stats())["total_users"] == 0

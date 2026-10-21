@@ -99,3 +99,19 @@ def test_invalid_admin_user_id_is_rejected(tmp_path, monkeypatch, value):
     monkeypatch.setenv("ADMIN_USER_ID", value)
     with pytest.raises(ValueError, match="ADMIN_USER_ID"):
         config.Config.from_env()
+
+
+def test_bot_link_is_loaded_and_normalized(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "BASE_DIR", tmp_path)
+    monkeypatch.setenv("MAX_BOT_TOKEN", "test-token")
+    monkeypatch.setenv("BOT_LINK", " https://max.ru/another_bot/ ")
+    assert config.Config.from_env().bot_link == "https://max.ru/another_bot"
+
+
+@pytest.mark.parametrize("value", ["http://max.ru/bot", "https://evil.test/bot", "https://max.ru/bot?start=x", "https://max.ru/bot/extra"])
+def test_invalid_bot_link_is_rejected(tmp_path, monkeypatch, value):
+    monkeypatch.setattr(config, "BASE_DIR", tmp_path)
+    monkeypatch.setenv("MAX_BOT_TOKEN", "test-token")
+    monkeypatch.setenv("BOT_LINK", value)
+    with pytest.raises(ValueError, match="BOT_LINK"):
+        config.Config.from_env()

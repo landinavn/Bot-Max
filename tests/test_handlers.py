@@ -1270,3 +1270,94 @@ async def test_modern_card_button_uses_shared_photo_and_custom_text_flow(credit_
     await call_handler(router, "collect_card_text", message_event("Счастья тебе, Аня!"), context)
     card.assert_awaited_once_with("https://photos.example.com/source.png", "mode_modern_card", "Счастья тебе, Аня!")
     assert (await credit_db.get_user(456))["balance"] == 1
+
+
+@pytest.mark.parametrize("mode", list(handlers.POSTCARD_PROMPTS))
+@pytest.mark.parametrize("general_handler_first", [False, True])
+async def test_dispatcher_routes_card_text_to_generation(
+    credit_db, monkeypatch, event_replies, caplog, mode, general_handler_first,
+):
+    from maxapi import Dispatcher
+    from maxapi.context.isolation import SimpleEventIsolation
+    from maxapi.types import MessageCreated, MessageCallback, User
+
+    monkeypatch.setattr(handlers, "_reply", event_replies)
+    await credit_db.add_credits(456, 2)
+    generator = AsyncMock(return_value=["https://cdn.example/dispatched-card.png"])
+    router = create_router(postcard_generator=generator)
+    if general_handler_first:
+        # Воспроизвести перехват общего обработчика до фильтра состояния.
+        generic = next(h for h in router.event_handlers if h.func_event.__name__ == "echo")
+        router.event_handlers.remove(generic)
+        index = next(i for i, h in enumerate(router.event_handlers) if h.func_event.__name__ == "collect_card_text")
+        router.event_handlers.insert(index, generic)
+    dp = Dispatcher(storage=MemoryContext, event_isolation=SimpleEventIsolation())
+    dp.include_routers(router)
+    bot = SimpleNamespace(
+        me=User(user_id=999, first_name="Bot", username="test_bot", is_bot=True),
+        send_message=AsyncMock(return_value=object()), send_callback=AsyncMock(),
+    )
+    user = {"user_id": 456, "first_name": "Test", "is_bot": False}
+
+    def message(text=None, attachments=None, sender=None):
+        return {
+            "sender": sender or user,
+            "recipient": {"chat_id": 123, "chat_type": "dialog"}, "timestamp": 1,
+            "body": {"mid": "fsm-test", "seq": 1, "text": text, "attachments": attachments},
+        }
+
+    try:
+        callback = MessageCallback(
+            timestamp=1, bot=bot, message=message(sender=bot.me.model_dump()),
+            callback={"timestamp": 1, "callback_id": "mode", "payload": mode, "user": user},
+        )
+        await dp.handle(callback)
+        context = dp.fsm.get_context(chat_id=123, user_id=456)
+        assert await context.get_state() == PosterStates.waiting_for_photo
+        photo = MessageCreated(timestamp=2, bot=bot, message=message(attachments=[{
+            "type": "image", "payload": {"photo_id": 1, "token": "photo", "url": "https://cdn.example/source.png"},
+        }]))
+        await dp.handle(photo)
+        assert await context.get_state() == PosterStates.waiting_for_card_text
+        generator.assert_not_awaited()
+        user_text = "Счастья тебе, Аня!"
+        with caplog.at_level(logging.INFO, logger=handlers.__name__):
+            await dp.handle(MessageCreated(timestamp=3, bot=bot, message=message(text=user_text)))
+        generator.assert_awaited_once_with("https://cdn.example/source.png", mode, user_text)
+        assert f"Начинаю генерацию открытки с текстом: {user_text}" in caplog.text
+        replies = [call.kwargs.get("text") for call in bot.send_message.await_args_list]
+        assert "⏳ Генерирую..." in replies and "Ваша открытка готов!" in replies
+        assert user_text not in replies
+        assert await context.get_state() is None
+        assert (await credit_db.get_user(456))["balance"] == 1
+        assert (await credit_db.get_user(456))["total_generations"] == 1
+        if general_handler_first:
+            assert "передаю текст из общего обработчика" in caplog.text
+    finally:
+        await dp.shutdown()
+
+
+@pytest.mark.parametrize("photo", [None, {}, {"url": ""}])
+async def test_card_text_without_photo_requests_photo_instead_of_generating(photo):
+    context = await ready_context()
+    await context.update_data(mode="mode_modern_card", photo=photo)
+    await context.set_state(PosterStates.waiting_for_card_text)
+    card = AsyncMock()
+    event = message_event("С праздником, Аня!")
+    await call_handler(create_router(postcard_generator=card), "collect_card_text", event, context)
+    card.assert_not_awaited()
+    assert await context.get_state() == PosterStates.waiting_for_photo
+    assert (await context.get_data())["mode"] == "mode_modern_card"
+    assert "загрузите фото заново" in event.message.answer.await_args.args[0]
+
+
+async def test_general_handler_only_echoes_when_no_fsm_state():
+    router = create_router()
+    context = await ready_context()
+    active = message_event("Новая мечта")
+    await call_handler(router, "echo", active, context)
+    active.message.answer.assert_not_awaited()
+    await context.set_state(None)
+    idle = message_event("Привет")
+    await call_handler(router, "echo", idle, context)
+    idle.message.answer.assert_awaited_once_with(text="Привет")

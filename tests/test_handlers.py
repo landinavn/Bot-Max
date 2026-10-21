@@ -394,7 +394,7 @@ def test_result_buttons_use_plain_more_and_share_payloads():
     markup = handlers.result_keyboard("https://storage.example.com/photo.png").model_dump()
     buttons = markup["payload"]["buttons"][0]
     assert buttons[0]["url"] == "https://storage.example.com/photo.png"
-    assert [button["payload"] for button in buttons[1:]] == ["more", "share"]
+    assert [button["payload"] for button in buttons[1:]] == ["more"]
 
 
 def message_event(text="карьера", *, chat_id=123, chat_type="dialog"):
@@ -883,7 +883,7 @@ async def test_start_shows_six_finished_examples_and_modes(example_photos):
     assert "Примеры работ" in greeting.kwargs["text"]
     assert "исходное фото" not in greeting.kwargs["text"]
     buttons = greeting.kwargs["attachments"][-1].model_dump()["payload"]["buttons"]
-    assert [(row[0]["text"], row[0]["payload"]) for row in buttons[:6]] == list(handlers.MODE_BUTTONS)
+    assert [(row[0]["text"], row[0]["payload"]) for row in buttons[:7]] == list(handlers.MODE_BUTTONS)
 
 
 async def test_start_still_offers_menu_if_examples_fail(example_photos):
@@ -915,7 +915,7 @@ def photo_event():
 
 @pytest.mark.parametrize("mode", list(handlers.POSTCARD_PROMPTS))
 @pytest.mark.parametrize("balance,admin", [(2, False), (0, False), (0, True)])
-async def test_postcard_photo_generates_without_text_and_uses_shared_balance(credit_db, mode, balance, admin):
+async def test_postcard_requires_custom_text_and_uses_shared_balance(credit_db, mode, balance, admin):
     await credit_db.add_credits(456, balance or 1)
     if not balance:
         await credit_db.deduct_credit(456)
@@ -926,15 +926,20 @@ async def test_postcard_photo_generates_without_text_and_uses_shared_balance(cre
     router = create_router(vision, postcard_generator=postcard, admin_user_id=456 if admin else None)
     event = photo_event()
     await call_handler(router, "collect_photo", event, context)
+    postcard.assert_not_awaited()
+    assert await context.get_state() == PosterStates.waiting_for_card_text
+    assert event.message.answer.await_args.args == (handlers.CARD_TEXT_PROMPT,)
+    event = message_event("Аня, будь счастлива!")
+    await call_handler(router, "collect_card_text", event, context)
     vision.assert_not_awaited()
     if balance or admin:
-        postcard.assert_awaited_once_with("https://photos.example.com/source.png", mode)
+        postcard.assert_awaited_once_with("https://photos.example.com/source.png", mode, "Аня, будь счастлива!")
         assert (await credit_db.get_user(456))["balance"] == (balance if admin else balance - 1)
         assert await context.get_state() is None
     else:
         postcard.assert_not_awaited()
         assert event.message.answer.await_args.args == (NO_CREDITS_TEXT,)
-        assert await context.get_state() == PosterStates.waiting_for_mode
+        assert await context.get_state() == PosterStates.waiting_for_card_text
     assert all("опиши" not in str(c).lower() for c in event.message.answer.await_args_list)
 
 
@@ -944,15 +949,18 @@ async def test_postcard_send_retry_reuses_paid_result_and_more_creates_new(credi
     await context.update_data(mode="mode_ny")
     postcard = AsyncMock(return_value=["https://cdn.example/card.png"])
     router = create_router(postcard_generator=postcard)
-    event = photo_event()
+    await call_handler(router, "collect_photo", photo_event(), context)
+    event = message_event("Аня, с праздником!")
     event.bot.send_message.side_effect = RuntimeError("MAX temporarily unavailable")
-    await call_handler(router, "collect_photo", event, context)
+    await call_handler(router, "collect_card_text", event, context)
     assert (await credit_db.get_user(456))["balance"] == 2
-    assert await context.get_state() == PosterStates.waiting_for_mode
+    assert await context.get_state() == PosterStates.waiting_for_card_text
     await dispatch_callback(router, callback_event("postcard_retry"), context)
     assert postcard.await_count == 1
     assert (await credit_db.get_user(456))["balance"] == 2
     await dispatch_callback(router, callback_event("more"), context)
+    assert postcard.await_count == 1
+    await call_handler(router, "collect_card_text", message_event("Оля, поздравляю!"), context)
     assert postcard.await_count == 2
     assert (await credit_db.get_user(456))["balance"] == 1
 
@@ -964,6 +972,7 @@ async def test_postcard_generation_failure_does_not_charge_and_can_retry(credit_
     postcard = AsyncMock(side_effect=[RuntimeError("API error"), ["https://cdn.example/card.png"]])
     router = create_router(postcard_generator=postcard)
     await call_handler(router, "collect_photo", photo_event(), context)
+    await call_handler(router, "collect_card_text", message_event("С днём рождения, Оля!"), context)
     assert (await credit_db.get_user(456))["balance"] == 2
     await dispatch_callback(router, callback_event("postcard_retry"), context)
     assert (await credit_db.get_user(456))["balance"] == 1
@@ -1132,3 +1141,116 @@ async def test_source_stats_include_generation_and_actual_paid_amount(credit_db)
     text = event.message.answer.await_args.args[0]
     assert "Реклама VK\n👥 Новые пользователи: 1\n🖼 Пользователи с генерацией: 1\n💳 Покупатели: 1\n💰 Сумма оплат: 99,00 ₽" in text
     assert "Реклама Яндекса" in text and "Без метки" in text
+
+
+@pytest.mark.parametrize("mode", ["mode_vision", *handlers.POSTCARD_PROMPTS])
+async def test_all_modes_send_persistent_bot_share_link_and_only_vision_invites_to_channel(credit_db, mode):
+    from urllib.parse import urlsplit, parse_qs
+    await credit_db.add_credits(456, 2)
+    image_url = "https://cdn.example/generated.png"
+    vision, card = AsyncMock(return_value=[image_url]), AsyncMock(return_value=[image_url])
+    router = create_router(vision, postcard_generator=card, bot_link="https://max.ru/custom_bot")
+    context = await ready_context()
+    await context.update_data(mode=mode)
+    if mode == "mode_vision":
+        event = message_event("Моя мечта")
+        await call_handler(router, "collect_sphere", event, context)
+    else:
+        await call_handler(router, "collect_photo", photo_event(), context)
+        assert card.await_count == 0
+        event = message_event("Оля, счастья и добра!")
+        await call_handler(router, "collect_card_text", event, context)
+        card.assert_awaited_once_with("https://photos.example.com/source.png", mode, "Оля, счастья и добра!")
+    calls = event.message.answer.await_args_list
+    share = next(c for c in calls if c.args and c.args[0] == "👇 Хочешь поделиться с друзьями?")
+    button = share.kwargs["attachments"][0].model_dump()["payload"]["buttons"][0][0]
+    assert button["type"] == "link" and button["text"] == "🔗 Поделиться"
+    assert button["url"].startswith("https://max.ru/custom_bot?start=share_")
+    payload = parse_qs(urlsplit(button["url"]).query)["start"][0]
+    assert len(payload) <= 128
+    assert await credit_db.get_shared_image(payload.removeprefix("share_")) == image_url
+    invites = [c for c in calls if c.args and c.args[0] == handlers.CHANNEL_TEXT]
+    assert len(invites) == (1 if mode == "mode_vision" else 0)
+    if invites:
+        button = invites[0].kwargs["attachments"][0].model_dump()["payload"]["buttons"][0][0]
+        assert button["url"] == "https://max.ru/se14596751_biz"
+    assert (await credit_db.get_user(456))["balance"] == 1
+
+
+@pytest.mark.parametrize("entry", ["command", "bot_started"])
+async def test_share_entry_shows_friends_image_and_create_own_menu(credit_db, monkeypatch, event_replies, max_image_upload, entry):
+    monkeypatch.setattr(handlers, "_reply", event_replies)
+    url = "https://cdn.example/friend.png"
+    token = await credit_db.register_shared_image(url)
+    await credit_db.init_db()  # Simulate a restart and an empty FSM session.
+    router = create_router()
+    context = MemoryContext(chat_id=123, user_id=789)
+    if entry == "command":
+        event = message_event("/start share_" + token)
+        event.get_ids = lambda: (123, 789)
+        name = "start"
+    else:
+        event = bot_started_event("share_" + token, user_id=789)
+        name = "bot_started"
+    await call_handler(router, name, event, context)
+    max_image_upload.assert_awaited_once_with(event.bot, url)
+    greeting = event.bot.send_message.await_args_list[0]
+    assert greeting.kwargs["text"] == handlers.SHARED_WELCOME
+    assert greeting.kwargs["user_id"] == 789
+    buttons = greeting.kwargs["attachments"][-1].model_dump()["payload"]["buttons"]
+    assert buttons[0][0]["text"] == "Создать свою"
+    callback = callback_event(buttons[0][0]["payload"])
+    callback.get_ids = lambda: (123, 789)
+    await dispatch_callback(router, callback, context)
+    callback.ack.assert_awaited_once()
+    assert await context.get_state() == PosterStates.waiting_for_mode
+    assert "photo" not in await context.get_data()
+    user = await credit_db.get_user(789)
+    assert user["balance"] == 1 and user["first_start_source"] == "unmarked"
+    assert user["total_generations"] == 0
+
+
+async def test_unregistered_share_url_is_not_downloaded(credit_db, max_image_upload):
+    event = message_event("/start share_https://127.0.0.1/private")
+    await call_handler(create_router(), "start", event, await ready_context())
+    max_image_upload.assert_not_awaited()
+    assert "недоступна" in event.message.answer.await_args_list[0].args[0]
+
+
+@pytest.mark.parametrize("text", ["", "   ", "я" * 501])
+async def test_invalid_custom_card_text_does_not_generate_or_charge(credit_db, text):
+    await credit_db.add_credits(456, 2)
+    card = AsyncMock()
+    router = create_router(postcard_generator=card)
+    context = await ready_context()
+    await context.update_data(mode="mode_goodmorning")
+    await call_handler(router, "collect_photo", photo_event(), context)
+    await call_handler(router, "collect_card_text", message_event(text), context)
+    card.assert_not_awaited()
+    assert (await credit_db.get_user(456))["balance"] == 2
+    assert await context.get_state() == PosterStates.waiting_for_card_text
+
+
+async def test_failed_share_message_retry_does_not_regenerate_or_resend_image(credit_db):
+    await credit_db.add_credits(456, 2)
+    card = AsyncMock(return_value=["https://cdn.example/card.png"])
+    router = create_router(postcard_generator=card)
+    context = await ready_context()
+    await context.update_data(mode="mode_goodmorning")
+    await call_handler(router, "collect_photo", photo_event(), context)
+    event = message_event("С добрым утром, Аня!")
+
+    async def reply(text=None, **kwargs):
+        if text == "👇 Хочешь поделиться с друзьями?":
+            raise RuntimeError("share message failed")
+        return object()
+
+    event.message.answer.side_effect = reply
+    await call_handler(router, "collect_card_text", event, context)
+    assert event.bot.send_message.await_count == 1
+    retry = callback_event("postcard_retry")
+    await dispatch_callback(router, retry, context)
+    card.assert_awaited_once()
+    retry.bot.send_message.assert_not_awaited()
+    assert (await credit_db.get_user(456))["balance"] == 1
+    assert (await context.get_data())["share_prompt_sent"] is True

@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 from pathlib import Path
+from secrets import token_urlsafe
 
 import aiosqlite
 
@@ -40,6 +41,13 @@ async def init_db() -> None:
                 provider_payment_id TEXT UNIQUE,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 paid_at TEXT
+            )"""
+        )
+        await db.execute(
+            """CREATE TABLE IF NOT EXISTS shared_images (
+                token TEXT PRIMARY KEY,
+                image_url TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )"""
         )
         async with db.execute("PRAGMA table_info(users)") as cursor:
@@ -275,3 +283,29 @@ async def get_source_stats() -> list[dict]:
         })
         result.append({**row, "label": label})
     return result
+
+
+async def register_shared_image(image_url: str) -> str:
+    """Сохранить короткую ссылку на уже созданное изображение, независимо от FSM."""
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        await db.execute(
+            "INSERT INTO shared_images (token, image_url) VALUES (?, ?) ON CONFLICT(image_url) DO NOTHING",
+            (token_urlsafe(16), image_url),
+        )
+        async with db.execute("SELECT token FROM shared_images WHERE image_url = ?", (image_url,)) as cursor:
+            row = await cursor.fetchone()
+        await db.commit()
+        return row[0]
+
+
+async def get_shared_image(key: str) -> str | None:
+    # Принимаются только зарегистрированные результаты. Внешний URL из payload
+    # не скачивается произвольно; поддержан и старый формат share_<image_url>.
+    if not isinstance(key, str) or not 1 <= len(key) <= 2048:
+        return None
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        async with db.execute(
+            "SELECT image_url FROM shared_images WHERE token = ? OR image_url = ?", (key, key)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else None

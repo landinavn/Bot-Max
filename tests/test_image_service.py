@@ -611,9 +611,9 @@ async def test_postcard_uses_template_and_stores_text_overlay(config, storage, a
     Image.new("RGB", (1024, 1536), "#243c58").save(buffer, format="PNG")
     generated = buffer.getvalue()
     register_generation(api, payload={"data": [{"b64_json": base64.b64encode(generated).decode()}]})
-    urls = await service.generate_postcards(PHOTO_URL, mode)
+    urls = await service.generate_postcards(PHOTO_URL, mode, "Счастья тебе, Аня!")
     assert len(urls) == 1
-    assert storage.uploaded_images == [service.add_text_to_image(generated, mode)]
+    assert storage.uploaded_images == [service.add_text_to_image(generated, "Счастья тебе, Аня!")]
     assert storage.uploaded_images[0] != generated
     fields = await multipart_fields(post_requests(api)[0])
     prompt = fields["prompt"].get_content()
@@ -645,8 +645,8 @@ def test_greeting_is_legible_centered_and_does_not_cover_portrait(monkeypatch, m
         return real_text(self, xy, text, *args, **kwargs)
 
     monkeypatch.setattr(service.ImageDraw.ImageDraw, "text", record_text)
-    result = Image.open(BytesIO(service.add_text_to_image(buffer.getvalue(), mode))).convert("RGB")
-    assert drawn == [greeting]
+    result = Image.open(BytesIO(service.add_text_to_image(buffer.getvalue(), greeting))).convert("RGB")
+    assert " ".join(drawn).split() == greeting.split()
     assert result.size == source.size
     box = ImageChops.difference(result, source).getbbox()
     assert box is not None
@@ -666,7 +666,7 @@ async def test_missing_font_prevents_paid_generation(monkeypatch, config, storag
     generate = AsyncMock()
     monkeypatch.setattr(service, "_generate_image_bytes", generate)
     with pytest.raises(service.GenerationNotConfigured, match="font.ttf"):
-        await service.generate_postcards(PHOTO_URL, "mode_ny")
+        await service.generate_postcards(PHOTO_URL, "mode_ny", "Анна, с праздником!")
     generate.assert_not_awaited()
     storage.put_object.assert_not_called()
 
@@ -680,5 +680,50 @@ async def test_unknown_postcard_mode_does_not_call_api(monkeypatch):
     generate = AsyncMock()
     monkeypatch.setattr(service, "_generate_and_store", generate)
     with pytest.raises(ValueError, match="Неизвестный режим"):
-        await service.generate_postcards(PHOTO_URL, "mode_unknown")
+        await service.generate_postcards(PHOTO_URL, "mode_unknown", "С праздником!")
     generate.assert_not_awaited()
+
+
+async def test_user_text_is_overlayed_but_not_sent_to_image_model(config, storage, api):
+    buffer = BytesIO()
+    Image.new("RGB", (1024, 1536), "#243c58").save(buffer, format="PNG")
+    generated = buffer.getvalue()
+    custom = "С добрым утром, Алёна!\nПусть всё получится!"
+    register_generation(api, payload={"data": [{"b64_json": base64.b64encode(generated).decode()}]})
+    await service.generate_postcards(PHOTO_URL, "mode_goodmorning", custom)
+    assert storage.uploaded_images == [service.add_text_to_image(generated, custom)]
+    fields = await multipart_fields(post_requests(api)[0])
+    prompt = fields["prompt"].get_content()
+    assert "Good Morning" in prompt and custom not in prompt
+    assert "Leave a large empty space at the bottom" in prompt
+
+
+@pytest.mark.parametrize("text", ["", " ", "я" * 501])
+async def test_invalid_user_text_is_rejected_before_paid_request(monkeypatch, text):
+    generate = AsyncMock()
+    monkeypatch.setattr(service, "_generate_and_store", generate)
+    with pytest.raises(ValueError, match="Текст открытки"):
+        await service.generate_postcards(PHOTO_URL, "mode_ny", text)
+    generate.assert_not_awaited()
+
+
+def test_long_multiline_custom_text_fits_bottom_and_keeps_all_words(monkeypatch):
+    from PIL import ImageChops
+    source = Image.new("RGB", (1024, 1536), "#324056")
+    buffer = BytesIO()
+    source.save(buffer, format="PNG")
+    custom = "Любимая Аня, с днём рождения!\n" + "Пусть мечты сбываются и каждый день дарит радость! " * 6
+    assert len(custom) <= 500
+    drawn = []
+    real_text = service.ImageDraw.ImageDraw.text
+
+    def capture(self, xy, text, *args, **kwargs):
+        drawn.append(text)
+        return real_text(self, xy, text, *args, **kwargs)
+
+    monkeypatch.setattr(service.ImageDraw.ImageDraw, "text", capture)
+    result = Image.open(BytesIO(service.add_text_to_image(buffer.getvalue(), custom))).convert("RGB")
+    assert " ".join(drawn).split() == custom.split()
+    assert "\n" in "\n".join(drawn)
+    box = ImageChops.difference(source, result).getbbox()
+    assert box is not None and box[1] >= 1536 * 0.78 and box[3] <= 1536 * 0.99

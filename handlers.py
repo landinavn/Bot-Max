@@ -305,7 +305,7 @@ def create_router(
                         await context.set_state(retry_state)
                         await _reply(event, NO_CREDITS_TEXT, attachments=[packages_keyboard()] + ([postcard_retry_keyboard()] if is_postcard else []))
                         return
-                await _reply(event, "Создаю открытку…" if is_postcard else "Создаю плакат…")
+                await _reply(event, "⏳ Генерирую..." if is_postcard else "Создаю плакат…")
                 if is_postcard:
                     urls = await postcard_generator(photo["url"], data["mode"], data["card_text"])
                 else:
@@ -686,6 +686,11 @@ def create_router(
             await context.set_state(PosterStates.waiting_for_mode)
             await _reply(event, "Выберите открытку в меню.", attachments=[main_keyboard()])
             return
+        photo = data.get("photo")
+        if not isinstance(photo, dict) or not isinstance(photo.get("url"), str) or not photo["url"]:
+            await context.set_state(PosterStates.waiting_for_photo)
+            await _reply(event, "Фото не сохранилось. Пожалуйста, загрузите фото заново.")
+            return
         body = event.message.body
         text = (body.text or "").strip() if body else ""
         if not text or len(text) > MAX_CARD_TEXT_LENGTH:
@@ -694,6 +699,7 @@ def create_router(
         if data.get("card_text") != text:
             await context.update_data(variants=[], sent_count=0, batch_id=None, new_batch_requested=False)
         await context.update_data(card_text=text, sphere=data["mode"])
+        logger.info("Начинаю генерацию открытки с текстом: %s", text)
         await generate_and_send(event, context)
 
     @router.message_created(PosterStates.waiting_for_sphere)
@@ -820,8 +826,18 @@ def create_router(
             await _reply(event, "Плакат уже создаётся. Пожалуйста, подождите.")
 
     @router.message_created()
-    async def echo(event: MessageCreated) -> None:
+    async def echo(event: MessageCreated, context: MemoryContext) -> None:
         if is_bot_message(event):
+            return
+        state = await context.get_state()
+        if state == PosterStates.waiting_for_card_text:
+            # MAX останавливает поиск на первом подходящем обработчике:
+            # простой return не передаст событие следующему хендлеру.
+            logger.info("FSM: передаю текст из общего обработчика в waiting_for_card_text.")
+            await collect_card_text(event, context)
+            return
+        if state is not None:
+            logger.info("Общий обработчик пропустил сообщение в состоянии %s.", state)
             return
         body = event.message.body
         if body is not None and body.text is not None and body.text != "":

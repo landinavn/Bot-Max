@@ -4,6 +4,7 @@ import asyncio
 import base64
 import binascii
 import logging
+import textwrap
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -63,6 +64,13 @@ POSTCARD_PROMPTS = {
         "Beautiful Good Morning greeting card. Warm sunrise lighting, coffee cup, soft morning atmosphere. "
         "Place the person from the photo looking fresh and happy. Leave a large empty space at the bottom."
     ),
+    "mode_modern_card": (
+        "Aesthetic scrapbook style greeting card. The reference photo is placed in the center or slightly to the right with torn paper edges. "
+        "The background is a soft, blurred autumn or spring cityscape with warm lighting. "
+        "Add beautiful decorative elements: drawn hearts, brush strokes, soft pastel colors, subtle doodles. "
+        "Keep the person's face EXACTLY as in the reference photo. "
+        "Leave plenty of empty space on the left side or at the top for custom text. Cinematic lighting, highly detailed."
+    ),
 }
 MAX_CARD_TEXT_LENGTH = 500
 
@@ -94,24 +102,35 @@ def _wrap_card_text(text: str, draw, font, max_width: float) -> str:
     return "\n".join(lines)
 
 
-def add_text_to_image(image_bytes: bytes, text: str) -> bytes:
+def add_text_to_image(image_bytes: bytes, text: str, mode: str | None = None) -> bytes:
     """Наложить именно текст пользователя, с переносами и подбором размера."""
     validate_card_text(text)
     with Image.open(BytesIO(image_bytes)) as source:
         image = ImageOps.exif_transpose(source).convert("RGB")
     width, height = image.size
     draw = ImageDraw.Draw(image)
-    low, high = 1, max(1, height // 15)
+    modern = mode == "mode_modern_card"
+    if modern:
+        # Короткие строки как в скрапбукинге, включая очень длинные слова.
+        text = "\n".join(
+            "\n".join(textwrap.wrap(paragraph, width=28, break_long_words=True,
+                                   break_on_hyphens=False, replace_whitespace=False))
+            if paragraph else "" for paragraph in text.split("\n")
+        )
+    max_width = width * (0.37 if modern else 0.9)
+    max_height = height * (0.7 if modern else 0.2)
+    align = "left" if modern else "center"
+    low, high = 1, max(1, height // (24 if modern else 15))
     fitted = None
     while low <= high:
         size = (low + high) // 2
         font = _postcard_font(size)
-        stroke = max(1, size // 25)
-        spacing = max(1, size // 5)
-        wrapped = _wrap_card_text(text, draw, font, width * 0.9 - 2 * stroke)
+        stroke = 0 if modern else max(1, size // 25)
+        spacing = max(1, size // (3 if modern else 5))
+        wrapped = _wrap_card_text(text, draw, font, max_width - 2 * stroke)
         box = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=spacing,
-                                      stroke_width=stroke, align="center")
-        if box[2] - box[0] <= width * 0.9 and box[3] - box[1] <= height * 0.2:
+                                      stroke_width=stroke, align=align)
+        if box[2] - box[0] <= max_width and box[3] - box[1] <= max_height:
             fitted = (font, stroke, spacing, wrapped, box)
             low = size + 1
         else:
@@ -119,9 +138,10 @@ def add_text_to_image(image_bytes: bytes, text: str) -> bytes:
     if fitted is None:
         raise ImageGenerationError("Размер открытки слишком мал для поздравления.")
     font, stroke, spacing, wrapped, (left, top, right, bottom) = fitted
-    x = (width - (right - left)) / 2 - left
-    y = height * 0.89 - (bottom - top) / 2 - top
-    draw.multiline_text((round(x), round(y)), wrapped, font=font, fill="white", align="center",
+    x = width * 0.05 - left if modern else (width - (right - left)) / 2 - left
+    y = height * (0.5 if modern else 0.89) - (bottom - top) / 2 - top
+    draw.multiline_text((round(x), round(y)), wrapped, font=font,
+                       fill="#3b2720" if modern else "white", align=align,
                        spacing=spacing, stroke_width=stroke, stroke_fill="black")
     buffer = BytesIO()
     image.save(buffer, format="PNG")
@@ -439,7 +459,7 @@ def _store_image(client, config: Config, image_path: Path) -> str:
 
 async def _generate_and_store(
     photo_url: str, sphere: str, count: int = 1, *, prompt_override: str | None = None,
-    postcard_text: str | None = None
+    postcard_text: str | None = None, postcard_mode: str | None = None
 ) -> list[str]:
     _validate_inputs(photo_url, sphere if prompt_override is None else "Открытка")
     config = Config.from_env()
@@ -457,7 +477,7 @@ async def _generate_and_store(
         result_urls = []
         for image_bytes in images:
             if postcard_text is not None:
-                image_bytes = await asyncio.to_thread(add_text_to_image, image_bytes, postcard_text)
+                image_bytes = await asyncio.to_thread(add_text_to_image, image_bytes, postcard_text, mode=postcard_mode)
             with TemporaryDirectory(prefix="botmax-images-") as directory:
                 image_path = Path(directory) / "generated.png"
                 await asyncio.to_thread(image_path.write_bytes, image_bytes)
@@ -512,13 +532,21 @@ async def generate_postcards(photo_url: str, mode: str, card_text: str) -> list[
     if mode not in POSTCARD_PROMPTS:
         raise ValueError(f"Неизвестный режим открытки: {mode}")
     validate_card_text(card_text)
+    modern = mode == "mode_modern_card"
+    layout = (
+        "Keep the left 42% of the image light, uncluttered and free of people or decoration, "
+        "for text added later by software. Place the reference portrait on the right, outside this area. "
+        "Keep the portrait photorealistic; decorative elements may be hand-drawn. "
+        if modern else
+        "Use photorealistic photography, vivid harmonious colors and natural anatomy. "
+        "Keep the bottom 22% empty for a greeting added later by software; keep faces outside this area. "
+    )
     prompt = (
         POSTCARD_PROMPTS[mode] + "\n\nPreserve every reference person's identity, facial features, "
-        "hairstyle, age and skin tone. Do not remove or add people. Use photorealistic photography, "
-        "vivid harmonious colors and natural anatomy. Keep the bottom 22% empty for a greeting "
-        "added later by software; keep faces outside this area. Do not add any text or watermarks."
+        "hairstyle, age and skin tone. Do not remove or add people. "
+        + layout + "Do not add any text or watermarks."
     )
-    return await _generate_and_store(photo_url, "Открытка", prompt_override=prompt, postcard_text=card_text)
+    return await _generate_and_store(photo_url, "Открытка", prompt_override=prompt, postcard_text=card_text, postcard_mode=mode)
 
 
 def _prepare_max_image(data: bytes) -> tuple[bytes, str]:

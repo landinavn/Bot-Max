@@ -883,7 +883,7 @@ async def test_start_shows_six_finished_examples_and_modes(example_photos):
     assert "Примеры работ" in greeting.kwargs["text"]
     assert "исходное фото" not in greeting.kwargs["text"]
     buttons = greeting.kwargs["attachments"][-1].model_dump()["payload"]["buttons"]
-    assert [(row[0]["text"], row[0]["payload"]) for row in buttons[:7]] == list(handlers.MODE_BUTTONS)
+    assert [(row[0]["text"], row[0]["payload"]) for row in buttons[:8]] == list(handlers.MODE_BUTTONS)
 
 
 async def test_start_still_offers_menu_if_examples_fail(example_photos):
@@ -1254,3 +1254,19 @@ async def test_failed_share_message_retry_does_not_regenerate_or_resend_image(cr
     retry.bot.send_message.assert_not_awaited()
     assert (await credit_db.get_user(456))["balance"] == 1
     assert (await context.get_data())["share_prompt_sent"] is True
+
+
+async def test_modern_card_button_uses_shared_photo_and_custom_text_flow(credit_db):
+    assert ("🎨 Современная открытка", "mode_modern_card") in handlers.MODE_BUTTONS
+    await credit_db.add_credits(456, 2)
+    card = AsyncMock(return_value=["https://cdn.example/modern.png"])
+    router = create_router(postcard_generator=card)
+    context = await ready_context()
+    await dispatch_callback(router, callback_event("mode_modern_card"), context)
+    assert await context.get_state() == PosterStates.waiting_for_photo
+    await call_handler(router, "collect_photo", photo_event(), context)
+    assert await context.get_state() == PosterStates.waiting_for_card_text
+    card.assert_not_awaited()
+    await call_handler(router, "collect_card_text", message_event("Счастья тебе, Аня!"), context)
+    card.assert_awaited_once_with("https://photos.example.com/source.png", "mode_modern_card", "Счастья тебе, Аня!")
+    assert (await credit_db.get_user(456))["balance"] == 1

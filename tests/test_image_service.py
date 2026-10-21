@@ -613,13 +613,17 @@ async def test_postcard_uses_template_and_stores_text_overlay(config, storage, a
     register_generation(api, payload={"data": [{"b64_json": base64.b64encode(generated).decode()}]})
     urls = await service.generate_postcards(PHOTO_URL, mode, "Счастья тебе, Аня!")
     assert len(urls) == 1
-    assert storage.uploaded_images == [service.add_text_to_image(generated, "Счастья тебе, Аня!")]
+    assert storage.uploaded_images == [service.add_text_to_image(generated, "Счастья тебе, Аня!", mode=mode)]
     assert storage.uploaded_images[0] != generated
     fields = await multipart_fields(post_requests(api)[0])
     prompt = fields["prompt"].get_content()
     assert prompt.startswith(service.POSTCARD_PROMPTS[mode])
     assert "Preserve every reference person's identity" in prompt
-    assert "Keep the bottom 22% empty" in prompt
+    if mode == "mode_modern_card":
+        assert "Keep the left 42%" in prompt
+        assert "bottom 22%" not in prompt
+    else:
+        assert "Keep the bottom 22% empty" in prompt
     assert "COLLAGE LAYOUT" not in prompt
     assert set(fields) == {"model", "image", "prompt", "size", "quality"}
 
@@ -727,3 +731,42 @@ def test_long_multiline_custom_text_fits_bottom_and_keeps_all_words(monkeypatch)
     assert "\n" in "\n".join(drawn)
     box = ImageChops.difference(source, result).getbbox()
     assert box is not None and box[1] >= 1536 * 0.78 and box[3] <= 1536 * 0.99
+
+
+@pytest.mark.parametrize("size", [(1024, 1536), (512, 768), (1536, 1024)])
+def test_modern_card_uses_short_dark_lines_on_left_and_keeps_portrait_area(monkeypatch, size):
+    from PIL import ImageChops
+    source = Image.new("RGB", size, "#fff3df")
+    buffer = BytesIO()
+    source.save(buffer, format="PNG")
+    text = (
+        "Дорогая Аня, с праздником!\n"
+        "Пусть каждый день приносит радость, улыбки, вдохновение и исполнение самых светлых желаний. "
+        "Твоё счастье очень важно для нас!\n" + "Вдохновение" * 5
+    )
+    rendered = []
+    original = service.ImageDraw.ImageDraw.multiline_text
+
+    def capture(self, xy, text, *args, **kwargs):
+        rendered.append((text, kwargs))
+        return original(self, xy, text, *args, **kwargs)
+
+    monkeypatch.setattr(service.ImageDraw.ImageDraw, "multiline_text", capture)
+    result = Image.open(BytesIO(service.add_text_to_image(buffer.getvalue(), text, mode="mode_modern_card"))).convert("RGB")
+    assert len(rendered) == 1
+    content, kwargs = rendered[0]
+    assert max(map(len, content.splitlines())) <= 28
+    assert "".join(content.split()) == "".join(text.split())
+    assert kwargs["align"] == "left" and kwargs["fill"] == "#3b2720"
+    box = ImageChops.difference(source, result).getbbox()
+    assert box is not None
+    width, height = size
+    assert width * 0.04 <= box[0] <= width * 0.06
+    assert box[2] <= width * 0.43
+    assert box[1] >= height * 0.14 and box[3] <= height * 0.86
+    assert ImageChops.difference(
+        source.crop((int(width * 0.45), 0, width, height)),
+        result.crop((int(width * 0.45), 0, width, height)),
+    ).getbbox() is None
+    colors = {color for _, color in result.getcolors(maxcolors=width * height)}
+    assert (59, 39, 32) in colors

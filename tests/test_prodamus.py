@@ -190,6 +190,7 @@ async def test_webhook_credits_paid_order_once(client, payments, credit_db, cred
     response = await post_notification(client, data, encoding=encoding)
     assert response.status == 200 and await response.text() == "OK"
     assert (await credit_db.get_user(456))["balance"] == credits + 1
+    assert await credit_db.get_all_counters() == {f"buy_{credits}": 1}
     assert (await credit_db.get_user(456))["total_purchases"] == 1
     assert (await credit_db.get_global_stats())["total_revenue_credits"] == credits
     assert (await credit_db.get_user(456))["free_trial_used"] == 1
@@ -197,6 +198,7 @@ async def test_webhook_credits_paid_order_once(client, payments, credit_db, cred
     await credit_db.init_db()  # Повтор после перезапуска и с новым attempt.
     data["attempt"] = "2"
     assert (await post_notification(client, data, encoding=encoding)).status == 200
+    assert await credit_db.get_all_counters() == {f"buy_{credits}": 1}
     assert (await credit_db.get_user(456))["balance"] == credits + 1
     assert (await credit_db.get_user(456))["total_purchases"] == 1
     assert (await credit_db.get_global_stats())["total_revenue_credits"] == credits
@@ -413,6 +415,7 @@ async def test_non_paid_webhooks_do_not_count_as_purchases(client, payments, cre
     assert (await post_notification(client, data)).status == 200
     stats = await credit_db.get_global_stats()
     assert stats["total_purchases"] == stats["total_paid_users"] == stats["total_revenue_credits"] == 0
+    assert await credit_db.get_all_counters() == {}
 
 
 @pytest.mark.parametrize("payload,source", [("vk_ads", "vk_ads"), ("yandex_ads", "yandex_ads"), (None, "unmarked")])
@@ -427,3 +430,18 @@ async def test_paid_webhook_remains_linked_to_first_source(client, payments, cre
     assert rows[source]["revenue_kopecks"] == 9900
     assert sum(row["revenue_kopecks"] for row in rows.values()) == 9900
     assert (await credit_db.get_user(456))["total_purchases"] == 1
+
+
+async def test_package_counter_failure_rolls_back_payment_and_retry_counts_once(client, payments, credit_db, monkeypatch):
+    data = await notification(payments, credits=15)
+    await credit_db.grant_free_trial(456)
+    with monkeypatch.context() as patch:
+        patch.setattr(credit_db, "increment_counter", AsyncMock(side_effect=sqlite3.OperationalError("counter failed")))
+        assert (await post_notification(client, data)).status == 503
+    assert (await credit_db.get_user(456))["balance"] == 1
+    assert (await credit_db.get_user(456))["total_purchases"] == 0
+    assert (await credit_db.get_payment_order(data["order_num"]))["status"] == "pending"
+    assert await credit_db.get_all_counters() == {}
+    assert (await post_notification(client, data)).status == 200
+    assert (await post_notification(client, data)).status == 200
+    assert await credit_db.get_all_counters() == {"buy_15": 1}

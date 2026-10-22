@@ -50,6 +50,24 @@ async def init_db() -> None:
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )"""
         )
+        async with db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'global_counters'"
+        ) as cursor:
+            counters_exist = await cursor.fetchone() is not None
+        await db.execute(
+            """CREATE TABLE IF NOT EXISTS global_counters (
+                event_name TEXT PRIMARY KEY,
+                count INTEGER NOT NULL DEFAULT 0 CHECK (count >= 0)
+            )"""
+        )
+        if not counters_exist:
+            # Покупки восстановим из заказов один раз; тип старых генераций неизвестен.
+            await db.execute(
+                """INSERT INTO global_counters (event_name, count)
+                   SELECT 'buy_' || credits, COUNT(*) FROM payment_orders
+                   WHERE status = 'paid' AND credits IN (1, 5, 15)
+                   GROUP BY credits"""
+            )
         async with db.execute("PRAGMA table_info(users)") as cursor:
             columns = {row[1] for row in await cursor.fetchall()}
         for column in ("total_generations", "total_purchases"):
@@ -121,6 +139,8 @@ async def add_credits(
         )
         if payment_order_id is not None:
             await increment_purchases(user_id, connection=db)
+            if order["credits"] in (1, 5, 15):
+                await increment_counter(f"buy_{order['credits']}", connection=db)
         await db.commit()
         return True
 
@@ -147,7 +167,9 @@ async def get_payment_order(order_id: str) -> aiosqlite.Row | None:
             return await cursor.fetchone()
 
 
-async def deduct_credit(user_id: int, *, count_generation: bool = False) -> bool:
+async def deduct_credit(
+    user_id: int, *, count_generation: bool = False, generation_event: str | None = None,
+) -> bool:
     """Атомарно списать кредит и при необходимости учесть новую генерацию."""
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         cursor = await db.execute(
@@ -156,7 +178,7 @@ async def deduct_credit(user_id: int, *, count_generation: bool = False) -> bool
         )
         charged = cursor.rowcount == 1
         if charged and count_generation:
-            await increment_generations(user_id, connection=db)
+            await increment_generations(user_id, connection=db, event_name=generation_event)
         await db.commit()
         return charged
 
@@ -203,9 +225,40 @@ async def _increment_counter(user_id: int, column: str, connection: aiosqlite.Co
             await db.commit()
 
 
-async def increment_generations(user_id: int, *, connection: aiosqlite.Connection | None = None) -> None:
+async def increment_counter(event_name: str, *, connection: aiosqlite.Connection | None = None) -> None:
+    """Атомарно увеличить глобальный счётчик, при необходимости в общей транзакции."""
+    if not isinstance(event_name, str) or not event_name.strip():
+        raise ValueError("Название события не должно быть пустым.")
+    query = (
+        "INSERT INTO global_counters (event_name, count) VALUES (?, 1) "
+        "ON CONFLICT(event_name) DO UPDATE SET count = count + 1"
+    )
+    if connection is not None:
+        await connection.execute(query, (event_name,))
+    else:
+        async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+            await db.execute(query, (event_name,))
+            await db.commit()
+
+
+async def get_all_counters() -> dict[str, int]:
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        async with db.execute("SELECT event_name, count FROM global_counters") as cursor:
+            return dict(await cursor.fetchall())
+
+
+async def increment_generations(
+    user_id: int, *, connection: aiosqlite.Connection | None = None, event_name: str | None = None,
+) -> None:
     """Учесть новую генерацию; connection связывает счётчик со списанием кредита."""
-    await _increment_counter(user_id, "total_generations", connection)
+    if connection is None:
+        async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+            await increment_generations(user_id, connection=db, event_name=event_name)
+            await db.commit()
+    else:
+        await _increment_counter(user_id, "total_generations", connection)
+        if event_name is not None:
+            await increment_counter(event_name, connection=connection)
 
 
 async def increment_purchases(user_id: int, *, connection: aiosqlite.Connection | None = None) -> None:

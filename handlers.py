@@ -89,7 +89,8 @@ async def _reply(event: MessageCreated | MessageCallback | BotStarted, text=None
 
 PosterGenerator = Callable[[str, str], Awaitable[list[str]]]
 WELCOME_TEXT = (
-    "Привет! Я создаю волшебные открытки и карты желаний с твоим лицом. "
+    "Привет! Я создаю волшебные открытки и карты желаний с твоим лицом или с лицом твоего близкого человека. "
+    "На открытках ты можешь добавить любое пожелание и поздравление. "
     "Выбери, что хочешь создать:"
 )
 MODE_BUTTONS = (

@@ -41,6 +41,7 @@ from image_service import (
     UnsupportedPhotoFormatError,
     generate_vision_boards,
     generate_postcards,
+    fix_text_with_ai,
     POSTCARD_PROMPTS,
     MAX_CARD_TEXT_LENGTH,
     upload_image_for_max,
@@ -88,7 +89,7 @@ MODE_BUTTONS = (
     ("🎂 День рождения (Старшим)", "mode_bday_old"),
     ("🌹 Открытка: 8 Марта", "mode_8march"),
     ("☀️ Открытка: С Добрым утром", "mode_goodmorning"),
-    ("🎨 Современная открытка", "mode_modern_card"),
+    ("🎨 Скрапбукинг", "mode_modern_card"),
 )
 
 
@@ -131,7 +132,7 @@ START_EXAMPLE_FILES = (
     "i (14).webp",
 )
 EXAMPLE_TEXT = (
-    "📸 Можно создать карту желаний или открытку по шаблону: Новый год (личный или семейный), День рождения (молодым или старшим), 8 Марта, Доброе утро, Современная открытка.\n"
+    "📸 Можно создать карту желаний или открытку по шаблону: Новый год (личный или семейный), День рождения (молодым или старшим), 8 Марта, Доброе утро, Скрапбукинг.\n"
     "Ниже пример превращения фото в карту желаний — до и после.\n\n"
     "Промпт: «Машина тесла с бордовым салоном, я за рулем»"
 )
@@ -139,7 +140,7 @@ HELP_TEXT = (
     "🆘 Помощь\n\n"
     "Я создаю карты желаний и праздничные открытки с твоим фото. "
     "Вот как это работает:\n\n"
-    "1. Выбери «Карта желаний» или открытку: Новый год (личный или семейный), День рождения (молодым или старшим), 8 Марта, Доброе утро, Современная открытка.\n"
+    "1. Выбери «Карта желаний» или открытку: Новый год (личный или семейный), День рождения (молодым или старшим), 8 Марта, Доброе утро, Скрапбукинг.\n"
     "2. Отправь своё фото (селфи).\n"
     "3. Для открытки напиши поздравление и имя после фото (до 500 символов). "
     "Для карты желаний опиши свою мечту или желание текстом — например, "
@@ -307,7 +308,15 @@ def create_router(
                         return
                 await _reply(event, "⏳ Генерирую..." if is_postcard else "Создаю плакат…")
                 if is_postcard:
-                    urls = await postcard_generator(photo["url"], data["mode"], data["card_text"])
+                    text = data["card_text"]
+                    fixed_text = data.get("fixed_card_text")
+                    if data.get("fixed_card_text_source") != text or not fixed_text:
+                        fixed_text = await fix_text_with_ai(text)
+                        logger.info("Исходный текст: %s | Исправленный: %s", text, fixed_text)
+                        data = await context.update_data(
+                            fixed_card_text=fixed_text, fixed_card_text_source=text,
+                        )
+                    urls = await postcard_generator(photo["url"], data["mode"], fixed_text)
                 else:
                     urls = await generator(photo["url"], sphere)
                 if len(urls) != 1 or not all(isinstance(url, str) and url.startswith("https://") for url in urls):
@@ -697,7 +706,10 @@ def create_router(
             await _reply(event, f"Напишите поздравление текстом — от 1 до {MAX_CARD_TEXT_LENGTH} символов.")
             return
         if data.get("card_text") != text:
-            await context.update_data(variants=[], sent_count=0, batch_id=None, new_batch_requested=False)
+            await context.update_data(
+                variants=[], sent_count=0, batch_id=None, new_batch_requested=False,
+                fixed_card_text=None, fixed_card_text_source=None,
+            )
         await context.update_data(card_text=text, sphere=data["mode"])
         logger.info("Начинаю генерацию открытки с текстом: %s", text)
         await generate_and_send(event, context)

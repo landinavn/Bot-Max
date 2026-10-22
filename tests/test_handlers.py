@@ -35,6 +35,13 @@ def event_replies(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def text_correction(monkeypatch):
+    fixer = AsyncMock(side_effect=lambda text: text)
+    monkeypatch.setattr(handlers, "fix_text_with_ai", fixer)
+    return fixer
+
+
+@pytest.fixture(autouse=True)
 def max_image_upload(monkeypatch):
     image = AttachmentUpload(type="image", payload={"token": "uploaded-poster-token"})
     upload = AsyncMock(return_value=image)
@@ -1257,7 +1264,7 @@ async def test_failed_share_message_retry_does_not_regenerate_or_resend_image(cr
 
 
 async def test_modern_card_button_uses_shared_photo_and_custom_text_flow(credit_db):
-    assert ("🎨 Современная открытка", "mode_modern_card") in handlers.MODE_BUTTONS
+    assert ("🎨 Скрапбукинг", "mode_modern_card") in handlers.MODE_BUTTONS
     await credit_db.add_credits(456, 2)
     card = AsyncMock(return_value=["https://cdn.example/modern.png"])
     router = create_router(postcard_generator=card)
@@ -1275,7 +1282,7 @@ async def test_modern_card_button_uses_shared_photo_and_custom_text_flow(credit_
 @pytest.mark.parametrize("mode", list(handlers.POSTCARD_PROMPTS))
 @pytest.mark.parametrize("general_handler_first", [False, True])
 async def test_dispatcher_routes_card_text_to_generation(
-    credit_db, monkeypatch, event_replies, caplog, mode, general_handler_first,
+    credit_db, monkeypatch, event_replies, caplog, mode, general_handler_first, text_correction,
 ):
     from maxapi import Dispatcher
     from maxapi.context.isolation import SimpleEventIsolation
@@ -1320,10 +1327,15 @@ async def test_dispatcher_routes_card_text_to_generation(
         await dp.handle(photo)
         assert await context.get_state() == PosterStates.waiting_for_card_text
         generator.assert_not_awaited()
-        user_text = "Счастья тебе, Аня!"
+        user_text = "Счастя тебе, Аня!"
+        fixed_text = "Счастья тебе, Аня!"
+        text_correction.side_effect = None
+        text_correction.return_value = fixed_text
         with caplog.at_level(logging.INFO, logger=handlers.__name__):
             await dp.handle(MessageCreated(timestamp=3, bot=bot, message=message(text=user_text)))
-        generator.assert_awaited_once_with("https://cdn.example/source.png", mode, user_text)
+        text_correction.assert_awaited_once_with(user_text)
+        generator.assert_awaited_once_with("https://cdn.example/source.png", mode, fixed_text)
+        assert f"Исходный текст: {user_text} | Исправленный: {fixed_text}" in caplog.text
         assert f"Начинаю генерацию открытки с текстом: {user_text}" in caplog.text
         replies = [call.kwargs.get("text") for call in bot.send_message.await_args_list]
         assert "⏳ Генерирую..." in replies and "Ваша открытка готов!" in replies
@@ -1361,3 +1373,48 @@ async def test_general_handler_only_echoes_when_no_fsm_state():
     idle = message_event("Привет")
     await call_handler(router, "echo", idle, context)
     idle.message.answer.assert_awaited_once_with(text="Привет")
+
+
+async def test_correction_failure_can_retry_without_charge(credit_db, text_correction):
+    await credit_db.add_credits(456, 2)
+    context = await ready_context()
+    await context.update_data(mode="mode_modern_card")
+    card = AsyncMock(return_value=["https://cdn.example/card.png"])
+    router = create_router(postcard_generator=card)
+    await call_handler(router, "collect_photo", photo_event(), context)
+    text_correction.side_effect = [RuntimeError("correction unavailable"), "Счастья, Аня!"]
+    await call_handler(router, "collect_card_text", message_event("Счастя, Аня!"), context)
+    card.assert_not_awaited()
+    assert (await credit_db.get_user(456))["balance"] == 2
+    assert await context.get_state() == PosterStates.waiting_for_card_text
+    await dispatch_callback(router, callback_event("postcard_retry"), context)
+    card.assert_awaited_once_with("https://photos.example.com/source.png", "mode_modern_card", "Счастья, Аня!")
+    assert (await credit_db.get_user(456))["balance"] == 1
+
+
+async def test_correction_cached_after_image_failure_but_replaced_for_new_text(credit_db, text_correction):
+    await credit_db.add_credits(456, 3)
+    context = await ready_context()
+    await context.update_data(mode="mode_ny")
+    card = AsyncMock(side_effect=[RuntimeError("image unavailable"), ["https://cdn.example/card.png"], ["https://cdn.example/next.png"]])
+    router = create_router(postcard_generator=card)
+    await call_handler(router, "collect_photo", photo_event(), context)
+    text_correction.side_effect = ["Счастья, Аня!", "Здоровья, Оля!"]
+    await call_handler(router, "collect_card_text", message_event("Счастя, Аня!"), context)
+    await dispatch_callback(router, callback_event("postcard_retry"), context)
+    text_correction.assert_awaited_once_with("Счастя, Аня!")
+    assert card.await_args_list[:2] == [call("https://photos.example.com/source.png", "mode_ny", "Счастья, Аня!")] * 2
+    await dispatch_callback(router, callback_event("more"), context)
+    await call_handler(router, "collect_card_text", message_event("Здаровья, Оля!"), context)
+    assert text_correction.await_count == 2
+    assert card.await_args.args[-1] == "Здоровья, Оля!"
+    assert (await credit_db.get_user(456))["balance"] == 1
+
+
+async def test_no_credit_does_not_call_text_api(credit_db, text_correction):
+    context = await ready_context()
+    await context.update_data(mode="mode_ny")
+    router = create_router(postcard_generator=AsyncMock())
+    await call_handler(router, "collect_photo", photo_event(), context)
+    await call_handler(router, "collect_card_text", message_event("Аня, с праздником!"), context)
+    text_correction.assert_not_awaited()

@@ -770,3 +770,67 @@ def test_modern_card_uses_short_dark_lines_on_left_and_keeps_portrait_area(monke
     ).getbbox() is None
     colors = {color for _, color in result.getcolors(maxcolors=width * height)}
     assert (59, 39, 32) in colors
+
+
+def correction_response(text, finish_reason="stop"):
+    return {
+        "id": "correction", "object": "chat.completion", "created": 1, "model": "gpt-4o-mini",
+        "choices": [{"index": 0, "finish_reason": finish_reason,
+                     "message": {"role": "assistant", "content": text}}],
+    }
+
+
+async def test_text_correction_uses_same_proxy_and_key(config, api, monkeypatch):
+    import json
+    settings = replace(config, openai_proxy_url="http://proxy.example:8888")
+    monkeypatch.setattr(service.Config, "from_env", lambda: settings)
+    original_init = httpx.AsyncClient.__init__
+    clients = []
+
+    def init(client, *args, **kwargs):
+        clients.append((client, kwargs))
+        original_init(client, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", init)
+    api.post("https://api.openai.com/v1/chat/completions", payload=correction_response("Счастья, Аня!\nУлыбайся!"))
+    assert await service.fix_text_with_ai("Счастя, Аня!\nУлыбайся!") == "Счастья, Аня!\nУлыбайся!"
+    request = post_requests(api)[0]
+    body = json.loads(request.content)
+    assert body["model"] == "gpt-4o-mini"
+    assert body["messages"][1] == {"role": "user", "content": "Счастя, Аня!\nУлыбайся!"}
+    assert "сохрани смысл и имена" in body["messages"][0]["content"]
+    assert request.headers["Authorization"] == "Bearer test-openai-key"
+    client, kwargs = clients[0]
+    assert kwargs["proxy"] == settings.openai_proxy_url
+    assert kwargs["trust_env"] is False
+    assert kwargs["follow_redirects"] is False
+    assert client.is_closed
+    assert len(post_requests(api)) == 1
+
+
+@pytest.mark.parametrize("text,reason", [(None, "stop"), ("", "stop"), (" " * 10, "stop"), ("а" * 501, "stop"), ("обрыв", "length"), (None, "content_filter")])
+async def test_correction_rejects_invalid_or_incomplete_answer(config, api, text, reason):
+    api.post("https://api.openai.com/v1/chat/completions", payload=correction_response(text, reason))
+    with pytest.raises(service.ImageGenerationError):
+        await service.fix_text_with_ai("С праздником, Аня!")
+
+
+async def test_correction_logs_api_response_and_does_not_retry(config, api, caplog):
+    api.post("https://api.openai.com/v1/chat/completions", status=400,
+             payload={"error": {"message": "model not available", "code": "unsupported_model"}})
+    with pytest.raises(service.ImageGenerationError), caplog.at_level(logging.ERROR):
+        await service.fix_text_with_ai("Счастя, Аня!")
+    assert "HTTP 400" in caplog.text and "model not available" in caplog.text
+    assert len(post_requests(api)) == 1
+
+
+async def test_correction_timeout(config, api):
+    api.post("https://api.openai.com/v1/chat/completions", exception=httpx.ReadTimeout("timeout"))
+    with pytest.raises(service.GenerationTimeoutError):
+        await service.fix_text_with_ai("Счастя, Аня!")
+
+
+async def test_correction_connection_failure(config, api):
+    api.post("https://api.openai.com/v1/chat/completions", exception=httpx.ConnectError("unreachable"))
+    with pytest.raises(service.ImageGenerationError):
+        await service.fix_text_with_ai("Счастя, Аня!")

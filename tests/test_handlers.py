@@ -920,9 +920,14 @@ def photo_event():
     return event
 
 
-@pytest.mark.parametrize("mode", list(handlers.POSTCARD_PROMPTS))
+@pytest.mark.parametrize("mode,event_name", [
+    ("mode_ny", "gen_ny"), ("mode_ny_family", "gen_ny_family"),
+    ("mode_bday_young", "gen_bday_young"), ("mode_bday_old", "gen_bday_old"),
+    ("mode_8march", "gen_8march"), ("mode_goodmorning", "gen_goodmorning"),
+    ("mode_modern_card", "gen_scrapbook"),
+])
 @pytest.mark.parametrize("balance,admin", [(2, False), (0, False), (0, True)])
-async def test_postcard_requires_custom_text_and_uses_shared_balance(credit_db, mode, balance, admin):
+async def test_postcard_requires_custom_text_and_uses_shared_balance(credit_db, mode, event_name, balance, admin):
     await credit_db.add_credits(456, balance or 1)
     if not balance:
         await credit_db.deduct_credit(456)
@@ -939,6 +944,9 @@ async def test_postcard_requires_custom_text_and_uses_shared_balance(credit_db, 
     event = message_event("Аня, будь счастлива!")
     await call_handler(router, "collect_card_text", event, context)
     vision.assert_not_awaited()
+    assert await credit_db.get_all_counters() == (
+        {event_name: 1} if balance or admin else {}
+    )
     if balance or admin:
         postcard.assert_awaited_once_with("https://photos.example.com/source.png", mode, "Аня, будь счастлива!")
         assert (await credit_db.get_user(456))["balance"] == (balance if admin else balance - 1)
@@ -1026,10 +1034,16 @@ async def test_admin_stats_does_not_change_fsm(credit_db, state):
     router = create_router(admin_user_id=456)
     await call_handler(router, "stats", event)
     event.message.answer.assert_awaited_once()
-    assert event.message.answer.await_args.args[0].startswith(
+    text = event.message.answer.await_args.args[0]
+    assert text.startswith(
         "📊 Статистика бота:\n\n👥 Всего пользователей: 1\n💳 Покупателей: 1\n"
-        "🖼 Всего сгенерировано картинок: 1\n💰 Всего покупок: 1"
     )
+    assert "- 5 генераций (299 ₽): 1" in text
+    assert "- 1 генерация (99 ₽): 0" in text
+    assert "- 15 генераций (799 ₽): 0" in text
+    assert "🖼 Всего сгенерировано картинок: 1\n💰 Всего покупок: 1" in text
+    for label in ("Карта желаний", "Новый год", "Семейный НГ", "ДР (Молодым)", "ДР (Старшим)", "8 Марта", "Доброе утро", "Скрапбукинг"):
+        assert f"- {label}: 0" in text
     assert await context.get_state() == state
     assert await context.get_data() == before
     names = [h.func_event.__name__ for h in router.event_handlers]
@@ -1062,9 +1076,11 @@ async def test_generation_stats_count_new_results_not_delivery_retries(credit_db
     await call_handler(router, "collect_sphere", event, context)
     assert generator.await_count == 1
     assert (await credit_db.get_user(456))["total_generations"] == 1
+    assert await credit_db.get_all_counters() == {"gen_vision": 1}
     await dispatch_callback(router, callback_event("more"), context)
     await call_handler(router, "collect_sphere", message_event("Новая мечта"), context)
     assert (await credit_db.get_user(456))["total_generations"] == 2
+    assert await credit_db.get_all_counters() == {"gen_vision": 2}
 
 
 async def test_failed_generation_does_not_change_stats(credit_db):
@@ -1072,6 +1088,7 @@ async def test_failed_generation_does_not_change_stats(credit_db):
     generator = AsyncMock(side_effect=RuntimeError("generation failed"))
     await call_handler(create_router(generator), "collect_sphere", message_event(), await ready_context())
     assert (await credit_db.get_global_stats())["total_generated"] == 0
+    assert await credit_db.get_all_counters() == {}
 
 
 def bot_started_event(payload=None, *, user_id=456, timestamp=1792526400000, is_bot=False):
@@ -1418,3 +1435,23 @@ async def test_no_credit_does_not_call_text_api(credit_db, text_correction):
     await call_handler(router, "collect_photo", photo_event(), context)
     await call_handler(router, "collect_card_text", message_event("Аня, с праздником!"), context)
     text_correction.assert_not_awaited()
+
+
+async def test_stats_displays_distinct_nonzero_values_for_each_event(credit_db):
+    fields = [
+        ("buy_1", "1 генерация (99 ₽)"), ("buy_5", "5 генераций (299 ₽)"),
+        ("buy_15", "15 генераций (799 ₽)"), ("gen_vision", "Карта желаний"),
+        ("gen_ny", "Новый год"), ("gen_ny_family", "Семейный НГ"),
+        ("gen_bday_young", "ДР (Молодым)"), ("gen_bday_old", "ДР (Старшим)"),
+        ("gen_8march", "8 Марта"), ("gen_goodmorning", "Доброе утро"),
+        ("gen_scrapbook", "Скрапбукинг"),
+    ]
+    for count, (key, _) in enumerate(fields, 1):
+        for _ in range(count):
+            await credit_db.increment_counter(key)
+    event = message_event("/stats")
+    await call_handler(create_router(admin_user_id=456), "stats", event)
+    text = event.message.answer.await_args.args[0]
+    for count, (_, label) in enumerate(fields, 1):
+        assert f"- {label}: {count}\n" in text
+    assert "📍 Источники первого запуска" in text

@@ -31,6 +31,7 @@ from config import DEFAULT_BOT_LINK, validate_bot_link
 from database import (
     deduct_credit, get_user, grant_free_trial, get_global_stats, increment_generations,
     record_first_start, get_source_stats, register_shared_image, get_shared_image,
+    get_all_counters,
 )
 from prodamus import PACKAGES, ProdamusPayments
 from max_client import log_max_error
@@ -48,6 +49,17 @@ from image_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+GENERATION_EVENTS = {
+    "mode_vision": "gen_vision",
+    "mode_ny": "gen_ny",
+    "mode_ny_family": "gen_ny_family",
+    "mode_bday_young": "gen_bday_young",
+    "mode_bday_old": "gen_bday_old",
+    "mode_8march": "gen_8march",
+    "mode_goodmorning": "gen_goodmorning",
+    "mode_modern_card": "gen_scrapbook",
+}
 
 
 def _recipient(event: MessageCreated | MessageCallback | BotStarted) -> dict[str, int]:
@@ -267,6 +279,7 @@ def create_router(
         data = await context.get_data()
         photo = data.get("photo")
         sphere = data.get("sphere")
+        mode = data.get("mode", "mode_vision")
         is_postcard = data.get("mode") in POSTCARD_PROMPTS
         retry_state = PosterStates.waiting_for_card_text if is_postcard else PosterStates.waiting_for_prompt
 
@@ -322,11 +335,12 @@ def create_router(
                 if len(urls) != 1 or not all(isinstance(url, str) and url.startswith("https://") for url in urls):
                     raise RuntimeError("Генератор должен вернуть один HTTPS URL.")
                 user = None
+                generation_event = GENERATION_EVENTS[mode]
                 if is_admin:
-                    await increment_generations(credit_user_id)
+                    await increment_generations(credit_user_id, event_name=generation_event)
                     logger.info("Пропущено списание кредитов для администратора %s", credit_user_id)
                 else:
-                    if not await deduct_credit(credit_user_id, count_generation=True):
+                    if not await deduct_credit(credit_user_id, count_generation=True, generation_event=generation_event):
                         raise RuntimeError("Не удалось списать кредит после генерации.")
                     user = await get_user(credit_user_id)
                 data = await context.update_data(
@@ -441,6 +455,7 @@ def create_router(
         if admin_user_id is None or event.get_ids()[1] != admin_user_id:
             return
         data = await get_global_stats()
+        counters = await get_all_counters()
         sources = await get_source_stats()
         source_text = "\n\n📍 Источники первого запуска (весь период):"
         for source in sources:
@@ -459,6 +474,19 @@ def create_router(
             "📊 Статистика бота:\n\n"
             f"👥 Всего пользователей: {data['total_users']}\n"
             f"💳 Покупателей: {data['total_paid_users']}\n"
+            "\n🛍 Проданные пакеты:\n"
+            f"- 1 генерация (99 ₽): {counters.get('buy_1', 0)}\n"
+            f"- 5 генераций (299 ₽): {counters.get('buy_5', 0)}\n"
+            f"- 15 генераций (799 ₽): {counters.get('buy_15', 0)}\n"
+            "\n🖼 Сгенерировано картинок:\n"
+            f"- Карта желаний: {counters.get('gen_vision', 0)}\n"
+            f"- Новый год: {counters.get('gen_ny', 0)}\n"
+            f"- Семейный НГ: {counters.get('gen_ny_family', 0)}\n"
+            f"- ДР (Молодым): {counters.get('gen_bday_young', 0)}\n"
+            f"- ДР (Старшим): {counters.get('gen_bday_old', 0)}\n"
+            f"- 8 Марта: {counters.get('gen_8march', 0)}\n"
+            f"- Доброе утро: {counters.get('gen_goodmorning', 0)}\n"
+            f"- Скрапбукинг: {counters.get('gen_scrapbook', 0)}\n\n"
             f"🖼 Всего сгенерировано картинок: {data['total_generated']}\n"
             f"💰 Всего покупок: {data['total_purchases']}" + source_text
         )

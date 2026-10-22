@@ -231,3 +231,59 @@ async def test_share_tokens_are_persistent_and_do_not_create_users(credit_db):
     assert await credit_db.get_shared_image(url) == url  # Registered legacy share_<URL>.
     assert await credit_db.get_shared_image("https://127.0.0.1/private") is None
     assert (await credit_db.get_global_stats())["total_users"] == 0
+
+
+async def test_global_counters_atomic_persistent_and_independent(credit_db):
+    assert await credit_db.get_all_counters() == {}
+    await asyncio.gather(*(credit_db.increment_counter("gen_ny") for _ in range(20)))
+    await credit_db.increment_counter("gen_vision")
+    await credit_db.init_db()
+    assert await credit_db.get_all_counters() == {"gen_ny": 20, "gen_vision": 1}
+
+
+@pytest.mark.parametrize("event", [None, "", "   ", 123])
+async def test_global_counters_reject_empty_names(credit_db, event):
+    with pytest.raises(ValueError):
+        await credit_db.increment_counter(event)
+    assert await credit_db.get_all_counters() == {}
+
+
+async def test_package_counter_migration_backfills_paid_orders_once(credit_db):
+    import aiosqlite
+    for credits, amount in [(1, 9900), (5, 29900), (15, 79900), (15, 69900)]:
+        order = f"order-{credits}-{amount}"
+        await credit_db.create_payment_order(order, 456, credits, amount, "package")
+        await credit_db.add_credits(456, credits, payment_order_id=order, provider_payment_id=order)
+    await credit_db.create_payment_order("pending", 456, 1, 9900, "package")
+    async with aiosqlite.connect(credit_db.DATABASE_PATH) as db:
+        await db.execute("DROP TABLE global_counters")
+        await db.commit()
+    await credit_db.init_db()
+    assert await credit_db.get_all_counters() == {"buy_1": 1, "buy_5": 1, "buy_15": 2}
+    await credit_db.increment_counter("gen_scrapbook")
+    await credit_db.init_db()
+    assert await credit_db.get_all_counters() == {"buy_1": 1, "buy_5": 1, "buy_15": 2, "gen_scrapbook": 1}
+
+
+@pytest.mark.parametrize("admin", [True, False])
+async def test_generation_counter_failure_rolls_back_user_and_balance(credit_db, monkeypatch, admin):
+    from unittest.mock import AsyncMock
+    import sqlite3
+    await credit_db.add_credits(456, 2)
+    with monkeypatch.context() as patch:
+        patch.setattr(credit_db, "increment_counter", AsyncMock(side_effect=sqlite3.OperationalError("counter failed")))
+        with pytest.raises(sqlite3.OperationalError):
+            if admin:
+                await credit_db.increment_generations(456, event_name="gen_vision")
+            else:
+                await credit_db.deduct_credit(456, count_generation=True, generation_event="gen_vision")
+    user = await credit_db.get_user(456)
+    assert user["balance"] == 2 and user["total_generations"] == 0
+    assert await credit_db.get_all_counters() == {}
+
+
+async def test_failed_charge_does_not_increment_generation_counter(credit_db):
+    await credit_db.grant_free_trial(456)
+    await credit_db.deduct_credit(456)
+    assert not await credit_db.deduct_credit(456, count_generation=True, generation_event="gen_vision")
+    assert await credit_db.get_all_counters() == {}

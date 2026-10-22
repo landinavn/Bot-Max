@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
 from secrets import token_urlsafe
+from zoneinfo import ZoneInfo
 
 import aiosqlite
 
@@ -27,7 +28,11 @@ async def init_db() -> None:
                 total_generations INTEGER NOT NULL DEFAULT 0 CHECK (total_generations >= 0),
                 total_purchases INTEGER NOT NULL DEFAULT 0 CHECK (total_purchases >= 0),
                 first_start_source TEXT,
-                first_started_at TEXT
+                first_started_at TEXT,
+                is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                days_active INTEGER NOT NULL DEFAULT 1 CHECK (days_active >= 1),
+                last_active_at TEXT
             )"""
         )
         await db.execute(
@@ -90,7 +95,96 @@ async def init_db() -> None:
             # Не приписывать старых пользователей новой рекламной кампании.
             # Их точная дата первого запуска до обновления неизвестна.
             await db.execute("UPDATE users SET first_start_source = 'legacy'")
+        for column, definition in (
+            ("is_active", "INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1))"),
+            ("days_active", "INTEGER NOT NULL DEFAULT 1 CHECK (days_active >= 1)"),
+            ("last_active_at", "TEXT"),
+        ):
+            if column not in columns:
+                await db.execute(f"ALTER TABLE users ADD COLUMN {column} {definition}")
+        if "created_at" not in columns:
+            # SQLite запрещает ALTER ADD с динамическим DEFAULT для непустой таблицы.
+            await db.execute("ALTER TABLE users ADD COLUMN created_at TIMESTAMP")
+            await db.execute("UPDATE users SET created_at = first_started_at")
+        # Для мигрированных баз обеспечиваем тот же default при новых INSERT.
+        await db.execute(
+            """CREATE TRIGGER IF NOT EXISTS users_created_at_default
+               AFTER INSERT ON users WHEN NEW.created_at IS NULL
+               BEGIN
+                   UPDATE users SET created_at = CURRENT_TIMESTAMP WHERE user_id = NEW.user_id;
+               END"""
+        )
+        await db.execute(
+            """CREATE TABLE IF NOT EXISTS user_activity_days (
+                user_id INTEGER NOT NULL,
+                activity_date TEXT NOT NULL,
+                PRIMARY KEY (user_id, activity_date)
+            )"""
+        )
         await db.commit()
+
+
+def _activity_date(timestamp: str) -> str:
+    moment = datetime.fromisoformat(timestamp)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(ZoneInfo("Europe/Moscow")).date().isoformat()
+
+
+async def mark_user_inactive(user_id: int) -> None:
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        await db.execute("UPDATE users SET is_active = 0 WHERE user_id = ?", (user_id,))
+        await db.commit()
+
+
+async def update_user_activity(user_id: int, *, timestamp_ms: int | None = None) -> None:
+    """Учесть уникальный московский день; входящее событие восстанавливает доступность."""
+    if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
+        raise ValueError("Некорректный user_id.")
+    moment = (datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+              if timestamp_ms is not None else datetime.now(timezone.utc))
+    timestamp = moment.isoformat(timespec="milliseconds")
+    activity_date = _activity_date(timestamp)
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        db.row_factory = aiosqlite.Row
+        await db.execute(
+            "INSERT OR IGNORE INTO users (user_id, created_at) VALUES (?, ?)", (user_id, timestamp),
+        )
+        async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            user = await cursor.fetchone()
+        baseline = user["last_active_at"] or user["first_started_at"] or user["created_at"] or timestamp
+        await db.execute(
+            "INSERT OR IGNORE INTO user_activity_days VALUES (?, ?)", (user_id, _activity_date(baseline)),
+        )
+        inserted = await db.execute(
+            "INSERT OR IGNORE INTO user_activity_days VALUES (?, ?)", (user_id, activity_date),
+        )
+        last_active = max(user["last_active_at"] or timestamp, timestamp)
+        await db.execute(
+            """UPDATE users SET is_active = 1, last_active_at = ?,
+               days_active = days_active + ? WHERE user_id = ?""",
+            (last_active, inserted.rowcount, user_id),
+        )
+        await db.commit()
+
+
+async def get_advanced_stats() -> dict[str, int]:
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT COUNT(*) AS total_all,
+               COALESCE(SUM(is_active = 1), 0) AS total_active,
+               COALESCE(SUM(is_active = 0), 0) AS total_blocked,
+               COALESCE(SUM(days_active > 1), 0) AS total_returned FROM users"""
+        ) as cursor:
+            return dict(await cursor.fetchone())
+
+
+async def get_active_user_ids() -> list[int]:
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        async with db.execute("SELECT user_id FROM users WHERE is_active = 1 ORDER BY user_id") as cursor:
+            return [row[0] for row in await cursor.fetchall()]
 
 
 async def get_user(user_id: int) -> aiosqlite.Row | None:
@@ -295,13 +389,14 @@ async def record_first_start(user_id: int, payload: str | None = None, *, timest
     ).isoformat(timespec="milliseconds")
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         cursor = await db.execute(
-            """INSERT INTO users (user_id, first_start_source, first_started_at)
-               VALUES (?, ?, ?)
+            """INSERT INTO users (user_id, first_start_source, first_started_at, created_at)
+               VALUES (?, ?, ?, ?)
                ON CONFLICT(user_id) DO UPDATE SET
                  first_start_source = excluded.first_start_source,
-                 first_started_at = excluded.first_started_at
+                 first_started_at = excluded.first_started_at,
+                 created_at = excluded.created_at
                WHERE users.first_start_source IS NULL""",
-            (user_id, source, started_at),
+            (user_id, source, started_at, started_at),
         )
         await db.commit()
         return cursor.rowcount == 1

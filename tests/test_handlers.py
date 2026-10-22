@@ -995,7 +995,9 @@ async def test_admin_stats_does_not_change_fsm(credit_db, state):
     event.message.answer.assert_awaited_once()
     text = event.message.answer.await_args.args[0]
     assert text.startswith(
-        "📊 Статистика бота:\n\n👥 Всего пользователей: 1\n💳 Покупателей: 1\n"
+        "📊 Статистика бота:\n\n👥 Всего запускали: 1\n🟢 Доступны для сообщений: 1\n"
+        "🔴 Заблокировали/Удалили: 0\n🔄 Вернулись после 1-го дня: 0\n\n"
+        "👥 Всего пользователей: 1\n💳 Покупателей: 1\n"
     )
     assert "- 5 генераций (299 ₽): 1" in text
     assert "- 1 генерация (99 ₽): 0" in text
@@ -1323,6 +1325,7 @@ async def test_dispatcher_routes_card_text_to_generation(
         assert await context.get_state() is None
         assert (await credit_db.get_user(456))["balance"] == 1
         assert (await credit_db.get_user(456))["total_generations"] == 1
+        assert (await credit_db.get_user(456))["last_active_at"] == "1970-01-01T00:00:00.003+00:00"
         if general_handler_first:
             assert "передаю текст из общего обработчика" in caplog.text
     finally:
@@ -1474,3 +1477,112 @@ async def test_more_restarts_with_new_photo_then_corrected_text_or_dream(credit_
         card.assert_awaited_once_with("https://cdn.example/new-reference.png", mode, "Счастья, Аня!")
     assert await context.get_state() is None
     assert (await credit_db.get_user(456))["balance"] == 1
+
+
+async def test_broadcast_marks_only_forbidden_and_skips_inactive_users(credit_db, monkeypatch):
+    for user_id in (101, 102, 103, 104):
+        await credit_db.add_credits(user_id, 1)
+    await credit_db.mark_user_inactive(104)
+    monkeypatch.setattr(handlers.asyncio, "sleep", AsyncMock())
+    event = message_event("/broadcast Новые открытки готовы!")
+    async def send(**kwargs):
+        if kwargs["user_id"] == 101:
+            raise MaxApiError(code=403, raw={"code": "recipient.blocked", "message": "forbidden"})
+        if kwargs["user_id"] == 102:
+            raise MaxApiError(code=500, raw="temporary error")
+    event.bot.send_message.side_effect = send
+    router = create_router(admin_user_id=456)
+    await call_handler(router, "broadcast", event)
+    assert [c.kwargs["user_id"] for c in event.bot.send_message.await_args_list] == [101, 102, 103]
+    assert all(c.kwargs["text"] == "Новые открытки готовы!" and "chat_id" not in c.kwargs
+               for c in event.bot.send_message.await_args_list)
+    assert (await credit_db.get_user(101))["is_active"] == 0
+    assert (await credit_db.get_user(102))["is_active"] == 1
+    assert "Отправлено: 1. Недоступны (403): 1. Ошибок: 1." in event.message.answer.await_args.args[0]
+    event.bot.send_message.reset_mock()
+    await call_handler(router, "broadcast", event)
+    assert [c.kwargs["user_id"] for c in event.bot.send_message.await_args_list] == [102, 103]
+
+
+@pytest.mark.parametrize("status", [401, 429])
+async def test_broadcast_stops_on_auth_or_rate_limit_without_marking_blocked(credit_db, status):
+    await credit_db.add_credits(101, 1)
+    await credit_db.add_credits(102, 1)
+    event = message_event("/broadcast Привет!")
+    event.bot.send_message.side_effect = MaxApiError(code=status, raw="API error")
+    await call_handler(create_router(admin_user_id=456), "broadcast", event)
+    event.bot.send_message.assert_awaited_once_with(user_id=101, text="Привет!")
+    assert await credit_db.get_active_user_ids() == [101, 102]
+    assert "Рассылка остановлена" in event.message.answer.await_args.args[0]
+
+
+@pytest.mark.parametrize("admin,actor,is_bot", [(None, 456, False), (789, 456, False), (456, None, False), (456, 456, True)])
+async def test_broadcast_ignores_unauthorized_and_bots(credit_db, admin, actor, is_bot):
+    await credit_db.add_credits(101, 1)
+    event = message_event("/broadcast Привет!")
+    event.get_ids = lambda: (456, actor)
+    event.message.sender.is_bot = is_bot
+    await call_handler(create_router(admin_user_id=admin), "broadcast", event)
+    event.bot.send_message.assert_not_awaited()
+    event.message.answer.assert_not_awaited()
+
+
+@pytest.mark.parametrize("text", ["/broadcast", "/broadcast   ", "/broadcast " + "a" * 4001])
+async def test_broadcast_validates_text(credit_db, text):
+    event = message_event(text)
+    await call_handler(create_router(admin_user_id=456), "broadcast", event)
+    event.bot.send_message.assert_not_awaited()
+    assert "Используйте /broadcast" in event.message.answer.await_args.args[0]
+
+
+async def test_stats_reports_active_blocked_and_returned(credit_db):
+    from datetime import datetime
+    def stamp(day):
+        return int(datetime.fromisoformat(f"2026-10-{day}T12:00:00+00:00").timestamp() * 1000)
+    await credit_db.update_user_activity(101, timestamp_ms=stamp(20))
+    await credit_db.update_user_activity(101, timestamp_ms=stamp(21))
+    await credit_db.update_user_activity(102, timestamp_ms=stamp(20))
+    await credit_db.mark_user_inactive(102)
+    event = message_event("/stats")
+    await call_handler(create_router(admin_user_id=456), "stats", event)
+    text = event.message.answer.await_args.args[0]
+    assert "Всего запускали: 2" in text
+    assert "Доступны для сообщений: 1" in text
+    assert "Заблокировали/Удалили: 1" in text
+    assert "Вернулись после 1-го дня: 1" in text
+    assert "Проданные пакеты" in text and "Скрапбукинг" in text
+
+
+@pytest.mark.parametrize("kind", ["message", "callback", "bot_started"])
+async def test_activity_middleware_updates_before_handler_for_all_user_events(credit_db, kind):
+    from maxapi.types import MessageCreated, MessageCallback
+    event = bot_started_event(user_id=789, timestamp=1792526400000)
+    user = event.user.model_dump()
+    message = {"sender": user, "recipient": {"chat_id": 123, "chat_type": "dialog"},
+               "timestamp": 1, "body": {"mid": "activity", "seq": 1, "text": "Привет"}}
+    if kind == "message":
+        event = MessageCreated(timestamp=1792526400000, message=message)
+    elif kind == "callback":
+        event = MessageCallback(timestamp=1792526400000, message=message,
+                                callback={"timestamp": 1, "callback_id": "cb", "payload": "more", "user": user})
+    await credit_db.update_user_activity(789, timestamp_ms=1792526400000)
+    await credit_db.mark_user_inactive(789)
+    called = False
+    async def next_handler(event_object, data):
+        nonlocal called
+        called = True
+        row = await credit_db.get_user(789)
+        assert row["is_active"] == 1 and row["days_active"] == 1
+        assert row["last_active_at"] is not None
+        return "handled"
+    middleware = create_router().outer_middlewares[0]
+    assert await middleware(next_handler, event, {}) == "handled"
+    assert called
+
+
+async def test_activity_middleware_ignores_bot_messages(credit_db):
+    event = bot_started_event(user_id=789, is_bot=True)
+    handler = AsyncMock()
+    await create_router().outer_middlewares[0](handler, event, {})
+    assert await credit_db.get_user(789) is None
+    handler.assert_awaited_once()

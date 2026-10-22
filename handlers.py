@@ -12,6 +12,7 @@ from maxapi import F, Router
 from maxapi.context import MemoryContext
 from maxapi.context.state_machine import State, StatesGroup
 from maxapi.filters.command import Command, CommandStart
+from maxapi.filters.middleware import BaseMiddleware
 from maxapi.enums.parse_mode import ParseMode
 from maxapi.enums.upload_type import UploadType
 from maxapi.types import (
@@ -31,6 +32,7 @@ from database import (
     deduct_credit, get_user, grant_free_trial, get_global_stats, increment_generations,
     record_first_start, get_source_stats, register_shared_image, get_shared_image,
     get_all_counters,
+    get_advanced_stats, update_user_activity, mark_user_inactive, get_active_user_ids,
 )
 from prodamus import PACKAGES, ProdamusPayments
 from max_client import log_max_error
@@ -48,6 +50,29 @@ from image_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class UserActivityMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event_object, data):
+        actor = None
+        if isinstance(event_object, BotStarted):
+            actor = event_object.user
+        elif isinstance(event_object, MessageCallback):
+            actor = event_object.callback.user
+        elif isinstance(event_object, MessageCreated):
+            actor = event_object.message.sender
+        if actor is not None and not actor.is_bot:
+            await update_user_activity(actor.user_id, timestamp_ms=event_object.timestamp)
+        return await handler(event_object, data)
+
+
+def max_error_status(exc: Exception) -> int | None:
+    response = getattr(exc, "response", None)
+    for value in (getattr(exc, "code", None), getattr(exc, "status", None),
+                  getattr(response, "status_code", None), getattr(response, "status", None)):
+        if isinstance(value, int):
+            return value
+    return 403 if type(exc).__name__ == "Forbidden" else None
 
 GENERATION_EVENTS = {
     "mode_vision": "gen_vision",
@@ -249,6 +274,8 @@ def create_router(
 ) -> Router:
     bot_link = validate_bot_link(bot_link)
     router = Router()
+    router.register_outer_middleware(UserActivityMiddleware())
+    broadcast_lock = asyncio.Lock()
     # FSM изолирован по чату, а баланс общий для всех чатов пользователя.
     generation_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
 
@@ -459,6 +486,7 @@ def create_router(
         if admin_user_id is None or event.get_ids()[1] != admin_user_id:
             return
         data = await get_global_stats()
+        activity = await get_advanced_stats()
         counters = await get_all_counters()
         sources = await get_source_stats()
         source_text = "\n\n📍 Источники первого запуска (весь период):"
@@ -476,6 +504,10 @@ def create_router(
                 source_text += f"\nРанее зарегистрированы, дата и источник неизвестны: {source['total_users']}"
         await _reply(event,
             "📊 Статистика бота:\n\n"
+            f"👥 Всего запускали: {activity['total_all']}\n"
+            f"🟢 Доступны для сообщений: {activity['total_active']}\n"
+            f"🔴 Заблокировали/Удалили: {activity['total_blocked']}\n"
+            f"🔄 Вернулись после 1-го дня: {activity['total_returned']}\n\n"
             f"👥 Всего пользователей: {data['total_users']}\n"
             f"💳 Покупателей: {data['total_paid_users']}\n"
             "\n🛍 Проданные пакеты:\n"
@@ -494,6 +526,45 @@ def create_router(
             f"🖼 Всего сгенерировано картинок: {data['total_generated']}\n"
             f"💰 Всего покупок: {data['total_purchases']}" + source_text
         )
+
+    @router.message_created(Command("broadcast"))
+    async def broadcast(event: MessageCreated) -> None:
+        if is_bot_message(event) or admin_user_id is None or event.get_ids()[1] != admin_user_id:
+            return
+        parts = (event.message.body.text or "").split(maxsplit=1)
+        if len(parts) != 2 or not parts[1].strip() or len(parts[1]) > 4000:
+            await _reply(event, "Используйте /broadcast текст сообщения (до 4000 символов).")
+            return
+        if broadcast_lock.locked():
+            await _reply(event, "Рассылка уже выполняется. Дождитесь завершения.")
+            return
+        async with broadcast_lock:
+            recipients = await get_active_user_ids()
+            sent = blocked = failed = 0
+            stopped = False
+            for user_id in recipients:
+                # Пользователь мог стать недоступен уже после получения списка.
+                user = await get_user(user_id)
+                if user is None or not user["is_active"]:
+                    continue
+                try:
+                    await event.bot.send_message(user_id=user_id, text=parts[1])
+                    sent += 1
+                except Exception as exc:
+                    await log_max_error(exc, logger)
+                    status = max_error_status(exc)
+                    if status == 403:
+                        await mark_user_inactive(user_id)
+                        blocked += 1
+                    else:
+                        failed += 1
+                        if status in {401, 429}:
+                            stopped = True
+                            break
+                await asyncio.sleep(0.1)
+            title = "Рассылка остановлена" if stopped else "Рассылка завершена"
+            await _reply(event, f"{title}. Отправлено: {sent}. "
+                         f"Недоступны (403): {blocked}. Ошибок: {failed}.")
 
     async def show_start(
         event: MessageCreated | MessageCallback | BotStarted, context: MemoryContext,

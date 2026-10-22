@@ -6,10 +6,13 @@ import pytest
 async def test_trial_is_atomic_under_concurrent_starts(credit_db):
     grants = await asyncio.gather(*(credit_db.grant_free_trial(123) for _ in range(20)))
     assert sum(grants) == 1
-    assert dict(await credit_db.get_user(123)) == {
+    user = dict(await credit_db.get_user(123))
+    assert user.pop("created_at") is not None
+    assert user == {
         "user_id": 123, "balance": 1, "free_trial_used": 1,
         "total_generations": 0, "total_purchases": 0,
         "first_start_source": None, "first_started_at": None,
+        "is_active": 1, "days_active": 1, "last_active_at": None,
     }
 
 
@@ -287,3 +290,73 @@ async def test_failed_charge_does_not_increment_generation_counter(credit_db):
     await credit_db.deduct_credit(456)
     assert not await credit_db.deduct_credit(456, count_generation=True, generation_event="gen_vision")
     assert await credit_db.get_all_counters() == {}
+
+
+def activity_timestamp(iso):
+    from datetime import datetime
+    return int(datetime.fromisoformat(iso).timestamp() * 1000)
+
+
+async def test_empty_advanced_stats(credit_db):
+    assert await credit_db.get_advanced_stats() == {
+        "total_all": 0, "total_active": 0, "total_blocked": 0, "total_returned": 0,
+    }
+
+
+async def test_unique_activity_days_are_concurrent_restart_safe_and_use_moscow(credit_db):
+    first = activity_timestamp("2026-10-21T20:59:59+00:00")  # 23:59 Moscow
+    second = first + 1000  # Midnight Moscow, still October 21 in UTC.
+    await asyncio.gather(*(credit_db.update_user_activity(123, timestamp_ms=first) for _ in range(10)))
+    user = await credit_db.get_user(123)
+    assert user["days_active"] == 1 and user["is_active"] == 1
+    created_at = user["created_at"]
+    await asyncio.gather(*(credit_db.update_user_activity(123, timestamp_ms=second) for _ in range(10)))
+    await credit_db.init_db()
+    await credit_db.update_user_activity(123, timestamp_ms=first)  # Delayed duplicate from yesterday.
+    user = await credit_db.get_user(123)
+    assert user["days_active"] == 2 and user["created_at"] == created_at
+    assert user["last_active_at"] == "2026-10-21T21:00:00.000+00:00"
+    assert user["balance"] == 0 and user["total_generations"] == 0
+    assert await credit_db.get_advanced_stats() == {
+        "total_all": 1, "total_active": 1, "total_blocked": 0, "total_returned": 1,
+    }
+
+
+async def test_inactive_user_is_excluded_and_incoming_activity_reactivates(credit_db):
+    first = activity_timestamp("2026-10-21T12:00:00+00:00")
+    await credit_db.update_user_activity(123, timestamp_ms=first)
+    await credit_db.update_user_activity(456, timestamp_ms=first)
+    await credit_db.mark_user_inactive(123)
+    await credit_db.mark_user_inactive(123)
+    assert await credit_db.get_active_user_ids() == [456]
+    assert (await credit_db.get_advanced_stats())["total_blocked"] == 1
+    await credit_db.update_user_activity(123, timestamp_ms=first + 1000)
+    assert (await credit_db.get_user(123))["days_active"] == 1
+    assert await credit_db.get_active_user_ids() == [123, 456]
+    assert (await credit_db.get_advanced_stats())["total_blocked"] == 0
+
+
+async def test_activity_migration_preserves_history_and_sets_defaults_for_new_users(credit_db):
+    import aiosqlite
+    async with aiosqlite.connect(credit_db.DATABASE_PATH) as db:
+        await db.execute("DROP TABLE users")
+        await db.execute('''CREATE TABLE users (
+            user_id INTEGER PRIMARY KEY, balance INTEGER NOT NULL DEFAULT 0,
+            free_trial_used INTEGER NOT NULL DEFAULT 0,
+            first_started_at TEXT, first_start_source TEXT)''')
+        await db.execute("INSERT INTO users VALUES (123, 7, 1, '2026-10-20T12:00:00.000+00:00', 'vk_ads')")
+        await db.execute("INSERT INTO users VALUES (456, 5, 1, NULL, 'legacy')")
+        await db.commit()
+    await credit_db.init_db()
+    user = await credit_db.get_user(123)
+    assert user["created_at"] == user["first_started_at"]
+    assert user["balance"] == 7 and user["free_trial_used"] == 1
+    assert (await credit_db.get_user(456))["created_at"] is None
+    await credit_db.update_user_activity(123, timestamp_ms=activity_timestamp("2026-10-22T12:00:00+00:00"))
+    assert (await credit_db.get_user(123))["days_active"] == 2
+    await credit_db.mark_user_inactive(123)
+    await credit_db.init_db()
+    user = await credit_db.get_user(123)
+    assert user["days_active"] == 2 and user["is_active"] == 0 and user["balance"] == 7
+    await credit_db.add_credits(789, 1)
+    assert (await credit_db.get_user(789))["created_at"] is not None

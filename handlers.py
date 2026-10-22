@@ -3,9 +3,8 @@
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from html import escape
 from pathlib import Path
-from urllib.parse import urlsplit, unquote, urlencode
+from urllib.parse import unquote, urlencode
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
@@ -116,8 +115,7 @@ CARD_TEXT_PROMPT = (
     "Этот текст появится на открытке."
 )
 SHARED_WELCOME = (
-    "Привет! Твой друг поделился с тобой этой открыткой. Хочешь создать такую же с твоим лицом? "
-    "Нажми кнопку ниже!"
+    "Привет! Твой друг поделился с тобой этой открыткой. Хочешь создать такую же с твоим лицом?"
 )
 CHANNEL_TEXT = "✨ Хочешь узнать секреты исполнения желаний? Присоединяйся к нашему каналу!"
 
@@ -142,23 +140,10 @@ START_EXAMPLE_FILES = (
     "i (19).webp",
     "i (16).webp",
     "i (14).webp",
-    "1cb6c3d1-319b-49fa-a9dd-50493671d193",
-    "i (20)",
-    "i (21)",
+    "1cb6c3d1-319b-49fa-a9dd-50493671d193.jpg",
+    "i (20).webp",
+    "i (21).webp",
 )
-
-
-def start_example_path(filename: str) -> Path:
-    """Для новых примеров без расширения найти исходный JPEG, PNG или WebP."""
-    path = EXAMPLES_DIR / filename
-    if path.is_file():
-        return path
-    if not path.suffix and EXAMPLES_DIR.is_dir():
-        for candidate in sorted(EXAMPLES_DIR.iterdir()):
-            if (candidate.stem == filename and candidate.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
-                    and candidate.is_file()):
-                return candidate
-    raise FileNotFoundError(filename)
 
 
 EXAMPLE_TEXT = (
@@ -463,7 +448,7 @@ def create_router(
                 "Повторите описание мечты или /cancel."
             )
             return
-        # Данные нужны кнопкам «Ещё» и «Поделиться»; завершаем только состояние.
+        # Сохраняем режим для «Ещё» и кэш результата для повторной отправки.
         await context.set_state(None)
 
     @router.message_created(Command("stats"))
@@ -535,17 +520,24 @@ def create_router(
                     await _reply(event, "Вам начислен 1 бесплатный кредит!")
                 return
             await _reply(event, "Эта ссылка на картинку недоступна. Вы можете создать свою.")
-        await _reply(event, text=WELCOME_TEXT, attachments=[main_keyboard()])
+        examples = []
         for filename in START_EXAMPLE_FILES:
             try:
-                path = start_example_path(filename)
+                path = EXAMPLES_DIR / filename
+                if not path.is_file():
+                    raise FileNotFoundError(filename)
                 image = await event.bot.upload_media(InputMedia(path=str(path), type=UploadType.IMAGE))
                 if not isinstance(image.payload.token, str) or not image.payload.token.strip():
                     raise RuntimeError("MAX вернул пустой media token.")
-                # Один файл на сообщение: не зависим от лимита вложений MAX.
-                await _reply(event, text="Пример работы:", attachments=[image])
+                examples.append(image)
             except Exception as exc:
-                logger.error("Не удалось отправить пример %s: %s", filename, exc)
+                logger.error("Не удалось загрузить пример %s: %s", filename, exc)
+        if examples:
+            try:
+                await _reply(event, text="Примеры работ:", attachments=examples)
+            except Exception as exc:
+                logger.error("Не удалось отправить альбом примеров: %s", exc)
+        await _reply(event, text=WELCOME_TEXT, attachments=[main_keyboard()])
         if trial_granted:
             await _reply(event, "Вам начислен 1 бесплатный кредит!")
 
@@ -783,81 +775,28 @@ def create_router(
         await generate_and_send(event, context)
 
     @router.message_callback(
-        F.callback.payload.in_({"more", "share"})
-        | F.callback.payload.startswith("more:")
-        | F.callback.payload.startswith("share:")
+        (F.callback.payload == "more") | F.callback.payload.startswith("more:")
     )
     async def result_callback(event: MessageCallback, context: MemoryContext) -> None:
         if event.message is None:
             await event.ack(notification="Сообщение удалено. Отправьте /start.")
             return
         parts = (event.callback.payload or "").split(":")
-        action = parts[0]
-        data = await context.get_data()
-        if action == "more":
-            if len(parts) not in {1, 2}:
-                await event.ack(notification="Кнопка недоступна.")
-                return
-            if await context.get_state() == PosterStates.generating:
-                await event.ack(notification="Плакат уже создаётся. Подождите.")
-                return
-            is_postcard = data.get("mode") in POSTCARD_PROMPTS
-            await event.ack(notification="Жду текст новой открытки." if is_postcard else "Жду новое описание мечты.")
-            photo = data.get("photo")
-            if not isinstance(photo, dict) or not isinstance(photo.get("url"), str) or not photo["url"]:
-                mode = data.get("mode", "mode_vision")
-                await context.clear()
-                await context.update_data(mode=mode)
-                await context.set_state(PosterStates.waiting_for_photo)
-                await _reply(event, "Фото не сохранилось. Пожалуйста, загрузите фото заново.")
-                return
-            if is_postcard:
-                await context.update_data(card_text=None, new_batch_requested=True)
-                await context.set_state(PosterStates.waiting_for_card_text)
-                await _reply(event, CARD_TEXT_PROMPT)
-                return
-            variants = data.get("variants") or []
-            await context.update_data(
-                sphere=None, new_batch_requested=True, package_offer_pending=False,
-                last_image_url=data.get("last_image_url") or (variants[0] if variants else None),
-                last_image_batch_id=data.get("last_image_batch_id") or data.get("batch_id"),
-            )
-            await context.set_state(PosterStates.waiting_for_prompt)
-            await _reply(event, "Опишите новую мечту или желание (до 200 символов). Ваше фото сохранено. /cancel — отмена.")
+        if len(parts) not in {1, 2}:
+            await event.ack(notification="Кнопка недоступна.")
             return
-
-        # Поддержать и новые кнопки share, и уже отправленные share:<batch>:0.
-        if len(parts) != 1:
-            batch_id = data.get("last_image_batch_id") or data.get("batch_id")
-            if len(parts) != 3 or parts[1] != batch_id or parts[2] != "0":
-                await event.ack(notification="Эта кнопка устарела. Используйте последнее меню.")
-                return
-        variants = data.get("variants") or []
-        url = data.get("last_image_url") or (variants[0] if variants else None)
-        # Кнопка «Скачать» хранит ссылку именно на изображение этого сообщения.
-        body = getattr(event.message, "body", None)
-        for attachment in getattr(body, "attachments", None) or []:
-            payload = getattr(attachment, "payload", None)
-            for row in getattr(payload, "buttons", None) or []:
-                for button in row:
-                    if getattr(button, "text", None) == "Скачать" and getattr(button, "url", None):
-                        url = button.url
-        try:
-            parsed = urlsplit(url) if isinstance(url, str) else None
-            valid = parsed is not None and parsed.scheme == "https" and bool(parsed.hostname)
-        except ValueError:
-            valid = False
-        if not valid:
-            await event.ack(notification="Ссылка недоступна.")
-            await _reply(event, "Ссылка на картинку не сохранилась. Создайте изображение заново.")
+        if await context.get_state() == PosterStates.generating:
+            await event.ack(notification="Плакат уже создаётся. Подождите.")
             return
-        await event.ack(notification="Готовлю ссылку…")
-        safe_url = escape(url, quote=True)
-        await _reply(
-            event,
-            f'Вы можете скачать картинку или поделиться ссылкой:\n<a href="{safe_url}">{safe_url}</a>',
-            parse_mode=ParseMode.HTML,
-        )
+        mode = (await context.get_data()).get("mode", "mode_vision")
+        if mode not in GENERATION_EVENTS:
+            mode = "mode_vision"
+        await event.ack(notification="Жду новое фото.")
+        await context.clear()
+        await context.update_data(mode=mode)
+        await context.set_state(PosterStates.waiting_for_photo)
+        await _reply(event, "Отправьте новое общее фото семьи. /cancel — отмена." if mode == "mode_ny_family"
+                     else "Отправьте новое фото. /cancel — отмена.")
 
     @router.message_callback(F.callback.payload == "postcard_retry")
     async def retry_postcard(event: MessageCallback, context: MemoryContext) -> None:

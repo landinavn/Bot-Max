@@ -838,7 +838,7 @@ async def test_start_sends_album_before_welcome_and_menu(example_photos):
     assert await context.get_data() == {}
     assert [Path(c.args[0].path).name for c in event.bot.upload_media.await_args_list] == [
         "i (1).webp", "i (18).webp", "i (17).webp", "i (19).webp", "i (16).webp", "i (14).webp",
-        "1cb6c3d1-319b-49fa-a9dd-50493671d193.jpg", "i (20).webp", "i (21).webp",
+        "1cb6c3d1-319b-49fa-a9dd-50493671d193.png", "i (20).webp", "i (21).webp",
     ]
     replies = event.message.answer.await_args_list
     assert len(replies) == 3

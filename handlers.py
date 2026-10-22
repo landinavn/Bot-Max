@@ -140,7 +140,7 @@ START_EXAMPLE_FILES = (
     "i (19).webp",
     "i (16).webp",
     "i (14).webp",
-    "1cb6c3d1-319b-49fa-a9dd-50493671d193.jpg",
+    "1cb6c3d1-319b-49fa-a9dd-50493671d193.png",
     "i (20).webp",
     "i (21).webp",
 )

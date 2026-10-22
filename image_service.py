@@ -237,6 +237,50 @@ def _raise_api_error(response: httpx.Response) -> None:
     raise ImageGenerationError(f"API генерации вернул ошибку HTTP {response.status_code}.")
 
 
+async def fix_text_with_ai(text: str) -> str:
+    """Исправить поздравление через тот же OpenAI endpoint и прокси, что и фото."""
+    validate_card_text(text)
+    config = Config.from_env()
+    if not config.image_api_key:
+        raise GenerationNotConfigured("Не задан IMAGE_API_KEY для коррекции текста.")
+    instruction = (
+        "Ты профессиональный корректор. Исправь орфографические и грамматические "
+        "ошибки в следующем тексте для открытки, но сохрани смысл и имена. "
+        "Верни ТОЛЬКО исправленный текст без кавычек и комментариев:"
+    )
+    try:
+        async with httpx.AsyncClient(
+            proxy=config.openai_proxy_url, timeout=60, trust_env=False, follow_redirects=False,
+        ) as http_client:
+            async with AsyncOpenAI(
+                api_key=config.image_api_key, base_url=OPENAI_BASE_URL,
+                http_client=http_client, max_retries=0,
+            ) as client:
+                result = await client.chat.completions.create(
+                    model="gpt-4o-mini", temperature=0,
+                    messages=[
+                        {"role": "system", "content": instruction},
+                        {"role": "user", "content": text},
+                    ],
+                )
+    except APIStatusError as exc:
+        logger.error("Коррекция текста OpenAI: HTTP %s; ответ: %s", exc.status_code, exc.response.text)
+        _raise_api_error(exc.response)
+    except APITimeoutError as exc:
+        raise GenerationTimeoutError("OpenAI не успел исправить текст.") from exc
+    except APIConnectionError as exc:
+        logger.error("Ошибка соединения OpenAI при коррекции текста: %s", exc)
+        raise ImageGenerationError("Не удалось подключиться к OpenAI для коррекции текста.") from exc
+    if not result.choices or result.choices[0].finish_reason != "stop":
+        raise ImageGenerationError("OpenAI не вернул полное исправленное поздравление.")
+    fixed_text = result.choices[0].message.content
+    try:
+        validate_card_text(fixed_text)
+    except ValueError as exc:
+        raise ImageGenerationError("OpenAI вернул некорректный текст поздравления.") from exc
+    return fixed_text.strip()
+
+
 async def _download_photo(session: aiohttp.ClientSession, photo_url: str) -> bytes:
     logger.info("HTTP GET: загрузка изображения.")
     async with session.get(photo_url, timeout=aiohttp.ClientTimeout(total=60)) as response:

@@ -142,7 +142,25 @@ START_EXAMPLE_FILES = (
     "i (19).webp",
     "i (16).webp",
     "i (14).webp",
+    "1cb6c3d1-319b-49fa-a9dd-50493671d193",
+    "i (20)",
+    "i (21)",
 )
+
+
+def start_example_path(filename: str) -> Path:
+    """Для новых примеров без расширения найти исходный JPEG, PNG или WebP."""
+    path = EXAMPLES_DIR / filename
+    if path.is_file():
+        return path
+    if not path.suffix and EXAMPLES_DIR.is_dir():
+        for candidate in sorted(EXAMPLES_DIR.iterdir()):
+            if (candidate.stem == filename and candidate.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
+                    and candidate.is_file()):
+                return candidate
+    raise FileNotFoundError(filename)
+
+
 EXAMPLE_TEXT = (
     "📸 Можно создать карту желаний или открытку по шаблону: Новый год (личный или семейный), День рождения (молодым или старшим), 8 Марта, Доброе утро, Скрапбукинг.\n"
     "Ниже пример превращения фото в карту желаний — до и после.\n\n"
@@ -517,20 +535,17 @@ def create_router(
                     await _reply(event, "Вам начислен 1 бесплатный кредит!")
                 return
             await _reply(event, "Эта ссылка на картинку недоступна. Вы можете создать свою.")
-        examples = []
+        await _reply(event, text=WELCOME_TEXT, attachments=[main_keyboard()])
         for filename in START_EXAMPLE_FILES:
-            path = EXAMPLES_DIR / filename
             try:
-                if not path.is_file():
-                    raise FileNotFoundError(filename)
+                path = start_example_path(filename)
                 image = await event.bot.upload_media(InputMedia(path=str(path), type=UploadType.IMAGE))
                 if not isinstance(image.payload.token, str) or not image.payload.token.strip():
                     raise RuntimeError("MAX вернул пустой media token.")
-                examples.append(image)
+                # Один файл на сообщение: не зависим от лимита вложений MAX.
+                await _reply(event, text="Пример работы:", attachments=[image])
             except Exception as exc:
-                logger.error("Не удалось загрузить пример %s: %s", filename, exc)
-        await _reply(event, text=WELCOME_TEXT + ("\n\nПримеры работ: карта желаний и праздничные открытки." if examples else ""),
-                     attachments=[*examples, main_keyboard()])
+                logger.error("Не удалось отправить пример %s: %s", filename, exc)
         if trial_granted:
             await _reply(event, "Вам начислен 1 бесплатный кредит!")
 

@@ -190,6 +190,8 @@ def example_photos(tmp_path, monkeypatch):
     directory = tmp_path / "project" / "examples"
     directory.mkdir(parents=True)
     for filename in ("before.jpg", "after.jpg", *handlers.START_EXAMPLE_FILES):
+        if not Path(filename).suffix:
+            filename += ".webp"
         (directory / filename).write_bytes(b"local-photo")
     monkeypatch.setattr(handlers, "EXAMPLES_DIR", directory)
     # Файлы ищутся относительно проекта, а не рабочей директории процесса.
@@ -500,7 +502,8 @@ async def test_start_grants_only_one_credit_across_chats_and_restart(credit_db):
     repeated = message_event("/start", chat_id=789)
     await call_handler(create_router(), "start", repeated, await ready_context(chat_id=789))
     assert (await credit_db.get_user(456))["balance"] == 0
-    repeated.message.answer.assert_awaited_once()
+    assert repeated.message.answer.await_args_list[0].kwargs["text"].startswith(handlers.WELCOME_TEXT)
+    assert all("начислен" not in str(reply) for reply in repeated.message.answer.await_args_list)
 
 
 async def test_buy_describes_packages_without_adding_credits(credit_db):
@@ -873,21 +876,30 @@ async def test_purchase_link_error_is_reported_without_charging(credit_db):
     assert await credit_db.get_user(456) is None
 
 
-async def test_start_shows_six_finished_examples_and_modes(example_photos):
+async def test_start_shows_nine_finished_examples_in_sequence_and_modes(example_photos):
     event = message_event("/start")
+    sequence = Mock()
+    sequence.attach_mock(event.bot.upload_media, "upload")
+    sequence.attach_mock(event.message.answer, "reply")
     context = await ready_context()
     await call_handler(create_router(), "start", event, context)
     assert await context.get_state() == PosterStates.waiting_for_mode
     assert await context.get_data() == {}
     greeting = event.message.answer.await_args_list[0]
     assert greeting.kwargs["text"].startswith(handlers.WELCOME_TEXT)
-    assert event.bot.upload_media.await_count == 6
+    assert event.bot.upload_media.await_count == 9
     assert [Path(call.args[0].path).name for call in event.bot.upload_media.await_args_list] == [
         "i (1).webp", "i (18).webp", "i (17).webp",
         "i (19).webp", "i (16).webp", "i (14).webp",
+        "1cb6c3d1-319b-49fa-a9dd-50493671d193.webp", "i (20).webp", "i (21).webp",
     ]
-    assert len(greeting.kwargs["attachments"]) == 7
-    assert "Примеры работ" in greeting.kwargs["text"]
+    assert len(greeting.kwargs["attachments"]) == 1
+    replies = event.message.answer.await_args_list
+    assert len(replies) == 11  # Приветствие, девять примеров, пробный кредит.
+    for reply in replies[1:10]:
+        assert reply.kwargs["text"] == "Пример работы:"
+        assert len(reply.kwargs["attachments"]) == 1
+    assert [c[0] for c in sequence.mock_calls] == ["reply"] + ["upload", "reply"] * 9 + ["reply"]
     assert "исходное фото" not in greeting.kwargs["text"]
     buttons = greeting.kwargs["attachments"][-1].model_dump()["payload"]["buttons"]
     assert [(row[0]["text"], row[0]["payload"]) for row in buttons[:8]] == list(handlers.MODE_BUTTONS)
@@ -1119,7 +1131,9 @@ async def test_real_bot_started_event_tracks_source_and_shows_start(credit_db, e
     greeting = event.bot.send_message.await_args_list[0]
     assert greeting.kwargs["user_id"] == 456 and "chat_id" not in greeting.kwargs
     assert greeting.kwargs["text"].startswith(handlers.WELCOME_TEXT)
-    assert len(greeting.kwargs["attachments"]) == 7
+    assert len(greeting.kwargs["attachments"]) == 1
+    assert event.bot.upload_media.await_count == 9
+    assert len(event.bot.send_message.await_args_list) == 11
 
 
 async def test_repeated_ad_starts_and_start_command_preserve_first_touch_and_trial(credit_db, example_photos, monkeypatch, event_replies):
@@ -1455,3 +1469,38 @@ async def test_stats_displays_distinct_nonzero_values_for_each_event(credit_db):
     for count, (_, label) in enumerate(fields, 1):
         assert f"- {label}: {count}\n" in text
     assert "📍 Источники первого запуска" in text
+
+
+@pytest.mark.parametrize("extension", [".jpg", ".jpeg", ".png", ".webp", ".JPG", ".PNG"])
+def test_new_start_examples_resolve_actual_extension(example_photos, extension):
+    for name in ("1cb6c3d1-319b-49fa-a9dd-50493671d193", "i (20)", "i (21)"):
+        original = example_photos / (name + ".webp")
+        target = original.with_suffix(extension)
+        original.rename(target)
+        assert handlers.start_example_path(name) == target
+
+
+@pytest.mark.parametrize("failure", ["missing", "upload", "send"])
+async def test_start_continues_after_one_example_failure(example_photos, failure, caplog):
+    event = message_event("/start")
+    missing_name = "i (20).webp"
+    image = event.bot.upload_media.return_value
+    if failure == "missing":
+        (example_photos / missing_name).unlink()
+    elif failure == "upload":
+        async def upload(media):
+            if Path(media.path).name == missing_name:
+                raise RuntimeError("single upload failed")
+            return image
+        event.bot.upload_media.side_effect = upload
+    else:
+        event.message.answer.side_effect = [None] * 8 + [RuntimeError("single send failed"), None, None]
+    await call_handler(create_router(), "start", event, await ready_context())
+    assert "Не удалось отправить пример i (20)" in caplog.text
+    uploads = [Path(call.args[0].path).name for call in event.bot.upload_media.await_args_list]
+    assert uploads[-1] == "i (21).webp"
+    replies = event.message.answer.await_args_list
+    assert len(replies) == (11 if failure == "send" else 10)
+    assert replies[0].kwargs["attachments"][-1].type == "inline_keyboard"
+    assert replies[-2].kwargs["text"] == "Пример работы:"
+    assert "бесплатный кредит" in replies[-1].args[0]

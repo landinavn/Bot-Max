@@ -92,7 +92,7 @@ POSTCARD_PROMPTS = {
         "Leave plenty of empty space on the left side or at the top for custom text. Cinematic lighting, highly detailed."
     ),
 }
-MAX_CARD_TEXT_LENGTH = 500
+MAX_CARD_TEXT_LENGTH = 200
 
 
 def _postcard_font(size: int):

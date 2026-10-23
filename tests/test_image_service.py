@@ -702,7 +702,7 @@ async def test_user_text_is_overlayed_but_not_sent_to_image_model(config, storag
     assert "Leave a large empty space at the bottom" in prompt
 
 
-@pytest.mark.parametrize("text", ["", " ", "я" * 501])
+@pytest.mark.parametrize("text", ["", " ", "я" * 201])
 async def test_invalid_user_text_is_rejected_before_paid_request(monkeypatch, text):
     generate = AsyncMock()
     monkeypatch.setattr(service, "_generate_and_store", generate)
@@ -716,8 +716,8 @@ def test_long_multiline_custom_text_fits_bottom_and_keeps_all_words(monkeypatch)
     source = Image.new("RGB", (1024, 1536), "#324056")
     buffer = BytesIO()
     source.save(buffer, format="PNG")
-    custom = "Любимая Аня, с днём рождения!\n" + "Пусть мечты сбываются и каждый день дарит радость! " * 6
-    assert len(custom) <= 500
+    custom = "Любимая Аня, с днём рождения!\n" + "Пусть мечты сбываются и каждый день дарит радость! " * 3
+    assert len(custom) <= 200
     drawn = []
     real_text = service.ImageDraw.ImageDraw.text
 
@@ -741,7 +741,7 @@ def test_modern_card_uses_short_dark_lines_on_left_and_keeps_portrait_area(monke
     source.save(buffer, format="PNG")
     text = (
         "Дорогая Аня, с праздником!\n"
-        "Пусть каждый день приносит радость, улыбки, вдохновение и исполнение самых светлых желаний. "
+        "Пусть каждый день приносит радость, улыбки и исполнение желаний. "
         "Твоё счастье очень важно для нас!\n" + "Вдохновение" * 5
     )
     rendered = []
@@ -808,7 +808,7 @@ async def test_text_correction_uses_same_proxy_and_key(config, api, monkeypatch)
     assert len(post_requests(api)) == 1
 
 
-@pytest.mark.parametrize("text,reason", [(None, "stop"), ("", "stop"), (" " * 10, "stop"), ("а" * 501, "stop"), ("обрыв", "length"), (None, "content_filter")])
+@pytest.mark.parametrize("text,reason", [(None, "stop"), ("", "stop"), (" " * 10, "stop"), ("а" * 201, "stop"), ("обрыв", "length"), (None, "content_filter")])
 async def test_correction_rejects_invalid_or_incomplete_answer(config, api, text, reason):
     api.post("https://api.openai.com/v1/chat/completions", payload=correction_response(text, reason))
     with pytest.raises(service.ImageGenerationError):

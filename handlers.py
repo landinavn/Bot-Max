@@ -120,8 +120,8 @@ async def _reply(event: MessageCreated | MessageCallback | BotStarted, text=None
 
 PosterGenerator = Callable[[str, str], Awaitable[list[str]]]
 WELCOME_TEXT = (
-    "Привет! Я создаю волшебные открытки и карты желаний с твоим лицом или лицом твоего близкого человека. "
-    "На открытках ты можешь добавить любое пожелание и поздравление.\n\n"
+    "Привет! Я создаю волшебные открытки и карты желаний с твоим лицом или лицом твоего близкого человека.\n"
+    "✍️ На открытках ты можешь добавить любое пожелание и поздравление.\n\n"
     "🎨 Первая открытка — бесплатно!\n\n👇 Выбери, что хочешь создать:"
 )
 MODE_BUTTONS = (
@@ -581,7 +581,6 @@ def create_router(
             f"- Семейный НГ: {counters.get('gen_ny_family', 0)}\n"
             f"- ДР (Молодым): {counters.get('gen_bday_young', 0)}\n"
             f"- ДР (Старшим): {counters.get('gen_bday_old', 0)}\n"
-            f"- 8 Марта: {counters.get('gen_8march', 0)}\n"
             f"- Доброе утро: {counters.get('gen_goodmorning', 0)}\n"
             f"- Уютный НГ: {counters.get('gen_ny_cozy', 0)}\n"
             f"- Зимняя сказка: {counters.get('gen_ny_fairytale', 0)}\n"

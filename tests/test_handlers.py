@@ -883,6 +883,11 @@ def photo_event():
     ("mode_bday_young", "gen_bday_young"), ("mode_bday_old", "gen_bday_old"),
     ("mode_8march", "gen_8march"), ("mode_goodmorning", "gen_goodmorning"),
     ("mode_modern_card", "gen_scrapbook"),
+    ("mode_halloween", "gen_halloween"),
+    ("mode_bday_old_elegant", "gen_bday_old_elegant"),
+    ("mode_ny_cozy", "gen_ny_cozy"),
+    ("mode_ny_fairytale", "gen_ny_fairytale"),
+    ("mode_ny_elegant", "gen_ny_elegant"),
 ])
 @pytest.mark.parametrize("balance,admin", [(2, False), (0, False), (0, True)])
 async def test_postcard_requires_custom_text_and_uses_shared_balance(credit_db, mode, event_name, balance, admin):
@@ -1003,7 +1008,7 @@ async def test_admin_stats_does_not_change_fsm(credit_db, state):
     assert "- 1 генерация (99 ₽): 0" in text
     assert "- 15 генераций (799 ₽): 0" in text
     assert "🖼 Всего сгенерировано картинок: 1\n💰 Всего покупок: 1" in text
-    for label in ("Карта желаний", "Новый год", "Семейный НГ", "ДР (Молодым)", "ДР (Старшим)", "8 Марта", "Доброе утро", "Скрапбукинг"):
+    for label in ("Карта желаний", "Новый год", "Семейный НГ", "ДР (Молодым)", "ДР (Старшим)", "Доброе утро", "Скрапбукинг"):
         assert f"- {label}: 0" in text
     assert await context.get_state() == state
     assert await context.get_data() == before
@@ -1410,18 +1415,23 @@ async def test_stats_displays_distinct_nonzero_values_for_each_event(credit_db):
         ("buy_15", "15 генераций (799 ₽)"), ("gen_vision", "Карта желаний"),
         ("gen_ny", "Новый год"), ("gen_ny_family", "Семейный НГ"),
         ("gen_bday_young", "ДР (Молодым)"), ("gen_bday_old", "ДР (Старшим)"),
-        ("gen_8march", "8 Марта"), ("gen_goodmorning", "Доброе утро"),
+        ("gen_halloween", "Хэллоуин"), ("gen_bday_old_elegant", "ДР Старшим 2"),
+        ("gen_ny_cozy", "Уютный НГ"), ("gen_ny_fairytale", "Зимняя сказка"),
+        ("gen_ny_elegant", "Элегантный НГ"), ("gen_goodmorning", "Доброе утро"),
         ("gen_scrapbook", "Скрапбукинг"),
     ]
     for count, (key, _) in enumerate(fields, 1):
         for _ in range(count):
             await credit_db.increment_counter(key)
+    await credit_db.increment_counter("gen_8march")
     event = message_event("/stats")
     await call_handler(create_router(admin_user_id=456), "stats", event)
     text = event.message.answer.await_args.args[0]
     for count, (_, label) in enumerate(fields, 1):
         assert f"- {label}: {count}\n" in text
     assert "📍 Источники первого запуска" in text
+    assert "8 Марта" not in text
+    assert (await credit_db.get_all_counters())["gen_8march"] == 1
 
 
 @pytest.mark.parametrize("failure", ["missing", "upload", "send"])
@@ -1740,3 +1750,12 @@ async def test_start_sends_one_album_with_distinct_tokens_in_requested_order(exa
     albums = [c for c in event.message.answer.await_args_list if c.kwargs.get("text") == "Примеры работ:"]
     assert len(albums) == 1
     assert [a.payload.token for a in albums[0].kwargs["attachments"]] == [f"token-{i}" for i in range(12)]
+
+
+def test_welcome_has_exact_requested_line_breaks_and_emoji():
+    assert handlers.WELCOME_TEXT == (
+        "Привет! Я создаю волшебные открытки и карты желаний с твоим лицом или лицом твоего близкого человека.\n"
+        "✍️ На открытках ты можешь добавить любое пожелание и поздравление.\n\n"
+        "🎨 Первая открытка — бесплатно!\n\n"
+        "👇 Выбери, что хочешь создать:"
+    )

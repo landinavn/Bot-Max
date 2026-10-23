@@ -43,9 +43,29 @@ POSTCARD_PROMPTS = {
         "If the person in the reference photo is wearing a summer hat, cap, or no hat, replace it with a stylish winter knitted hat (beanie) to match the snowy atmosphere. Keep the person's face exactly as in the reference."
     ),
     "mode_ny_family": (
-        "Beautiful New Year family greeting card. Place all people from the reference photo together in a cozy winter atmosphere. "
-        "Keep all faces exactly as in the reference. Add Christmas tree, snow, gifts. Leave a large empty space at the bottom. "
-        "If the person in the reference photo is wearing a summer hat, cap, or no hat, replace it with a stylish winter knitted hat (beanie) to match the snowy atmosphere. Keep the person's face exactly as in the reference."
+        "Replace headwear with a winter hat ONLY if the person in the reference photo is wearing a hat/cap, or if it's a child. "
+        "Otherwise, keep the original hairstyle. Place all people from the reference photo together in a cozy winter atmosphere. "
+        "Keep all faces exactly as in the reference. Add Christmas tree, snow, gifts. Leave a large empty space at the bottom."
+    ),
+    "mode_bday_old_elegant": (
+        "Elegant Birthday card for a mature person (50+). Keep natural age, wrinkles, and facial features. "
+        "Use soft lighting, elegant flowers, and minimal decorations. Leave empty space for text."
+    ),
+    "mode_halloween": (
+        "Cozy Halloween card with pumpkins, autumn leaves, and warm fairy lights. Keep it cute and not scary. "
+        "Preserve the person's face exactly. Leave empty space for text."
+    ),
+    "mode_ny_cozy": (
+        "Cozy New Year greeting card. Warm fireplace, soft blankets, fairy lights, hot cocoa. "
+        "Place the person from the reference photo in a cozy winter sweater. Keep the face exactly as in the reference. Leave empty space for text."
+    ),
+    "mode_ny_fairytale": (
+        "Fairy-tale winter greeting card. Snow-covered pine trees, ice castle in the background, magical glowing lights. "
+        "Place the person in an elegant winter coat. Keep the face exactly as in the reference. Leave empty space for text."
+    ),
+    "mode_ny_elegant": (
+        "Elegant New Year party greeting card. Champagne glasses, golden decorations, festive bokeh. "
+        "Place the person in a stylish evening outfit. Keep the face exactly as in the reference. Leave empty space for text."
     ),
     "mode_bday_young": (
         "Vibrant Birthday greeting card. Place the young person from the reference photo in a celebratory pose "

@@ -46,8 +46,8 @@ async def client(payments, credit_db):
         yield client
 
 
-async def notification(payments, credits=5, *, payment_id="provider-1", user_id=456):
-    link = await payments.create_payment_link(user_id, credits)
+async def notification(payments, credits=5, *, payment_id="provider-1", user_id=456, promo=False):
+    link = await payments.create_payment_link(user_id, credits, promo=promo)
     fields = parse_form_fields(parse_qsl(urlsplit(link).query, keep_blank_values=True))
     return {
         "order_num": fields["order_id"], "order_id": payment_id,
@@ -55,7 +55,7 @@ async def notification(payments, credits=5, *, payment_id="provider-1", user_id=
         "domain": "test-shop.payform.ru", "payment_status": "success",
         "products": fields["products"], "customer_extra": fields["customer_extra"],
         "_param_user_id": str(user_id), "_param_credits": str(credits),
-        "_param_package_id": f"package_{credits}",
+        "_param_package_id": fields["_param_package_id"],
     }
 
 
@@ -88,7 +88,7 @@ def test_signature_matches_prodamus_reference_vectors(data, expected):
     assert not verify_signature(data, expected, "wrong-secret")
 
 
-@pytest.mark.parametrize("credits,price", [(1, "99.00"), (5, "299.00"), (15, "799.00")])
+@pytest.mark.parametrize("credits,price", [(1, "99.00"), (3, "199.00"), (5, "299.00"), (15, "799.00")])
 async def test_signed_link_persists_bound_order(payments, credit_db, credits, price):
     link = await payments.create_payment_link(456, credits)
     assert link.startswith("https://test-shop.payform.ru/?")
@@ -97,12 +97,12 @@ async def test_signed_link_persists_bound_order(payments, credit_db, credits, pr
     assert data["do"] == "link"
     assert data["urlNotification"] == payments.webhook_url
     assert data["urlSuccess"] == data["urlReturn"] == payments.return_url
-    assert data["products"] == [{"name": "1 генерация (Открытка)" if credits == 1 else f"{credits} генераций", "price": price, "quantity": "1"}]
+    assert data["products"] == [{"name": prodamus.PACKAGES[credits][1], "price": price, "quantity": "1"}]
     assert data["_param_package_id"] == f"package_{credits}"
     assert json.loads(data["customer_extra"]) == {"user_id": 456, "credits": credits, "package_id": f"package_{credits}"}
     order = await credit_db.get_payment_order(data["order_id"])
     assert order["user_id"] == 456 and order["credits"] == credits
-    assert order["amount_kopecks"] == {1: 9900, 5: 29900, 15: 79900}[credits]
+    assert order["amount_kopecks"] == {1: 9900, 3: 19900, 5: 29900, 15: 79900}[credits]
     assert order["status"] == "pending"
     assert await credit_db.get_user(456) is None  # Ссылка ещё не означает оплату.
 
@@ -182,7 +182,7 @@ def test_only_domain_and_secret_are_not_enough_for_payment_webhook(payment_confi
         ProdamusPayments(replace(payment_config, prodamus_return_url=None, prodamus_webhook_url=None))
 
 
-@pytest.mark.parametrize("credits", [1, 5, 15])
+@pytest.mark.parametrize("credits", [1, 3, 5, 15])
 @pytest.mark.parametrize("encoding", ["form", "multipart", "json"])
 async def test_webhook_credits_paid_order_once(client, payments, credit_db, credits, encoding):
     await credit_db.grant_free_trial(456)
@@ -445,3 +445,48 @@ async def test_package_counter_failure_rolls_back_payment_and_retry_counts_once(
     assert (await post_notification(client, data)).status == 200
     assert (await post_notification(client, data)).status == 200
     assert await credit_db.get_all_counters() == {"buy_15": 1}
+
+
+async def test_discount_link_has_149_price_but_credits_three_and_is_single_use(client, payments, credit_db):
+    await credit_db.grant_free_trial(456)
+    await credit_db.deduct_credit(456, count_generation=True)
+    first = await notification(payments, 3, promo=True)
+    second = await notification(payments, 3, promo=True)
+    assert first["order_num"] == second["order_num"]
+    assert first["sum"] == "149.00" and first["_param_package_id"] == "promo_3"
+    assert (await post_notification(client, first)).status == 200
+    assert (await post_notification(client, first)).status == 200
+    assert (await credit_db.get_user(456))["balance"] == 3
+    assert (await credit_db.get_user(456))["total_purchases"] == 1
+    with pytest.raises(credit_db.PromoUnavailableError):
+        await payments.create_payment_link(456, 3, promo=True)
+
+
+async def test_expired_promo_cannot_create_link_but_existing_paid_order_is_honoured(client, payments, credit_db, monkeypatch):
+    clock = [1800000000]
+    monkeypatch.setattr(credit_db, "_now_ts", lambda: clock[0])
+    await credit_db.grant_free_trial(456)
+    await credit_db.deduct_credit(456, count_generation=True)
+    data = await notification(payments, 3, promo=True)
+    clock[0] += 86400
+    payments._request_payment_link.reset_mock()
+    with pytest.raises(credit_db.PromoUnavailableError):
+        await payments.create_payment_link(456, 3, promo=True)
+    payments._request_payment_link.assert_not_awaited()
+    # Не отказывать в кредитах, если провайдер подтвердил оплату уже выданной ссылки.
+    assert (await post_notification(client, data)).status == 200
+    assert (await credit_db.get_user(456))["balance"] == 3
+
+
+@pytest.mark.parametrize("mutation", ["sum", "package"])
+async def test_discount_webhook_rejects_price_and_package_tampering(client, payments, credit_db, mutation):
+    await credit_db.grant_free_trial(456)
+    await credit_db.deduct_credit(456, count_generation=True)
+    data = await notification(payments, 3, promo=True)
+    if mutation == "sum":
+        data["sum"] = "99.00"
+    else:
+        data["_param_package_id"] = "package_3"
+    assert (await post_notification(client, data)).status == 400
+    assert (await credit_db.get_user(456))["balance"] == 0
+    assert (await credit_db.get_user(456))["promo_redeemed_at"] is None

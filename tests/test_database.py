@@ -13,6 +13,7 @@ async def test_trial_is_atomic_under_concurrent_starts(credit_db):
         "total_generations": 0, "total_purchases": 0,
         "first_start_source": None, "first_started_at": None,
         "is_active": 1, "days_active": 1, "last_active_at": None,
+        "promo_expires_at": None, "promo_redeemed_at": None,
     }
 
 
@@ -360,3 +361,86 @@ async def test_activity_migration_preserves_history_and_sets_defaults_for_new_us
     assert user["days_active"] == 2 and user["is_active"] == 0 and user["balance"] == 7
     await credit_db.add_credits(789, 1)
     assert (await credit_db.get_user(789))["created_at"] is not None
+
+
+async def test_tripwire_starts_with_first_free_generation_and_never_extends(credit_db, monkeypatch):
+    clock = [1800000000]
+    monkeypatch.setattr(credit_db, "_now_ts", lambda: clock[0])
+    await credit_db.grant_free_trial(456)
+    assert not await credit_db.is_promo_active(456)
+    assert await credit_db.deduct_credit(456, count_generation=True, generation_event="gen_ny")
+    expires = (await credit_db.get_user(456))["promo_expires_at"]
+    assert expires == clock[0] + 86400
+    assert await credit_db.is_promo_active(456)
+    clock[0] += 100
+    await credit_db.init_db()
+    await credit_db.grant_free_trial(456)
+    assert (await credit_db.get_user(456))["promo_expires_at"] == expires
+    clock[0] = expires
+    assert not await credit_db.is_promo_active(456)
+    await credit_db.add_credits(456, 1)
+    await credit_db.deduct_credit(456, count_generation=True)
+    assert (await credit_db.get_user(456))["promo_expires_at"] == expires
+    assert not await credit_db.is_promo_active(456)
+
+
+@pytest.mark.parametrize("paid", [False, True])
+async def test_non_free_or_already_paid_user_does_not_start_tripwire(credit_db, paid):
+    if paid:
+        await credit_db.grant_free_trial(456)
+        await credit_db.create_payment_order("paid", 456, 3, 19900, "3 генерации")
+        await credit_db.add_credits(456, 3, payment_order_id="paid", provider_payment_id="provider")
+        for _ in range(4):
+            await credit_db.deduct_credit(456, count_generation=True)
+    else:
+        await credit_db.add_credits(456, 1)
+        await credit_db.deduct_credit(456, count_generation=True)
+    assert (await credit_db.get_user(456))["promo_expires_at"] is None
+
+
+async def test_concurrent_promo_orders_reuse_one_bound_order(credit_db):
+    await credit_db.grant_free_trial(456)
+    await credit_db.deduct_credit(456, count_generation=True)
+    orders = await asyncio.gather(*(credit_db.create_payment_order(
+        f"promo-{index}", 456, 3, 14900, "3 генерации", promo=True) for index in range(10)))
+    assert len(set(orders)) == 1
+    await credit_db.add_credits(456, 3, payment_order_id=orders[0], provider_payment_id="paid-promo")
+    assert not await credit_db.add_credits(456, 3, payment_order_id=orders[0], provider_payment_id="paid-promo")
+    user = await credit_db.get_user(456)
+    assert user["balance"] == 3 and user["promo_redeemed_at"] is not None
+    assert not await credit_db.is_promo_active(456)
+    assert await credit_db.get_all_counters() == {"buy_3": 1, "buy_3_promo": 1}
+    with pytest.raises(credit_db.PromoUnavailableError):
+        await credit_db.create_payment_order("second-promo", 456, 3, 14900, "3 генерации", promo=True)
+
+
+async def test_tripwire_migration_preserves_old_paid_orders_and_never_grants_retroactively(credit_db):
+    import aiosqlite
+    await credit_db.grant_free_trial(456)
+    await credit_db.deduct_credit(456, count_generation=True)
+    await credit_db.create_payment_order("old-order", 456, 3, 19900, "3 генерации")
+    await credit_db.add_credits(456, 3, payment_order_id="old-order", provider_payment_id="old-payment")
+    async with aiosqlite.connect(credit_db.DATABASE_PATH) as db:
+        await db.execute("DROP INDEX one_promo_order_per_user")
+        await db.execute("ALTER TABLE payment_orders DROP COLUMN package_id")
+        await db.execute("ALTER TABLE users DROP COLUMN promo_expires_at")
+        await db.execute("ALTER TABLE users DROP COLUMN promo_redeemed_at")
+        await db.commit()
+    await credit_db.init_db()
+    user = await credit_db.get_user(456)
+    assert user["balance"] == 3 and user["total_purchases"] == 1 and user["total_generations"] == 1
+    assert user["promo_expires_at"] is None and user["promo_redeemed_at"] is None
+    assert (await credit_db.get_payment_order("old-order"))["package_id"] == "package_3"
+    await credit_db.deduct_credit(456, count_generation=True)
+    assert (await credit_db.get_user(456))["promo_expires_at"] is None
+
+
+async def test_rolled_back_free_generation_does_not_start_discount(credit_db, monkeypatch):
+    from unittest.mock import AsyncMock
+    import sqlite3
+    await credit_db.grant_free_trial(456)
+    monkeypatch.setattr(credit_db, "increment_generations", AsyncMock(side_effect=sqlite3.OperationalError("failed")))
+    with pytest.raises(sqlite3.OperationalError):
+        await credit_db.deduct_credit(456, count_generation=True)
+    user = await credit_db.get_user(456)
+    assert user["balance"] == 1 and user["promo_expires_at"] is None

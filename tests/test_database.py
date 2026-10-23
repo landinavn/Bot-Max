@@ -579,3 +579,35 @@ async def test_broadcast_campaign_migrates_original_promo_order(credit_db):
     assert await credit_db.create_payment_order("reuse", 1, 3, 14900, "3 генерации", promo=True) == "legacy"
     await credit_db.start_broadcast_promo(1, "new")
     assert await credit_db.create_payment_order("new-order", 1, 3, 14900, "3 генерации", promo=True) == "new-order"
+
+
+async def test_reminder_recipients_strict_window_and_available_promo(credit_db, monkeypatch):
+    import aiosqlite
+    now = 1800000000
+    monkeypatch.setattr(credit_db, "_now_ts", lambda: now)
+    cases = [
+        (1, None, 1, None), (2, now - 1, 1, None), (3, now, 1, None),
+        (4, now + 1, 1, None), (5, now + 10800 - 1, 1, None),
+        (6, now + 10800, 1, None), (7, now + 10801, 1, None),
+        (8, now + 7200, 0, None), (9, now + 7200, 1, now - 10),
+    ]
+    for uid, *_ in cases:
+        await credit_db.grant_free_trial(uid)
+    async with aiosqlite.connect(credit_db.DATABASE_PATH) as db:
+        await db.executemany(
+            "UPDATE users SET promo_expires_at = ?, is_active = ?, promo_redeemed_at = ? WHERE user_id = ?",
+            [(expiry, active, redeemed, uid) for uid, expiry, active, redeemed in cases],
+        )
+        await db.commit()
+    assert await credit_db.get_users_for_reminder() == [4, 5]
+    assert (await credit_db.get_user(4))["promo_expires_at"] == now + 1
+    monkeypatch.setattr(credit_db, "_now_ts", lambda: now + 1)
+    assert await credit_db.get_users_for_reminder() == [5, 6]
+
+
+async def test_reminder_migration_preserves_promo_deadline(credit_db):
+    await credit_db.increment_generations(1)
+    await credit_db.start_broadcast_promo(1, "campaign")
+    before = dict(await credit_db.get_user(1))
+    await credit_db.init_db()
+    assert dict(await credit_db.get_user(1)) == before

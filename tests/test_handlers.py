@@ -1891,3 +1891,97 @@ async def test_segmented_broadcast_continues_if_marking_blocked_fails(credit_db,
     await call_handler(create_router(admin_user_id=456), "broadcast_nogen", event)
     assert event.bot.send_message.await_count == 2
     assert event.message.answer.await_args.args[0] == "✅ Рассылка завершена! Успешно: 1, Ошибок: 1."
+
+
+async def setup_reminder_users(credit_db, monkeypatch, user_ids=(101, 102)):
+    now = 1800000000
+    monkeypatch.setattr(credit_db, "_now_ts", lambda: now)
+    for uid in user_ids:
+        await credit_db.increment_generations(uid)
+        await credit_db.start_broadcast_promo(uid, "reminder-campaign")
+    # Через 22 часа скидка заканчивается через 2 часа.
+    monkeypatch.setattr(credit_db, "_now_ts", lambda: now + 22 * 3600)
+    monkeypatch.setattr(handlers.asyncio, "sleep", AsyncMock())
+
+
+async def test_broadcast_reminder_text_button_and_preserved_deadline(credit_db, monkeypatch):
+    await setup_reminder_users(credit_db, monkeypatch)
+    before = dict(await credit_db.get_user(101))
+    event = message_event("/broadcast_reminder")
+    router = create_router(admin_user_id=456)
+    await call_handler(router, "broadcast_reminder", event)
+    assert event.message.answer.await_args_list[0].args[0] == "⏳ Начинаю рассылку напоминаний для 2 пользователей..."
+    assert [c.kwargs["user_id"] for c in event.bot.send_message.await_args_list] == [101, 102]
+    for c in event.bot.send_message.await_args_list:
+        assert "chat_id" not in c.kwargs
+        assert c.kwargs["text"] == (
+            "⏳ Напоминаем! Специальное предложение (3 генерации за 149 ₽) сгорит через 2-3 часа!\n\n"
+            "Не упустите шанс создать красивые открытки для себя и близких. "
+            "Купленные генерации останутся с вами навсегда, вы сможете использовать их, когда захотите."
+        )
+        assert len(c.kwargs["attachments"]) == 1
+        button = c.kwargs["attachments"][0].payload.buttons[0][0]
+        assert button.text == "Купить 3 генерации за 149 ₽"
+        assert button.payload == "buy_promo_149"
+    assert handlers.asyncio.sleep.await_args_list == [call(0.5), call(0.5)]
+    event.bot.upload_media.assert_not_awaited()
+    assert event.message.answer.await_args.args[0] == "✅ Напоминания отправлены! Успешно: 2, Ошибок: 0"
+    assert dict(await credit_db.get_user(101)) == before
+    await call_handler(router, "broadcast_reminder", event)
+    assert dict(await credit_db.get_user(101)) == before
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 429, 500])
+async def test_broadcast_reminder_continues_after_error(credit_db, monkeypatch, caplog, status):
+    await setup_reminder_users(credit_db, monkeypatch)
+    event = message_event("/broadcast_reminder")
+    event.bot.send_message.side_effect = [MaxApiError(code=status, raw="reminder failure"), None]
+    await call_handler(create_router(admin_user_id=456), "broadcast_reminder", event)
+    assert [c.kwargs["user_id"] for c in event.bot.send_message.await_args_list] == [101, 102]
+    assert event.message.answer.await_args.args[0] == "✅ Напоминания отправлены! Успешно: 1, Ошибок: 1"
+    assert "Ошибка отправки пользователю 101:" in caplog.text
+    assert (await credit_db.get_user(101))["is_active"] == (0 if status == 403 else 1)
+
+
+@pytest.mark.parametrize("admin,actor,is_bot", [(None, 456, False), (999, 456, False), (456, None, False), (456, 456, True)])
+async def test_broadcast_reminder_admin_only(credit_db, admin, actor, is_bot):
+    event = message_event("/broadcast_reminder")
+    event.get_ids = lambda: (123, actor)
+    event.message.sender.is_bot = is_bot
+    await call_handler(create_router(admin_user_id=admin), "broadcast_reminder", event)
+    event.bot.send_message.assert_not_awaited()
+    event.message.answer.assert_not_awaited()
+
+
+async def test_broadcast_reminder_empty_segment(credit_db):
+    event = message_event("/broadcast_reminder")
+    await call_handler(create_router(admin_user_id=456), "broadcast_reminder", event)
+    event.bot.send_message.assert_not_awaited()
+    assert event.message.answer.await_args_list[0].args[0] == "⏳ Начинаю рассылку напоминаний для 0 пользователей..."
+    assert event.message.answer.await_args.args[0] == "✅ Напоминания отправлены! Успешно: 0, Ошибок: 0"
+
+
+async def test_broadcast_reminder_rechecks_paid_and_blocked_users(credit_db, monkeypatch):
+    await setup_reminder_users(credit_db, monkeypatch, (101, 102, 103))
+    await credit_db.create_payment_order("reminder-order", 103, 3, 14900, "3 генерации", promo=True)
+    event = message_event("/broadcast_reminder")
+    async def send(**kwargs):
+        await credit_db.mark_user_inactive(102)
+        await credit_db.add_credits(103, 3, payment_order_id="reminder-order", provider_payment_id="reminder-payment")
+    event.bot.send_message.side_effect = send
+    await call_handler(create_router(admin_user_id=456), "broadcast_reminder", event)
+    event.bot.send_message.assert_awaited_once()
+    assert event.message.answer.await_args.args[0] == "✅ Напоминания отправлены! Успешно: 1, Ошибок: 0"
+
+
+async def test_broadcast_reminder_shares_broadcast_lock(credit_db, monkeypatch):
+    await setup_reminder_users(credit_db, monkeypatch, (101,))
+    router = create_router(admin_user_id=456)
+    event = message_event("/broadcast_reminder")
+    second = message_event("/broadcast_nogen")
+    async def send(**kwargs):
+        await call_handler(router, "broadcast_nogen", second)
+    event.bot.send_message.side_effect = send
+    await call_handler(router, "broadcast_reminder", event)
+    second.bot.send_message.assert_not_awaited()
+    assert second.message.answer.await_args.args[0] == "Рассылка уже выполняется. Дождитесь завершения."

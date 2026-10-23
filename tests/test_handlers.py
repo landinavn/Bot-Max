@@ -837,13 +837,13 @@ async def test_start_sends_album_before_welcome_and_menu(example_photos):
     assert await context.get_state() == PosterStates.waiting_for_mode
     assert await context.get_data() == {}
     assert [Path(c.args[0].path).name for c in event.bot.upload_media.await_args_list] == [
-        "i (1).webp", "i (18).webp", "i (17).webp", "i (19).webp", "i (16).webp", "i (14).webp",
-        "1cb6c3d1-319b-49fa-a9dd-50493671d193.png", "i (20).webp", "i (21).webp",
+        "i (28).webp", "i (22).webp", "i (23).webp", "i (24).webp", "i (25).webp", "i (1).webp",
+        "i (29).webp", "i (16).webp", "i (27).webp", "i (26).webp", "i (20).webp", "i (21).webp",
     ]
     replies = event.message.answer.await_args_list
     assert len(replies) == 3
     assert replies[0].kwargs["text"] == "Примеры работ:"
-    assert len(replies[0].kwargs["attachments"]) == 9
+    assert len(replies[0].kwargs["attachments"]) == 12
     assert all(a.payload.token == "example-token" for a in replies[0].kwargs["attachments"])
     assert replies[1].kwargs["text"] == handlers.WELCOME_TEXT
     buttons = replies[1].kwargs["attachments"][0].model_dump()["payload"]["buttons"]
@@ -1079,11 +1079,11 @@ async def test_real_bot_started_event_tracks_source_and_shows_start(credit_db, e
     assert user["balance"] == 1 and user["free_trial_used"] == 1
     assert await context.get_state() == PosterStates.waiting_for_mode
     album, greeting = event.bot.send_message.await_args_list[:2]
-    assert len(album.kwargs["attachments"]) == 9
+    assert len(album.kwargs["attachments"]) == 12
     assert greeting.kwargs["user_id"] == 456 and "chat_id" not in greeting.kwargs
     assert greeting.kwargs["text"].startswith(handlers.WELCOME_TEXT)
     assert len(greeting.kwargs["attachments"]) == 1
-    assert event.bot.upload_media.await_count == 9
+    assert event.bot.upload_media.await_count == 12
     assert len(event.bot.send_message.await_args_list) == 3
 
 
@@ -1440,7 +1440,7 @@ async def test_start_still_shows_menu_after_example_failures(example_photos, fai
         event.message.answer.side_effect = [RuntimeError("album rejected"), None, None]
     await call_handler(create_router(), "start", event, await ready_context())
     replies = event.message.answer.await_args_list
-    assert len(replies[0].kwargs["attachments"]) == (9 if failure == "send" else 8)
+    assert len(replies[0].kwargs["attachments"]) == (12 if failure == "send" else 11)
     assert replies[1].kwargs["text"] == handlers.WELCOME_TEXT
     assert len(replies[1].kwargs["attachments"]) == 1
     assert "Не удалось" in caplog.text
@@ -1703,3 +1703,40 @@ def test_photo_guidance_allows_family_and_card_prompt_mentions_emoji():
     assert "где хорошо видно лицо" in handlers.PHOTO_GUIDANCE
     assert "Вы можете использовать не только буквы, но и эмодзи (😊, 🎉, ❤️)." in handlers.CARD_TEXT_PROMPT
     assert "до 200 символов" in handlers.CARD_TEXT_PROMPT
+
+
+async def test_start_album_splits_only_after_explicit_attachment_count_rejection(example_photos):
+    event = message_event("/start")
+    images = [SimpleNamespace(payload=SimpleNamespace(token=f"ordered-{i}")) for i in range(12)]
+    event.bot.upload_media.side_effect = images
+    event.message.answer.side_effect = [MaxApiError(code=400, raw={"message": "Too many attachments, maximum 10"}), None, None, None, None]
+    await call_handler(create_router(), "start", event, await ready_context())
+    replies = event.message.answer.await_args_list
+    assert [len(c.kwargs["attachments"]) for c in replies[:3]] == [12, 10, 2]
+    assert replies[1].kwargs["attachments"] + replies[2].kwargs["attachments"] == images
+    assert replies[3].kwargs["text"] == handlers.WELCOME_TEXT
+    assert "бесплатный кредит" in replies[4].args[0]
+    assert all(len(c.kwargs["attachments"]) > 1 for c in replies[:3])
+
+
+@pytest.mark.parametrize("status,raw", [
+    (500, "attachment timeout"), (429, "attachments rate limit"),
+    (400, "attachment.not.ready"), (400, "invalid photo"),
+])
+async def test_start_album_does_not_split_on_unrelated_errors(example_photos, status, raw):
+    event = message_event("/start")
+    event.message.answer.side_effect = [MaxApiError(code=status, raw=raw), None, None]
+    await call_handler(create_router(), "start", event, await ready_context())
+    replies = event.message.answer.await_args_list
+    assert len(replies) == 3
+    assert len(replies[0].kwargs["attachments"]) == 12
+    assert replies[1].kwargs["text"] == handlers.WELCOME_TEXT
+
+
+async def test_start_sends_one_album_with_distinct_tokens_in_requested_order(example_photos):
+    event = message_event("/start")
+    event.bot.upload_media.side_effect = [SimpleNamespace(payload=SimpleNamespace(token=f"token-{i}")) for i in range(12)]
+    await call_handler(create_router(), "start", event, await ready_context())
+    albums = [c for c in event.message.answer.await_args_list if c.kwargs.get("text") == "Примеры работ:"]
+    assert len(albums) == 1
+    assert [a.payload.token for a in albums[0].kwargs["attachments"]] == [f"token-{i}" for i in range(12)]

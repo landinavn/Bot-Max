@@ -188,16 +188,40 @@ PAYMENT_PACKAGES_TEXT = PACKAGES_TEXT.split("\n\n", 1)[0]
 NO_CREDITS_TEXT = "У вас закончились кредиты. Пожалуйста, выберите пакет для продолжения:"
 EXAMPLES_DIR = Path(__file__).resolve().parent / "examples"
 START_EXAMPLE_FILES = (
-    "i (1).webp",
-    "i (18).webp",
-    "i (17).webp",
-    "i (19).webp",
-    "i (16).webp",
-    "i (14).webp",
-    "1cb6c3d1-319b-49fa-a9dd-50493671d193.png",
-    "i (20).webp",
-    "i (21).webp",
+    r"i (28).webp",
+    r"i (22).webp",
+    r"i (23).webp",
+    r"i (24).webp",
+    r"i (25).webp",
+    r"i (1).webp",
+    r"i (29).webp",
+    r"i (16).webp",
+    r"i (27).webp",
+    r"i (26).webp",
+    r"i (20).webp",
+    r"i (21).webp",
 )
+
+
+def is_attachment_count_limit(exc: Exception) -> bool:
+    if max_error_status(exc) not in {400, 413, 422}:
+        return False
+    details = str(getattr(exc, "raw", "") or exc).lower()
+    return (
+        any(word in details for word in ("attachment", "media", "вложен"))
+        and any(word in details for word in ("too many", "too.many", "maximum", "max ", "limit", "не более", "количеств"))
+    )
+
+
+async def send_start_album(event, attachments) -> None:
+    try:
+        await _reply(event, text="Примеры работ:", attachments=attachments)
+    except Exception as exc:
+        if len(attachments) <= 10 or not is_attachment_count_limit(exc):
+            raise
+        logger.info("MAX отклонил число вложений; отправляю примеры альбомами по 10.")
+        for offset in range(0, len(attachments), 10):
+            await _reply(event, text="Примеры работ:", attachments=attachments[offset:offset + 10])
 
 
 EXAMPLE_TEXT = (
@@ -648,7 +672,7 @@ def create_router(
                 logger.error("Не удалось загрузить пример %s: %s", filename, exc)
         if examples:
             try:
-                await _reply(event, text="Примеры работ:", attachments=examples)
+                await send_start_album(event, examples)
             except Exception as exc:
                 logger.error("Не удалось отправить альбом примеров: %s", exc)
         await _reply(event, text=WELCOME_TEXT, attachments=[main_keyboard()])

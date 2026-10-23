@@ -13,7 +13,7 @@ async def test_trial_is_atomic_under_concurrent_starts(credit_db):
         "total_generations": 0, "total_purchases": 0,
         "first_start_source": None, "first_started_at": None,
         "is_active": 1, "days_active": 1, "last_active_at": None,
-        "promo_expires_at": None, "promo_redeemed_at": None,
+        "promo_expires_at": None, "promo_redeemed_at": None, "promo_campaign_id": None,
     }
 
 
@@ -421,7 +421,7 @@ async def test_tripwire_migration_preserves_old_paid_orders_and_never_grants_ret
     await credit_db.create_payment_order("old-order", 456, 3, 19900, "3 генерации")
     await credit_db.add_credits(456, 3, payment_order_id="old-order", provider_payment_id="old-payment")
     async with aiosqlite.connect(credit_db.DATABASE_PATH) as db:
-        await db.execute("DROP INDEX one_promo_order_per_user")
+        await db.execute("DROP INDEX one_promo_order_per_campaign")
         await db.execute("ALTER TABLE payment_orders DROP COLUMN package_id")
         await db.execute("ALTER TABLE users DROP COLUMN promo_expires_at")
         await db.execute("ALTER TABLE users DROP COLUMN promo_redeemed_at")
@@ -521,3 +521,61 @@ async def test_user_counter_write_failure_rolls_back_global_counter_and_credit(c
     assert (await credit_db.get_user(123))["balance"] == 2
     assert (await credit_db.get_user(123))["total_generations"] == 0
     assert await credit_db.get_all_counters() == {}
+
+
+async def test_activity_segments_only_include_active_users(credit_db):
+    for uid in (1, 2, 3, 4):
+        await credit_db.grant_free_trial(uid)
+    for uid in (1, 3):
+        await credit_db.increment_generations(uid)
+    for uid in (3, 4):
+        await credit_db.mark_user_inactive(uid)
+    assert await credit_db.get_users_by_activity(True) == [1]
+    assert await credit_db.get_users_by_activity(False) == [2]
+
+
+async def test_campaign_promo_renewal_and_delayed_payment(credit_db, monkeypatch):
+    clock = [1800000000]
+    monkeypatch.setattr(credit_db, "_now_ts", lambda: clock[0])
+    await credit_db.increment_generations(1)
+    await credit_db.start_broadcast_promo(1, "campaign-a")
+    expiry = (await credit_db.get_user(1))["promo_expires_at"]
+    assert expiry == clock[0] + 86400
+    old_order = await credit_db.create_payment_order("a", 1, 3, 14900, "3 генерации", promo=True)
+    clock[0] += 100
+    await credit_db.start_broadcast_promo(1, "campaign-a")
+    assert (await credit_db.get_user(1))["promo_expires_at"] == expiry
+    await credit_db.start_broadcast_promo(1, "campaign-b")
+    new_order = await credit_db.create_payment_order("b", 1, 3, 14900, "3 генерации", promo=True)
+    assert new_order != old_order
+    assert await credit_db.add_credits(1, 3, payment_order_id=old_order, provider_payment_id="old")
+    assert await credit_db.is_promo_active(1)  # Старый платёж не погашает новую акцию.
+    assert await credit_db.add_credits(1, 3, payment_order_id=new_order, provider_payment_id="new")
+    assert not await credit_db.is_promo_active(1)
+    assert not await credit_db.add_credits(1, 3, payment_order_id=new_order, provider_payment_id="new")
+    assert (await credit_db.get_user(1))["balance"] == 6
+    await credit_db.start_broadcast_promo(1, "campaign-c")
+    assert await credit_db.is_promo_active(1)
+    clock[0] += 86400
+    assert not await credit_db.is_promo_active(1)
+    with pytest.raises(credit_db.PromoUnavailableError):
+        await credit_db.create_payment_order("c", 1, 3, 14900, "3 генерации", promo=True)
+    await credit_db.init_db()
+    assert (await credit_db.get_payment_order("a"))["promo_campaign_id"] == "campaign-a"
+
+
+async def test_broadcast_campaign_migrates_original_promo_order(credit_db):
+    import aiosqlite
+    await credit_db.grant_free_trial(1)
+    await credit_db.deduct_credit(1, count_generation=True)
+    await credit_db.create_payment_order("legacy", 1, 3, 14900, "3 генерации", promo=True)
+    async with aiosqlite.connect(credit_db.DATABASE_PATH) as db:
+        await db.execute("DROP INDEX one_promo_order_per_campaign")
+        await db.execute("ALTER TABLE users DROP COLUMN promo_campaign_id")
+        await db.execute("ALTER TABLE payment_orders DROP COLUMN promo_campaign_id")
+        await db.execute("CREATE UNIQUE INDEX one_promo_order_per_user ON payment_orders(user_id) WHERE package_id = 'promo_3'")
+        await db.commit()
+    await credit_db.init_db()
+    assert await credit_db.create_payment_order("reuse", 1, 3, 14900, "3 генерации", promo=True) == "legacy"
+    await credit_db.start_broadcast_promo(1, "new")
+    assert await credit_db.create_payment_order("new-order", 1, 3, 14900, "3 генерации", promo=True) == "new-order"

@@ -1787,3 +1787,76 @@ async def test_admin_stats_without_existing_admin_record_shows_zero_test_activit
     text = event.message.answer.await_args.args[0]
     assert "Всего запускали: 0" in text
     assert text.endswith("🛠 Тестовая активность (Админ):\n- Сгенерировано: 0\n- Покупок: 0")
+
+
+@pytest.mark.parametrize("generated,command", [(True, "broadcast_gen"), (False, "broadcast_nogen")])
+async def test_segmented_broadcast_single_message_album(credit_db, monkeypatch, example_photos, generated, command):
+    for uid in (101, 102, 103):
+        await credit_db.grant_free_trial(uid)
+    await credit_db.increment_generations(101)
+    await credit_db.mark_user_inactive(103)
+    sleep = AsyncMock()
+    monkeypatch.setattr(handlers.asyncio, "sleep", sleep)
+    event = message_event("/" + command)
+    await call_handler(create_router(admin_user_id=456), command, event)
+    event.bot.send_message.assert_awaited_once()
+    kwargs = event.bot.send_message.await_args.kwargs
+    assert kwargs["user_id"] == (101 if generated else 102)
+    assert "chat_id" not in kwargs
+    assert len(kwargs["attachments"]) == 13
+    assert event.bot.upload_media.await_count == 12
+    assert [Path(c.args[0].path).name for c in event.bot.upload_media.await_args_list] == list(handlers.START_EXAMPLE_FILES)
+    payload = kwargs["attachments"][-1].payload.buttons[0][0].payload
+    assert payload == ("buy_promo_149" if generated else "open_main_menu")
+    assert await credit_db.is_promo_active(101) == generated
+    sleep.assert_awaited_once_with(0.5)
+
+
+@pytest.mark.parametrize("command", ["broadcast_gen", "broadcast_nogen"])
+async def test_segmented_broadcast_admin_only(credit_db, command):
+    event = message_event("/" + command)
+    await call_handler(create_router(admin_user_id=999), command, event)
+    event.bot.upload_media.assert_not_awaited()
+    event.bot.send_message.assert_not_awaited()
+
+
+async def test_segmented_broadcast_missing_album_aborts_without_promo(credit_db, monkeypatch, tmp_path):
+    await credit_db.increment_generations(101)
+    monkeypatch.setattr(handlers, "EXAMPLES_DIR", tmp_path)
+    event = message_event("/broadcast_gen")
+    await call_handler(create_router(admin_user_id=456), "broadcast_gen", event)
+    event.bot.send_message.assert_not_awaited()
+    assert not await credit_db.is_promo_active(101)
+    assert "отменена" in event.message.answer.await_args.args[0]
+
+
+@pytest.mark.parametrize("status", [403, 429, 400])
+async def test_segmented_broadcast_errors(credit_db, monkeypatch, example_photos, status):
+    for uid in (101, 102):
+        await credit_db.grant_free_trial(uid)
+    monkeypatch.setattr(handlers.asyncio, "sleep", AsyncMock())
+    event = message_event("/broadcast_nogen")
+    event.bot.send_message.side_effect = MaxApiError(code=status, raw="API error")
+    await call_handler(create_router(admin_user_id=456), "broadcast_nogen", event)
+    assert event.bot.send_message.await_count == (2 if status == 403 else 1)
+    assert (await credit_db.get_user(101))["is_active"] == (0 if status == 403 else 1)
+
+
+async def test_broadcast_promo_callback_alias(credit_db):
+    await credit_db.increment_generations(456)
+    await credit_db.start_broadcast_promo(456, "campaign")
+    payments = SimpleNamespace(create_payment_link=AsyncMock(return_value="https://pay.example/149"))
+    await call_handler(create_router(admin_user_id=456, payments=payments), "buy_callback", callback_event("buy_promo_149"))
+    payments.create_payment_link.assert_awaited_once_with(456, 3, promo=True)
+
+
+async def test_segmented_broadcast_reuses_uploaded_album(credit_db, monkeypatch, example_photos):
+    for uid in (101, 102):
+        await credit_db.increment_generations(uid)
+    monkeypatch.setattr(handlers.asyncio, "sleep", AsyncMock())
+    event = message_event("/broadcast_gen")
+    await call_handler(create_router(admin_user_id=456), "broadcast_gen", event)
+    assert event.bot.upload_media.await_count == 12
+    assert [c.kwargs["user_id"] for c in event.bot.send_message.await_args_list] == [101, 102]
+    assert all(len(c.kwargs["attachments"]) == 13 for c in event.bot.send_message.await_args_list)
+    assert (await credit_db.get_user(101))["promo_campaign_id"] == (await credit_db.get_user(102))["promo_campaign_id"]

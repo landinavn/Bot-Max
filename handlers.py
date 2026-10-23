@@ -33,7 +33,7 @@ from database import (
     record_first_start, get_source_stats, register_shared_image, get_shared_image,
     get_all_counters,
     get_advanced_stats, update_user_activity, mark_user_inactive, get_active_user_ids,
-    is_promo_active, PromoUnavailableError,
+    is_promo_active, PromoUnavailableError, get_users_by_activity, start_broadcast_promo,
 )
 from prodamus import PACKAGES, ProdamusPayments
 from max_client import log_max_error
@@ -638,6 +638,88 @@ def create_router(
             await _reply(event, f"{title}. Отправлено: {sent}. "
                          f"Недоступны (403): {blocked}. Ошибок: {failed}.")
 
+    async def segmented_broadcast(event: MessageCreated, *, has_generated: bool) -> None:
+        if is_bot_message(event) or admin_user_id is None or event.get_ids()[1] != admin_user_id:
+            return
+        if broadcast_lock.locked():
+            await _reply(event, "Рассылка уже выполняется. Дождитесь завершения.")
+            return
+        async with broadcast_lock:
+            recipients = await get_users_by_activity(has_generated=has_generated)
+            segment = "сгенерировавших" if has_generated else "новых"
+            await _reply(event, f"🚀 Начинаю рассылку для {len(recipients)} {segment} пользователей...")
+            if not recipients:
+                await _reply(event, "Рассылка завершена. Нет получателей.")
+                return
+            # Полный альбом обязателен. Загружаем один раз и переиспользуем токены.
+            examples = []
+            try:
+                for filename in START_EXAMPLE_FILES:
+                    path = EXAMPLES_DIR / filename
+                    if not path.is_file():
+                        raise FileNotFoundError(filename)
+                    image = await event.bot.upload_media(InputMedia(path=str(path), type=UploadType.IMAGE))
+                    if not isinstance(image.payload.token, str) or not image.payload.token.strip():
+                        raise RuntimeError("MAX вернул пустой media token.")
+                    examples.append(image)
+            except Exception as exc:
+                await log_max_error(exc, logger)
+                await _reply(event, "Рассылка отменена: не удалось загрузить все 12 примеров. Проверьте examples и логи.")
+                return
+            keyboard = InlineKeyboardBuilder()
+            keyboard.row(CallbackButton(
+                text="Купить 3 генерации за 149 ₽" if has_generated else "Попробовать бесплатно",
+                payload="buy_promo_149" if has_generated else "open_main_menu",
+            ))
+            attachments = [*examples, keyboard.as_markup()]
+            text = (
+                "🎁 Мы обновили наш бот! Теперь доступно 5 новогодних открыток, Хэллоуин и элегантный День рождения!\n\n"
+                "А для вас действует специальное предложение: **3 генерации за 149 ₽** (вместо 199 ₽).\n\n"
+                "⏳ Цена действует 24 часа, но купленные генерации можно использовать в любое время и на любые картинки!\n\n"
+                "Посмотрите новые примеры ниже 👇"
+            ) if has_generated else (
+                "✨ У нас появились новые волшебные открытки! Теперь можно создать Новогоднюю сказку, Хэллоуин или элегантное поздравление с вашим лицом.\n\n"
+                "🎨 Первая открытка — бесплатно!\n\nПосмотрите новые примеры ниже 👇"
+            )
+            campaign_id = uuid4().hex
+            sent = blocked = failed = 0
+            stopped = False
+            for user_id in recipients:
+                user = await get_user(user_id)
+                if user is None or not user["is_active"] or (user["total_generations"] > 0) != has_generated:
+                    continue
+                try:
+                    if has_generated:
+                        await start_broadcast_promo(user_id, campaign_id)
+                    # Не разбиваем альбом даже при отказе MAX: одно сообщение на получателя.
+                    await event.bot.send_message(
+                        user_id=user_id, text=text, attachments=attachments, parse_mode=ParseMode.MARKDOWN,
+                    )
+                    sent += 1
+                except Exception as exc:
+                    await log_max_error(exc, logger)
+                    status = max_error_status(exc)
+                    if status == 403:
+                        await mark_user_inactive(user_id)
+                        blocked += 1
+                    else:
+                        failed += 1
+                        if status in {400, 401, 413, 422, 429}:
+                            stopped = True
+                            break
+                await asyncio.sleep(0.5)
+            title = "Рассылка остановлена" if stopped else "Рассылка завершена"
+            await _reply(event, f"{title}. Отправлено: {sent}. "
+                         f"Недоступны (403): {blocked}. Ошибок: {failed}.")
+
+    @router.message_created(Command("broadcast_gen"))
+    async def broadcast_gen(event: MessageCreated) -> None:
+        await segmented_broadcast(event, has_generated=True)
+
+    @router.message_created(Command("broadcast_nogen"))
+    async def broadcast_nogen(event: MessageCreated) -> None:
+        await segmented_broadcast(event, has_generated=False)
+
     async def show_start(
         event: MessageCreated | MessageCallback | BotStarted, context: MemoryContext,
         *, payload: str | None = None, timestamp_ms: int | None = None,
@@ -718,7 +800,7 @@ def create_router(
             attachments=[await purchase_keyboard(event.get_ids()[1])],
         )
 
-    @router.message_callback(F.callback.payload.in_({"buy_1", "buy_3", "buy_3_promo", "buy_5", "buy_15"}))
+    @router.message_callback(F.callback.payload.in_({"buy_1", "buy_3", "buy_3_promo", "buy_promo_149", "buy_5", "buy_15"}))
     async def buy_callback(event: MessageCallback) -> None:
         if event.message is None:
             await event.ack(notification="Сообщение удалено. Отправьте /buy.")
@@ -732,7 +814,7 @@ def create_router(
         if user_id is None:
             await _reply(event, "Не удалось определить пользователя. Отправьте /start.")
             return
-        promo_requested = event.callback.payload == "buy_3_promo"
+        promo_requested = event.callback.payload in {"buy_3_promo", "buy_promo_149"}
         credits = 3 if promo_requested else int(event.callback.payload.removeprefix("buy_"))
         promo = promo_requested and await is_promo_active(user_id)
         amount, title = PACKAGES[credits]

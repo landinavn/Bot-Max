@@ -34,6 +34,7 @@ from database import (
     get_all_counters,
     get_advanced_stats, update_user_activity, mark_user_inactive, get_active_user_ids,
     is_promo_active, PromoUnavailableError, get_users_by_activity, start_broadcast_promo,
+    get_users_for_reminder,
 )
 from prodamus import PACKAGES, ProdamusPayments
 from max_client import log_max_error
@@ -722,6 +723,45 @@ def create_router(
     @router.message_created(Command("broadcast_nogen"))
     async def broadcast_nogen(event: MessageCreated) -> None:
         await segmented_broadcast(event, has_generated=False)
+
+    @router.message_created(Command("broadcast_reminder"))
+    async def broadcast_reminder(event: MessageCreated) -> None:
+        if is_bot_message(event) or admin_user_id is None or event.get_ids()[1] != admin_user_id:
+            return
+        if broadcast_lock.locked():
+            await _reply(event, "Рассылка уже выполняется. Дождитесь завершения.")
+            return
+        async with broadcast_lock:
+            recipients = await get_users_for_reminder()
+            await _reply(event, f"⏳ Начинаю рассылку напоминаний для {len(recipients)} пользователей...")
+            keyboard = InlineKeyboardBuilder().row(CallbackButton(
+                text="Купить 3 генерации за 149 ₽", payload="buy_promo_149",
+            )).as_markup()
+            text = (
+                "⏳ Напоминаем! Специальное предложение (3 генерации за 149 ₽) сгорит через 2-3 часа!\n\n"
+                "Не упустите шанс создать красивые открытки для себя и близких. "
+                "Купленные генерации останутся с вами навсегда, вы сможете использовать их, когда захотите."
+            )
+            success = failed = 0
+            for user_id in recipients:
+                try:
+                    user = await get_user(user_id)
+                    # Пока шла рассылка, скидку могли использовать или пользователь мог заблокировать бота.
+                    if user is None or not user["is_active"] or not await is_promo_active(user_id):
+                        continue
+                    await event.bot.send_message(user_id=user_id, text=text, attachments=[keyboard])
+                    success += 1
+                except Exception as exc:
+                    failed += 1
+                    logger.error(f"Ошибка отправки пользователю {user_id}: {exc}")
+                    await log_max_error(exc, logger)
+                    if max_error_status(exc) == 403:
+                        try:
+                            await mark_user_inactive(user_id)
+                        except Exception as marking_error:
+                            logger.error("Не удалось отметить пользователя %s недоступным: %s", user_id, marking_error)
+                await asyncio.sleep(0.5)
+            await _reply(event, f"✅ Напоминания отправлены! Успешно: {success}, Ошибок: {failed}")
 
     async def show_start(
         event: MessageCreated | MessageCallback | BotStarted, context: MemoryContext,

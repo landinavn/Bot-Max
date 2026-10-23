@@ -131,9 +131,10 @@ async def init_db() -> None:
                 PRIMARY KEY (user_id, activity_date)
             )"""
         )
-        for column in ("promo_expires_at", "promo_redeemed_at"):
+        # Существующие сроки сохраняем; TIMESTAMP в SQLite также хранит Unix-секунды.
+        for column, definition in (("promo_expires_at", "TIMESTAMP"), ("promo_redeemed_at", "INTEGER")):
             if column not in columns:
-                await db.execute(f"ALTER TABLE users ADD COLUMN {column} INTEGER")
+                await db.execute(f"ALTER TABLE users ADD COLUMN {column} {definition}")
         if "promo_campaign_id" not in columns:
             await db.execute("ALTER TABLE users ADD COLUMN promo_campaign_id TEXT")
         async with db.execute("PRAGMA table_info(payment_orders)") as cursor:
@@ -243,6 +244,19 @@ async def get_users_by_activity(has_generated: bool = True) -> list[int]:
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         async with db.execute(
             f"SELECT user_id FROM users WHERE is_active = 1 AND {condition} ORDER BY user_id"
+        ) as cursor:
+            return [row[0] for row in await cursor.fetchall()]
+
+
+async def get_users_for_reminder() -> list[int]:
+    """Активная неиспользованная скидка истекает строго в ближайшие три часа."""
+    now = _now_ts()
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        async with db.execute(
+            """SELECT user_id FROM users WHERE is_active = 1
+               AND promo_expires_at > ? AND promo_expires_at < ?
+               AND promo_redeemed_at IS NULL ORDER BY user_id""",
+            (now, now + 3 * 60 * 60),
         ) as cursor:
             return [row[0] for row in await cursor.fetchall()]
 

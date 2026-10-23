@@ -456,7 +456,7 @@ def create_router(
                     logger.info("Запрос MAX API: отправка плаката с media token.")
                     sent = await bot.send_message(
                         **recipient,
-                        text="Ваша открытка готов!" if is_postcard else "Ваш плакат готов!",
+                        text="Ваша открытка готова!" if is_postcard else "Ваш плакат готов!",
                         attachments=[image, keyboard],
                     )
                 except Exception as exc:
@@ -763,11 +763,11 @@ def create_router(
                 await asyncio.sleep(0.5)
             await _reply(event, f"✅ Напоминания отправлены! Успешно: {success}, Ошибок: {failed}")
 
-    async def show_start(
+    async def send_welcome_message(
         event: MessageCreated | MessageCallback | BotStarted, context: MemoryContext,
         *, payload: str | None = None, timestamp_ms: int | None = None,
     ) -> None:
-        user_id = event.get_ids()[1]
+        user_id = event.user.user_id if isinstance(event, BotStarted) else event.get_ids()[1]
         if user_id is None:
             await _reply(event, "Не удалось определить пользователя.")
             return
@@ -813,14 +813,15 @@ def create_router(
     @router.bot_started()
     async def bot_started(event: BotStarted, context: MemoryContext) -> None:
         if not event.user.is_bot:
-            await show_start(event, context, payload=event.payload, timestamp_ms=event.timestamp)
+            logger.info("Получено bot_started: отправляю приветствие пользователю %s", event.user.user_id)
+            await send_welcome_message(event, context, payload=event.payload, timestamp_ms=event.timestamp)
 
     @router.message_created(CommandStart())
     async def start(event: MessageCreated, context: MemoryContext) -> None:
         if not is_bot_message(event):
             body = event.message.body
             parts = ((body.text or "").split(maxsplit=1) if body else [])
-            await show_start(event, context, payload=parts[1].strip() if len(parts) > 1 else None)
+            await send_welcome_message(event, context, payload=parts[1].strip() if len(parts) > 1 else None)
 
     @router.message_callback(F.callback.payload == "open_main_menu")
     async def open_main_menu(event: MessageCallback, context: MemoryContext) -> None:
@@ -831,7 +832,7 @@ def create_router(
             await event.ack(notification="Изображение уже создаётся. Подождите.")
             return
         await event.ack(notification="Открываю меню…")
-        await show_start(event, context)
+        await send_welcome_message(event, context)
 
     @router.message_created(Command("buy"))
     async def buy(event: MessageCreated) -> None:

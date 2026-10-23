@@ -1325,7 +1325,7 @@ async def test_dispatcher_routes_card_text_to_generation(
         assert f"Исходный текст: {user_text} | Исправленный: {fixed_text}" in caplog.text
         assert f"Начинаю генерацию открытки с текстом: {user_text}" in caplog.text
         replies = [call.kwargs.get("text") for call in bot.send_message.await_args_list]
-        assert "⏳ Генерирую..." in replies and "Ваша открытка готов!" in replies
+        assert "⏳ Генерирую..." in replies and "Ваша открытка готова!" in replies
         assert user_text not in replies
         assert await context.get_state() is None
         assert (await credit_db.get_user(456))["balance"] == 1
@@ -1985,3 +1985,63 @@ async def test_broadcast_reminder_shares_broadcast_lock(credit_db, monkeypatch):
     await call_handler(router, "broadcast_reminder", event)
     second.bot.send_message.assert_not_awaited()
     assert second.message.answer.await_args.args[0] == "Рассылка уже выполняется. Дождитесь завершения."
+
+
+@pytest.mark.parametrize("first_entry", ["bot_started", "command"])
+async def test_dispatcher_welcomes_link_and_command_with_same_menu(
+    credit_db, example_photos, monkeypatch, event_replies, caplog, first_entry,
+):
+    from maxapi import Dispatcher
+    from maxapi.context.isolation import SimpleEventIsolation
+    from maxapi.types import MessageCreated, User
+
+    monkeypatch.setattr(handlers, "_reply", event_replies)
+    started = bot_started_event()
+    bot = started.bot
+    bot.me = User(user_id=999, first_name="Bot", is_bot=True)
+    command = MessageCreated(
+        timestamp=started.timestamp, bot=bot,
+        message={
+            "sender": started.user.model_dump(),
+            "recipient": {"chat_id": 123, "chat_type": "dialog"},
+            "timestamp": started.timestamp,
+            "body": {"mid": "welcome-test", "seq": 1, "text": "/start"},
+        },
+    )
+    dp = Dispatcher(storage=MemoryContext, event_isolation=SimpleEventIsolation())
+    dp.include_routers(create_router())
+    try:
+        entries = [started, command] if first_entry == "bot_started" else [command, started]
+        with caplog.at_level(logging.INFO):
+            await dp.handle(entries[0])
+            context = dp.fsm.get_context(chat_id=123, user_id=456)
+            assert await context.get_state() == PosterStates.waiting_for_mode
+            await context.set_state(PosterStates.waiting_for_card_text)
+            await context.update_data(mode="mode_ny", photo="old-photo", card_text="old-text")
+            await dp.handle(entries[1])
+        greetings = [c.kwargs for c in bot.send_message.await_args_list if c.kwargs.get("text") == handlers.WELCOME_TEXT]
+        assert len(greetings) == 2
+        assert all(g["user_id"] == 456 and "chat_id" not in g for g in greetings)
+        assert greetings[0]["attachments"] == greetings[1]["attachments"]
+        assert greetings[0]["attachments"] == [handlers.main_keyboard()]
+        assert await context.get_state() == PosterStates.waiting_for_mode
+        assert await context.get_data() == {}
+        assert (await credit_db.get_user(456))["balance"] == 1
+        assert "Получено bot_started: отправляю приветствие пользователю 456" in caplog.text
+    finally:
+        await dp.shutdown()
+
+
+async def test_bot_started_welcomes_even_if_examples_cannot_upload(
+    credit_db, example_photos, monkeypatch, event_replies,
+):
+    monkeypatch.setattr(handlers, "_reply", event_replies)
+    event = bot_started_event()
+    event.bot.upload_media.side_effect = RuntimeError("example upload unavailable")
+    context = await ready_context()
+    await call_handler(create_router(), "bot_started", event, context)
+    greeting = event.bot.send_message.await_args_list[0].kwargs
+    assert greeting["text"] == handlers.WELCOME_TEXT
+    assert greeting["user_id"] == 456
+    assert greeting["attachments"] == [handlers.main_keyboard()]
+    assert await context.get_state() == PosterStates.waiting_for_mode

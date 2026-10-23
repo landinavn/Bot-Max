@@ -1803,9 +1803,9 @@ async def test_segmented_broadcast_single_message_album(credit_db, monkeypatch, 
     kwargs = event.bot.send_message.await_args.kwargs
     assert kwargs["user_id"] == (101 if generated else 102)
     assert "chat_id" not in kwargs
-    assert len(kwargs["attachments"]) == 13
-    assert event.bot.upload_media.await_count == 12
-    assert [Path(c.args[0].path).name for c in event.bot.upload_media.await_args_list] == list(handlers.START_EXAMPLE_FILES)
+    assert len(kwargs["attachments"]) == 5
+    assert event.bot.upload_media.await_count == 4
+    assert [Path(c.args[0].path).name for c in event.bot.upload_media.await_args_list] == ["i (28).webp", "i (25).webp", "i (29).webp", "i (26).webp"]
     payload = kwargs["attachments"][-1].payload.buttons[0][0].payload
     assert payload == ("buy_promo_149" if generated else "open_main_menu")
     assert await credit_db.is_promo_active(101) == generated
@@ -1830,7 +1830,7 @@ async def test_segmented_broadcast_missing_album_aborts_without_promo(credit_db,
     assert "отменена" in event.message.answer.await_args.args[0]
 
 
-@pytest.mark.parametrize("status", [403, 429, 400])
+@pytest.mark.parametrize("status", [400, 401, 403, 413, 422, 429, 500])
 async def test_segmented_broadcast_errors(credit_db, monkeypatch, example_photos, status):
     for uid in (101, 102):
         await credit_db.grant_free_trial(uid)
@@ -1838,8 +1838,9 @@ async def test_segmented_broadcast_errors(credit_db, monkeypatch, example_photos
     event = message_event("/broadcast_nogen")
     event.bot.send_message.side_effect = MaxApiError(code=status, raw="API error")
     await call_handler(create_router(admin_user_id=456), "broadcast_nogen", event)
-    assert event.bot.send_message.await_count == (2 if status == 403 else 1)
+    assert event.bot.send_message.await_count == 2
     assert (await credit_db.get_user(101))["is_active"] == (0 if status == 403 else 1)
+    assert event.message.answer.await_args.args[0] == "✅ Рассылка завершена! Успешно: 0, Ошибок: 2."
 
 
 async def test_broadcast_promo_callback_alias(credit_db):
@@ -1856,7 +1857,37 @@ async def test_segmented_broadcast_reuses_uploaded_album(credit_db, monkeypatch,
     monkeypatch.setattr(handlers.asyncio, "sleep", AsyncMock())
     event = message_event("/broadcast_gen")
     await call_handler(create_router(admin_user_id=456), "broadcast_gen", event)
-    assert event.bot.upload_media.await_count == 12
+    assert event.bot.upload_media.await_count == 4
     assert [c.kwargs["user_id"] for c in event.bot.send_message.await_args_list] == [101, 102]
-    assert all(len(c.kwargs["attachments"]) == 13 for c in event.bot.send_message.await_args_list)
+    assert all(len(c.kwargs["attachments"]) == 5 for c in event.bot.send_message.await_args_list)
     assert (await credit_db.get_user(101))["promo_campaign_id"] == (await credit_db.get_user(102))["promo_campaign_id"]
+
+
+@pytest.mark.parametrize("command", ["broadcast_gen", "broadcast_nogen"])
+async def test_segmented_broadcast_continues_after_attachment_error(credit_db, monkeypatch, example_photos, caplog, command):
+    for uid in (101, 102):
+        await credit_db.grant_free_trial(uid)
+        if command == "broadcast_gen":
+            await credit_db.increment_generations(uid)
+    monkeypatch.setattr(handlers.asyncio, "sleep", AsyncMock())
+    event = message_event("/" + command)
+    event.bot.send_message.side_effect = [
+        MaxApiError(code=400, raw={"code": "attachment.max-size-reached"}), None,
+    ]
+    await call_handler(create_router(admin_user_id=456), command, event)
+    assert [c.kwargs["user_id"] for c in event.bot.send_message.await_args_list] == [101, 102]
+    assert event.message.answer.await_args.args[0] == "✅ Рассылка завершена! Успешно: 1, Ошибок: 1."
+    assert "Ошибка отправки пользователю 101:" in caplog.text
+    assert "attachment.max-size-reached" in caplog.text
+
+
+async def test_segmented_broadcast_continues_if_marking_blocked_fails(credit_db, monkeypatch, example_photos):
+    for uid in (101, 102):
+        await credit_db.grant_free_trial(uid)
+    monkeypatch.setattr(handlers.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(handlers, "mark_user_inactive", AsyncMock(side_effect=RuntimeError("db error")))
+    event = message_event("/broadcast_nogen")
+    event.bot.send_message.side_effect = [MaxApiError(code=403, raw="forbidden"), None]
+    await call_handler(create_router(admin_user_id=456), "broadcast_nogen", event)
+    assert event.bot.send_message.await_count == 2
+    assert event.message.answer.await_args.args[0] == "✅ Рассылка завершена! Успешно: 1, Ошибок: 1."

@@ -203,6 +203,14 @@ START_EXAMPLE_FILES = (
 )
 
 
+BROADCAST_EXAMPLE_FILES = (
+    r"i (28).webp",
+    r"i (25).webp",
+    r"i (29).webp",
+    r"i (26).webp",
+)
+
+
 def is_attachment_count_limit(exc: Exception) -> bool:
     if max_error_status(exc) not in {400, 413, 422}:
         return False
@@ -649,12 +657,12 @@ def create_router(
             segment = "сгенерировавших" if has_generated else "новых"
             await _reply(event, f"🚀 Начинаю рассылку для {len(recipients)} {segment} пользователей...")
             if not recipients:
-                await _reply(event, "Рассылка завершена. Нет получателей.")
+                await _reply(event, "✅ Рассылка завершена! Успешно: 0, Ошибок: 0.")
                 return
             # Полный альбом обязателен. Загружаем один раз и переиспользуем токены.
             examples = []
             try:
-                for filename in START_EXAMPLE_FILES:
+                for filename in BROADCAST_EXAMPLE_FILES:
                     path = EXAMPLES_DIR / filename
                     if not path.is_file():
                         raise FileNotFoundError(filename)
@@ -664,7 +672,7 @@ def create_router(
                     examples.append(image)
             except Exception as exc:
                 await log_max_error(exc, logger)
-                await _reply(event, "Рассылка отменена: не удалось загрузить все 12 примеров. Проверьте examples и логи.")
+                await _reply(event, "Рассылка отменена: не удалось загрузить все 4 примера. Проверьте examples и логи.")
                 return
             keyboard = InlineKeyboardBuilder()
             keyboard.row(CallbackButton(
@@ -682,35 +690,30 @@ def create_router(
                 "🎨 Первая открытка — бесплатно!\n\nПосмотрите новые примеры ниже 👇"
             )
             campaign_id = uuid4().hex
-            sent = blocked = failed = 0
-            stopped = False
+            success_count = failed_count = 0
             for user_id in recipients:
-                user = await get_user(user_id)
-                if user is None or not user["is_active"] or (user["total_generations"] > 0) != has_generated:
-                    continue
                 try:
+                    user = await get_user(user_id)
+                    if user is None or not user["is_active"] or (user["total_generations"] > 0) != has_generated:
+                        continue
                     if has_generated:
                         await start_broadcast_promo(user_id, campaign_id)
-                    # Не разбиваем альбом даже при отказе MAX: одно сообщение на получателя.
+                    # Четыре фото и кнопка отправляются одним сообщением.
                     await event.bot.send_message(
                         user_id=user_id, text=text, attachments=attachments, parse_mode=ParseMode.MARKDOWN,
                     )
-                    sent += 1
+                    success_count += 1
                 except Exception as exc:
+                    failed_count += 1
+                    logger.error(f"Ошибка отправки пользователю {user_id}: {exc}")
                     await log_max_error(exc, logger)
-                    status = max_error_status(exc)
-                    if status == 403:
-                        await mark_user_inactive(user_id)
-                        blocked += 1
-                    else:
-                        failed += 1
-                        if status in {400, 401, 413, 422, 429}:
-                            stopped = True
-                            break
+                    if max_error_status(exc) == 403:
+                        try:
+                            await mark_user_inactive(user_id)
+                        except Exception as marking_error:
+                            logger.error("Не удалось отметить пользователя %s недоступным: %s", user_id, marking_error)
                 await asyncio.sleep(0.5)
-            title = "Рассылка остановлена" if stopped else "Рассылка завершена"
-            await _reply(event, f"{title}. Отправлено: {sent}. "
-                         f"Недоступны (403): {blocked}. Ошибок: {failed}.")
+            await _reply(event, f"✅ Рассылка завершена! Успешно: {success_count}, Ошибок: {failed_count}.")
 
     @router.message_created(Command("broadcast_gen"))
     async def broadcast_gen(event: MessageCreated) -> None:

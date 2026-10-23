@@ -21,6 +21,7 @@ from database import create_payment_order, get_payment_order
 
 PACKAGES = {
     1: (9900, "1 генерация (Открытка)"),
+    3: (19900, "3 генерации"),
     5: (29900, "5 генераций"),
     15: (79900, "15 генераций"),
 }
@@ -146,26 +147,32 @@ class ProdamusPayments:
             raise ValueError("PRODAMUS_WEBHOOK_URL должен оканчиваться на /prodamus/webhook.")
         self.secret = config.prodamus_secret_key
 
-    async def create_payment_link(self, user_id: int, credits: int) -> str:
+    async def create_payment_link(self, user_id: int, credits: int, *, promo: bool = False) -> str:
         if credits not in PACKAGES or isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
             raise ValueError("Некорректный пользователь или пакет.")
         amount, title = PACKAGES[credits]
+        if promo:
+            if credits != 3:
+                raise ValueError("Скидка доступна только для трёх генераций.")
+            amount = 14900
         order_id = f"max-{user_id}-{uuid4().hex}"
+        # Создать заказ/проверить срок скидки до обращения к платёжному сервису.
+        order_id = await create_payment_order(order_id, user_id, credits, amount, title, promo=promo)
+        package_id = "promo_3" if promo else f"package_{credits}"
         data = {
             "do": "link", "order_id": order_id,
             "products": [{"name": title, "price": f"{amount // 100}.00", "quantity": "1"}],
             "customer_extra": json.dumps(
-                {"user_id": user_id, "credits": credits, "package_id": f"package_{credits}"},
+                {"user_id": user_id, "credits": credits, "package_id": package_id},
                 separators=(",", ":"),
             ),
             "_param_user_id": str(user_id), "_param_credits": str(credits),
-            "_param_package_id": f"package_{credits}",
+            "_param_package_id": package_id,
             "urlReturn": self.return_url, "urlSuccess": self.return_url,
             "urlNotification": self.webhook_url, "payments_limit": "1",
         }
         data["sign"] = sign_link_payload(data, self.secret)
         # Заказ должен существовать ДО передачи ссылки покупателю.
-        await create_payment_order(order_id, user_id, credits, amount, title)
         return await self._request_payment_link(data)
 
     async def _request_payment_link(self, data: dict) -> str:
@@ -217,13 +224,14 @@ class ProdamusPayments:
             raise ValueError("Пользователь не соответствует заказу.")
         if "_param_credits" in data and str(data["_param_credits"]) != str(order["credits"]):
             raise ValueError("Пакет не соответствует заказу.")
-        if "_param_package_id" in data and data["_param_package_id"] != f"package_{order['credits']}":
+        package_id = order["package_id"] or f"package_{order['credits']}"
+        if "_param_package_id" in data and data["_param_package_id"] != package_id:
             raise ValueError("Идентификатор пакета не соответствует заказу.")
         if "customer_extra" in data:
             extra = json.loads(data["customer_extra"])
             if not isinstance(extra, dict) or extra.get("user_id") != order["user_id"] or extra.get("credits") != order["credits"]:
                 raise ValueError("Метаданные покупателя не соответствуют заказу.")
-            if "package_id" in extra and extra["package_id"] != f"package_{order['credits']}":
+            if "package_id" in extra and extra["package_id"] != package_id:
                 raise ValueError("Метаданные пакета не соответствуют заказу.")
         # Сумма уже сверена с сохранённым заказом выше: смена прайса не должна
         # блокировать оплату ссылки, выданной до изменения цены.

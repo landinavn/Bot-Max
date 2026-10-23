@@ -33,6 +33,7 @@ from database import (
     record_first_start, get_source_stats, register_shared_image, get_shared_image,
     get_all_counters,
     get_advanced_stats, update_user_activity, mark_user_inactive, get_active_user_ids,
+    is_promo_active, PromoUnavailableError,
 )
 from prodamus import PACKAGES, ProdamusPayments
 from max_client import log_max_error
@@ -83,6 +84,11 @@ GENERATION_EVENTS = {
     "mode_8march": "gen_8march",
     "mode_goodmorning": "gen_goodmorning",
     "mode_modern_card": "gen_scrapbook",
+    "mode_ny_cozy": "gen_ny_cozy",
+    "mode_ny_fairytale": "gen_ny_fairytale",
+    "mode_ny_elegant": "gen_ny_elegant",
+    "mode_bday_old_elegant": "gen_bday_old_elegant",
+    "mode_halloween": "gen_halloween",
 }
 
 
@@ -114,17 +120,21 @@ async def _reply(event: MessageCreated | MessageCallback | BotStarted, text=None
 
 PosterGenerator = Callable[[str, str], Awaitable[list[str]]]
 WELCOME_TEXT = (
-    "Привет! Я создаю волшебные открытки и карты желаний с твоим лицом или с лицом твоего близкого человека. "
-    "На открытках ты можешь добавить любое пожелание и поздравление. "
-    "Выбери, что хочешь создать:"
+    "Привет! Я создаю волшебные открытки и карты желаний с твоим лицом или лицом твоего близкого человека. "
+    "На открытках ты можешь добавить любое пожелание и поздравление.\n\n"
+    "🎨 Первая открытка — бесплатно!\n\n👇 Выбери, что хочешь создать:"
 )
 MODE_BUTTONS = (
-    ("🖼 Карта желаний", "mode_vision"),
     ("🎄 Открытка: Новый год", "mode_ny"),
     ("👨‍👩‍👧‍👦 Семейный Новый год", "mode_ny_family"),
+    ("🕯 Уютный Новый год", "mode_ny_cozy"),
+    ("❄️ Зимняя сказка", "mode_ny_fairytale"),
+    ("🥂 Элегантный Новый год", "mode_ny_elegant"),
+    ("🖼 Карта желаний", "mode_vision"),
     ("🎂 День рождения (Молодым)", "mode_bday_young"),
     ("🎂 День рождения (Старшим)", "mode_bday_old"),
-    ("🌹 Открытка: 8 Марта", "mode_8march"),
+    ("🎂 День рождения 2 (Старшим)", "mode_bday_old_elegant"),
+    ("🎃 Хэллоуин", "mode_halloween"),
     ("☀️ Открытка: С Добрым утром", "mode_goodmorning"),
     ("🎨 Скрапбукинг", "mode_modern_card"),
 )
@@ -153,6 +163,7 @@ def create_own_keyboard():
 PACKAGES_TEXT = (
     "💎 Доступные пакеты:\n"
     "• 1 генерация (открытка) — 99 ₽\n"
+    "• 3 генерации — 199 ₽\n"
     "• 5 генераций — 299 ₽\n"
     "• 15 генераций — 799 ₽"
 )
@@ -173,7 +184,7 @@ START_EXAMPLE_FILES = (
 
 
 EXAMPLE_TEXT = (
-    "📸 Можно создать карту желаний или открытку по шаблону: Новый год (личный или семейный), День рождения (молодым или старшим), 8 Марта, Доброе утро, Скрапбукинг.\n"
+    "📸 Можно создать карту желаний или открытку по шаблону: Новый год (личный или семейный), День рождения (молодым или старшим), уютный Новый год, Зимняя сказка, элегантный Новый год, День рождения 2 (Старшим), Хэллоуин, Доброе утро, Скрапбукинг.\n"
     "Ниже пример превращения фото в карту желаний — до и после.\n\n"
     "Промпт: «Машина тесла с бордовым салоном, я за рулем»"
 )
@@ -181,7 +192,7 @@ HELP_TEXT = (
     "🆘 Помощь\n\n"
     "Я создаю карты желаний и праздничные открытки с твоим фото. "
     "Вот как это работает:\n\n"
-    "1. Выбери «Карта желаний» или открытку: Новый год (личный или семейный), День рождения (молодым или старшим), 8 Марта, Доброе утро, Скрапбукинг.\n"
+    "1. Выбери «Карта желаний» или открытку: Новый год (личный или семейный), День рождения (молодым или старшим), уютный Новый год, Зимняя сказка, элегантный Новый год, День рождения 2 (Старшим), Хэллоуин, Доброе утро, Скрапбукинг.\n"
     "2. Отправь своё фото (селфи).\n"
     "3. Для открытки напиши поздравление и имя после фото (до 500 символов). "
     "Для карты желаний опиши свою мечту или желание текстом — например, "
@@ -219,14 +230,23 @@ def help_keyboard():
     )
 
 
-def packages_keyboard():
-    return (
-        InlineKeyboardBuilder()
-        .row(CallbackButton(text="Купить 1 генерацию — 99 ₽", payload="buy_1"))
-        .row(CallbackButton(text="Купить 5 генераций — 299 ₽", payload="buy_5"))
-        .row(CallbackButton(text="Купить 15 генераций — 799 ₽", payload="buy_15"))
-        .as_markup()
-    )
+PROMO_TEXT = (
+    "🎁 Специальное предложение!\nЗабери 3 генерации за 149 ₽ (вместо 199 ₽).\n"
+    "⏳ Цена действует 24 часа, но купленные генерации можно использовать в любое время и на любые картинки!"
+)
+
+
+def packages_keyboard(*, promo: bool = False):
+    builder = InlineKeyboardBuilder()
+    if promo:
+        builder.row(CallbackButton(text="Купить 3 генерации за 149 ₽", payload="buy_3_promo"))
+    for credits, label in ((1, "1 генерацию"), (3, "3 генерации"), (5, "5 генераций"), (15, "15 генераций")):
+        builder.row(CallbackButton(text=f"Купить {label} — {PACKAGES[credits][0] // 100} ₽", payload=f"buy_{credits}"))
+    return builder.as_markup()
+
+
+async def purchase_keyboard(user_id: int | None):
+    return packages_keyboard(promo=user_id is not None and await is_promo_active(user_id))
 
 
 class PosterStates(StatesGroup):
@@ -348,7 +368,7 @@ def create_router(
                     user = await get_user(credit_user_id)
                     if user is None or user["balance"] < 1:
                         await context.set_state(retry_state)
-                        await _reply(event, NO_CREDITS_TEXT, attachments=[packages_keyboard()] + ([postcard_retry_keyboard()] if is_postcard else []))
+                        await _reply(event, NO_CREDITS_TEXT, attachments=[await purchase_keyboard(credit_user_id)] + ([postcard_retry_keyboard()] if is_postcard else []))
                         return
                 await _reply(event, "⏳ Генерирую..." if is_postcard else "Создаю плакат…")
                 if is_postcard:
@@ -418,8 +438,8 @@ def create_router(
                 await _reply(event, f"Осталось кредитов: {user['balance'] if user else 0}.")
                 if data.get("package_offer_pending"):
                     await _reply(event,
-                        NO_CREDITS_TEXT,
-                        attachments=[packages_keyboard()],
+                        PROMO_TEXT if await is_promo_active(credit_user_id) else NO_CREDITS_TEXT,
+                        attachments=[await purchase_keyboard(credit_user_id)],
                     )
                     await context.update_data(package_offer_pending=False)
         except GenerationTimeoutError:
@@ -512,6 +532,8 @@ def create_router(
             f"💳 Покупателей: {data['total_paid_users']}\n"
             "\n🛍 Проданные пакеты:\n"
             f"- 1 генерация (99 ₽): {counters.get('buy_1', 0)}\n"
+            f"- 3 генерации (199 ₽; по акции 149 ₽): {counters.get('buy_3', 0)}\n"
+            f"- Из них по акции: {counters.get('buy_3_promo', 0)}\n"
             f"- 5 генераций (299 ₽): {counters.get('buy_5', 0)}\n"
             f"- 15 генераций (799 ₽): {counters.get('buy_15', 0)}\n"
             "\n🖼 Сгенерировано картинок:\n"
@@ -522,6 +544,11 @@ def create_router(
             f"- ДР (Старшим): {counters.get('gen_bday_old', 0)}\n"
             f"- 8 Марта: {counters.get('gen_8march', 0)}\n"
             f"- Доброе утро: {counters.get('gen_goodmorning', 0)}\n"
+            f"- Уютный НГ: {counters.get('gen_ny_cozy', 0)}\n"
+            f"- Зимняя сказка: {counters.get('gen_ny_fairytale', 0)}\n"
+            f"- Элегантный НГ: {counters.get('gen_ny_elegant', 0)}\n"
+            f"- ДР Старшим 2: {counters.get('gen_bday_old_elegant', 0)}\n"
+            f"- Хэллоуин: {counters.get('gen_halloween', 0)}\n"
             f"- Скрапбукинг: {counters.get('gen_scrapbook', 0)}\n\n"
             f"🖼 Всего сгенерировано картинок: {data['total_generated']}\n"
             f"💰 Всего покупок: {data['total_purchases']}" + source_text
@@ -643,10 +670,10 @@ def create_router(
         await _reply(event,
             (PAYMENT_PACKAGES_TEXT if payments else PACKAGES_TEXT)
             + "\n1 кредит — одно сгенерированное изображение.",
-            attachments=[packages_keyboard()],
+            attachments=[await purchase_keyboard(event.get_ids()[1])],
         )
 
-    @router.message_callback(F.callback.payload.in_({"buy_1", "buy_5", "buy_15"}))
+    @router.message_callback(F.callback.payload.in_({"buy_1", "buy_3", "buy_3_promo", "buy_5", "buy_15"}))
     async def buy_callback(event: MessageCallback) -> None:
         if event.message is None:
             await event.ack(notification="Сообщение удалено. Отправьте /buy.")
@@ -660,19 +687,30 @@ def create_router(
         if user_id is None:
             await _reply(event, "Не удалось определить пользователя. Отправьте /start.")
             return
-        credits = int(event.callback.payload.removeprefix("buy_"))
+        promo_requested = event.callback.payload == "buy_3_promo"
+        credits = 3 if promo_requested else int(event.callback.payload.removeprefix("buy_"))
+        promo = promo_requested and await is_promo_active(user_id)
+        amount, title = PACKAGES[credits]
         try:
-            link = await payments.create_payment_link(user_id, credits)
+            if promo:
+                try:
+                    link = await payments.create_payment_link(user_id, credits, promo=True)
+                    amount = 14900
+                except PromoUnavailableError:
+                    promo = False
+                    link = await payments.create_payment_link(user_id, credits)
+            else:
+                link = await payments.create_payment_link(user_id, credits)
         except Exception as exc:
             logger.error("Не удалось создать ссылку Prodamus (%s).", type(exc).__name__)
             await _reply(event, "Не удалось создать ссылку на оплату. Попробуйте /buy позже.")
             return
-        amount, title = PACKAGES[credits]
         keyboard = InlineKeyboardBuilder().row(
             LinkButton(text=f"Оплатить {amount // 100} ₽", url=link)
         ).as_markup()
+        notice = "Скидка больше недоступна. Предлагаю обычный тариф.\n" if promo_requested and not promo else ""
         await _reply(event,
-            f"Для оплаты пакета «{title} — {amount // 100} ₽» перейдите по ссылке:\n{link}",
+            notice + f"Для оплаты пакета «{title} — {amount // 100} ₽» перейдите по ссылке:\n{link}",
             attachments=[keyboard],
         )
 
@@ -684,7 +722,7 @@ def create_router(
         await context.set_state(PosterStates.waiting_for_mode)
         await _reply(event, "Сбор данных отменён.", attachments=[main_keyboard()])
 
-    @router.message_callback(F.callback.payload.in_({"create_poster", "mode_bday", *(payload for _, payload in MODE_BUTTONS)}))
+    @router.message_callback(F.callback.payload.in_({"create_poster", "mode_bday", "mode_8march", *(payload for _, payload in MODE_BUTTONS)}))
     async def begin_poster(event: MessageCallback, context: MemoryContext) -> None:
         if event.message is None:
             await event.ack(notification="Меню недоступно. Отправьте /start.")
@@ -755,7 +793,7 @@ def create_router(
                 + PAYMENT_PACKAGES_TEXT
                 if payments else HELP_ANSWERS["help_payment"]
             )
-            await _reply(event, text, attachments=[packages_keyboard()])
+            await _reply(event, text, attachments=[await purchase_keyboard(event.get_ids()[1])])
         elif event.callback.payload in {"help_support", "help_generation"}:
             await _reply(event, HELP_ANSWERS[event.callback.payload], parse_mode=ParseMode.HTML)
         else:

@@ -834,3 +834,22 @@ async def test_correction_connection_failure(config, api):
     api.post("https://api.openai.com/v1/chat/completions", exception=httpx.ConnectError("unreachable"))
     with pytest.raises(service.ImageGenerationError):
         await service.fix_text_with_ai("Счастя, Аня!")
+
+
+def test_family_new_year_headwear_is_conditional():
+    prompt = service.POSTCARD_PROMPTS["mode_ny_family"]
+    assert "ONLY if" in prompt and "or if it's a child" in prompt
+    assert "Otherwise, keep the original hairstyle" in prompt
+    assert "or no hat" not in prompt
+
+
+@pytest.mark.parametrize("mode,details", [
+    ("mode_bday_old_elegant", ["50+", "wrinkles", "minimal decorations"]),
+    ("mode_halloween", ["pumpkins", "cute and not scary"]),
+    ("mode_ny_cozy", ["fireplace", "hot cocoa", "winter sweater"]),
+    ("mode_ny_fairytale", ["ice castle", "elegant winter coat"]),
+    ("mode_ny_elegant", ["Champagne glasses", "golden decorations", "evening outfit"]),
+])
+def test_new_card_prompts_match_requested_theme(mode, details):
+    for detail in details:
+        assert detail in service.POSTCARD_PROMPTS[mode]

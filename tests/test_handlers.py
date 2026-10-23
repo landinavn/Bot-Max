@@ -55,6 +55,7 @@ def assert_purchase_keyboard(keyboard):
     buttons = [button for row in markup["payload"]["buttons"] for button in row]
     assert [(button["text"], button["payload"], button["type"]) for button in buttons] == [
         ("Купить 1 генерацию — 99 ₽", "buy_1", "callback"),
+        ("Купить 3 генерации — 199 ₽", "buy_3", "callback"),
         ("Купить 5 генераций — 299 ₽", "buy_5", "callback"),
         ("Купить 15 генераций — 799 ₽", "buy_15", "callback"),
     ]
@@ -713,19 +714,17 @@ async def test_last_free_credit_offers_packages_once_and_not_on_zero_balance(cre
     assert (await credit_db.get_user(456))["balance"] == 0
     offer = next(
         call for call in event.message.answer.await_args_list
-        if call.args and call.args[0] == NO_CREDITS_TEXT
+        if call.args and call.args[0] == handlers.PROMO_TEXT
     )
-    assert_purchase_keyboard(offer.kwargs["attachments"][0])
+    assert offer.kwargs["attachments"][0].model_dump()["payload"]["buttons"][0][0]["payload"] == "buy_3_promo"
     keyboard = offer.kwargs["attachments"][0].model_dump()
     buttons = [button for row in keyboard["payload"]["buttons"] for button in row]
-    assert [button["text"] for button in buttons] == [
-        "Купить 1 генерацию — 99 ₽", "Купить 5 генераций — 299 ₽", "Купить 15 генераций — 799 ₽",
-    ]
-    assert [button["payload"] for button in buttons] == ["buy_1", "buy_5", "buy_15"]
+    assert buttons[0]["text"] == "Купить 3 генерации за 149 ₽"
+    assert [button["payload"] for button in buttons] == ["buy_3_promo", "buy_1", "buy_3", "buy_5", "buy_15"]
     # Повторное сообщение о той же сфере использует готовый оплаченный результат.
     await call_handler(router, "collect_sphere", event, context)
     assert sum(
-        bool(call.args and call.args[0] == NO_CREDITS_TEXT)
+        bool(call.args and call.args[0] == handlers.PROMO_TEXT)
         for call in event.message.answer.await_args_list
     ) == 1
     more = callback_event("more:" + (await context.get_data())["batch_id"])
@@ -736,13 +735,13 @@ async def test_last_free_credit_offers_packages_once_and_not_on_zero_balance(cre
     next_dream = message_event()
     await call_handler(router, "collect_sphere", next_dream, context)
     assert next_dream.message.answer.await_args.args == (NO_CREDITS_TEXT,)
-    assert_purchase_keyboard(next_dream.message.answer.await_args.kwargs["attachments"][0])
+    assert "buy_3_promo" in str(next_dream.message.answer.await_args.kwargs["attachments"][0])
     generator.assert_awaited_once()
     assert event.bot.send_message.await_count == 1
     more.bot.send_message.assert_not_awaited()
 
 
-@pytest.mark.parametrize("credits", [1, 5, 15])
+@pytest.mark.parametrize("credits", [1, 3, 5, 15])
 async def test_payment_help_opens_packages_and_creates_selected_link(credit_db, credits):
     payments = SimpleNamespace(create_payment_link=AsyncMock(return_value="https://test-shop.payform.ru/pay"))
     generator = AsyncMock()
@@ -768,7 +767,7 @@ async def test_payment_help_opens_packages_and_creates_selected_link(credit_db, 
     generator.assert_not_awaited()
 
 
-@pytest.mark.parametrize("payload", ["buy_1", "buy_5", "buy_15"])
+@pytest.mark.parametrize("payload", ["buy_1", "buy_3", "buy_5", "buy_15"])
 async def test_package_buttons_report_missing_configuration_without_duplicate_menu(credit_db, payload):
     await credit_db.add_credits(456, 2)
     event = callback_event(payload)
@@ -778,7 +777,7 @@ async def test_package_buttons_report_missing_configuration_without_duplicate_me
     assert (await credit_db.get_user(456))["balance"] == 2
 
 
-@pytest.mark.parametrize("payload,credits,price", [("buy_1", 1, "99.00"), ("buy_5", 5, "299.00"), ("buy_15", 15, "799.00")])
+@pytest.mark.parametrize("payload,credits,price", [("buy_1", 1, "99.00"), ("buy_3", 3, "199.00"), ("buy_5", 5, "299.00"), ("buy_15", 15, "799.00")])
 async def test_purchase_button_creates_signed_link_for_callback_user(credit_db, payload, credits, price):
     from pathlib import Path
     from urllib.parse import parse_qsl, urlsplit
@@ -847,7 +846,7 @@ async def test_start_sends_album_before_welcome_and_menu(example_photos):
     assert all(a.payload.token == "example-token" for a in replies[0].kwargs["attachments"])
     assert replies[1].kwargs["text"] == handlers.WELCOME_TEXT
     buttons = replies[1].kwargs["attachments"][0].model_dump()["payload"]["buttons"]
-    assert [(row[0]["text"], row[0]["payload"]) for row in buttons[:8]] == list(handlers.MODE_BUTTONS)
+    assert [(row[0]["text"], row[0]["payload"]) for row in buttons[:len(handlers.MODE_BUTTONS)]] == list(handlers.MODE_BUTTONS)
     assert "бесплатный кредит" in replies[2].args[0]
 
 
@@ -1586,3 +1585,68 @@ async def test_activity_middleware_ignores_bot_messages(credit_db):
     await create_router().outer_middlewares[0](handler, event, {})
     assert await credit_db.get_user(789) is None
     handler.assert_awaited_once()
+
+
+def test_new_menu_starts_with_five_new_year_modes_and_hides_march():
+    modes = [payload for _, payload in handlers.MODE_BUTTONS]
+    assert modes[:5] == ["mode_ny", "mode_ny_family", "mode_ny_cozy", "mode_ny_fairytale", "mode_ny_elegant"]
+    assert len(modes) == 12 and len(set(modes)) == 12
+    assert "mode_8march" not in modes
+    assert {"mode_halloween", "mode_bday_old_elegant"} <= set(modes)
+    assert "🎨 Первая открытка — бесплатно!" in handlers.WELCOME_TEXT
+
+
+@pytest.mark.parametrize("active", [True, False])
+async def test_discount_callback_uses_149_only_while_active(credit_db, active, monkeypatch):
+    clock = [1800000000]
+    monkeypatch.setattr(credit_db, "_now_ts", lambda: clock[0])
+    await credit_db.grant_free_trial(456)
+    await credit_db.deduct_credit(456, count_generation=True)
+    if not active:
+        clock[0] += 86400
+    payments = SimpleNamespace(create_payment_link=AsyncMock(return_value="https://pay.example/three"))
+    event = callback_event("buy_3_promo")
+    await dispatch_callback(create_router(payments=payments), event, await ready_context())
+    event.ack.assert_awaited_once()
+    if active:
+        payments.create_payment_link.assert_awaited_once_with(456, 3, promo=True)
+        assert "149 ₽" in event.send.await_args.args[0]
+    else:
+        payments.create_payment_link.assert_awaited_once_with(456, 3)
+        assert "199 ₽" in event.send.await_args.args[0] and "149 ₽" not in event.send.await_args.args[0]
+    keyboard = await handlers.purchase_keyboard(456)
+    assert ("buy_3_promo" in str(keyboard)) is active
+
+
+async def test_discount_race_at_checkout_falls_back_to_regular_price(credit_db):
+    await credit_db.grant_free_trial(456)
+    await credit_db.deduct_credit(456, count_generation=True)
+    payments = SimpleNamespace(create_payment_link=AsyncMock(side_effect=[handlers.PromoUnavailableError(), "https://pay.example/three"]))
+    event = callback_event("buy_3_promo")
+    await dispatch_callback(create_router(payments=payments), event, await ready_context())
+    assert payments.create_payment_link.await_args_list == [call(456, 3, promo=True), call(456, 3)]
+    assert "199 ₽" in event.send.await_args.args[0]
+
+
+async def test_failed_first_generation_and_admin_do_not_start_discount(credit_db):
+    await credit_db.grant_free_trial(456)
+    event = message_event()
+    await call_handler(create_router(AsyncMock(side_effect=RuntimeError("generation failed"))), "collect_sphere", event, await ready_context())
+    assert (await credit_db.get_user(456))["promo_expires_at"] is None
+    await call_handler(create_router(AsyncMock(return_value=["https://cdn.example/admin.png"]), admin_user_id=456), "collect_sphere", message_event(), await ready_context())
+    assert (await credit_db.get_user(456))["promo_expires_at"] is None
+
+
+async def test_first_free_postcard_shows_tripwire_after_delivery(credit_db):
+    await credit_db.grant_free_trial(456)
+    context = await ready_context()
+    await context.update_data(mode="mode_ny_cozy")
+    card = AsyncMock(return_value=["https://cdn.example/cozy.png"])
+    router = create_router(postcard_generator=card)
+    await call_handler(router, "collect_photo", photo_event(), context)
+    event = message_event("Аня, с Новым годом!")
+    await call_handler(router, "collect_card_text", event, context)
+    assert await credit_db.is_promo_active(456)
+    assert any(c.args and c.args[0] == handlers.PROMO_TEXT for c in event.message.answer.await_args_list)
+    assert (await credit_db.get_all_counters())["gen_ny_cozy"] == 1
+    assert (await credit_db.get_user(456))["balance"] == 0

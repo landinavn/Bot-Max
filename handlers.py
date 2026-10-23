@@ -146,9 +146,24 @@ def postcard_retry_keyboard():
     ).as_markup()
 
 
+PHOTO_GUIDANCE = (
+    "📸 Отправьте четкое фото, где хорошо видно ваше лицо (анфас, при дневном свете). "
+    "Без темных очков и сильных теней — так нейросеть сохранит максимальное сходство!"
+)
+
+
+def photo_request(text: str) -> str:
+    return text + "\n\n" + PHOTO_GUIDANCE
+
+
 CARD_TEXT_PROMPT = (
-    "✍️ Теперь напиши текст поздравления и имя (например: «С днём рождения, Аня! Будь счастлива!»). "
-    "Этот текст появится на открытке."
+    "✍️ Отлично! Теперь напиши текст поздравления и имя (например: «С днём рождения, Аня! Будь счастлива!»).\n\n"
+    "Этот текст появится на открытке.\n\n"
+    "💡 Примеры для вдохновения:\n"
+    "• «С днём рождения, [Имя]! Желаю моря счастья, крепкого здоровья и исполнения самых заветных желаний!»\n"
+    "• «С праздником, дорогая [Имя]! Пусть в жизни всегда будет место для чудес, а рядом — самые близкие люди.»\n"
+    "• «С Новым годом, [Имя]! Пусть новый год принесёт только лучшее, а все мечты обязательно сбудутся!»\n\n"
+    "Напиши свой текст (до 200 символов) или /cancel для отмены:"
 )
 SHARED_WELCOME = (
     "Привет! Твой друг поделился с тобой этой открыткой. Хочешь создать такую же с твоим лицом?"
@@ -189,21 +204,18 @@ EXAMPLE_TEXT = (
     "Промпт: «Машина тесла с бордовым салоном, я за рулем»"
 )
 HELP_TEXT = (
-    "🆘 Помощь\n\n"
-    "Я создаю карты желаний и праздничные открытки с твоим фото. "
-    "Вот как это работает:\n\n"
-    "1. Выбери «Карта желаний» или открытку: Новый год (личный или семейный), День рождения (молодым или старшим), уютный Новый год, Зимняя сказка, элегантный Новый год, День рождения 2 (Старшим), Хэллоуин, Доброе утро, Скрапбукинг.\n"
-    "2. Отправь своё фото (селфи).\n"
-    "3. Для открытки напиши поздравление и имя после фото (до 500 символов). "
-    "Для карты желаний опиши свою мечту или желание текстом — например, "
-    "«Машина тесла с бордовым салоном, я за рулем» или «Я на пляже на Мальдивах».\n"
-    "4. Получи готовый плакат с тобой в мечте!\n\n"
-    "💎 Стоимость:\n"
-    "• 1 бесплатная генерация — для новых пользователей.\n"
-    "• 1 генерация (открытка) — 99 ₽.\n"
-    "• Пакет 5 генераций — 299 ₽.\n"
-    "• Пакет 15 генераций — 799 ₽.\n\n"
-    "❓ Частые вопросы:"
+    "🆘 Помощь\n\nКак это работает:\n"
+    "1. Выбираете шаблон (открытка или карта желаний).\n"
+    "2. Загружаете четкое фото.\n"
+    "3. Пишете текст поздравления (своими словами), а для карты желаний — описание мечты.\n"
+    "4. Получаете готовый подарок примерно за 1 минуту!\n\n"
+    "💎 Что такое кредиты (генерации):\n"
+    "Это ваши попытки. Они НЕ сгорают! Купите пакет сейчас, а используйте, когда будет удобно "
+    "(например, перед Новым годом).\n\n"
+    "🔒 Конфиденциальность:\n"
+    "Ваши фото используются для создания изображения и обрабатываются сервисом OpenAI. "
+    "Готовая картинка сохраняется в облачном хранилище и доступна по ссылке.\n\n"
+    "💬 Остались вопросы? Нажмите «Связаться с поддержкой» ниже."
 )
 HELP_ANSWERS = {
     "help_payment": "Выберите пакет для оплаты.",
@@ -232,7 +244,8 @@ def help_keyboard():
 
 PROMO_TEXT = (
     "🎁 Специальное предложение!\nЗабери 3 генерации за 149 ₽ (вместо 199 ₽).\n"
-    "⏳ Цена действует 24 часа, но купленные генерации можно использовать в любое время и на любые картинки!"
+    "⏳ Цена действует 24 часа, но купленные генерации можно использовать в любое время и на любые картинки!\n\n"
+    "🔥 Это предложение сейчас популярно — к нам присоединились более 60 человек!"
 )
 
 
@@ -347,7 +360,7 @@ def create_router(
             await context.clear()
             await context.update_data(mode=mode)
             await context.set_state(PosterStates.waiting_for_photo)
-            await _reply(event, "Начнём заново: отправьте одно фото.")
+            await _reply(event, photo_request("Начнём заново: отправьте одно фото."))
             return
         if is_postcard and not data.get("card_text"):
             await context.set_state(PosterStates.waiting_for_card_text)
@@ -458,7 +471,7 @@ def create_router(
             await context.set_state(PosterStates.waiting_for_photo)
             await _reply(event,
                 "Формат фото не поддерживается или изображение повреждено. "
-                "Отправьте новое фото в формате PNG, JPEG или WebP."
+                "Отправьте новое фото в формате PNG, JPEG или WebP." + "\n\n" + PHOTO_GUIDANCE
             )
             return
         except GenerationLimitError as exc:
@@ -743,7 +756,7 @@ def create_router(
             text = "Отправьте одно фото для плаката. /cancel — отмена."
         else:
             text = "Отправьте одно фото для открытки. Затем напишите поздравление для открытки. /cancel — отмена."
-        await _reply(event, text)
+        await _reply(event, photo_request(text))
 
     @router.message_callback(F.callback.payload.in_({"examples", "help"}))
     async def menu_callback(event: MessageCallback, context: MemoryContext) -> None:
@@ -812,7 +825,7 @@ def create_router(
             and isinstance(attachment.payload, PhotoAttachmentPayload)
         ]
         if len(photos) != 1 or not photos[0].payload.url:
-            await _reply(event, "Нужно одно фото, отправленное как изображение. /cancel — отмена.")
+            await _reply(event, photo_request("Нужно одно фото, отправленное как изображение. /cancel — отмена."))
             return
         data = await context.get_data()
         await context.update_data(photo=photos[0].payload.model_dump(), variants=[], sent_count=0,
@@ -843,7 +856,7 @@ def create_router(
         photo = data.get("photo")
         if not isinstance(photo, dict) or not isinstance(photo.get("url"), str) or not photo["url"]:
             await context.set_state(PosterStates.waiting_for_photo)
-            await _reply(event, "Фото не сохранилось. Пожалуйста, загрузите фото заново.")
+            await _reply(event, photo_request("Фото не сохранилось. Пожалуйста, загрузите фото заново."))
             return
         body = event.message.body
         text = (body.text or "").strip() if body else ""
@@ -905,8 +918,8 @@ def create_router(
         await context.clear()
         await context.update_data(mode=mode)
         await context.set_state(PosterStates.waiting_for_photo)
-        await _reply(event, "Отправьте новое общее фото семьи. /cancel — отмена." if mode == "mode_ny_family"
-                     else "Отправьте новое фото. /cancel — отмена.")
+        await _reply(event, photo_request("Отправьте новое общее фото семьи. /cancel — отмена." if mode == "mode_ny_family"
+                     else "Отправьте новое фото. /cancel — отмена."))
 
     @router.message_callback(F.callback.payload == "postcard_retry")
     async def retry_postcard(event: MessageCallback, context: MemoryContext) -> None:

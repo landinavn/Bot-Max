@@ -99,7 +99,7 @@ async def test_create_poster_acknowledges_and_requests_photo():
     await dispatch_callback(create_router(), event, context)
     event.ack.assert_awaited_once_with(notification="Загружаю…")
     event.send.assert_awaited_once_with(
-        "Отправьте одно фото для плаката. /cancel — отмена."
+        "Отправьте одно фото для плаката. /cancel — отмена." + "\n\n" + handlers.PHOTO_GUIDANCE
     )
     assert await context.get_state() == PosterStates.waiting_for_photo
     assert await context.get_data() == {"mode": "mode_vision"}
@@ -135,12 +135,13 @@ async def test_help_acknowledges_and_sends_response():
     assert event.send.await_args.args == (handlers.HELP_TEXT,)
     text = event.send.await_args.args[0]
     assert text.startswith("🆘 Помощь\n\n")
-    assert "Машина тесла с бордовым салоном, я за рулем" in text
-    assert "Я на пляже на Мальдивах" in text
-    assert "1 бесплатная генерация — для новых пользователей." in text
-    assert "Пакет 5 генераций — 299 ₽." in text
-    assert "Пакет 15 генераций — 799 ₽." in text
-    assert text.endswith("❓ Частые вопросы:")
+    assert "Как это работает:" in text
+    assert "описание мечты" in text
+    assert "Они НЕ сгорают!" in text
+    assert "OpenAI" in text and "облачном хранилище" in text
+    assert "никуда не передаются" not in text
+    assert "Связаться с поддержкой" in text
+    assert "@ваш_ник_поддержки" not in text
     keyboard = event.send.await_args.kwargs["attachments"][0].model_dump()
     buttons = [button for row in keyboard["payload"]["buttons"] for button in row]
     assert [(button["text"], button["payload"]) for button in buttons] == [
@@ -305,7 +306,7 @@ async def test_more_without_photo_requests_new_upload(payload, photo):
     event.ack.assert_awaited_once()
     assert await context.get_state() == PosterStates.waiting_for_photo
     assert await context.get_data() == {"mode": "mode_vision"}
-    event.send.assert_awaited_once_with("Отправьте новое фото. /cancel — отмена.")
+    event.send.assert_awaited_once_with(handlers.photo_request("Отправьте новое фото. /cancel — отмена."))
     generator.assert_not_awaited()
 
 
@@ -1205,7 +1206,7 @@ async def test_unregistered_share_url_is_not_downloaded(credit_db, max_image_upl
     assert "недоступна" in event.message.answer.await_args_list[0].args[0]
 
 
-@pytest.mark.parametrize("text", ["", "   ", "я" * 501])
+@pytest.mark.parametrize("text", ["", "   ", "я" * 201])
 async def test_invalid_custom_card_text_does_not_generate_or_charge(credit_db, text):
     await credit_db.add_credits(456, 2)
     card = AsyncMock()
@@ -1650,3 +1651,48 @@ async def test_first_free_postcard_shows_tripwire_after_delivery(credit_db):
     assert any(c.args and c.args[0] == handlers.PROMO_TEXT for c in event.message.answer.await_args_list)
     assert (await credit_db.get_all_counters())["gen_ny_cozy"] == 1
     assert (await credit_db.get_user(456))["balance"] == 0
+
+
+@pytest.mark.parametrize("mode", [payload for _, payload in handlers.MODE_BUTTONS])
+async def test_photo_guidance_is_shown_for_every_mode_and_more(mode):
+    context = await ready_context()
+    event = callback_event(mode)
+    router = create_router()
+    await dispatch_callback(router, event, context)
+    assert handlers.PHOTO_GUIDANCE in event.send.await_args.args[0]
+    assert await context.get_state() == PosterStates.waiting_for_photo
+    more = callback_event("more")
+    await dispatch_callback(router, more, context)
+    assert handlers.PHOTO_GUIDANCE in more.send.await_args.args[0]
+    if mode == "mode_ny_family":
+        assert "общее фото семьи" in event.send.await_args.args[0]
+        assert "общее фото семьи" in more.send.await_args.args[0]
+
+
+@pytest.mark.parametrize("length", [200, 201])
+async def test_greeting_text_boundary_matches_advertised_200_characters(credit_db, length):
+    await credit_db.add_credits(456, 2)
+    context = await ready_context()
+    await context.update_data(mode="mode_ny_cozy")
+    generator = AsyncMock(return_value=["https://cdn.example/card.png"])
+    router = create_router(postcard_generator=generator)
+    await call_handler(router, "collect_photo", photo_event(), context)
+    event = message_event("я" * length)
+    await call_handler(router, "collect_card_text", event, context)
+    if length == 200:
+        generator.assert_awaited_once()
+        assert (await credit_db.get_user(456))["balance"] == 1
+    else:
+        generator.assert_not_awaited()
+        assert (await credit_db.get_user(456))["balance"] == 2
+        assert "200" in event.message.answer.await_args.args[0]
+        assert await context.get_state() == PosterStates.waiting_for_card_text
+
+
+def test_onboarding_and_tripwire_copy_contains_examples_and_supplied_social_proof():
+    assert "Отлично!" in handlers.CARD_TEXT_PROMPT
+    assert handlers.CARD_TEXT_PROMPT.count("• «") == 3
+    assert "до 200 символов" in handlers.CARD_TEXT_PROMPT
+    assert "/cancel" in handlers.CARD_TEXT_PROMPT
+    assert "более 60 человек" in handlers.PROMO_TEXT
+    assert "149 ₽" in handlers.PROMO_TEXT and "24 часа" in handlers.PROMO_TEXT

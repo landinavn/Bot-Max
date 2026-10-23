@@ -148,6 +148,7 @@ async def test_help_acknowledges_and_sends_response():
         ("Как оплатить?", "help_payment"),
         ("Не работает генерация", "help_generation"),
         ("Связаться с поддержкой", "help_support"),
+        ("🔄 Главное меню", "open_main_menu"),
     ]
 
 
@@ -848,6 +849,7 @@ async def test_start_sends_album_before_welcome_and_menu(example_photos):
     assert replies[1].kwargs["text"] == handlers.WELCOME_TEXT
     buttons = replies[1].kwargs["attachments"][0].model_dump()["payload"]["buttons"]
     assert [(row[0]["text"], row[0]["payload"]) for row in buttons[:len(handlers.MODE_BUTTONS)]] == list(handlers.MODE_BUTTONS)
+    assert [(b["text"], b["payload"]) for row in buttons for b in row][-1] == ("🔄 Главное меню", "open_main_menu")
     assert "бесплатный кредит" in replies[2].args[0]
 
 
@@ -2045,3 +2047,51 @@ async def test_bot_started_welcomes_even_if_examples_cannot_upload(
     assert greeting["user_id"] == 456
     assert greeting["attachments"] == [handlers.main_keyboard()]
     assert await context.get_state() == PosterStates.waiting_for_mode
+
+
+@pytest.mark.parametrize("state", [
+    None, PosterStates.waiting_for_mode, PosterStates.waiting_for_photo,
+    PosterStates.waiting_for_prompt, PosterStates.waiting_for_card_text,
+    PosterStates.waiting_for_sphere, PosterStates.generating,
+])
+async def test_main_menu_button_resets_fsm_and_sends_welcome(credit_db, example_photos, state):
+    await credit_db.grant_free_trial(456)
+    context = await ready_context()
+    await context.set_state(state)
+    await context.update_data(mode="mode_ny", card_text="старый текст", retry_url="https://cdn.example/old.png")
+    event = callback_event("open_main_menu")
+    await dispatch_callback(create_router(), event, context)
+    event.ack.assert_awaited_once_with(notification="Открываю меню…")
+    assert await context.get_state() == PosterStates.waiting_for_mode
+    assert await context.get_data() == {}
+    greetings = [c.kwargs for c in event.send.await_args_list if c.kwargs.get("text") == handlers.WELCOME_TEXT]
+    assert len(greetings) == 1
+    buttons = greetings[0]["attachments"][0].payload.buttons
+    assert buttons[-1][0].text == "🔄 Главное меню"
+    assert buttons[-1][0].payload == "open_main_menu"
+    assert (await credit_db.get_user(456))["balance"] == 1
+
+
+async def test_help_main_menu_button_returns_to_start(credit_db, example_photos):
+    context = await ready_context()
+    await context.set_state(PosterStates.waiting_for_card_text)
+    router = create_router()
+    help_event = callback_event("help")
+    await dispatch_callback(router, help_event, context)
+    button = help_event.send.await_args.kwargs["attachments"][0].payload.buttons[-1][0]
+    assert button.text == "🔄 Главное меню"
+    event = callback_event(button.payload)
+    await dispatch_callback(router, event, context)
+    assert await context.get_state() == PosterStates.waiting_for_mode
+    assert await context.get_data() == {}
+    assert any(c.kwargs.get("text") == handlers.WELCOME_TEXT for c in event.send.await_args_list)
+
+
+async def test_main_menu_button_acknowledges_deleted_message():
+    context = await ready_context()
+    before = await context.get_data()
+    event = callback_event("open_main_menu", deleted=True)
+    await dispatch_callback(create_router(), event, context)
+    event.ack.assert_awaited_once_with(notification="Отправьте /start, чтобы открыть меню.")
+    event.send.assert_not_awaited()
+    assert await context.get_data() == before

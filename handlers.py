@@ -273,6 +273,7 @@ def help_keyboard():
         .row(CallbackButton(text="Как оплатить?", payload="help_payment"))
         .row(CallbackButton(text="Не работает генерация", payload="help_generation"))
         .row(CallbackButton(text="Связаться с поддержкой", payload="help_support"))
+        .row(CallbackButton(text="🔄 Главное меню", payload="open_main_menu"))
         .as_markup()
     )
 
@@ -317,6 +318,7 @@ def main_keyboard():
             CallbackButton(text="Примеры", payload="examples"),
             CallbackButton(text="Помощь", payload="help"),
         )
+        .row(CallbackButton(text="🔄 Главное меню", payload="open_main_menu"))
         .as_markup()
     )
 
@@ -827,9 +829,6 @@ def create_router(
     async def open_main_menu(event: MessageCallback, context: MemoryContext) -> None:
         if event.message is None:
             await event.ack(notification="Отправьте /start, чтобы открыть меню.")
-            return
-        if await context.get_state() == PosterStates.generating:
-            await event.ack(notification="Изображение уже создаётся. Подождите.")
             return
         await event.ack(notification="Открываю меню…")
         await send_welcome_message(event, context)

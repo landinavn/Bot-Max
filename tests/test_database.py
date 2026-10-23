@@ -444,3 +444,80 @@ async def test_rolled_back_free_generation_does_not_start_discount(credit_db, mo
         await credit_db.deduct_credit(456, count_generation=True)
     user = await credit_db.get_user(456)
     assert user["balance"] == 1 and user["promo_expires_at"] is None
+
+
+async def test_all_stats_exclude_admin_without_changing_recorded_activity(credit_db):
+    for user_id in (111, 222, 999):
+        await credit_db.record_first_start(user_id, "vk_ads", timestamp_ms=1792526400000)
+    await credit_db.update_user_activity(999, timestamp_ms=1792699200000)
+    await credit_db.mark_user_inactive(999)
+    for _ in range(3):
+        await credit_db.increment_generations(999, event_name="gen_halloween")
+    for _ in range(2):
+        await credit_db.increment_generations(111, event_name="gen_halloween")
+    await credit_db.increment_generations(222, event_name="gen_ny")
+    for order, user_id, credits, amount in [("admin-buy", 999, 5, 29900), ("user-buy", 111, 3, 19900)]:
+        await credit_db.create_payment_order(order, user_id, credits, amount, "package")
+        await credit_db.add_credits(user_id, credits, payment_order_id=order, provider_payment_id=order)
+    assert await credit_db.get_advanced_stats(admin_id=999) == {
+        "total_all": 2, "total_active": 2, "total_blocked": 0, "total_returned": 0,
+    }
+    assert await credit_db.get_global_stats(admin_id=999) == {
+        "total_users": 2, "total_paid_users": 1, "total_generated": 3,
+        "total_purchases": 1, "total_revenue_credits": 3,
+    }
+    counters = await credit_db.get_all_counters(admin_id=999)
+    assert counters == {"gen_halloween": 2, "gen_ny": 1, "buy_3": 1, "gen_unclassified": 0}
+    source = next(row for row in await credit_db.get_source_stats(admin_id=999) if row["source"] == "vk_ads")
+    assert source["total_users"] == 2 and source["new_users"] == 2
+    assert source["users_with_generation"] == 2 and source["buyers"] == 1 and source["revenue_kopecks"] == 19900
+    assert (await credit_db.get_user(999))["total_generations"] == 3
+    assert (await credit_db.get_user(999))["total_purchases"] == 1
+    assert (await credit_db.get_global_stats())["total_generated"] == 6
+    assert (await credit_db.get_all_counters())["gen_halloween"] == 5
+    # Фильтрация зависит от переданного id, а не от роли в момент записи события.
+    assert (await credit_db.get_all_counters(admin_id=111))["gen_halloween"] == 3
+
+
+async def test_excluding_absent_admin_does_not_subtract_a_user(credit_db):
+    await credit_db.record_first_start(123)
+    await credit_db.increment_generations(123, event_name="gen_vision")
+    assert (await credit_db.get_global_stats(admin_id=999))["total_users"] == 1
+    assert (await credit_db.get_advanced_stats(admin_id=999))["total_all"] == 1
+    assert (await credit_db.get_all_counters(admin_id=999))["gen_vision"] == 1
+
+
+async def test_user_counter_migration_backfills_payments_once_and_preserves_unclassified_generations(credit_db):
+    import aiosqlite
+    for user_id, credits, amount in [(123, 3, 19900), (999, 5, 29900)]:
+        order = f"old-{user_id}"
+        await credit_db.create_payment_order(order, user_id, credits, amount, "package")
+        await credit_db.add_credits(user_id, credits, payment_order_id=order, provider_payment_id=order)
+    for _ in range(4):
+        await credit_db.increment_generations(123, event_name="gen_ny")
+    for _ in range(3):
+        await credit_db.increment_generations(999, event_name="gen_ny")
+    async with aiosqlite.connect(credit_db.DATABASE_PATH) as db:
+        await db.execute("DROP TABLE user_counters")
+        await db.commit()
+    await credit_db.init_db()
+    assert await credit_db.get_all_counters(admin_id=999) == {"buy_3": 1, "gen_unclassified": 4}
+    assert (await credit_db.get_global_stats(admin_id=999))["total_generated"] == 4
+    await credit_db.increment_generations(123, event_name="gen_halloween")
+    await credit_db.increment_generations(999, event_name="gen_halloween")
+    await credit_db.init_db()
+    assert await credit_db.get_all_counters(admin_id=999) == {"buy_3": 1, "gen_halloween": 1, "gen_unclassified": 4}
+    assert (await credit_db.get_all_counters())["gen_ny"] == 7
+
+
+async def test_user_counter_write_failure_rolls_back_global_counter_and_credit(credit_db):
+    import aiosqlite
+    await credit_db.add_credits(123, 2)
+    async with aiosqlite.connect(credit_db.DATABASE_PATH) as db:
+        await db.execute("CREATE TRIGGER reject_user_counter BEFORE INSERT ON user_counters BEGIN SELECT RAISE(ABORT, 'rejected'); END")
+        await db.commit()
+    with pytest.raises(Exception, match="rejected"):
+        await credit_db.deduct_credit(123, count_generation=True, generation_event="gen_ny")
+    assert (await credit_db.get_user(123))["balance"] == 2
+    assert (await credit_db.get_user(123))["total_generations"] == 0
+    assert await credit_db.get_all_counters() == {}

@@ -134,14 +134,20 @@ async def init_db() -> None:
         for column in ("promo_expires_at", "promo_redeemed_at"):
             if column not in columns:
                 await db.execute(f"ALTER TABLE users ADD COLUMN {column} INTEGER")
+        if "promo_campaign_id" not in columns:
+            await db.execute("ALTER TABLE users ADD COLUMN promo_campaign_id TEXT")
         async with db.execute("PRAGMA table_info(payment_orders)") as cursor:
             order_columns = {row[1] for row in await cursor.fetchall()}
         if "package_id" not in order_columns:
             await db.execute("ALTER TABLE payment_orders ADD COLUMN package_id TEXT")
             await db.execute("UPDATE payment_orders SET package_id = 'package_' || credits")
+        if "promo_campaign_id" not in order_columns:
+            await db.execute("ALTER TABLE payment_orders ADD COLUMN promo_campaign_id TEXT")
+        await db.execute("DROP INDEX IF EXISTS one_promo_order_per_user")
         await db.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS one_promo_order_per_user "
-            "ON payment_orders(user_id) WHERE package_id = 'promo_3'"
+            "CREATE UNIQUE INDEX IF NOT EXISTS one_promo_order_per_campaign "
+            "ON payment_orders(user_id, COALESCE(promo_campaign_id, 'tripwire')) "
+            "WHERE package_id = 'promo_3'"
         )
         async with db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'user_counters'") as cursor:
             user_counters_exist = await cursor.fetchone() is not None
@@ -232,6 +238,27 @@ async def get_active_user_ids() -> list[int]:
             return [row[0] for row in await cursor.fetchall()]
 
 
+async def get_users_by_activity(has_generated: bool = True) -> list[int]:
+    condition = "total_generations > 0" if has_generated else "total_generations = 0"
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        async with db.execute(
+            f"SELECT user_id FROM users WHERE is_active = 1 AND {condition} ORDER BY user_id"
+        ) as cursor:
+            return [row[0] for row in await cursor.fetchall()]
+
+
+async def start_broadcast_promo(user_id: int, campaign_id: str) -> None:
+    """Новая акция рассылки; повтор в рамках той же кампании не продлевает срок."""
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        await db.execute(
+            """UPDATE users SET promo_expires_at = ?, promo_redeemed_at = NULL,
+               promo_campaign_id = ? WHERE user_id = ? AND is_active = 1
+               AND total_generations > 0 AND promo_campaign_id IS NOT ?""",
+            (_now_ts() + PROMO_SECONDS, campaign_id, user_id, campaign_id),
+        )
+        await db.commit()
+
+
 async def get_user(user_id: int) -> aiosqlite.Row | None:
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         db.row_factory = aiosqlite.Row
@@ -281,7 +308,10 @@ async def add_credits(
             if order["credits"] in (1, 3, 5, 15):
                 await increment_counter(f"buy_{order['credits']}", user_id=user_id, connection=db)
             if order["package_id"] == "promo_3":
-                await db.execute("UPDATE users SET promo_redeemed_at = ? WHERE user_id = ?", (_now_ts(), user_id))
+                await db.execute(
+                    "UPDATE users SET promo_redeemed_at = ? WHERE user_id = ? AND promo_campaign_id IS ?",
+                    (_now_ts(), user_id, order["promo_campaign_id"]),
+                )
                 await increment_counter("buy_3_promo", user_id=user_id, connection=db)
         await db.commit()
         return True
@@ -294,26 +324,29 @@ async def create_payment_order(
     if promo and (credits != 3 or amount_kopecks != 14900):
         raise ValueError("Некорректный акционный пакет.")
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        campaign_id = None
         if promo:
             await db.execute("BEGIN IMMEDIATE")
             async with db.execute(
-                "SELECT 1 FROM users WHERE user_id = ? AND promo_expires_at > ? AND promo_redeemed_at IS NULL",
+                "SELECT promo_campaign_id FROM users WHERE user_id = ? AND promo_expires_at > ? AND promo_redeemed_at IS NULL",
                 (user_id, _now_ts()),
             ) as cursor:
-                if await cursor.fetchone() is None:
+                user = await cursor.fetchone()
+                if user is None:
                     raise PromoUnavailableError("Скидка больше недоступна.")
+                campaign_id = user[0]
             async with db.execute(
-                "SELECT order_id FROM payment_orders WHERE user_id = ? AND package_id = 'promo_3'",
-                (user_id,),
+                "SELECT order_id FROM payment_orders WHERE user_id = ? AND package_id = 'promo_3' AND promo_campaign_id IS ?",
+                (user_id, campaign_id),
             ) as cursor:
                 existing = await cursor.fetchone()
             if existing:
                 return existing[0]
         await db.execute(
             """INSERT INTO payment_orders
-               (order_id, user_id, credits, amount_kopecks, product_name, package_id)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (order_id, user_id, credits, amount_kopecks, product_name, "promo_3" if promo else f"package_{credits}"),
+               (order_id, user_id, credits, amount_kopecks, product_name, package_id, promo_campaign_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (order_id, user_id, credits, amount_kopecks, product_name, "promo_3" if promo else f"package_{credits}", campaign_id),
         )
         await db.commit()
         return order_id

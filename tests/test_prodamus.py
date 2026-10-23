@@ -193,6 +193,8 @@ async def test_webhook_credits_paid_order_once(client, payments, credit_db, cred
     assert await credit_db.get_all_counters() == {f"buy_{credits}": 1}
     assert (await credit_db.get_user(456))["total_purchases"] == 1
     assert (await credit_db.get_global_stats())["total_revenue_credits"] == credits
+    assert await credit_db.get_all_counters(admin_id=456) == {"gen_unclassified": 0}
+    assert (await credit_db.get_all_counters(admin_id=999))[f"buy_{credits}"] == 1
     assert (await credit_db.get_user(456))["free_trial_used"] == 1
     assert (await credit_db.get_payment_order(data["order_num"]))["status"] == "paid"
     await credit_db.init_db()  # Повтор после перезапуска и с новым attempt.

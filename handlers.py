@@ -544,10 +544,16 @@ def create_router(
             return
         if admin_user_id is None or event.get_ids()[1] != admin_user_id:
             return
-        data = await get_global_stats()
-        activity = await get_advanced_stats()
-        counters = await get_all_counters()
-        sources = await get_source_stats()
+        data = await get_global_stats(admin_id=admin_user_id)
+        activity = await get_advanced_stats(admin_id=admin_user_id)
+        counters = await get_all_counters(admin_id=admin_user_id)
+        sources = await get_source_stats(admin_id=admin_user_id)
+        admin = await get_user(admin_user_id)
+        admin_text = (
+            "\n\n🛠 Тестовая активность (Админ):\n"
+            f"- Сгенерировано: {admin['total_generations'] if admin else 0}\n"
+            f"- Покупок: {admin['total_purchases'] if admin else 0}"
+        )
         source_text = "\n\n📍 Источники первого запуска (весь период):"
         for source in sources:
             amount = source["revenue_kopecks"]
@@ -588,8 +594,9 @@ def create_router(
             f"- ДР Старшим 2: {counters.get('gen_bday_old_elegant', 0)}\n"
             f"- Хэллоуин: {counters.get('gen_halloween', 0)}\n"
             f"- Скрапбукинг: {counters.get('gen_scrapbook', 0)}\n\n"
+            f"Без разбивки по шаблонам (раньше): {counters.get('gen_unclassified', 0)}\n"
             f"🖼 Всего сгенерировано картинок: {data['total_generated']}\n"
-            f"💰 Всего покупок: {data['total_purchases']}" + source_text
+            f"💰 Всего покупок: {data['total_purchases']}" + source_text + admin_text
         )
 
     @router.message_created(Command("broadcast"))

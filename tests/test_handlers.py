@@ -1422,8 +1422,8 @@ async def test_stats_displays_distinct_nonzero_values_for_each_event(credit_db):
     ]
     for count, (key, _) in enumerate(fields, 1):
         for _ in range(count):
-            await credit_db.increment_counter(key)
-    await credit_db.increment_counter("gen_8march")
+            await credit_db.increment_counter(key, user_id=123)
+    await credit_db.increment_counter("gen_8march", user_id=123)
     event = message_event("/stats")
     await call_handler(create_router(admin_user_id=456), "stats", event)
     text = event.message.answer.await_args.args[0]
@@ -1759,3 +1759,31 @@ def test_welcome_has_exact_requested_line_breaks_and_emoji():
         "🎨 Первая открытка — бесплатно!\n\n"
         "👇 Выбери, что хочешь создать:"
     )
+
+
+async def test_stats_excludes_admin_everywhere_and_appends_admin_test_activity(credit_db):
+    await credit_db.record_first_start(456, "vk_ads")
+    await credit_db.record_first_start(123, "vk_ads")
+    for _ in range(7):
+        await credit_db.increment_generations(456, event_name="gen_halloween")
+    await credit_db.increment_generations(123, event_name="gen_halloween")
+    for order, user_id, credits, price in [("admin-order", 456, 5, 29900), ("regular-order", 123, 3, 19900)]:
+        await credit_db.create_payment_order(order, user_id, credits, price, "package")
+        await credit_db.add_credits(user_id, credits, payment_order_id=order, provider_payment_id=order)
+    event = message_event("/stats")
+    await call_handler(create_router(admin_user_id=456), "stats", event)
+    text = event.message.answer.await_args.args[0]
+    assert "Всего запускали: 1" in text and "Всего пользователей: 1" in text
+    assert "Покупателей: 1" in text and "Всего покупок: 1" in text
+    assert "- Хэллоуин: 1\n" in text and "Всего сгенерировано картинок: 1" in text
+    assert "- 5 генераций (299 ₽): 0" in text
+    assert "Сумма оплат: 199,00 ₽" in text and "299,00 ₽" not in text
+    assert text.endswith("🛠 Тестовая активность (Админ):\n- Сгенерировано: 7\n- Покупок: 1")
+
+
+async def test_admin_stats_without_existing_admin_record_shows_zero_test_activity(credit_db):
+    event = message_event("/stats")
+    await call_handler(create_router(admin_user_id=456), "stats", event)
+    text = event.message.answer.await_args.args[0]
+    assert "Всего запускали: 0" in text
+    assert text.endswith("🛠 Тестовая активность (Админ):\n- Сгенерировано: 0\n- Покупок: 0")

@@ -143,6 +143,28 @@ async def init_db() -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS one_promo_order_per_user "
             "ON payment_orders(user_id) WHERE package_id = 'promo_3'"
         )
+        async with db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'user_counters'") as cursor:
+            user_counters_exist = await cursor.fetchone() is not None
+        await db.execute(
+            """CREATE TABLE IF NOT EXISTS user_counters (
+                user_id INTEGER NOT NULL,
+                event_name TEXT NOT NULL,
+                count INTEGER NOT NULL DEFAULT 0 CHECK (count >= 0),
+                PRIMARY KEY (user_id, event_name)
+            )"""
+        )
+        if not user_counters_exist:
+            # Заказы имеют владельца; старые глобальные счётчики генераций — нет.
+            await db.execute(
+                """INSERT INTO user_counters (user_id, event_name, count)
+                   SELECT user_id, 'buy_' || credits, COUNT(*) FROM payment_orders
+                   WHERE status = 'paid' AND credits IN (1, 3, 5, 15) GROUP BY user_id, credits"""
+            )
+            await db.execute(
+                """INSERT INTO user_counters (user_id, event_name, count)
+                   SELECT user_id, 'buy_3_promo', COUNT(*) FROM payment_orders
+                   WHERE status = 'paid' AND package_id = 'promo_3' GROUP BY user_id"""
+            )
         await db.commit()
 
 
@@ -191,14 +213,15 @@ async def update_user_activity(user_id: int, *, timestamp_ms: int | None = None)
         await db.commit()
 
 
-async def get_advanced_stats() -> dict[str, int]:
+async def get_advanced_stats(admin_id: int | None = None) -> dict[str, int]:
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT COUNT(*) AS total_all,
                COALESCE(SUM(is_active = 1), 0) AS total_active,
                COALESCE(SUM(is_active = 0), 0) AS total_blocked,
-               COALESCE(SUM(days_active > 1), 0) AS total_returned FROM users"""
+               COALESCE(SUM(days_active > 1), 0) AS total_returned FROM users
+               WHERE (? IS NULL OR user_id != ?)""", (admin_id, admin_id),
         ) as cursor:
             return dict(await cursor.fetchone())
 
@@ -256,10 +279,10 @@ async def add_credits(
         if payment_order_id is not None:
             await increment_purchases(user_id, connection=db)
             if order["credits"] in (1, 3, 5, 15):
-                await increment_counter(f"buy_{order['credits']}", connection=db)
+                await increment_counter(f"buy_{order['credits']}", user_id=user_id, connection=db)
             if order["package_id"] == "promo_3":
                 await db.execute("UPDATE users SET promo_redeemed_at = ? WHERE user_id = ?", (_now_ts(), user_id))
-                await increment_counter("buy_3_promo", connection=db)
+                await increment_counter("buy_3_promo", user_id=user_id, connection=db)
         await db.commit()
         return True
 
@@ -376,7 +399,9 @@ async def _increment_counter(user_id: int, column: str, connection: aiosqlite.Co
             await db.commit()
 
 
-async def increment_counter(event_name: str, *, connection: aiosqlite.Connection | None = None) -> None:
+async def increment_counter(
+    event_name: str, *, user_id: int | None = None, connection: aiosqlite.Connection | None = None,
+) -> None:
     """Атомарно увеличить глобальный счётчик, при необходимости в общей транзакции."""
     if not isinstance(event_name, str) or not event_name.strip():
         raise ValueError("Название события не должно быть пустым.")
@@ -386,16 +411,35 @@ async def increment_counter(event_name: str, *, connection: aiosqlite.Connection
     )
     if connection is not None:
         await connection.execute(query, (event_name,))
+        if user_id is not None:
+            await connection.execute(
+                """INSERT INTO user_counters (user_id, event_name, count) VALUES (?, ?, 1)
+                   ON CONFLICT(user_id, event_name) DO UPDATE SET count = count + 1""",
+                (user_id, event_name),
+            )
     else:
         async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
-            await db.execute(query, (event_name,))
+            await increment_counter(event_name, user_id=user_id, connection=db)
             await db.commit()
 
 
-async def get_all_counters() -> dict[str, int]:
+async def get_all_counters(admin_id: int | None = None) -> dict[str, int]:
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
-        async with db.execute("SELECT event_name, count FROM global_counters") as cursor:
-            return dict(await cursor.fetchall())
+        if admin_id is None:
+            async with db.execute("SELECT event_name, count FROM global_counters") as cursor:
+                return dict(await cursor.fetchall())
+        async with db.execute(
+            "SELECT event_name, SUM(count) FROM user_counters WHERE user_id != ? GROUP BY event_name",
+            (admin_id,),
+        ) as cursor:
+            counters = dict(await cursor.fetchall())
+        async with db.execute(
+            "SELECT COALESCE(SUM(total_generations), 0) FROM users WHERE user_id != ?", (admin_id,),
+        ) as cursor:
+            total_generations = (await cursor.fetchone())[0]
+        classified = sum(count for event, count in counters.items() if event.startswith("gen_"))
+        counters["gen_unclassified"] = max(0, total_generations - classified)
+        return counters
 
 
 async def increment_generations(
@@ -409,7 +453,7 @@ async def increment_generations(
     else:
         await _increment_counter(user_id, "total_generations", connection)
         if event_name is not None:
-            await increment_counter(event_name, connection=connection)
+            await increment_counter(event_name, user_id=user_id, connection=connection)
 
 
 async def increment_purchases(user_id: int, *, connection: aiosqlite.Connection | None = None) -> None:
@@ -417,7 +461,7 @@ async def increment_purchases(user_id: int, *, connection: aiosqlite.Connection 
     await _increment_counter(user_id, "total_purchases", connection)
 
 
-async def get_global_stats() -> dict[str, int]:
+async def get_global_stats(admin_id: int | None = None) -> dict[str, int]:
     """Снимок счётчиков и точного количества кредитов из оплаченных заказов."""
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         db.row_factory = aiosqlite.Row
@@ -426,9 +470,10 @@ async def get_global_stats() -> dict[str, int]:
                 COALESCE(SUM(CASE WHEN total_purchases > 0 THEN 1 ELSE 0 END), 0) AS total_paid_users,
                 COALESCE(SUM(total_generations), 0) AS total_generated,
                 COALESCE(SUM(total_purchases), 0) AS total_purchases,
-                (SELECT COALESCE(SUM(credits), 0) FROM payment_orders WHERE status = 'paid')
+                (SELECT COALESCE(SUM(credits), 0) FROM payment_orders WHERE status = 'paid'
+                    AND (? IS NULL OR user_id != ?))
                     AS total_revenue_credits
-                FROM users"""
+                FROM users WHERE (? IS NULL OR user_id != ?)""", (admin_id,) * 4,
         ) as cursor:
             return dict(await cursor.fetchone())
 
@@ -459,7 +504,7 @@ async def record_first_start(user_id: int, payload: str | None = None, *, timest
         return cursor.rowcount == 1
 
 
-async def get_source_stats() -> list[dict]:
+async def get_source_stats(admin_id: int | None = None) -> list[dict]:
     """Воронка по первому источнику, выручка в копейках только по paid-заказам."""
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         db.row_factory = aiosqlite.Row
@@ -475,7 +520,8 @@ async def get_source_stats() -> list[dict]:
                  SELECT user_id, SUM(amount_kopecks) AS revenue_kopecks
                  FROM payment_orders WHERE status = 'paid' GROUP BY user_id
                ) p ON p.user_id = u.user_id
-               GROUP BY COALESCE(u.first_start_source, 'legacy')"""
+               WHERE (? IS NULL OR u.user_id != ?)
+               GROUP BY COALESCE(u.first_start_source, 'legacy')""", (admin_id, admin_id),
         ) as cursor:
             rows = {row["source"]: dict(row) for row in await cursor.fetchall()}
     result = []

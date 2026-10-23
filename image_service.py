@@ -4,6 +4,7 @@ import asyncio
 import base64
 import binascii
 import logging
+import re
 import textwrap
 from io import BytesIO
 from pathlib import Path
@@ -25,7 +26,7 @@ from botocore.session import Session as BotocoreSession
 from maxapi import Bot
 from maxapi.enums.upload_type import UploadType
 from maxapi.types import AttachmentUpload, InputMedia, InputMediaBuffer, Message
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageStat
 
 from config import Config
 from max_client import create_max_bot, log_max_error
@@ -122,11 +123,36 @@ def _wrap_card_text(text: str, draw, font, max_width: float) -> str:
     return "\n".join(lines)
 
 
+_EMOJI_RE = re.compile(
+    r"[0-9#*]\ufe0f?\u20e3|[\U0001F000-\U0001FAFF\u2600-\u27BF"
+    r"\u00A9\u00AE\u203C\u2049\u2122\u2139\u2194-\u2199\u21A9\u21AA"
+    r"\u231A\u231B\u2328\u23CF\u23E9-\u23F3\u23F8-\u23FA\u24C2"
+    r"\u25AA\u25AB\u25B6\u25C0\u25FB-\u25FE\u2934\u2935\u2B05-\u2B07"
+    r"\u2B1B\u2B1C\u2B50\u2B55\u3030\u303D\u3297\u3299\u200D\uFE0E\uFE0F\u20E3]"
+)
+
+
 def add_text_to_image(image_bytes: bytes, text: str, mode: str | None = None) -> bytes:
-    """Наложить именно текст пользователя, с переносами и подбором размера."""
+    """Наложить текст; при ошибке эмодзи повторить отрисовку без них."""
     validate_card_text(text)
+    try:
+        return _render_card_text(image_bytes, text, mode)
+    except (UnicodeError, OSError, ValueError):
+        clean_text = _EMOJI_RE.sub("", text)
+        if clean_text == text:
+            raise
+        logger.warning("Шрифт не смог отрисовать эмодзи; повторяю наложение без эмодзи.")
+        # Новая отрисовка начинается с исходника, без следов неудачной попытки.
+        return _render_card_text(image_bytes, clean_text, mode)
+
+
+def _render_card_text(image_bytes: bytes, text: str, mode: str | None) -> bytes:
     with Image.open(BytesIO(image_bytes)) as source:
         image = ImageOps.exif_transpose(source).convert("RGB")
+    if not text.strip():
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        return buffer.getvalue()
     width, height = image.size
     draw = ImageDraw.Draw(image)
     modern = mode == "mode_modern_card"
@@ -141,11 +167,19 @@ def add_text_to_image(image_bytes: bytes, text: str, mode: str | None = None) ->
     max_height = height * (0.7 if modern else 0.2)
     align = "left" if modern else "center"
     low, high = 1, max(1, height // (24 if modern else 15))
+    probe = _postcard_font(high)
+    missing = probe.getmask("\U0010FFFF")
+    for char in text:
+        if _EMOJI_RE.fullmatch(char) and char not in "\u200d\ufe0e\ufe0f":
+            glyph = probe.getmask(char)
+            if glyph.size == missing.size and bytes(glyph) == bytes(missing):
+                # FreeType часто рисует пустой квадрат вместо исключения.
+                raise UnicodeError("Шрифт не поддерживает эмодзи.")
     fitted = None
     while low <= high:
         size = (low + high) // 2
         font = _postcard_font(size)
-        stroke = 0 if modern else max(1, size // 25)
+        stroke = max(1, size // 25)
         spacing = max(1, size // (3 if modern else 5))
         wrapped = _wrap_card_text(text, draw, font, max_width - 2 * stroke)
         box = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=spacing,
@@ -160,9 +194,14 @@ def add_text_to_image(image_bytes: bytes, text: str, mode: str | None = None) ->
     font, stroke, spacing, wrapped, (left, top, right, bottom) = fitted
     x = width * 0.05 - left if modern else (width - (right - left)) / 2 - left
     y = height * (0.5 if modern else 0.89) - (bottom - top) / 2 - top
+    region = ((int(width * 0.05), int(height * 0.15), max(1, int(width * 0.42)), max(1, int(height * 0.85)))
+              if modern else (0, int(height * 0.78), width, height))
+    brightness = ImageStat.Stat(image.crop(region).convert("L")).mean[0]
+    light_background = brightness >= 150
     draw.multiline_text((round(x), round(y)), wrapped, font=font,
-                       fill="#3b2720" if modern else "white", align=align,
-                       spacing=spacing, stroke_width=stroke, stroke_fill="black")
+                       fill="#2C3E50" if light_background else "#FFFFFF", align=align,
+                       spacing=spacing, stroke_width=stroke,
+                       stroke_fill="white" if light_background else "black")
     buffer = BytesIO()
     image.save(buffer, format="PNG")
     return buffer.getvalue()
@@ -266,6 +305,7 @@ async def fix_text_with_ai(text: str) -> str:
     instruction = (
         "Ты профессиональный корректор. Исправь орфографические и грамматические "
         "ошибки в следующем тексте для открытки, но сохрани смысл и имена. "
+        "Сохрани все эмодзи и переносы строк. "
         "Верни ТОЛЬКО исправленный текст без кавычек и комментариев:"
     )
     try:

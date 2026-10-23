@@ -1696,3 +1696,10 @@ def test_onboarding_and_tripwire_copy_contains_examples_and_supplied_social_proo
     assert "/cancel" in handlers.CARD_TEXT_PROMPT
     assert "более 60 человек" in handlers.PROMO_TEXT
     assert "149 ₽" in handlers.PROMO_TEXT and "24 часа" in handlers.PROMO_TEXT
+
+
+def test_photo_guidance_allows_family_and_card_prompt_mentions_emoji():
+    assert "Вы можете загрузить как одного человека, так и целую семью!" in handlers.PHOTO_GUIDANCE
+    assert "где хорошо видно лицо" in handlers.PHOTO_GUIDANCE
+    assert "Вы можете использовать не только буквы, но и эмодзи (😊, 🎉, ❤️)." in handlers.CARD_TEXT_PROMPT
+    assert "до 200 символов" in handlers.CARD_TEXT_PROMPT

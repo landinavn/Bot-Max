@@ -757,7 +757,7 @@ def test_modern_card_uses_short_dark_lines_on_left_and_keeps_portrait_area(monke
     content, kwargs = rendered[0]
     assert max(map(len, content.splitlines())) <= 28
     assert "".join(content.split()) == "".join(text.split())
-    assert kwargs["align"] == "left" and kwargs["fill"] == "#3b2720"
+    assert kwargs["align"] == "left" and kwargs["fill"] == "#2C3E50"
     box = ImageChops.difference(source, result).getbbox()
     assert box is not None
     width, height = size
@@ -769,7 +769,7 @@ def test_modern_card_uses_short_dark_lines_on_left_and_keeps_portrait_area(monke
         result.crop((int(width * 0.45), 0, width, height)),
     ).getbbox() is None
     colors = {color for _, color in result.getcolors(maxcolors=width * height)}
-    assert (59, 39, 32) in colors
+    assert (44, 62, 80) in colors
 
 
 def correction_response(text, finish_reason="stop"):
@@ -853,3 +853,98 @@ def test_family_new_year_headwear_is_conditional():
 def test_new_card_prompts_match_requested_theme(mode, details):
     for detail in details:
         assert detail in service.POSTCARD_PROMPTS[mode]
+
+
+@pytest.mark.parametrize("mode", ["mode_ny", "mode_modern_card"])
+@pytest.mark.parametrize("light", [True, False])
+def test_text_color_and_outline_follow_background_in_text_area(monkeypatch, mode, light):
+    from PIL import ImageDraw
+    source = Image.new("RGB", (400, 600), "black" if light else "white")
+    painter = ImageDraw.Draw(source)
+    area = (20, 90, 168, 510) if mode == "mode_modern_card" else (0, 468, 400, 600)
+    painter.rectangle(area, fill="white" if light else "black")
+    buffer = BytesIO()
+    source.save(buffer, format="PNG")
+    captured = []
+    original = service.ImageDraw.ImageDraw.multiline_text
+    def draw(self, xy, text, *args, **kwargs):
+        captured.append(kwargs)
+        return original(self, xy, text, *args, **kwargs)
+    monkeypatch.setattr(service.ImageDraw.ImageDraw, "multiline_text", draw)
+    result = service.add_text_to_image(buffer.getvalue(), "Счастья, Аня!", mode)
+    assert captured[0]["fill"] == ("#2C3E50" if light else "#FFFFFF")
+    assert captured[0]["stroke_fill"] == ("white" if light else "black")
+    assert captured[0]["stroke_width"] >= 1
+    assert Image.open(BytesIO(result)).size == source.size
+
+
+def test_emoji_drawing_error_retries_from_clean_original(monkeypatch, caplog):
+    source = Image.new("RGB", (400, 600), "#dce4f5")
+    buffer = BytesIO()
+    source.save(buffer, format="PNG")
+    captured = []
+    original = service.ImageDraw.ImageDraw.multiline_text
+    def draw(self, xy, text, *args, **kwargs):
+        captured.append(text)
+        if "❤" in text:
+            self.rectangle((0, 0, 40, 40), fill="red")
+            raise UnicodeError("emoji render failure")
+        return original(self, xy, text, *args, **kwargs)
+    monkeypatch.setattr(service.ImageDraw.ImageDraw, "multiline_text", draw)
+    result = Image.open(BytesIO(service.add_text_to_image(buffer.getvalue(), "Счастья, Аня! ❤️\n2027")))
+    assert len(captured) == 2 and "❤" in captured[0]
+    assert captured[1].split() == ["Счастья,", "Аня!", "2027"]
+    assert result.getpixel((5, 5)) == source.getpixel((5, 5))
+    assert "без эмодзи" in caplog.text
+
+
+def test_missing_emoji_glyph_is_removed_instead_of_drawing_a_box(monkeypatch):
+    source = Image.new("RGB", (400, 600), "white")
+    buffer = BytesIO()
+    source.save(buffer, format="PNG")
+    original_mask = service.ImageFont.FreeTypeFont.getmask
+    def mask(self, text, *args, **kwargs):
+        return original_mask(self, "\U0010FFFF" if text == "🎉" else text, *args, **kwargs)
+    monkeypatch.setattr(service.ImageFont.FreeTypeFont, "getmask", mask)
+    actual = service.add_text_to_image(buffer.getvalue(), "Аня, поздравляю 🎉")
+    expected = service.add_text_to_image(buffer.getvalue(), "Аня, поздравляю ")
+    assert actual == expected
+
+
+def test_supported_heart_emoji_is_preserved(monkeypatch):
+    source = Image.new("RGB", (400, 600), "white")
+    buffer = BytesIO()
+    source.save(buffer, format="PNG")
+    captured = []
+    original = service.ImageDraw.ImageDraw.multiline_text
+    def draw(self, xy, text, *args, **kwargs):
+        captured.append(text)
+        return original(self, xy, text, *args, **kwargs)
+    monkeypatch.setattr(service.ImageDraw.ImageDraw, "multiline_text", draw)
+    service.add_text_to_image(buffer.getvalue(), "Любви ❤️")
+    assert len(captured) == 1 and "❤️" in captured[0]
+
+
+def test_emoji_only_fallback_returns_image_without_overlay(monkeypatch):
+    source = Image.new("RGB", (400, 600), "#345678")
+    buffer = BytesIO()
+    source.save(buffer, format="PNG")
+    original_mask = service.ImageFont.FreeTypeFont.getmask
+    def mask(self, text, *args, **kwargs):
+        return original_mask(self, "\U0010FFFF" if text == "🎉" else text, *args, **kwargs)
+    monkeypatch.setattr(service.ImageFont.FreeTypeFont, "getmask", mask)
+    result = Image.open(BytesIO(service.add_text_to_image(buffer.getvalue(), "🎉")))
+    assert result.tobytes() == source.tobytes()
+
+
+def test_fallback_removes_joined_emoji_flags_and_keycaps_but_keeps_digits():
+    assert service._EMOJI_RE.sub("", "Аня 👨‍👩‍👧‍👦 🇷🇺 1️⃣ 2027 ❤️") == "Аня    2027 "
+
+
+def test_unrelated_render_error_is_not_swallowed(monkeypatch):
+    source = Image.new("RGB", (400, 600), "white")
+    buffer = BytesIO()
+    source.save(buffer, format="PNG")
+    monkeypatch.setattr(service.ImageDraw.ImageDraw, "multiline_text", Mock(side_effect=ValueError("invalid drawing")))
+    with pytest.raises(ValueError, match="invalid drawing"):
+        service.add_text_to_image(buffer.getvalue(), "С праздником, Аня!")

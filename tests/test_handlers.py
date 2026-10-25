@@ -1011,7 +1011,8 @@ async def test_admin_stats_does_not_change_fsm(credit_db, state):
     assert "- 5 генераций (299 ₽): 1" in text
     assert "- 1 генерация (99 ₽): 0" in text
     assert "- 15 генераций (799 ₽): 0" in text
-    assert "🖼 Всего сгенерировано картинок: 1\n💰 Всего покупок: 1" in text
+    assert "🖼 Всего сгенерировано картинок: 1\n" in text
+    assert "💰 Всего покупок: 1" in text
     for label in ("Карта желаний", "Новый год", "Семейный НГ", "ДР (Молодым)", "ДР (Старшим)", "Доброе утро", "Скрапбукинг"):
         assert f"- {label}: 0" in text
     assert await context.get_state() == state
@@ -2275,3 +2276,110 @@ async def test_new_purchase_copy_and_existing_buttons(credit_db, payments_enable
         "👇 Выбери пакет для покупки:"
     )
     assert_purchase_keyboard(event.message.answer.await_args.kwargs["attachments"][0])
+
+
+async def test_navigation_only_counts_interest_clicks(credit_db, example_photos):
+    await credit_db.record_first_start(456, None)
+    await credit_db.grant_free_trial(456)
+    await credit_db.increment_generations(456, event_name="gen_vision")
+    before = dict(await credit_db.get_user(456))
+    before_stats = await credit_db.get_global_stats()
+    router = create_router()
+    context = await ready_context()
+    for payload in [*CATEGORY_EXPECTATIONS, "back_to_main", "back_to_cards", "cat_photo", "cat_audio", "cat_photo"]:
+        await dispatch_callback(router, callback_event(payload), context)
+    counters = await credit_db.get_all_counters()
+    assert counters == {"gen_vision": 1, "click_photo": 3, "click_audio": 2}
+    assert dict(await credit_db.get_user(456)) == before
+    assert await credit_db.get_global_stats() == before_stats
+
+
+async def test_stats_interest_counts_per_user_and_excludes_admin(credit_db, example_photos):
+    router = create_router(admin_user_id=456)
+    for uid, payload in [(101, "cat_photo"), (101, "cat_photo"), (102, "cat_audio"),
+                         (456, "cat_photo"), (456, "cat_audio")]:
+        event = callback_event(payload)
+        event.get_ids = lambda uid=uid: (123, uid)
+        await dispatch_callback(router, event, await ready_context())
+    assert await credit_db.get_all_counters() == {"click_photo": 3, "click_audio": 2}
+    filtered = await credit_db.get_all_counters(admin_id=456)
+    assert filtered["click_photo"] == 2 and filtered["click_audio"] == 1
+    assert filtered["gen_unclassified"] == 0
+    event = message_event("/stats")
+    await call_handler(router, "stats", event)
+    text = event.message.answer.await_args.args[0]
+    assert "🖱 Интерес к новым разделам:\n- Фотосессия (клики): 2\n- Аудиопесни (клики): 1" in text
+    assert text.index("🖼 Всего сгенерировано картинок:") < text.index("🖱 Интерес к новым разделам:") < text.index("📍 Источники")
+    assert "🖼 Всего сгенерировано картинок: 0" in text
+    assert "8 Марта" not in text
+
+
+async def test_stats_interest_defaults_to_zero(credit_db):
+    event = message_event("/stats")
+    await call_handler(create_router(admin_user_id=456), "stats", event)
+    text = event.message.answer.await_args.args[0]
+    assert "- Фотосессия (клики): 0\n- Аудиопесни (клики): 0" in text
+
+
+@pytest.mark.parametrize("mode", [payload for _, payload in handlers.MODE_BUTTONS] + ["mode_bday", "create_poster", "mode_8march"])
+async def test_legacy_generation_buttons_request_photo_without_counting(credit_db, mode):
+    await credit_db.grant_free_trial(456)
+    vision, card = AsyncMock(), AsyncMock()
+    context = await ready_context()
+    event = callback_event(mode)
+    await dispatch_callback(create_router(vision, postcard_generator=card), event, context)
+    event.ack.assert_awaited_once()
+    assert await context.get_state() == PosterStates.waiting_for_photo
+    expected = {"mode_bday": "mode_bday_young", "create_poster": "mode_vision"}.get(mode, mode)
+    assert await context.get_data() == {"mode": expected}
+    assert "фото" in event.send.await_args.args[0]
+    assert (await credit_db.get_user(456))["balance"] == 1
+    assert (await credit_db.get_user(456))["total_generations"] == 0
+    assert await credit_db.get_all_counters() == {}
+    vision.assert_not_awaited()
+    card.assert_not_awaited()
+
+
+@pytest.mark.parametrize("mode", [payload for _, payload in handlers.MODE_BUTTONS])
+async def test_generation_events_follow_existing_modes_only_after_success(credit_db, mode):
+    await credit_db.add_credits(456, 2)
+    async def generate(*args):
+        assert await credit_db.get_all_counters() == {}
+        assert (await credit_db.get_user(456))["total_generations"] == 0
+        return ["https://cdn.example/counted.png"]
+    generator = AsyncMock(side_effect=generate)
+    router = create_router(generator, postcard_generator=generator)
+    context = await ready_context()
+    await context.update_data(mode=mode)
+    if mode == "mode_vision":
+        await call_handler(router, "collect_sphere", message_event("Моя мечта"), context)
+    else:
+        await call_handler(router, "collect_photo", photo_event(), context)
+        await call_handler(router, "collect_card_text", message_event("Поздравляю!"), context)
+    expected_events = {
+        "mode_vision": "gen_vision", "mode_ny": "gen_ny", "mode_ny_family": "gen_ny_family",
+        "mode_ny_cozy": "gen_ny_cozy", "mode_ny_fairytale": "gen_ny_fairytale",
+        "mode_ny_elegant": "gen_ny_elegant", "mode_bday_young": "gen_bday_young",
+        "mode_bday_old": "gen_bday_old", "mode_bday_old_elegant": "gen_bday_old_elegant",
+        "mode_halloween": "gen_halloween", "mode_goodmorning": "gen_goodmorning",
+        "mode_modern_card": "gen_scrapbook",
+    }
+    assert await credit_db.get_all_counters() == {expected_events[mode]: 1}
+    assert (await credit_db.get_user(456))["total_generations"] == 1
+
+
+@pytest.mark.parametrize("mode", ["mode_vision", "mode_ny", "mode_halloween"])
+async def test_generator_failure_does_not_count_category_generation(credit_db, mode):
+    await credit_db.add_credits(456, 2)
+    generator = AsyncMock(side_effect=RuntimeError("OpenAI failed"))
+    router = create_router(generator, postcard_generator=generator)
+    context = await ready_context()
+    await context.update_data(mode=mode)
+    if mode == "mode_vision":
+        await call_handler(router, "collect_sphere", message_event("Моя мечта"), context)
+    else:
+        await call_handler(router, "collect_photo", photo_event(), context)
+        await call_handler(router, "collect_card_text", message_event("Поздравляю!"), context)
+    assert await credit_db.get_all_counters() == {}
+    assert (await credit_db.get_user(456))["total_generations"] == 0
+    assert (await credit_db.get_user(456))["balance"] == 2

@@ -121,9 +121,16 @@ async def _reply(event: MessageCreated | MessageCallback | BotStarted, text=None
 
 PosterGenerator = Callable[[str, str], Awaitable[list[str]]]
 WELCOME_TEXT = (
-    "Привет! Я создаю волшебные открытки и карты желаний с твоим лицом или лицом твоего близкого человека.\n"
-    "✍️ На открытках ты можешь добавить любое пожелание и поздравление.\n\n"
-    "🎨 Первая открытка — бесплатно!\n\n👇 Выбери, что хочешь создать:"
+    "Привет! Я твой личный нейро-художник 🎨\n"
+    "\n"
+    "Я создаю волшебные карты желаний и персональные открытки с твоим лицом или лицом твоего "
+    "близкого человека. \n"
+    "\n"
+    "🎁 Ты можешь добавить любое пожелание, а мы красиво его оформим.\n"
+    "\n"
+    "🎨 Первая генерация — бесплатно!\n"
+    "\n"
+    "👇 Выбери, что хочешь создать:"
 )
 MODE_BUTTONS = (
     ("🎄 Открытка: Новый год", "mode_ny"),
@@ -183,29 +190,147 @@ def create_own_keyboard():
 
 
 PACKAGES_TEXT = (
-    "💎 Доступные пакеты:\n"
-    "• 1 генерация (открытка) — 99 ₽\n"
+    "💎 Доступные пакеты генераций:\n"
+    "(Кредиты подходят для создания любых Карт желаний и Открыток. Они не сгорают!)\n"
+    "\n"
+    "• 1 генерация — 99 ₽\n"
     "• 3 генерации — 199 ₽\n"
     "• 5 генераций — 299 ₽\n"
-    "• 15 генераций — 799 ₽"
+    "• 15 генераций — 799 ₽\n"
+    "\n"
+    "👇 Выбери пакет для покупки:"
 )
-PAYMENT_PACKAGES_TEXT = PACKAGES_TEXT.split("\n\n", 1)[0]
+PAYMENT_PACKAGES_TEXT = PACKAGES_TEXT
 NO_CREDITS_TEXT = "У вас закончились кредиты. Пожалуйста, выберите пакет для продолжения:"
 EXAMPLES_DIR = Path(__file__).resolve().parent / "examples"
 START_EXAMPLE_FILES = (
-    r"i (28).webp",
-    r"i (22).webp",
-    r"i (23).webp",
-    r"i (24).webp",
-    r"i (25).webp",
     r"i (1).webp",
     r"i (29).webp",
-    r"i (16).webp",
+    r"i (28).webp",
     r"i (27).webp",
     r"i (26).webp",
-    r"i (20).webp",
     r"i (21).webp",
 )
+
+CATEGORY_BUTTONS = (
+    ("🖼 Карта Желаний", "cat_vision"),
+    ("🎁 Открытки", "cat_cards"),
+    ("📸 Фотосессия", "cat_photo"),
+    ("🎵 Аудиопесни", "cat_audio"),
+)
+
+# Файлы, текст и кнопки каждого экрана. mode_* остаются текущими входами в FSM.
+CATEGORY_MENUS = {
+    "cat_vision": (
+        (r"i (1).webp",),
+        (
+            "Привет! Здесь ты можешь создать вдохновляющую карту желаний с твоим лицом. \n"
+            "Всё просто: добавь своё фото и напиши описание своей мечты. Нейросеть нарисует твоё "
+            "будущее! ✨\n"
+            "\n"
+            "🎨 Первая карта — бесплатно!"
+        ),
+        (
+            ("Создать", "mode_vision"),
+            ("⬅️ Назад", "back_to_main"),
+        ),
+    ),
+    "cat_cards": (
+        (r"i (28).webp", r"i (22).webp", r"i (25).webp", r"i (29).webp", r"i (27).webp", r"i (21).webp"),
+        (
+            "Привет! Я создаю волшебные открытки с твоим лицом или лицом близкого человека для любого "
+            "праздника.\n"
+            "✍️ На открытках ты можешь добавить любое пожелание и поздравление.\n"
+            "\n"
+            "🎨 Первая открытка — бесплатно!\n"
+            "\n"
+            "👇 Выбери, что хочешь создать:"
+        ),
+        (
+            ("🎄 Новый год", "sub_ny"),
+            ("🎂 День рождения", "sub_bday"),
+            ("🎃 Хэллоуин", "sub_halloween"),
+            ("☀️ Доброе утро", "sub_goodmorning"),
+            ("⬅️ Назад", "back_to_main"),
+        ),
+    ),
+    "sub_ny": (
+        (r"i (28).webp", r"i (22).webp", r"i (23).webp", r"i (24).webp", r"i (25).webp"),
+        (
+            "🎄 Новый год\n"
+            "\n"
+            "Выбери шаблон открытки:"
+        ),
+        (
+            ("Классический НГ", "mode_ny"),
+            ("Семейный НГ", "mode_ny_family"),
+            ("Уютный НГ", "mode_ny_cozy"),
+            ("Зимняя сказка", "mode_ny_fairytale"),
+            ("Элегантный НГ", "mode_ny_elegant"),
+            ("⬅️ Назад", "back_to_cards"),
+        ),
+    ),
+    "sub_bday": (
+        (r"i (29).webp", r"i (27).webp", r"i (21).webp"),
+        (
+            "🎂 День рождения\n"
+            "\n"
+            "Выбери шаблон открытки:"
+        ),
+        (
+            ("ДР Молодым", "mode_bday_young"),
+            ("ДР Старшим", "mode_bday_old"),
+            ("ДР Старшим 2", "mode_bday_old_elegant"),
+            ("Скрапбукинг", "mode_modern_card"),
+            ("⬅️ Назад", "back_to_cards"),
+        ),
+    ),
+    "sub_halloween": (
+        (r"i (26).webp",),
+        (
+            "🎃 Хэллоуин\n"
+            "\n"
+            "Создай уютную праздничную открытку с твоим лицом!"
+        ),
+        (
+            ("Создать Хэллоуин", "mode_halloween"),
+            ("⬅️ Назад", "back_to_cards"),
+        ),
+    ),
+    "sub_goodmorning": (
+        (r"i (20).webp",),
+        (
+            "☀️ Доброе утро\n"
+            "\n"
+            "Создай открытку с тёплым утренним пожеланием!"
+        ),
+        (
+            ("Создать Доброе утро", "mode_goodmorning"),
+            ("⬅️ Назад", "back_to_cards"),
+        ),
+    ),
+    "cat_photo": (
+        (),
+        (
+            "📸 Раздел в разработке!\n"
+            "Скоро ты сможешь примерить на себя образы голливудских звезд или бизнес-леди. Мы уже "
+            "работаем над этим! 🚀"
+        ),
+        (
+            ("⬅️ Назад", "back_to_main"),
+        ),
+    ),
+    "cat_audio": (
+        (),
+        (
+            "🎵 Раздел в разработке!\n"
+            "Совсем скоро ты сможешь заказать персональную песню с твоим именем. Это будет хит! 🎶"
+        ),
+        (
+            ("⬅️ Назад", "back_to_main"),
+        ),
+    ),
+}
 
 
 BROADCAST_EXAMPLE_FILES = (
@@ -312,19 +437,15 @@ class PosterStates(StatesGroup):
     generating = State()
 
 
-def main_keyboard():
+def navigation_keyboard(buttons):
     keyboard = InlineKeyboardBuilder()
-    for text, payload in MODE_BUTTONS:
+    for text, payload in buttons:
         keyboard.row(CallbackButton(text=text, payload=payload))
-    return (
-        keyboard
-        .row(
-            CallbackButton(text="Примеры", payload="examples"),
-            CallbackButton(text="Помощь", payload="help"),
-        )
-        .row(CallbackButton(text="🔄 Главное меню", payload="open_main_menu"))
-        .as_markup()
-    )
+    return keyboard.as_markup()
+
+
+def main_keyboard():
+    return navigation_keyboard(CATEGORY_BUTTONS)
 
 
 def is_bot_message(event: MessageCreated) -> bool:
@@ -769,6 +890,25 @@ def create_router(
                 await asyncio.sleep(0.5)
             await _reply(event, f"✅ Напоминания отправлены! Успешно: {success}, Ошибок: {failed}")
 
+    async def send_menu_examples(event, filenames) -> None:
+        examples = []
+        for filename in filenames:
+            try:
+                path = EXAMPLES_DIR / filename
+                if not path.is_file():
+                    raise FileNotFoundError(filename)
+                image = await event.bot.upload_media(InputMedia(path=str(path), type=UploadType.IMAGE))
+                if not isinstance(image.payload.token, str) or not image.payload.token.strip():
+                    raise RuntimeError("MAX вернул пустой media token.")
+                examples.append(image)
+            except Exception as exc:
+                logger.error("Не удалось загрузить пример %s: %s", filename, exc)
+        if examples:
+            try:
+                await send_start_album(event, examples)
+            except Exception as exc:
+                logger.error("Не удалось отправить альбом примеров: %s", exc)
+
     async def send_welcome_message(
         event: MessageCreated | MessageCallback | BotStarted, context: MemoryContext,
         *, payload: str | None = None, timestamp_ms: int | None = None,
@@ -795,23 +935,7 @@ def create_router(
                     await _reply(event, "Вам начислен 1 бесплатный кредит!")
                 return
             await _reply(event, "Эта ссылка на картинку недоступна. Вы можете создать свою.")
-        examples = []
-        for filename in START_EXAMPLE_FILES:
-            try:
-                path = EXAMPLES_DIR / filename
-                if not path.is_file():
-                    raise FileNotFoundError(filename)
-                image = await event.bot.upload_media(InputMedia(path=str(path), type=UploadType.IMAGE))
-                if not isinstance(image.payload.token, str) or not image.payload.token.strip():
-                    raise RuntimeError("MAX вернул пустой media token.")
-                examples.append(image)
-            except Exception as exc:
-                logger.error("Не удалось загрузить пример %s: %s", filename, exc)
-        if examples:
-            try:
-                await send_start_album(event, examples)
-            except Exception as exc:
-                logger.error("Не удалось отправить альбом примеров: %s", exc)
+        await send_menu_examples(event, START_EXAMPLE_FILES)
         await _reply(event, text=WELCOME_TEXT, attachments=[main_keyboard()])
         if trial_granted:
             await _reply(event, "Вам начислен 1 бесплатный кредит!")
@@ -829,7 +953,7 @@ def create_router(
             parts = ((body.text or "").split(maxsplit=1) if body else [])
             await send_welcome_message(event, context, payload=parts[1].strip() if len(parts) > 1 else None)
 
-    @router.message_callback(F.callback.payload == "open_main_menu")
+    @router.message_callback(F.callback.payload.in_({"open_main_menu", "back_to_main"}))
     async def open_main_menu(event: MessageCallback, context: MemoryContext) -> None:
         if event.message is None:
             await event.ack(notification="Отправьте /start, чтобы открыть меню.")
@@ -837,13 +961,25 @@ def create_router(
         await event.ack(notification="Открываю меню…")
         await send_welcome_message(event, context)
 
+    @router.message_callback(F.callback.payload.in_({*CATEGORY_MENUS, "back_to_cards"}))
+    async def category_menu(event: MessageCallback, context: MemoryContext) -> None:
+        if event.message is None:
+            await event.ack(notification="Меню недоступно. Отправьте /start.")
+            return
+        await event.ack(notification="Открываю…")
+        await context.clear()
+        await context.set_state(PosterStates.waiting_for_mode)
+        screen = "cat_cards" if event.callback.payload == "back_to_cards" else event.callback.payload
+        filenames, text, buttons = CATEGORY_MENUS[screen]
+        await send_menu_examples(event, filenames)
+        await _reply(event, text=text, attachments=[navigation_keyboard(buttons)])
+
     @router.message_created(Command("buy"))
     async def buy(event: MessageCreated) -> None:
         if is_bot_message(event):
             return
         await _reply(event,
-            (PAYMENT_PACKAGES_TEXT if payments else PACKAGES_TEXT)
-            + "\n1 кредит — одно сгенерированное изображение.",
+            PACKAGES_TEXT,
             attachments=[await purchase_keyboard(event.get_ids()[1])],
         )
 

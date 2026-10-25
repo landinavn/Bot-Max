@@ -437,15 +437,19 @@ class PosterStates(StatesGroup):
     generating = State()
 
 
-def navigation_keyboard(buttons):
+def navigation_keyboard(buttons, *, footer=()):
     keyboard = InlineKeyboardBuilder()
     for text, payload in buttons:
         keyboard.row(CallbackButton(text=text, payload=payload))
+    if footer:
+        keyboard.row(*(CallbackButton(text=text, payload=payload) for text, payload in footer))
     return keyboard.as_markup()
 
 
 def main_keyboard():
-    return navigation_keyboard(CATEGORY_BUTTONS)
+    return navigation_keyboard(CATEGORY_BUTTONS, footer=(
+        ("🖼 Примеры", "show_examples"), ("🆘 Помощь", "show_help"),
+    ))
 
 
 def is_bot_message(event: MessageCreated) -> bool:
@@ -893,7 +897,7 @@ def create_router(
                 await asyncio.sleep(0.5)
             await _reply(event, f"✅ Напоминания отправлены! Успешно: {success}, Ошибок: {failed}")
 
-    async def send_menu_examples(event, filenames) -> None:
+    async def send_menu_examples(event, filenames) -> bool:
         examples = []
         for filename in filenames:
             try:
@@ -909,8 +913,10 @@ def create_router(
         if examples:
             try:
                 await send_start_album(event, examples)
+                return True
             except Exception as exc:
                 logger.error("Не удалось отправить альбом примеров: %s", exc)
+        return False
 
     async def send_welcome_message(
         event: MessageCreated | MessageCallback | BotStarted, context: MemoryContext,
@@ -980,6 +986,27 @@ def create_router(
             await increment_counter(interest_event, user_id=user_id)
         await send_menu_examples(event, filenames)
         await _reply(event, text=text, attachments=[navigation_keyboard(buttons)])
+
+    @router.message_callback(F.callback.payload.in_({"show_examples", "show_help"}))
+    async def utility_menu(event: MessageCallback) -> None:
+        if event.message is None:
+            await event.ack(notification="Меню недоступно. Отправьте /start.")
+            return
+        await event.ack(notification="Открываю…")
+        back = ("⬅️ Назад", "back_to_main")
+        if event.callback.payload == "show_examples":
+            sent = await send_menu_examples(event, START_EXAMPLE_FILES)
+            await _reply(
+                event,
+                "🖼 Карты желаний и открытки с твоим лицом. Вернуться к выбору можно кнопкой ниже."
+                if sent else "Примеры временно недоступны. Попробуйте позже.",
+                attachments=[navigation_keyboard((back,))],
+            )
+        else:
+            await _reply(
+                event, HELP_TEXT + "\n\n" + HELP_ANSWERS["help_support"],
+                parse_mode=ParseMode.HTML, attachments=[navigation_keyboard((back,))],
+            )
 
     @router.message_created(Command("buy"))
     async def buy(event: MessageCreated) -> None:

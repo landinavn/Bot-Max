@@ -851,7 +851,10 @@ async def test_start_sends_album_before_welcome_and_menu(example_photos):
     assert all(a.payload.token == "example-token" for a in replies[0].kwargs["attachments"])
     assert replies[1].kwargs["text"] == handlers.WELCOME_TEXT
     buttons = replies[1].kwargs["attachments"][0].model_dump()["payload"]["buttons"]
-    assert [(row[0]["text"], row[0]["payload"]) for row in buttons] == list(handlers.CATEGORY_BUTTONS)
+    assert [(row[0]["text"], row[0]["payload"]) for row in buttons[:-1]] == list(handlers.CATEGORY_BUTTONS)
+    assert [(button["text"], button["payload"]) for button in buttons[-1]] == [
+        ("🖼 Примеры", "show_examples"), ("🆘 Помощь", "show_help"),
+    ]
     assert "бесплатный кредит" in replies[2].args[0]
 
 
@@ -2069,7 +2072,10 @@ async def test_main_menu_button_resets_fsm_and_sends_welcome(credit_db, example_
     greetings = [c.kwargs for c in event.send.await_args_list if c.kwargs.get("text") == handlers.WELCOME_TEXT]
     assert len(greetings) == 1
     buttons = greetings[0]["attachments"][0].payload.buttons
-    assert [(row[0].text, row[0].payload) for row in buttons] == list(handlers.CATEGORY_BUTTONS)
+    assert [(row[0].text, row[0].payload) for row in buttons[:-1]] == list(handlers.CATEGORY_BUTTONS)
+    assert [(button.text, button.payload) for button in buttons[-1]] == [
+        ("🖼 Примеры", "show_examples"), ("🆘 Помощь", "show_help"),
+    ]
     assert (await credit_db.get_user(456))["balance"] == 1
 
 
@@ -2383,3 +2389,66 @@ async def test_generator_failure_does_not_count_category_generation(credit_db, m
     assert await credit_db.get_all_counters() == {}
     assert (await credit_db.get_user(456))["total_generations"] == 0
     assert (await credit_db.get_user(456))["balance"] == 2
+
+
+@pytest.mark.parametrize("payload", ["show_examples", "show_help"])
+async def test_utility_sections_preserve_fsm_and_offer_back(credit_db, example_photos, payload):
+    await credit_db.grant_free_trial(456)
+    router = create_router()
+    context = await ready_context()
+    await context.set_state(PosterStates.waiting_for_card_text)
+    before = await context.get_data()
+    event = callback_event(payload)
+    await dispatch_callback(router, event, context)
+    event.ack.assert_awaited_once_with(notification="Открываю…")
+    assert await context.get_state() == PosterStates.waiting_for_card_text
+    assert await context.get_data() == before
+    replies = event.send.await_args_list
+    if payload == "show_examples":
+        assert len(replies) == 2
+        assert replies[0].kwargs["text"] == "Примеры работ:"
+        assert len(replies[0].kwargs["attachments"]) == 6
+        assert [Path(c.args[0].path).name for c in event.bot.upload_media.await_args_list] == [
+            "i (1).webp", "i (29).webp", "i (28).webp", "i (27).webp", "i (26).webp", "i (21).webp",
+        ]
+    else:
+        event.bot.upload_media.assert_not_awaited()
+        assert len(replies) == 1
+        text = replies[0].args[0]
+        assert text.startswith(handlers.HELP_TEXT)
+        assert "Как это работает:" in text
+        assert "Связаться с поддержкой</a>" in text
+        assert 'href="https://max.ru/u/' in text
+        assert replies[0].kwargs["parse_mode"] == handlers.ParseMode.HTML
+    button = replies[-1].kwargs["attachments"][0].payload.buttons[0][0]
+    assert button.text == "⬅️ Назад" and button.payload == "back_to_main"
+    await dispatch_callback(router, callback_event(button.payload), context)
+    assert await context.get_state() == PosterStates.waiting_for_mode
+    assert await context.get_data() == {}
+    assert (await credit_db.get_user(456))["balance"] == 1
+    assert await credit_db.get_all_counters() == {}
+
+
+@pytest.mark.parametrize("failure", ["missing", "upload", "send"])
+async def test_show_examples_error_still_offers_back(credit_db, example_photos, failure):
+    event = callback_event("show_examples")
+    if failure == "missing":
+        for name in handlers.START_EXAMPLE_FILES:
+            (example_photos / name).unlink()
+    elif failure == "upload":
+        event.bot.upload_media.side_effect = RuntimeError("upload error")
+    else:
+        event.send.side_effect = [RuntimeError("album rejected"), object()]
+    await dispatch_callback(create_router(), event, await ready_context())
+    reply = event.send.await_args
+    assert "временно недоступны" in reply.args[0]
+    assert reply.kwargs["attachments"][0].payload.buttons[0][0].payload == "back_to_main"
+    assert await credit_db.get_all_counters() == {}
+
+
+@pytest.mark.parametrize("payload", ["show_examples", "show_help"])
+async def test_utility_sections_handle_deleted_message(payload):
+    event = callback_event(payload, deleted=True)
+    await dispatch_callback(create_router(), event, await ready_context())
+    event.ack.assert_awaited_once_with(notification="Меню недоступно. Отправьте /start.")
+    event.send.assert_not_awaited()

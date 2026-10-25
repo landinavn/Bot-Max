@@ -1170,6 +1170,8 @@ async def test_all_modes_send_persistent_bot_share_link_and_only_vision_invites_
     if invites:
         button = invites[0].kwargs["attachments"][0].model_dump()["payload"]["buttons"][0][0]
         assert button["url"] == "https://max.ru/se14596751_biz"
+        assert button["type"] == "link" and button["text"] == "Перейти в канал"
+        assert "payload" not in button
     assert (await credit_db.get_user(456))["balance"] == 1
 
 
@@ -2095,3 +2097,68 @@ async def test_main_menu_button_acknowledges_deleted_message():
     event.ack.assert_awaited_once_with(notification="Отправьте /start, чтобы открыть меню.")
     event.send.assert_not_awaited()
     assert await context.get_data() == before
+
+
+async def test_vision_channel_invitation_immediately_follows_image(credit_db):
+    await credit_db.add_credits(456, 2)
+    generator = AsyncMock(return_value=["https://cdn.example/vision.png"])
+    router = create_router(generator)
+    event = message_event("Моя мечта")
+    messages = []
+    async def image(**kwargs):
+        messages.append(kwargs)
+        return object()
+    async def reply(text=None, **kwargs):
+        messages.append({"text": text, **kwargs})
+        return object()
+    event.bot.send_message.side_effect = image
+    event.message.answer.side_effect = reply
+    await call_handler(router, "collect_sphere", event, await ready_context())
+    image_index = next(i for i, message in enumerate(messages) if message.get("text") == "Ваш плакат готов!")
+    invite = messages[image_index + 1]
+    assert invite["text"] == (
+        "✨ Понравилась твоя карта желаний?\n\n"
+        "Присоединяйся к нашему каналу «Жизнь мечты | Как изменить свою жизнь». "
+        "Там мы делимся вдохновением, секретами исполнения желаний и новыми шаблонами!"
+    )
+    button = invite["attachments"][0].model_dump()["payload"]["buttons"][0][0]
+    assert button["text"] == "Перейти в канал"
+    assert button["type"] == "link"
+    assert button["url"] == "https://max.ru/se14596751_biz"
+    assert messages[image_index + 2]["text"] == "👇 Хочешь поделиться с друзьями?"
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+async def test_no_channel_invitation_when_image_not_delivered(credit_db, confirmed):
+    await credit_db.add_credits(456, 2)
+    generator = AsyncMock(return_value=["https://cdn.example/vision.png"])
+    event = message_event("Моя мечта")
+    if confirmed:
+        event.bot.send_message.return_value = None
+    else:
+        event.bot.send_message.side_effect = RuntimeError("image delivery failed")
+    await call_handler(create_router(generator), "collect_sphere", event, await ready_context())
+    assert not any(c.args and c.args[0] == handlers.CHANNEL_TEXT for c in event.message.answer.await_args_list)
+
+
+async def test_vision_invitation_not_duplicated_after_share_retry(credit_db):
+    await credit_db.add_credits(456, 2)
+    generator = AsyncMock(return_value=["https://cdn.example/vision.png"])
+    router = create_router(generator)
+    event = message_event("Моя мечта")
+    context = await ready_context()
+    fail_share = True
+    async def reply(text=None, **kwargs):
+        nonlocal fail_share
+        if text == "👇 Хочешь поделиться с друзьями?" and fail_share:
+            fail_share = False
+            raise RuntimeError("share failed")
+        return object()
+    event.message.answer.side_effect = reply
+    await call_handler(router, "collect_sphere", event, context)
+    await call_handler(router, "collect_sphere", event, context)
+    invites = [c for c in event.message.answer.await_args_list if c.args and c.args[0] == handlers.CHANNEL_TEXT]
+    assert len(invites) == 1
+    generator.assert_awaited_once()
+    event.bot.send_message.assert_awaited_once()
+    assert (await credit_db.get_user(456))["balance"] == 1

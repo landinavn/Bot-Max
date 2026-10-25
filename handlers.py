@@ -31,7 +31,7 @@ from config import DEFAULT_BOT_LINK, validate_bot_link
 from database import (
     deduct_credit, get_user, grant_free_trial, get_global_stats, increment_generations,
     record_first_start, get_source_stats, register_shared_image, get_shared_image,
-    get_all_counters,
+    get_all_counters, increment_counter,
     get_advanced_stats, update_user_activity, mark_user_inactive, get_active_user_ids,
     is_promo_active, PromoUnavailableError, get_users_by_activity, start_broadcast_promo,
     get_users_for_reminder,
@@ -732,6 +732,9 @@ def create_router(
             f"- Скрапбукинг: {counters.get('gen_scrapbook', 0)}\n\n"
             f"Без разбивки по шаблонам (раньше): {counters.get('gen_unclassified', 0)}\n"
             f"🖼 Всего сгенерировано картинок: {data['total_generated']}\n"
+            "\n🖱 Интерес к новым разделам:\n"
+            f"- Фотосессия (клики): {counters.get('click_photo', 0)}\n"
+            f"- Аудиопесни (клики): {counters.get('click_audio', 0)}\n\n"
             f"💰 Всего покупок: {data['total_purchases']}" + source_text + admin_text
         )
 
@@ -971,6 +974,10 @@ def create_router(
         await context.set_state(PosterStates.waiting_for_mode)
         screen = "cat_cards" if event.callback.payload == "back_to_cards" else event.callback.payload
         filenames, text, buttons = CATEGORY_MENUS[screen]
+        interest_event = {"cat_photo": "click_photo", "cat_audio": "click_audio"}.get(screen)
+        user_id = event.get_ids()[1]
+        if interest_event is not None and user_id is not None:
+            await increment_counter(interest_event, user_id=user_id)
         await send_menu_examples(event, filenames)
         await _reply(event, text=text, attachments=[navigation_keyboard(buttons)])
 

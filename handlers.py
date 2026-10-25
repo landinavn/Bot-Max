@@ -171,7 +171,11 @@ CARD_TEXT_PROMPT = (
 SHARED_WELCOME = (
     "Привет! Твой друг поделился с тобой этой открыткой. Хочешь создать такую же с твоим лицом?"
 )
-CHANNEL_TEXT = "✨ Хочешь узнать секреты исполнения желаний? Присоединяйся к нашему каналу!"
+CHANNEL_TEXT = (
+    "✨ Понравилась твоя карта желаний?\n\n"
+    "Присоединяйся к нашему каналу «Жизнь мечты | Как изменить свою жизнь». "
+    "Там мы делимся вдохновением, секретами исполнения желаний и новыми шаблонами!"
+)
 
 
 def create_own_keyboard():
@@ -471,18 +475,18 @@ def create_router(
                     last_image_batch_id=data["batch_id"],
                 )
             data = await context.get_data()
+            if mode == "mode_vision" and not data.get("channel_invite_sent"):
+                keyboard = InlineKeyboardBuilder().row(
+                    LinkButton(text="Перейти в канал", url="https://max.ru/se14596751_biz")
+                ).as_markup()
+                await _reply(event, CHANNEL_TEXT, attachments=[keyboard])
+                await context.update_data(channel_invite_sent=True)
             if not data.get("share_prompt_sent"):
                 token = await register_shared_image(urls[0])
                 share_url = bot_link + "?" + urlencode({"start": "share_" + token})
                 keyboard = InlineKeyboardBuilder().row(LinkButton(text="🔗 Поделиться", url=share_url)).as_markup()
                 await _reply(event, "👇 Хочешь поделиться с друзьями?", attachments=[keyboard])
                 await context.update_data(share_prompt_sent=True)
-            if not is_postcard and not data.get("channel_invite_sent"):
-                keyboard = InlineKeyboardBuilder().row(
-                    LinkButton(text="Секреты исполнения желаний", url="https://max.ru/se14596751_biz")
-                ).as_markup()
-                await _reply(event, CHANNEL_TEXT, attachments=[keyboard])
-                await context.update_data(channel_invite_sent=True)
             if not is_admin:
                 user = await get_user(credit_user_id)
                 await _reply(event, f"Осталось кредитов: {user['balance'] if user else 0}.")

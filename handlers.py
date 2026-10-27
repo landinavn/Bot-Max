@@ -312,11 +312,15 @@ CATEGORY_MENUS = {
     "cat_photo": (
         (),
         (
-            "📸 Раздел в разработке!\n"
-            "Скоро ты сможешь примерить на себя образы голливудских звезд или бизнес-леди. Мы уже "
-            "работаем над этим! 🚀"
+            "📸 Раздел «Фотосессия» уже совсем скоро заработает!\n\n"
+            "Мы вовсю готовим для вас потрясающие образы. Но вы уже можете посмотреть стили и тарифы, "
+            "которые будут доступны.\n\n"
+            "Выбери стиль, который тебе интересен:"
         ),
         (
+            ("🏙 Студия", "photo_style_studio"),
+            ("🌳 Прогулка", "photo_style_walk"),
+            ("🎄 Новогодняя", "photo_style_ny"),
             ("⬅️ Назад", "back_to_main"),
         ),
     ),
@@ -331,6 +335,34 @@ CATEGORY_MENUS = {
         ),
     ),
 }
+
+
+PHOTO_STYLES = {
+    "photo_style_studio": "Студия",
+    "photo_style_walk": "Прогулка",
+    "photo_style_ny": "Новогодняя",
+}
+PHOTO_TARIFF_TEXT = (
+    "Вы выбрали стиль: {style_name}.\n\n"
+    "Теперь выберите тариф, который вам подходит:\n\n"
+    "🔹 «Попробовать» — 590 ₽\n"
+    "Вы получите 3 профессиональных фото в одном стиле. Отличный вариант, чтобы оценить качество!\n\n"
+    "🔹 «Фотосессия» — 990 ₽\n"
+    "Вы получите 5 фото в одном стиле. Полноценная мини-сессия для вашего портфолио или соцсетей.\n\n"
+    "🔹 «Премиум» — 1490 ₽\n"
+    "7 фото (5 в одном стиле и 2 в другом). Снимки в максимальном разрешении 4K — готовы к печати "
+    "в большом формате! Вы сможете загрузить два разных фото для разных образов."
+)
+PHOTO_TARIFF_BUTTONS = (
+    ("Тариф «Попробовать» (590 ₽)", "photo_tariff_590"),
+    ("Тариф «Фотосессия» (990 ₽)", "photo_tariff_990"),
+    ("Тариф «Премиум» (1490 ₽)", "photo_tariff_1490"),
+    ("⬅️ Назад", "cat_photo"),
+)
+PHOTO_TARIFF_SOON_TEXT = (
+    "🚀 Отличный выбор! Этот тариф скоро будет доступен. Мы уже заканчиваем настройку фотосессий, "
+    "следите за обновлениями!"
+)
 
 
 BROADCAST_EXAMPLE_FILES = (
@@ -986,6 +1018,31 @@ def create_router(
             await increment_counter(interest_event, user_id=user_id)
         await send_menu_examples(event, filenames)
         await _reply(event, text=text, attachments=[navigation_keyboard(buttons)])
+
+    @router.message_callback(F.callback.payload.in_(set(PHOTO_STYLES)))
+    async def photo_style_menu(event: MessageCallback, context: MemoryContext) -> None:
+        if event.message is None:
+            await event.ack(notification="Меню недоступно. Отправьте /start.")
+            return
+        await event.ack(notification="Показываю тарифы…")
+        await context.clear()
+        await context.set_state(PosterStates.waiting_for_mode)
+        await context.update_data(photo_style=event.callback.payload)
+        await _reply(
+            event, PHOTO_TARIFF_TEXT.format(style_name=PHOTO_STYLES[event.callback.payload]),
+            attachments=[navigation_keyboard(PHOTO_TARIFF_BUTTONS)],
+        )
+
+    @router.message_callback(F.callback.payload.in_({"photo_tariff_590", "photo_tariff_990", "photo_tariff_1490"}))
+    async def photo_tariff_soon(event: MessageCallback) -> None:
+        if event.message is None:
+            await event.ack(notification="Меню недоступно. Отправьте /start.")
+            return
+        await event.ack(notification="Скоро будет доступно…")
+        await _reply(
+            event, PHOTO_TARIFF_SOON_TEXT,
+            attachments=[navigation_keyboard((("⬅️ Назад", "cat_photo"),))],
+        )
 
     @router.message_callback(F.callback.payload.in_({"show_examples", "show_help"}))
     async def utility_menu(event: MessageCallback) -> None:

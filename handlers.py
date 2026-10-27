@@ -1015,6 +1015,14 @@ def create_router(
             f"- Скрапбукинг: {counters.get('gen_scrapbook', 0)}\n\n"
             f"Без разбивки по шаблонам (раньше): {counters.get('gen_unclassified', 0)}\n"
             f"🖼 Всего сгенерировано картинок: {data['total_generated']}\n"
+            "\n📸 Выбор шаблонов Фотосессий:\n"
+            f"- Семейная 3+: {counters.get('select_photo_fam3', 0)}\n"
+            f"- Семейная 4+: {counters.get('select_photo_fam4', 0)}\n"
+            f"- Семейная с малышами: {counters.get('select_photo_toddlers', 0)}\n"
+            "\n🎵 Активность Аудиопесен:\n"
+            f"- Нажали «Не то, ещё раз» (регенерация): {counters.get('audio_regenerate_click', 0)}\n"
+            f"- Скачали MP3: {counters.get('audio_download_mp3', 0)}\n"
+            f"- Скачали минусовку: {counters.get('audio_download_inst', 0)}\n"
             "\n🖱 Интерес к новым разделам:\n"
             f"- Фотосессия (клики): {counters.get('click_photo', 0)}\n"
             f"- Аудиопесни (клики): {counters.get('click_audio', 0)}\n"
@@ -1377,6 +1385,16 @@ def create_router(
         if event.message is None:
             await event.ack(notification="Меню недоступно. Отправьте /start.")
             return
+        counter = {
+            "audio_download_fun_1": "audio_download_mp3",
+            "audio_download_fun_2": "audio_download_mp3",
+            "audio_download_gift_mp3": "audio_download_mp3",
+            "audio_download_gift_instrumental": "audio_download_inst",
+        }.get(event.callback.payload)
+        user_id = event.get_ids()[1]
+        if counter is not None and user_id is not None:
+            # Пока файлы не подключены, учитываем нажатие кнопки скачивания.
+            await increment_counter(counter, user_id=user_id)
         await event.ack(notification="Аудио скоро появится")
         await _reply(event, "Аудио скоро появится")
 
@@ -1413,6 +1431,9 @@ def create_router(
         if event.message is None:
             await event.ack(notification="Меню недоступно. Отправьте /start.")
             return
+        user_id = event.get_ids()[1]
+        if user_id is not None:
+            await increment_counter("audio_regenerate_click", user_id=user_id)
         data = await context.get_data()
         if await context.get_state() != PosterStates.waiting_for_audio_test_result or data.get("audio_test_format") != "fun":
             await event.ack(notification="Треки ещё не созданы. Выберите формат в меню аудиопесен.")
@@ -1531,6 +1552,10 @@ def create_router(
             )
             return
         template = PHOTO_NY_TRIAL_TEMPLATES[event.callback.payload][1]
+        if template in {"fam3", "fam4", "toddlers"}:
+            user_id = event.get_ids()[1]
+            if user_id is not None:
+                await increment_counter("select_photo_" + template, user_id=user_id)
         await context.update_data(
             template=template, photo_product_name="Фотосессия Попробовать", photo_amount_kopecks=59000,
         )

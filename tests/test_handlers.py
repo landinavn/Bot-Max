@@ -2604,7 +2604,7 @@ async def test_photo_clicks_without_user_id_are_not_counted(credit_db, payload, 
 
 NY_TRIAL_TEMPLATES = [
     ("👨‍👩‍👧 Семейная (3 чел)", "photo_temp_fam3", "fam3"),
-    ("👨‍👩‍👧‍👦 Семейная (4+ чел)", "photo_temp_fam4", "fam4"),
+    ("👨‍👩‍👧‍👦 Семейная 3+ чел", "photo_temp_fam4", "fam4"),
     ("👶 Семейная с малышами", "photo_temp_toddlers", "toddlers"),
     ("👩‍👧 Мама + дочка", "photo_temp_mom_daughter", "mom_daughter"),
     ("🐰 С кроликом", "photo_temp_rabbit", "rabbit"),
@@ -2731,7 +2731,7 @@ async def family_context(with_photo=True):
     await context.clear()
     await context.update_data(photo_style="photo_style_ny", photo_tariff="photo_tariff_590", tariff="trial_590")
     if with_photo:
-        await context.update_data(photo={"url": "https://photos.example.com/source.png"}, photosession_admin_bypass=True, photosession_session_id="test-session", photosession=True)
+        await context.update_data(photo={"url": "https://photos.example.com/source.png"}, photosession_admin_bypass=True, photosession_session_id="test-session", photosession=True, template="fam3")
     await context.set_state(PosterStates.waiting_for_mode)
     return context
 
@@ -2919,3 +2919,62 @@ async def test_nonadmin_cannot_generate_from_stale_admin_photo_state():
     frames.assert_not_awaited()
     assert event.message.answer.await_args.args[0] == handlers.PHOTO_TRIAL_CHECKOUT_TEXT
     assert await context.get_state() == PosterStates.waiting_for_mode
+
+
+async def test_family_plus_admin_uses_its_three_prompts_and_original_reference(credit_db):
+    await credit_db.grant_free_trial(456)
+    frames = AsyncMock(side_effect=[f"https://cdn.example/plus-{i}.png" for i in range(3)])
+    router = create_router(admin_user_id=456, photosession_generator=frames)
+    context = await family_context(False)
+    event = callback_event("photo_temp_fam4")
+    await dispatch_callback(router, event, context)
+    assert "3 и более человек" in event.send.await_args.args[0]
+    assert (await context.get_data())["template"] == "fam4"
+    assert await context.get_state() == PosterStates.waiting_for_photosession_photo
+    await call_handler(router, "collect_photosession_photo", photo_event(), context)
+    assert frames.await_args_list == [
+        call("https://photos.example.com/source.png", prompt)
+        for prompt in handlers.NY_FAMILY_PHOTOSESSION_PROMPTS["fam4"]
+    ]
+    assert (await context.get_data())["photosession_sent_count"] == 3
+    assert (await credit_db.get_user(456))["balance"] == 1
+
+
+async def test_switching_family_template_does_not_reuse_previous_family_frames():
+    frames = AsyncMock(side_effect=[f"https://cdn.example/plus-{i}.png" for i in range(3)])
+    router = create_router(admin_user_id=456, photosession_generator=frames)
+    context = await family_context()
+    await context.update_data(template="fam3", photosession_complete=True,
+                              photosession_urls=["https://cdn.example/old.png"] * 3, photosession_sent_count=3)
+    event = callback_event("photo_temp_fam4")
+    await dispatch_callback(router, event, context)
+    data = await context.get_data()
+    assert data["template"] == "fam4" and "photosession_urls" not in data and "photo" not in data
+    assert await context.get_state() == PosterStates.waiting_for_photosession_photo
+    frames.assert_not_awaited()
+
+
+async def test_family_plus_retry_keeps_template_prompts():
+    frames = AsyncMock(side_effect=["https://cdn.example/1.png", RuntimeError("api error"),
+                                    "https://cdn.example/2.png", "https://cdn.example/3.png"])
+    router = create_router(admin_user_id=456, photosession_generator=frames)
+    context = await family_context()
+    await context.update_data(template="fam4")
+    event = callback_event("photo_temp_fam4")
+    await dispatch_callback(router, event, context)
+    button = event.send.await_args.kwargs["attachments"][0].payload.buttons[0][0]
+    assert button.payload == "photo_temp_fam4"
+    retry = callback_event(button.payload)
+    await dispatch_callback(router, retry, context)
+    prompts = handlers.NY_FAMILY_PHOTOSESSION_PROMPTS["fam4"]
+    assert [c.args[1] for c in frames.await_args_list] == [prompts[0], prompts[1], prompts[1], prompts[2]]
+    assert (await context.get_data())["photosession_complete"] is True
+
+
+@pytest.mark.parametrize("style,tariff", [("photo_style_walk", "photo_tariff_590"), ("photo_style_ny", "photo_tariff_990")])
+async def test_family_plus_does_not_run_for_other_style_or_tariff(style, tariff):
+    frames = AsyncMock()
+    context = await family_context()
+    await context.update_data(photo_style=style, photo_tariff=tariff)
+    await dispatch_callback(create_router(admin_user_id=456, photosession_generator=frames), callback_event("photo_temp_fam4"), context)
+    frames.assert_not_awaited()

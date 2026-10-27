@@ -2176,7 +2176,7 @@ CATEGORY_EXPECTATIONS = {
     "sub_bday": ([29, 27, 21], ["mode_bday_young", "mode_bday_old", "mode_bday_old_elegant", "mode_modern_card", "back_to_cards"]),
     "sub_halloween": ([26], ["mode_halloween", "back_to_cards"]),
     "sub_goodmorning": ([20], ["mode_goodmorning", "back_to_cards"]),
-    "cat_photo": ([], ["back_to_main"]),
+    "cat_photo": ([], ["photo_style_studio", "photo_style_walk", "photo_style_ny", "back_to_main"]),
     "cat_audio": ([], ["back_to_main"]),
 }
 
@@ -2452,3 +2452,90 @@ async def test_utility_sections_handle_deleted_message(payload):
     await dispatch_callback(create_router(), event, await ready_context())
     event.ack.assert_awaited_once_with(notification="Меню недоступно. Отправьте /start.")
     event.send.assert_not_awaited()
+
+
+@pytest.mark.parametrize("style,style_name", [
+    ("photo_style_studio", "Студия"), ("photo_style_walk", "Прогулка"), ("photo_style_ny", "Новогодняя"),
+])
+@pytest.mark.parametrize("tariff", ["photo_tariff_590", "photo_tariff_990", "photo_tariff_1490"])
+async def test_photo_style_tariff_preview_has_no_payment_or_generation(credit_db, example_photos, style, style_name, tariff):
+    await credit_db.grant_free_trial(456)
+    payments = SimpleNamespace(create_payment_link=AsyncMock())
+    vision, card = AsyncMock(), AsyncMock()
+    router = create_router(vision, postcard_generator=card, payments=payments)
+    context = await ready_context()
+    await context.set_state(PosterStates.waiting_for_card_text)
+    await context.update_data(card_text="old", mode="mode_ny")
+    category = callback_event("cat_photo")
+    await dispatch_callback(router, category, context)
+    assert category.send.await_args.kwargs["text"] == (
+        "📸 Раздел «Фотосессия» уже совсем скоро заработает!\n\n"
+        "Мы вовсю готовим для вас потрясающие образы. Но вы уже можете посмотреть стили и тарифы, "
+        "которые будут доступны.\n\nВыбери стиль, который тебе интересен:"
+    )
+    buttons = category.send.await_args.kwargs["attachments"][0].payload.buttons
+    assert [(row[0].text, row[0].payload) for row in buttons] == [
+        ("🏙 Студия", "photo_style_studio"), ("🌳 Прогулка", "photo_style_walk"),
+        ("🎄 Новогодняя", "photo_style_ny"), ("⬅️ Назад", "back_to_main"),
+    ]
+    event = callback_event(style)
+    await dispatch_callback(router, event, context)
+    event.ack.assert_awaited_once_with(notification="Показываю тарифы…")
+    text = event.send.await_args.args[0]
+    assert text == (
+        f"Вы выбрали стиль: {style_name}.\n\nТеперь выберите тариф, который вам подходит:\n\n"
+        "🔹 «Попробовать» — 590 ₽\n"
+        "Вы получите 3 профессиональных фото в одном стиле. Отличный вариант, чтобы оценить качество!\n\n"
+        "🔹 «Фотосессия» — 990 ₽\n"
+        "Вы получите 5 фото в одном стиле. Полноценная мини-сессия для вашего портфолио или соцсетей.\n\n"
+        "🔹 «Премиум» — 1490 ₽\n"
+        "7 фото (5 в одном стиле и 2 в другом). Снимки в максимальном разрешении 4K — готовы к печати "
+        "в большом формате! Вы сможете загрузить два разных фото для разных образов."
+    )
+    buttons = event.send.await_args.kwargs["attachments"][0].payload.buttons
+    assert [(row[0].text, row[0].payload) for row in buttons] == [
+        ("Тариф «Попробовать» (590 ₽)", "photo_tariff_590"),
+        ("Тариф «Фотосессия» (990 ₽)", "photo_tariff_990"),
+        ("Тариф «Премиум» (1490 ₽)", "photo_tariff_1490"), ("⬅️ Назад", "cat_photo"),
+    ]
+    assert await context.get_data() == {"photo_style": style}
+    assert await context.get_state() == PosterStates.waiting_for_mode
+    selected_tariff = callback_event(tariff)
+    await dispatch_callback(router, selected_tariff, context)
+    selected_tariff.ack.assert_awaited_once_with(notification="Скоро будет доступно…")
+    assert selected_tariff.send.await_args.args[0] == (
+        "🚀 Отличный выбор! Этот тариф скоро будет доступен. Мы уже заканчиваем настройку фотосессий, "
+        "следите за обновлениями!"
+    )
+    back = selected_tariff.send.await_args.kwargs["attachments"][0].payload.buttons[0][0]
+    assert (back.text, back.payload) == ("⬅️ Назад", "cat_photo")
+    await dispatch_callback(router, callback_event(back.payload), context)
+    assert await context.get_data() == {}
+    assert await context.get_state() == PosterStates.waiting_for_mode
+    # Считаются только два нажатия cat_photo; стиль/тариф не добавляют генераций.
+    assert await credit_db.get_all_counters() == {"click_photo": 2}
+    assert (await credit_db.get_user(456))["balance"] == 1
+    assert (await credit_db.get_user(456))["total_generations"] == 0
+    assert (await credit_db.get_user(456))["total_purchases"] == 0
+    payments.create_payment_link.assert_not_awaited()
+    vision.assert_not_awaited()
+    card.assert_not_awaited()
+
+
+@pytest.mark.parametrize("payload", ["photo_style_studio", "photo_style_walk", "photo_style_ny",
+                                     "photo_tariff_590", "photo_tariff_990", "photo_tariff_1490"])
+async def test_photo_preview_handles_buttons_from_old_or_deleted_messages(credit_db, payload):
+    router = create_router()
+    context = await ready_context()
+    await context.clear()  # Callback работает и после сброса сессии.
+    event = callback_event(payload)
+    await dispatch_callback(router, event, context)
+    event.ack.assert_awaited_once()
+    event.send.assert_awaited_once()
+    deleted = callback_event(payload, deleted=True)
+    before = await context.get_data()
+    await dispatch_callback(router, deleted, context)
+    deleted.ack.assert_awaited_once_with(notification="Меню недоступно. Отправьте /start.")
+    deleted.send.assert_not_awaited()
+    assert await context.get_data() == before
+    assert await credit_db.get_all_counters() == {}

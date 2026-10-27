@@ -191,11 +191,19 @@ async def test_help_buttons_handle_deleted_message(payload):
     event.send.assert_not_awaited()
 
 
+@pytest.fixture(autouse=True)
+def isolated_example_directory(tmp_path, monkeypatch):
+    # Результат тестов не зависит от того, добавлены ли реальные примеры в репозиторий.
+    directory = tmp_path / "empty-examples"
+    directory.mkdir()
+    monkeypatch.setattr(handlers, "EXAMPLES_DIR", directory)
+
+
 @pytest.fixture
 def example_photos(tmp_path, monkeypatch):
     directory = tmp_path / "project" / "examples"
     directory.mkdir(parents=True)
-    for filename in {"before.jpg", "after.jpg", *handlers.START_EXAMPLE_FILES, *handlers.BROADCAST_EXAMPLE_FILES,
+    for filename in {"before.jpg", "after.jpg", *handlers.START_EXAMPLE_FILES, *handlers.BROADCAST_EXAMPLE_FILES, *handlers.PHOTO_FAMILY_EXAMPLE_FILES,
                      *(f for files, _, _ in handlers.CATEGORY_MENUS.values() for f in files)}:
         if not Path(filename).suffix:
             filename += ".webp"
@@ -2176,7 +2184,7 @@ CATEGORY_EXPECTATIONS = {
     "sub_bday": ([29, 27, 21], ["mode_bday_young", "mode_bday_old", "mode_bday_old_elegant", "mode_modern_card", "back_to_cards"]),
     "sub_halloween": ([26], ["mode_halloween", "back_to_cards"]),
     "sub_goodmorning": ([20], ["mode_goodmorning", "back_to_cards"]),
-    "cat_photo": ([], ["photo_style_studio", "photo_style_walk", "photo_style_ny", "back_to_main"]),
+    "cat_photo": (["photo_main_1.webp", "photo_main_2.webp", "photo_main_3.webp"], ["photo_style_studio", "photo_style_walk", "photo_style_ny", "back_to_main"]),
     "cat_audio": ([], ["back_to_main"]),
 }
 
@@ -2188,7 +2196,7 @@ async def test_category_screens_ordered_album_and_buttons(credit_db, example_pho
     await dispatch_callback(create_router(), event, context)
     numbers, payloads = CATEGORY_EXPECTATIONS[screen]
     event.ack.assert_awaited_once_with(notification="Открываю…")
-    assert [Path(c.args[0].path).name for c in event.bot.upload_media.await_args_list] == [f"i ({n}).webp" for n in numbers]
+    assert [Path(c.args[0].path).name for c in event.bot.upload_media.await_args_list] == [f"i ({n}).webp" if isinstance(n, int) else n for n in numbers]
     replies = event.send.await_args_list
     assert len(replies) == (2 if numbers else 1)
     if numbers:
@@ -2509,7 +2517,7 @@ async def test_photo_style_tariff_preview_has_no_payment_or_generation(credit_db
     ny_trial = style == "photo_style_ny" and tariff == "photo_tariff_590"
     selected_tariff.ack.assert_awaited_once_with(notification="Показываю ссылку…" if ny_trial else "Скоро будет доступно…")
     if ny_trial:
-        assert selected_tariff.send.await_args.args[0] == handlers.PHOTO_TRIAL_CHECKOUT_TEXT
+        assert selected_tariff.send.await_args_list[0].args[0] == handlers.PHOTO_TRIAL_CHECKOUT_TEXT
         assert (await context.get_data())["tariff"] == "trial_590"
     else:
         assert selected_tariff.send.await_args.args[0] == (
@@ -2626,7 +2634,7 @@ async def test_legacy_ny_template_buttons_use_real_checkout(credit_db, label, pa
     tariff = callback_event("photo_tariff_590")
     await dispatch_callback(router, tariff, context)
     tariff.ack.assert_awaited_once_with(notification="Показываю ссылку…")
-    assert tariff.send.await_args.args[0] == handlers.PHOTO_TRIAL_CHECKOUT_TEXT
+    assert tariff.send.await_args_list[0].args[0] == handlers.PHOTO_TRIAL_CHECKOUT_TEXT
     assert (await context.get_data())["tariff"] == "trial_590"
     event = callback_event(payload)
     await dispatch_callback(router, event, context)
@@ -2708,8 +2716,7 @@ async def test_ny_trial_tariff_immediately_offers_real_payment_link(credit_db):
     event = callback_event("photo_tariff_590")
     await dispatch_callback(router, event, context)
     event.ack.assert_awaited_once_with(notification="Показываю ссылку…")
-    event.send.assert_awaited_once()
-    assert event.send.await_args.args[0] == (
+    assert event.send.await_args_list[0].args[0] == (
         "Вы выбрали тариф «Попробовать» (3 фото) за 590 ₽.\n\n"
         "Для продолжения, пожалуйста, оплатите заказ по ссылке ниже. После оплаты обязательно вернитесь в бота!"
     )
@@ -2718,7 +2725,7 @@ async def test_ny_trial_tariff_immediately_offers_real_payment_link(credit_db):
     assert data["photo_tariff"] == "photo_tariff_590"
     assert data["photo_style"] == "photo_style_ny"
     assert await context.get_state() == PosterStates.waiting_for_mode
-    button = event.send.await_args.kwargs["attachments"][0].model_dump()["payload"]["buttons"][0][0]
+    button = event.send.await_args_list[0].kwargs["attachments"][0].model_dump()["payload"]["buttons"][0][0]
     assert button["text"] == "Оплатить 590 ₽"
     assert button["type"] == "link"
     assert button["url"] == "https://link.payform.ru/?paymentLinkId=72139edd-76b7-4dcf-b7e4-a34f6bd9c625"
@@ -2826,7 +2833,7 @@ async def test_family_templates_reachable_from_payment_screen():
     context = await family_context(False)
     tariff = callback_event("photo_tariff_590")
     await dispatch_callback(router, tariff, context)
-    buttons = tariff.send.await_args.kwargs["attachments"][0].payload.buttons
+    buttons = tariff.send.await_args_list[0].kwargs["attachments"][0].payload.buttons
     choose = next(b for row in buttons for b in row if getattr(b, "payload", None) == "photo_choose_template")
     event = callback_event(choose.payload)
     await dispatch_callback(router, event, context)
@@ -3069,3 +3076,58 @@ async def test_switch_to_toddlers_requires_new_reference(old_template):
     assert data["template"] == "toddlers" and "photosession_urls" not in data and "photo" not in data
     assert await context.get_state() == PosterStates.waiting_for_photosession_photo
     frames.assert_not_awaited()
+
+
+@pytest.mark.parametrize("payload,filenames", [
+    ("cat_photo", ["photo_main_1.webp", "photo_main_2.webp", "photo_main_3.webp"]),
+    ("photo_style_ny", ["photo_fam_1.webp", "photo_fam_2.webp", "photo_fam_3.webp"]),
+])
+async def test_photosession_album_precedes_text_and_buttons(credit_db, example_photos, payload, filenames):
+    event = callback_event(payload)
+    context = await ready_context()
+    await dispatch_callback(create_router(), event, context)
+    replies = event.send.await_args_list
+    assert len(replies) == 2
+    assert replies[0].kwargs["text"] == "Примеры работ:"
+    assert len(replies[0].kwargs["attachments"]) == 3
+    assert len(replies[1].kwargs["attachments"]) == 1
+    assert [Path(c.args[0].path).name for c in event.bot.upload_media.await_args_list] == filenames
+    event.ack.assert_awaited_once()
+
+
+@pytest.mark.parametrize("payload", ["photo_tariff_590", "photo_choose_template"])
+async def test_family_album_between_text_and_template_buttons(credit_db, example_photos, payload):
+    context = await family_context(False)
+    event = callback_event(payload)
+    await dispatch_callback(create_router(), event, context)
+    replies = event.send.await_args_list
+    assert len(replies) == 3
+    assert "attachments" not in replies[0].kwargs or replies[0].args[0] == handlers.PHOTO_TRIAL_CHECKOUT_TEXT
+    assert replies[1].kwargs["text"] == "Примеры работ:"
+    assert len(replies[1].kwargs["attachments"]) == 3
+    buttons = replies[2].kwargs["attachments"][0].payload.buttons
+    assert [row[0].payload for row in buttons] == [p for _, p, _ in NY_TRIAL_TEMPLATES] + ["photo_tariff_back"]
+    assert [Path(c.args[0].path).name for c in event.bot.upload_media.await_args_list] == ["photo_fam_1.webp", "photo_fam_2.webp", "photo_fam_3.webp"]
+    assert (await context.get_data())["photo_style"] == "photo_style_ny"
+
+
+@pytest.mark.parametrize("payload", ["photo_style_studio", "photo_style_walk"])
+async def test_other_photo_styles_do_not_send_ny_album(payload):
+    event = callback_event(payload)
+    await dispatch_callback(create_router(), event, await ready_context())
+    event.bot.upload_media.assert_not_awaited()
+
+
+@pytest.mark.parametrize("failure", ["missing", "upload", "send"])
+async def test_photo_album_failure_keeps_navigation(credit_db, example_photos, failure):
+    event = callback_event("cat_photo")
+    if failure == "missing":
+        for filename in handlers.PHOTO_MAIN_EXAMPLE_FILES:
+            (example_photos / filename).unlink()
+    elif failure == "upload":
+        event.bot.upload_media.side_effect = RuntimeError("upload failed")
+    else:
+        event.send.side_effect = [RuntimeError("send failed"), object()]
+    await dispatch_callback(create_router(), event, await ready_context())
+    assert event.send.await_args.kwargs["text"] == handlers.CATEGORY_MENUS["cat_photo"][1]
+    assert event.send.await_args.kwargs["attachments"][0].payload.buttons[0][0].payload == "photo_style_studio"

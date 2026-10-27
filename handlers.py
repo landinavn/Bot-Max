@@ -213,6 +213,13 @@ START_EXAMPLE_FILES = (
     r"i (21).webp",
 )
 
+PHOTO_MAIN_EXAMPLE_FILES = (
+    r"photo_main_1.webp", r"photo_main_2.webp", r"photo_main_3.webp",
+)
+PHOTO_FAMILY_EXAMPLE_FILES = (
+    r"photo_fam_1.webp", r"photo_fam_2.webp", r"photo_fam_3.webp",
+)
+
 CATEGORY_BUTTONS = (
     ("🖼 Карта Желаний", "cat_vision"),
     ("🎁 Открытки", "cat_cards"),
@@ -311,7 +318,7 @@ CATEGORY_MENUS = {
         ),
     ),
     "cat_photo": (
-        (),
+        PHOTO_MAIN_EXAMPLE_FILES,
         (
             "📸 Ура! Новогодняя фотосессия уже доступна! 🎄\n\n"
             "Мы вовсю готовим для вас потрясающие образы, и вы уже можете попробовать наши новинки.\n\n"
@@ -1146,6 +1153,8 @@ def create_router(
         await context.clear()
         await context.set_state(PosterStates.waiting_for_mode)
         await context.update_data(photo_style=style)
+        if style == "photo_style_ny":
+            await send_menu_examples(event, PHOTO_FAMILY_EXAMPLE_FILES)
         await _reply(
             event, PHOTO_TARIFF_TEXT.format(style_name=PHOTO_STYLES[style]),
             attachments=[navigation_keyboard(PHOTO_TARIFF_BUTTONS)],
@@ -1161,6 +1170,16 @@ def create_router(
         if user_id is not None:
             await increment_counter(PHOTO_CLICK_EVENTS[event.callback.payload], user_id=user_id)
         await show_photo_tariffs(event, context, event.callback.payload)
+
+    async def show_photo_template_options(event: MessageCallback, *, with_intro: bool = True) -> None:
+        if with_intro:
+            await _reply(event, "Выберите сюжет новогодней фотосессии (3 фото):")
+        await send_menu_examples(event, PHOTO_FAMILY_EXAMPLE_FILES)
+        buttons = tuple((label, payload) for payload, (label, _) in PHOTO_NY_TRIAL_TEMPLATES.items())
+        await _reply(
+            event, "👇 Выберите подходящий сюжет:",
+            attachments=[navigation_keyboard((*buttons, ("⬅️ Назад", "photo_tariff_back")))],
+        )
 
     @router.message_callback(F.callback.payload.in_({"photo_tariff_590", "photo_tariff_990", "photo_tariff_1490"}))
     async def photo_tariff_soon(event: MessageCallback, context: MemoryContext) -> None:
@@ -1181,6 +1200,7 @@ def create_router(
                 photo_product_name="Фотосессия Попробовать", photo_amount_kopecks=59000,
             )
             await _reply(event, PHOTO_TRIAL_CHECKOUT_TEXT, attachments=[photo_trial_payment_keyboard()])
+            await show_photo_template_options(event, with_intro=False)
             return
         await _reply(
             event, PHOTO_TARIFF_SOON_TEXT,
@@ -1197,8 +1217,7 @@ def create_router(
         if data.get("photo_style") != "photo_style_ny" or data.get("photo_tariff") != "photo_tariff_590":
             await _reply(event, "Выберите стиль и тариф фотосессии заново.", attachments=[navigation_keyboard((("Фотосессия", "cat_photo"),))])
             return
-        buttons = tuple((label, payload) for payload, (label, _) in PHOTO_NY_TRIAL_TEMPLATES.items())
-        await _reply(event, "Выберите сюжет новогодней фотосессии (3 фото):", attachments=[navigation_keyboard((*buttons, ("⬅️ Назад", "photo_tariff_back")))])
+        await show_photo_template_options(event)
 
     @router.message_callback(F.callback.payload == "photo_tariff_back")
     async def photo_tariff_back(event: MessageCallback, context: MemoryContext) -> None:

@@ -2611,7 +2611,7 @@ NY_TRIAL_TEMPLATES = [
 ]
 
 
-@pytest.mark.parametrize("label,payload,template", NY_TRIAL_TEMPLATES)
+@pytest.mark.parametrize("label,payload,template", NY_TRIAL_TEMPLATES[1:])
 async def test_legacy_ny_template_buttons_use_real_checkout(credit_db, label, payload, template):
     await credit_db.grant_free_trial(456)
     payments = SimpleNamespace(create_payment_link=AsyncMock())
@@ -2643,7 +2643,7 @@ async def test_legacy_ny_template_buttons_use_real_checkout(credit_db, label, pa
     assert pay["text"] == "Оплатить 590 ₽"
     assert pay["url"] == "https://link.payform.ru/?paymentLinkId=72139edd-76b7-4dcf-b7e4-a34f6bd9c625"
     assert "payload" not in pay
-    assert buttons[1][0]["payload"] == "photo_tariff_back"
+    assert buttons[-1][0]["payload"] == "photo_tariff_back"
     # Повторный выбор сюжета обновляет FSM, без создания заказа пакета кредитов.
     await dispatch_callback(router, callback_event("photo_temp_rabbit"), context)
     assert (await context.get_data())["template"] == "rabbit"
@@ -2665,7 +2665,7 @@ async def test_old_template_button_requires_ny_trial_context(credit_db, style, t
     await context.update_data(photo_style=style, photo_tariff=tariff)
     event = callback_event("photo_temp_fam3")
     await dispatch_callback(create_router(), event, context)
-    assert event.send.await_args.args[0] == "Выберите стиль и тариф фотосессии заново."
+    assert event.send.await_args.args[0] == (handlers.PHOTO_TARIFF_SOON_TEXT if style == "photo_style_studio" else "Выберите стиль и тариф фотосессии заново.")
     button = event.send.await_args.kwargs["attachments"][0].model_dump()["payload"]["buttons"][0][0]
     assert button["type"] == "callback" and button["payload"] == "cat_photo"
     assert "template" not in await context.get_data()
@@ -2724,3 +2724,148 @@ async def test_ny_trial_tariff_immediately_offers_real_payment_link(credit_db):
     assert (await credit_db.get_user(456))["total_generations"] == 0
     payments.create_payment_link.assert_not_awaited()
     generator.assert_not_awaited()
+
+
+async def family_context(with_photo=True):
+    context = await ready_context()
+    await context.clear()
+    await context.update_data(photo_style="photo_style_ny", photo_tariff="photo_tariff_590", tariff="trial_590")
+    if with_photo:
+        await context.update_data(photo={"url": "https://photos.example.com/source.png"})
+    await context.set_state(PosterStates.waiting_for_mode)
+    return context
+
+
+async def test_family_three_sequential_frames_use_same_reference_and_no_card_generation(credit_db):
+    await credit_db.grant_free_trial(456)
+    outputs = [f"https://cdn.example/frame-{i}.png" for i in range(3)]
+    order = []
+    async def generate(reference, prompt):
+        index = len([v for v in order if v.startswith("generate")])
+        order.append(f"generate-{index}")
+        return outputs[index]
+    frames = AsyncMock(side_effect=generate)
+    cards, visions = AsyncMock(), AsyncMock()
+    router = create_router(visions, postcard_generator=cards, photosession_generator=frames)
+    event = callback_event("photo_temp_fam3")
+    async def send(**kwargs):
+        order.append("send-" + str(len([v for v in order if v.startswith("send")])))
+        return object()
+    event.bot.send_message.side_effect = send
+    context = await family_context()
+    await dispatch_callback(router, event, context)
+    assert order == ["generate-0", "send-0", "generate-1", "send-1", "generate-2", "send-2"]
+    assert frames.await_args_list == [call("https://photos.example.com/source.png", p) for p in handlers.NY_FAMILY_THREE_PROMPTS]
+    assert len(set(handlers.NY_FAMILY_THREE_PROMPTS)) == 3
+    assert [c.kwargs["text"] for c in event.bot.send_message.await_args_list] == ["Фотография 1 из 3", "Фотография 2 из 3", "Фотография 3 из 3"]
+    assert all(len(c.kwargs["attachments"]) == 1 for c in event.bot.send_message.await_args_list)
+    assert [c.args[0] for c in event.send.await_args_list[:3]] == [f"Генерирую кадр {i} из 3..." for i in range(1, 4)]
+    data = await context.get_data()
+    assert data["photosession_urls"] == outputs and data["photosession_sent_count"] == 3
+    assert data["photosession_complete"] is True
+    await dispatch_callback(router, callback_event("photo_temp_fam3"), context)
+    assert frames.await_count == 3
+    cards.assert_not_awaited()
+    visions.assert_not_awaited()
+    assert (await credit_db.get_user(456))["balance"] == 1
+
+
+async def test_family_three_requests_reference_then_generates_without_congratulation_text(credit_db):
+    frames = AsyncMock(side_effect=[f"https://cdn.example/{i}.png" for i in range(3)])
+    router = create_router(photosession_generator=frames)
+    context = await family_context(False)
+    event = callback_event("photo_temp_fam3")
+    await dispatch_callback(router, event, context)
+    assert await context.get_state() == PosterStates.waiting_for_photosession_photo
+    assert "трёх членов семьи" in event.send.await_args.args[0]
+    frames.assert_not_awaited()
+    await call_handler(router, "collect_photosession_photo", message_event("hello"), context)
+    frames.assert_not_awaited()
+    photo = photo_event()
+    await call_handler(router, "collect_photosession_photo", photo, context)
+    assert frames.await_count == 3
+    assert all(c.args[0] == "https://photos.example.com/source.png" for c in frames.await_args_list)
+    assert await context.get_state() == PosterStates.waiting_for_mode
+
+
+@pytest.mark.parametrize("failure", ["generate", "send"])
+async def test_family_three_resume_does_not_repeat_ready_frames(failure):
+    frames = AsyncMock(side_effect=["https://cdn.example/1.png", RuntimeError("api error"), "https://cdn.example/2.png", "https://cdn.example/3.png"] if failure == "generate" else [f"https://cdn.example/{i}.png" for i in range(3)])
+    router = create_router(photosession_generator=frames)
+    context = await family_context()
+    event = callback_event("photo_temp_fam3")
+    if failure == "send":
+        event.bot.send_message.side_effect = [object(), RuntimeError("MAX error")]
+    await dispatch_callback(router, event, context)
+    assert (await context.get_data())["photosession_sent_count"] == 1
+    retry = callback_event("photo_temp_fam3")
+    await dispatch_callback(router, retry, context)
+    assert retry.bot.send_message.await_count == 2
+    assert frames.await_count == (4 if failure == "generate" else 3)
+    assert (await context.get_data())["photosession_complete"] is True
+
+
+@pytest.mark.parametrize("style,tariff", [("photo_style_studio", "photo_tariff_590"), ("photo_style_walk", "photo_tariff_590"), ("photo_style_ny", "photo_tariff_990")])
+async def test_family_three_only_runs_for_new_year_trial(style, tariff):
+    frames = AsyncMock()
+    router = create_router(photosession_generator=frames)
+    context = await family_context()
+    await context.update_data(photo_style=style, photo_tariff=tariff)
+    event = callback_event("photo_temp_fam3")
+    await dispatch_callback(router, event, context)
+    frames.assert_not_awaited()
+    event.bot.send_message.assert_not_awaited()
+
+
+async def test_family_templates_reachable_from_payment_screen():
+    router = create_router()
+    context = await family_context(False)
+    tariff = callback_event("photo_tariff_590")
+    await dispatch_callback(router, tariff, context)
+    buttons = tariff.send.await_args.kwargs["attachments"][0].payload.buttons
+    choose = next(b for row in buttons for b in row if getattr(b, "payload", None) == "photo_choose_template")
+    event = callback_event(choose.payload)
+    await dispatch_callback(router, event, context)
+    payloads = [r[0].payload for r in event.send.await_args.kwargs["attachments"][0].payload.buttons]
+    assert payloads == [p for _, p, _ in NY_TRIAL_TEMPLATES] + ["photo_tariff_back"]
+
+
+async def test_family_three_stops_if_navigation_clears_session():
+    context = await family_context()
+    async def generate(*args):
+        await context.clear()
+        await context.set_state(PosterStates.waiting_for_mode)
+        return "https://cdn.example/result.png"
+    frames = AsyncMock(side_effect=generate)
+    event = callback_event("photo_temp_fam3")
+    await dispatch_callback(create_router(photosession_generator=frames), event, context)
+    frames.assert_awaited_once()
+    event.bot.send_message.assert_not_awaited()
+    assert await context.get_data() == {}
+
+
+async def test_family_three_duplicate_callback_cannot_start_second_batch():
+    context = await family_context()
+    duplicate = callback_event("photo_temp_fam3")
+    calls = 0
+    async def generate(*args):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await dispatch_callback(router, duplicate, context)
+        return f"https://cdn.example/{calls}.png"
+    frames = AsyncMock(side_effect=generate)
+    router = create_router(photosession_generator=frames)
+    await dispatch_callback(router, callback_event("photo_temp_fam3"), context)
+    assert frames.await_count == 3
+    duplicate.ack.assert_awaited_once_with(notification="Фотографии уже создаются. Пожалуйста, подождите.")
+    duplicate.bot.send_message.assert_not_awaited()
+
+
+@pytest.mark.parametrize("tariff", ["photo_tariff_990", "photo_tariff_1490"])
+async def test_family_three_wrong_tariff_does_not_run(tariff):
+    frames = AsyncMock()
+    context = await family_context()
+    await context.update_data(photo_tariff=tariff)
+    await dispatch_callback(create_router(photosession_generator=frames), callback_event("photo_temp_fam3"), context)
+    frames.assert_not_awaited()

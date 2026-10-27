@@ -653,6 +653,40 @@ async def generate_postcards(photo_url: str, mode: str, card_text: str) -> list[
     return await _generate_and_store(photo_url, "Открытка", prompt_override=prompt, postcard_text=card_text, postcard_mode=mode)
 
 
+NY_FAMILY_THREE_PROMPTS = (
+    "Create a highly realistic, professional New Year family photoshoot. "
+    "The image must feature EXACTLY the same 3 people from the reference photo. "
+    "Preserve their exact faces, hairstyles, skin tones, and ages perfectly. "
+    "CLOTHING: Dress all 3 people in matching red and green tartan plaid pajamas. "
+    "BACKGROUND: Cozy interior, beautifully decorated Christmas tree with gold and white ornaments. "
+    "POSE: The 3 people are sitting together on the floor in front of the tree, smiling and looking at the camera. "
+    "Exactly 3 people, correct human anatomy, exactly 5 fingers on each hand. DO NOT ADD ANY TEXT.",
+    "Create a highly realistic, professional New Year family photoshoot. "
+    "The image must feature EXACTLY the same 3 people from the reference photo. Preserve their exact faces perfectly. "
+    "CLOTHING: Same matching red and green tartan plaid pajamas. "
+    "BACKGROUND: Same cozy interior with the decorated Christmas tree. "
+    "POSE: The 3 people are lying on the floor together on a cozy rug, looking up at the camera and smiling. "
+    "Exactly 3 people, correct human anatomy, exactly 5 fingers on each hand. DO NOT ADD ANY TEXT.",
+    "Create a highly realistic, professional New Year family photoshoot. "
+    "The image must feature EXACTLY the same 3 people from the reference photo. Preserve their exact faces perfectly. "
+    "CLOTHING: Same matching red and green tartan plaid pajamas. "
+    "BACKGROUND: Same cozy interior with the decorated Christmas tree. "
+    "POSE LOGIC: If the reference photo has 2 adults and 1 child, the adults are gently kissing the child on the cheeks. "
+    "If the reference photo has 1 adult and 2 children, the adult is hugging and kissing the children. "
+    "Exactly 3 people, correct anatomy. DO NOT ADD ANY TEXT.",
+)
+
+
+async def generate_photosession_frame(photo_url: str, prompt: str) -> str:
+    """Один запрос /images/edits, один отдельный файл в S3, без надписи Pillow."""
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("Не задан промпт фотосессии.")
+    urls = await _generate_and_store(photo_url, "Фотосессия", count=1, prompt_override=prompt)
+    if len(urls) != 1:
+        raise ImageGenerationError("Ожидался один кадр фотосессии.")
+    return urls[0]
+
+
 def _prepare_max_image(data: bytes) -> tuple[bytes, str]:
     """Сохранить небольшое изображение или сжать большую копию для MAX."""
     filename, _ = _photo_format(data)

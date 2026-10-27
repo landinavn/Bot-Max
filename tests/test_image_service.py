@@ -948,3 +948,19 @@ def test_unrelated_render_error_is_not_swallowed(monkeypatch):
     monkeypatch.setattr(service.ImageDraw.ImageDraw, "multiline_text", Mock(side_effect=ValueError("invalid drawing")))
     with pytest.raises(ValueError, match="invalid drawing"):
         service.add_text_to_image(buffer.getvalue(), "С праздником, Аня!")
+
+
+async def test_photosession_frame_uses_edits_storage_pipeline_without_text_overlay(monkeypatch):
+    generate = AsyncMock(return_value=["https://cdn.example/frame.png"])
+    monkeypatch.setattr(service, "_generate_and_store", generate)
+    for prompt in service.NY_FAMILY_THREE_PROMPTS:
+        assert await service.generate_photosession_frame(PHOTO_URL, prompt) == "https://cdn.example/frame.png"
+    assert generate.await_count == 3
+    assert [c.kwargs for c in generate.await_args_list] == [
+        {"count": 1, "prompt_override": p} for p in service.NY_FAMILY_THREE_PROMPTS
+    ]
+    assert all("DO NOT ADD ANY TEXT." in p and "3 people" in p for p in service.NY_FAMILY_THREE_PROMPTS)
+    assert "sitting together" in service.NY_FAMILY_THREE_PROMPTS[0]
+    assert "lying on the floor" in service.NY_FAMILY_THREE_PROMPTS[1]
+    assert "2 adults and 1 child" in service.NY_FAMILY_THREE_PROMPTS[2]
+    assert "1 adult and 2 children" in service.NY_FAMILY_THREE_PROMPTS[2]

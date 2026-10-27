@@ -381,6 +381,39 @@ AUDIO_FUN_TEST_TEXT = (
     "(Пока это тестовый режим, музыкальный API скоро будет подключен!)"
 )
 
+AUDIO_GIFT_TEXT = (
+    "🎁 Песня в подарок — трек, который запомнится\n\n"
+    "Полноценная песня 2–3 минуты с именем и деталями. После оплаты вы получите MP3, минусовку и текст. "
+    "Сначала послушайте превью (10–15 секунд), чтобы понять стиль. "
+    "Если что-то пойдёт не так — бесплатно перегенерируем."
+)
+
+AUDIO_GIFT_SCENARIOS = {
+    "gift_scen_bday": ("🎂 День рождения", "Как зовут виновника торжества? Напишите 2-3 факта или привычки через запятую (например: любит горы, всегда поддерживает, обожает кофе)."),
+    "gift_scen_anniv": ("💍 Годовщина / Свадьба", "Напишите ваши имена, сколько лет вместе и одну историю или деталь (например: Аня и Ваня, 5 лет, познакомились в универе)."),
+    "gift_scen_parents": ("👵 Для родителей", "Как зовут маму или папу? Какой повод (юбилей, день рождения, просто так)? Напишите одно воспоминание или качество (например: всегда поддерживала, вкусные пироги)."),
+    "gift_scen_child": ("🧸 Для ребёнка", "Как зовут ребёнка, сколько ему лет и какое у него увлечение или мечта? (например: Маша, 7 лет, любит рисовать)."),
+    "gift_scen_friend": ("🤝 Для друга / подруги", "Как зовут друга/подругу? Напишите одну общую историю или шутку (например: всегда выручает, познакомились в универе)."),
+    "gift_scen_custom": ("🎯 Свой вариант", "Напишите имя, повод (любой) и 1-2 факта о человеке."),
+}
+
+AUDIO_GIFT_SCENARIO_TEXT = (
+    "Для кого песня?\n\n"
+    "🎂 День рождения — персональное поздравление.\n"
+    "💍 Годовщина / Свадьба — ваша история любви.\n"
+    "👵 Для родителей — воспоминания и благодарность.\n"
+    "🧸 Для ребёнка — увлечения и мечты.\n"
+    "🤝 Для друга / подруги — общие истории и шутки.\n"
+    "🎯 Свой вариант — любой человек и повод."
+)
+
+AUDIO_GIFT_PREVIEW_TEXT = (
+    "🎧 Ваша песня почти готова!\n\n"
+    "Послушайте фрагмент (10–15 секунд), чтобы понять стиль и настроение.\n\n"
+    "(Это тестовый режим, музыкальный API скоро будет подключен!)\n\n"
+    "После оплаты вы получите полный трек (MP3), минусовку и текст песни."
+)
+
 
 PHOTO_STYLES = {
     "photo_style_studio": "Студия",
@@ -533,9 +566,26 @@ class PosterStates(StatesGroup):
     waiting_for_prompt = State()
     waiting_for_card_text = State()
     waiting_for_song_details = State()
+    waiting_for_gift_bday = State()
+    waiting_for_gift_anniv = State()
+    waiting_for_gift_parents = State()
+    waiting_for_gift_child = State()
+    waiting_for_gift_friend = State()
+    waiting_for_gift_custom = State()
+    waiting_for_gift_preview = State()
     # Принимать описание и из состояния, сохранённого прежней версией.
     waiting_for_sphere = State()
     generating = State()
+
+
+GIFT_SCENARIO_STATES = {
+    "gift_scen_bday": PosterStates.waiting_for_gift_bday,
+    "gift_scen_anniv": PosterStates.waiting_for_gift_anniv,
+    "gift_scen_parents": PosterStates.waiting_for_gift_parents,
+    "gift_scen_child": PosterStates.waiting_for_gift_child,
+    "gift_scen_friend": PosterStates.waiting_for_gift_friend,
+    "gift_scen_custom": PosterStates.waiting_for_gift_custom,
+}
 
 
 def navigation_keyboard(buttons, *, footer=()):
@@ -944,6 +994,11 @@ def create_router(
                 f"- {label}: {counters.get('audio_scen_' + payload.removeprefix('audio_fun_'), 0)}"
                 for payload, (label, _) in AUDIO_FUN_SCENARIOS.items()
             ) + "\n\n"
+            "🎁 Интерес к Аудиопесням (Подарочный формат):\n"
+            + "\n".join(
+                f"- {label}: {counters.get('audio_gift_' + payload.removeprefix('gift_scen_'), 0)}"
+                for payload, (label, _) in AUDIO_GIFT_SCENARIOS.items()
+            ) + "\n\n"
             "📸 Интерес к Фотосессиям (клики):\n"
             f"- Стиль: Студия: {counters.get('click_photo_studio', 0)}\n"
             f"- Стиль: Прогулка: {counters.get('click_photo_walk', 0)}\n"
@@ -1217,9 +1272,9 @@ def create_router(
             return
         await _reply(
             event,
-            "🚀 Отличный выбор! Мы уже настраиваем генератор песен, и совсем скоро вы сможете создать свой хит. "
-            "Следите за обновлениями!",
-            attachments=[navigation_keyboard((("⬅️ Назад", "cat_audio"),))],
+            AUDIO_GIFT_TEXT,
+            attachments=[navigation_keyboard((("Выбрать сценарий", "gift_choose_scenario"),
+                                              ("⬅️ Назад", "cat_audio")))],
         )
 
     @router.message_callback(F.callback.payload.in_(set(AUDIO_FUN_SCENARIOS)))
@@ -1237,6 +1292,44 @@ def create_router(
         await context.set_state(PosterStates.waiting_for_song_details)
         await _reply(event, AUDIO_FUN_SCENARIOS[event.callback.payload][1],
                      attachments=[navigation_keyboard((("⬅️ Назад", "audio_tariff_fun"),))])
+
+    @router.message_callback(F.callback.payload == "gift_choose_scenario")
+    async def gift_choose_scenario(event: MessageCallback, context: MemoryContext) -> None:
+        if event.message is None:
+            await event.ack(notification="Меню недоступно. Отправьте /start.")
+            return
+        await event.ack(notification="Выберите сценарий…")
+        await context.clear()
+        await context.set_state(PosterStates.waiting_for_mode)
+        buttons = [(label, payload) for payload, (label, _) in AUDIO_GIFT_SCENARIOS.items()]
+        await _reply(event, AUDIO_GIFT_SCENARIO_TEXT,
+                     attachments=[navigation_keyboard((*buttons, ("⬅️ Назад", "audio_tariff_gift")))])
+
+    @router.message_callback(F.callback.payload.in_(set(AUDIO_GIFT_SCENARIOS)))
+    async def gift_scenario(event: MessageCallback, context: MemoryContext) -> None:
+        if event.message is None:
+            await event.ack(notification="Меню недоступно. Отправьте /start.")
+            return
+        await event.ack(notification="Жду детали песни…")
+        payload = event.callback.payload
+        scenario = payload.removeprefix("gift_scen_")
+        user_id = event.get_ids()[1]
+        if user_id is not None:
+            await increment_counter("audio_gift_" + scenario, user_id=user_id)
+        await context.clear()
+        await context.update_data(gift_scenario=scenario)
+        await context.set_state(GIFT_SCENARIO_STATES[payload])
+        await _reply(event, AUDIO_GIFT_SCENARIOS[payload][1],
+                     attachments=[navigation_keyboard((("⬅️ Назад", "gift_choose_scenario"),))])
+
+    @router.message_callback(F.callback.payload == "gift_payment_soon")
+    async def gift_payment_soon(event: MessageCallback) -> None:
+        if event.message is None:
+            await event.ack(notification="Меню недоступно. Отправьте /start.")
+            return
+        await event.ack(notification="Тестовый режим — оплата пока недоступна.")
+        await _reply(event, "💳 Оплата подарочной песни пока недоступна. Музыкальный API скоро будет подключен!",
+                     attachments=[navigation_keyboard((("⬅️ Назад", "gift_choose_scenario"),))])
 
     async def show_photo_tariffs(event: MessageCallback, context: MemoryContext, style: str) -> None:
         await context.clear()
@@ -1584,6 +1677,41 @@ def create_router(
             "/cancel — отмена"
         )
 
+    @router.message_created(PosterStates.waiting_for_gift_bday)
+    @router.message_created(PosterStates.waiting_for_gift_anniv)
+    @router.message_created(PosterStates.waiting_for_gift_parents)
+    @router.message_created(PosterStates.waiting_for_gift_child)
+    @router.message_created(PosterStates.waiting_for_gift_friend)
+    @router.message_created(PosterStates.waiting_for_gift_custom)
+    async def collect_gift_details(event: MessageCreated, context: MemoryContext) -> None:
+        if is_bot_message(event):
+            return
+        data = await context.get_data()
+        payload = "gift_scen_" + str(data.get("gift_scenario", ""))
+        if payload not in GIFT_SCENARIO_STATES or await context.get_state() != GIFT_SCENARIO_STATES[payload]:
+            await context.clear()
+            await context.set_state(PosterStates.waiting_for_mode)
+            await _reply(event, "Выберите сценарий подарочной песни заново.",
+                         attachments=[navigation_keyboard((("Выбрать сценарий", "gift_choose_scenario"),))])
+            return
+        body = event.message.body
+        details = (body.text or "").strip() if body else ""
+        if not details:
+            await _reply(event, "Напишите детали песни текстом. /cancel — отмена.")
+            return
+        await context.update_data(gift_details=details)
+        await context.set_state(PosterStates.waiting_for_gift_preview)
+        await _reply(event, AUDIO_GIFT_PREVIEW_TEXT, attachments=[navigation_keyboard((
+            ("Оплатить 490 ₽ и получить полный трек", "gift_payment_soon"),
+            ("⬅️ Назад", "gift_choose_scenario"),
+        ))])
+
+    @router.message_created(PosterStates.waiting_for_gift_preview)
+    async def gift_preview_message(event: MessageCreated) -> None:
+        if not is_bot_message(event):
+            await _reply(event, "Это тестовое превью. Чтобы изменить детали, выберите сценарий заново.",
+                         attachments=[navigation_keyboard((("⬅️ Назад", "gift_choose_scenario"),))])
+
     @router.message_created(PosterStates.waiting_for_song_details)
     async def collect_song_details(event: MessageCreated, context: MemoryContext) -> None:
         if is_bot_message(event):
@@ -1709,6 +1837,12 @@ def create_router(
         if is_bot_message(event):
             return
         state = await context.get_state()
+        if state in GIFT_SCENARIO_STATES.values():
+            await collect_gift_details(event, context)
+            return
+        if state == PosterStates.waiting_for_gift_preview:
+            await gift_preview_message(event)
+            return
         if state == PosterStates.waiting_for_song_details:
             await collect_song_details(event, context)
             return

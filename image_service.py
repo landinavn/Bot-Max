@@ -699,28 +699,34 @@ NY_FAMILY_THREE_PROMPTS = (
 
 NY_FAMILY_PLUS_PROMPTS = (
     "Create a highly realistic, professional New Year photoshoot.  "
-    "CRITICAL IDENTITY & LOGIC: Focus ONLY on the children from the reference photo in this frame. "
-    "Do NOT include the adults.  CLOTHING: Elegant festive attire.  "
+    "CRITICAL IDENTITY & LOGIC: Focus ONLY on the children from the reference photo in this frame. Do NOT include the adults.  "
+    "CLOTHING: Boys wear smart casual button-down shirts (no jackets) and trousers. "
+    "Girls wear simple, elegant, but not overly luxurious dresses.  "
     "BACKGROUND: The children are lying on a cozy rug right next to a beautifully decorated Christmas tree, "
-    "surrounded by glowing lights, ornaments, and wrapped gifts.  "
+    "surrounded by glowing lights and wrapped gifts.  "
     "POSE & CAMERA ANGLE: The children are lying on the floor, looking at the camera.  "
     "CRITICAL ANATOMY REQUIREMENT: Perfect human anatomy. Exactly 5 fingers on each hand. No extra limbs.  "
     "DO NOT ADD ANY TEXT.",
     "Create a highly realistic, professional New Year photoshoot. "
     "The image must feature EXACTLY the same people from the reference photo (3 or more people). "
-    "Preserve their exact faces perfectly.  CLOTHING: Elegant festive attire.  "
+    "Preserve their exact faces perfectly.  "
+    "CLOTHING: Men and boys wear smart casual button-down shirts (no jackets), trousers, and stylish sneakers. "
+    "Girls and women wear simple, elegant dresses (not overly luxurious).  "
     "BACKGROUND: Cozy interior with a beautifully decorated Christmas tree.  "
     "POSE & CAMERA ANGLE: Full-length wide shot. The whole family is together. "
     "Some members are standing elegantly, while others are sitting. Everyone is looking at the camera.  "
     "CRITICAL ANATOMY REQUIREMENT: Perfect human anatomy for all people. Exactly 5 fingers on each hand. "
-    "Correct body proportions. No extra limbs.  DO NOT ADD ANY TEXT.",
+    "No extra limbs.  DO NOT ADD ANY TEXT.",
     "Create a highly realistic, professional New Year photoshoot. "
     "Focus ONLY on the adult parents (man and woman) from the reference photo. Preserve their exact faces perfectly.  "
-    "CLOTHING: Elegant festive attire.  "
+    "CLOTHING: The man wears a smart casual button-down shirt (no jacket) and trousers. "
+    "The woman wears a simple, elegant dress.  "
     "BACKGROUND: Cozy interior with a beautifully decorated Christmas tree.  "
-    "POSE & CAMERA ANGLE: Full-length shot. The parents are sitting elegantly together on a sofa or chairs, "
-    "looking at the camera.  CRITICAL ANATOMY REQUIREMENT: Perfect human anatomy. Exactly 5 fingers on each hand. "
-    "Correct body proportions. No extra limbs.  DO NOT ADD ANY TEXT.",
+    "POSE & CAMERA ANGLE: Full-length shot. The parents are sitting elegantly together on a sofa. "
+    "CRITICAL REQUIREMENT: The woman's legs and feet must be positioned naturally and elegantly, "
+    "avoiding any tangled or unnatural postures.  "
+    "CRITICAL ANATOMY REQUIREMENT: Perfect human anatomy. Exactly 5 fingers on each hand. No extra limbs.  "
+    "DO NOT ADD ANY TEXT.",
 )
 NY_FAMILY_PHOTOSESSION_PROMPTS = {
     "fam3": NY_FAMILY_THREE_PROMPTS,

@@ -584,7 +584,7 @@ def create_router(
                     if (await context.get_data()).get("photosession_session_id") != session_id:
                         return
                     if index >= len(urls):
-                        await _reply(event, f"Генерирую кадр {index + 1} из 3...")
+                        await _reply(event, f"Генерирую кадр {index + 1} из 3... ⏳ Это может занять 3-5 минут. Пожалуйста, не закрывайте чат!")
                         url = await photosession_generator(reference_url, prompt)
                         if not isinstance(url, str) or not url.startswith("https://"):
                             raise RuntimeError("Генератор не вернул HTTPS-ссылку кадра.")

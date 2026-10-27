@@ -2759,7 +2759,7 @@ async def test_family_three_sequential_frames_use_same_reference_and_no_card_gen
     assert len(set(handlers.NY_FAMILY_THREE_PROMPTS)) == 3
     assert [c.kwargs["text"] for c in event.bot.send_message.await_args_list] == ["Фотография 1 из 3", "Фотография 2 из 3", "Фотография 3 из 3"]
     assert all(len(c.kwargs["attachments"]) == 1 for c in event.bot.send_message.await_args_list)
-    assert [c.args[0] for c in event.send.await_args_list[:3]] == [f"Генерирую кадр {i} из 3..." for i in range(1, 4)]
+    assert [c.args[0] for c in event.send.await_args_list[:3]] == [f"Генерирую кадр {i} из 3... ⏳ Это может занять 3-5 минут. Пожалуйста, не закрывайте чат!" for i in range(1, 4)]
     data = await context.get_data()
     assert data["photosession_urls"] == outputs and data["photosession_sent_count"] == 3
     assert data["photosession_complete"] is True

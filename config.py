@@ -43,6 +43,7 @@ class Config:
     image_quality: str = "high"
     admin_user_id: int | None = None
     bot_link: str = DEFAULT_BOT_LINK
+    ttapi_key: str | None = field(default=None, repr=False)
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -67,6 +68,7 @@ class Config:
             token=token,
             photo_path=photo_path,
             image_api_key=image_api_key,
+            ttapi_key=os.environ.get("TTAPI_KEY", "").strip() or None,
             image_model=image_model,
             admin_user_id=admin_user_id,
             bot_link=validate_bot_link(os.environ.get("BOT_LINK", "").strip() or DEFAULT_BOT_LINK),

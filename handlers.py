@@ -37,6 +37,7 @@ from database import (
     get_users_for_reminder,
 )
 from prodamus import PACKAGES, ProdamusPayments
+from audio_service import generate_song, wait_for_song, song_tracks, AudioNotConfigured, SongFailed
 from max_client import log_max_error
 from image_service import (
     GenerationLimitError,
@@ -597,6 +598,8 @@ class PosterStates(StatesGroup):
     waiting_for_song_details = State()
     waiting_for_audio_fun_payment = State()
     waiting_for_audio_test_result = State()
+    waiting_for_audio_generation = State()
+    waiting_for_audio_result = State()
     waiting_for_gift_bday = State()
     waiting_for_gift_anniv = State()
     waiting_for_gift_parents = State()
@@ -661,6 +664,8 @@ def create_router(
     postcard_generator: Callable[[str, str, str], Awaitable[list[str]]] = generate_postcards,
     bot_link: str = DEFAULT_BOT_LINK,
     photosession_generator: Callable[[str, str], Awaitable[str]] = generate_photosession_frame,
+    song_generator: Callable[[str, str, str], Awaitable[str]] = generate_song,
+    song_waiter: Callable[[str], Awaitable[dict]] = wait_for_song,
 ) -> Router:
     bot_link = validate_bot_link(bot_link)
     router = Router()
@@ -1361,27 +1366,114 @@ def create_router(
         await _reply(event, AUDIO_GIFT_SCENARIOS[payload][1],
                      attachments=[navigation_keyboard((("⬅️ Назад", "gift_choose_scenario"),))])
 
-    @router.message_callback(F.callback.payload == "gift_payment_soon")
-    async def gift_payment_soon(event: MessageCallback) -> None:
+    async def send_song_result(event, tracks: list[dict], audio_format: str) -> None:
+        text = "🎧 Ваши треки готовы!" if len(tracks) > 1 else "🎧 Ваша песня готова!"
+        buttons = []
+        for index, track in enumerate(tracks, 1):
+            text += f"\n\nВариант {index}: {track['title']}\n{track['audioUrl']}"
+            payload = f"audio_download_fun_{index}" if audio_format == "fun" else f"audio_download_gift_{index}"
+            buttons.append((f"Скачать вариант {index}", payload))
+        buttons.append(("⬅️ Назад", "cat_audio"))
+        await _reply(event, text, attachments=[navigation_keyboard(buttons)])
+
+    async def run_song_generation(event: MessageCallback, context: MemoryContext, audio_format: str) -> None:
         if event.message is None:
             await event.ack(notification="Меню недоступно. Отправьте /start.")
             return
-        await event.ack(notification="Тестовый режим — оплата пока недоступна.")
-        await _reply(event, "💳 Оплата подарочной песни пока недоступна. Музыкальный API скоро будет подключен!",
-                     attachments=[navigation_keyboard((("⬅️ Назад", "gift_choose_scenario"),))])
+        user_id = event.get_ids()[1]
+        if user_id is None:
+            await event.ack(notification="Не удалось определить пользователя.")
+            return
+        lock = generation_locks.setdefault(user_id, asyncio.Lock())
+        if lock.locked():
+            await event.ack(notification="Генерация уже идёт. Пожалуйста, подождите.")
+            return
+        async with lock:
+            data = await context.get_data()
+            state = await context.get_state()
+            if data.get("audio_format") == audio_format and data.get("audio_tracks"):
+                await event.ack(notification="Показываю готовые треки…")
+                await send_song_result(event, data["audio_tracks"], audio_format)
+                return
+            expected = PosterStates.waiting_for_audio_fun_payment if audio_format == "fun" else PosterStates.waiting_for_gift_preview
+            scenario = data.get("song_scenario" if audio_format == "fun" else "gift_scenario")
+            details = data.get("song_details" if audio_format == "fun" else "gift_details")
+            scenarios = AUDIO_FUN_SCENARIOS if audio_format == "fun" else AUDIO_GIFT_SCENARIOS
+            prefix = "audio_fun_" if audio_format == "fun" else "gift_scen_"
+            if state != expected or prefix + str(scenario) not in scenarios or not isinstance(details, str) or not details.strip():
+                await event.ack(notification="Выберите сценарий и заполните детали песни заново.")
+                return
+            if data.get("audio_submit_started") and not data.get("audio_job_id"):
+                await event.ack(notification="Статус отправки неизвестен. Не запускаем повторную генерацию.")
+                await _reply(event, "Не удалось подтвердить отправку в TTAPI. Обратитесь в поддержку перед новым запуском.",
+                             attachments=[navigation_keyboard((("Написать в поддержку", "help_support"),))])
+                return
+            await event.ack(notification="Генерирую песню…")
+            session = data.get("audio_session_id") or uuid4().hex
+            await context.update_data(audio_session_id=session, audio_format=audio_format)
+            await context.set_state(PosterStates.waiting_for_audio_generation)
+
+            async def session_current():
+                return (await context.get_data()).get("audio_session_id") == session
+
+            try:
+                await _reply(event, "🎵 Генерирую ваши треки... Это займет около 1-2 минут.")
+                if not await session_current():
+                    return
+                job_id = data.get("audio_job_id")
+                if not job_id:
+                    # custom=true принимает слова песни, а не инструкции для модели.
+                    label = scenarios[prefix + scenario][0]
+                    chorus = "Эта песня для тебя, улыбайся, пой со мной!\nПусть удача каждый день будет рядом с тобой!"
+                    prompt = f"[Verse]\n{label.split(' ', 1)[-1]}\n{details.strip()}\nСегодня эта песня посвящается тебе!\n[Chorus]\n{chorus}"
+                    if audio_format == "gift":
+                        prompt += f"\n[Verse 2]\nЗа истории и встречи, за тепло счастливых дней,\nЗа мечты и добрый смех дорогих тебе людей!\n[Chorus]\n{chorus}\n[Outro]\nЭта песня для тебя!"
+                    tags = str(data.get("song_style") or ("upbeat pop, playful, Russian vocals, short song, 30-40 seconds" if audio_format == "fun"
+                                                        else "warm emotional pop, Russian vocals, heartfelt, 2-3 minutes"))
+                    if len(prompt) > 5000 or len(tags) > 1000:
+                        raise ValueError("Слишком много деталей для TTAPI.")
+                    await context.update_data(audio_submit_started=True)
+                    job_id = await song_generator(prompt, tags, f"{label}: {details.split(',')[0]}"[:80])
+                    if not await session_current():
+                        return
+                    await context.update_data(audio_job_id=job_id)
+                result = await song_waiter(job_id)
+                if not await session_current():
+                    return
+                tracks = song_tracks(result)
+                await context.update_data(audio_tracks=tracks)
+                await context.set_state(PosterStates.waiting_for_audio_result)
+                await send_song_result(event, tracks, audio_format)
+            except AudioNotConfigured:
+                logger.warning("Генерация музыки не настроена: задайте TTAPI_KEY.")
+                if await session_current():
+                    await context.update_data(audio_submit_started=False)
+                    await _reply(event, "Генерация музыки временно недоступна. Попробуйте позже.")
+            except SongFailed:
+                if await session_current():
+                    await _reply(event, "TTAPI сообщил об ошибке генерации песни. Обратитесь в поддержку.")
+            except TimeoutError:
+                if await session_current():
+                    await _reply(event, "Песня ещё не готова. Нажмите ту же кнопку ещё раз: проверю уже созданную задачу без новой генерации.")
+            except Exception as exc:
+                logger.error("Ошибка аудиогенерации (%s).", type(exc).__name__)
+                if await session_current():
+                    await _reply(event, "Не удалось получить или отправить песню. Повторите проверку той же кнопкой. Если задача не была подтверждена, обратитесь в поддержку.")
+            finally:
+                if await session_current() and await context.get_state() == PosterStates.waiting_for_audio_generation:
+                    await context.set_state(expected)
+
+    @router.message_callback(F.callback.payload == "gift_payment_soon")
+    async def gift_payment_soon(event: MessageCallback, context: MemoryContext) -> None:
+        await run_song_generation(event, context, "gift")
 
     @router.message_callback(F.callback.payload == "audio_fun_payment_soon")
-    async def audio_fun_payment_soon(event: MessageCallback) -> None:
-        if event.message is None:
-            await event.ack(notification="Меню недоступно. Отправьте /start.")
-            return
-        await event.ack(notification="Тестовый режим — оплата пока недоступна.")
-        await _reply(event, "💳 Оплата песни пока недоступна. Музыкальный API скоро будет подключен!",
-                     attachments=[navigation_keyboard((("⬅️ Назад", "audio_tariff_fun"),))])
+    async def audio_fun_payment_soon(event: MessageCallback, context: MemoryContext) -> None:
+        await run_song_generation(event, context, "fun")
 
-    @router.message_callback(F.callback.payload.in_({"audio_gift_preview", "audio_download_fun_1", "audio_download_fun_2",
+    @router.message_callback(F.callback.payload.in_({"audio_gift_preview", "audio_download_fun_1", "audio_download_fun_2", "audio_download_gift_1", "audio_download_gift_2",
                                                      "audio_download_gift_mp3", "audio_download_gift_instrumental"}))
-    async def audio_file_placeholder(event: MessageCallback) -> None:
+    async def audio_file_placeholder(event: MessageCallback, context: MemoryContext) -> None:
         if event.message is None:
             await event.ack(notification="Меню недоступно. Отправьте /start.")
             return
@@ -1389,12 +1481,24 @@ def create_router(
             "audio_download_fun_1": "audio_download_mp3",
             "audio_download_fun_2": "audio_download_mp3",
             "audio_download_gift_mp3": "audio_download_mp3",
+            "audio_download_gift_1": "audio_download_mp3",
+            "audio_download_gift_2": "audio_download_mp3",
             "audio_download_gift_instrumental": "audio_download_inst",
         }.get(event.callback.payload)
         user_id = event.get_ids()[1]
         if counter is not None and user_id is not None:
             # Пока файлы не подключены, учитываем нажатие кнопки скачивания.
             await increment_counter(counter, user_id=user_id)
+        data = await context.get_data()
+        tracks = data.get("audio_tracks", [])
+        index = {"audio_download_fun_1": ("fun", 0), "audio_download_fun_2": ("fun", 1),
+                 "audio_download_gift_mp3": ("gift", 0), "audio_download_gift_1": ("gift", 0),
+                 "audio_download_gift_2": ("gift", 1)}.get(event.callback.payload)
+        if index and data.get("audio_format") == index[0] and len(tracks) > index[1]:
+            url = tracks[index[1]]["audioUrl"]
+            await event.ack(notification="Ссылка на MP3 готова.")
+            await _reply(event, url, attachments=[InlineKeyboardBuilder().row(LinkButton(text="Скачать MP3", url=url)).as_markup()])
+            return
         await event.ack(notification="Аудио скоро появится")
         await _reply(event, "Аудио скоро появится")
 

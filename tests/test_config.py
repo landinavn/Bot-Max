@@ -115,3 +115,20 @@ def test_invalid_bot_link_is_rejected(tmp_path, monkeypatch, value):
     monkeypatch.setenv("BOT_LINK", value)
     with pytest.raises(ValueError, match="BOT_LINK"):
         config.Config.from_env()
+
+
+def test_ttapi_key_loads_dotenv_environment_and_is_hidden(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, 'BASE_DIR', tmp_path)
+    monkeypatch.setenv('MAX_BOT_TOKEN', 'test-token')
+    monkeypatch.setenv('TTAPI_KEY', '')
+    monkeypatch.delenv('TTAPI_KEY')
+    (tmp_path / '.env').write_text('TTAPI_KEY=dotenv-test-key\n')
+    settings = config.Config.from_env()
+    assert settings.ttapi_key == 'dotenv-test-key'
+    assert 'dotenv-test-key' not in repr(settings)
+    monkeypatch.setenv('TTAPI_KEY', ' environment-test-key ')
+    settings = config.Config.from_env()
+    assert settings.ttapi_key == 'environment-test-key'
+    assert 'environment-test-key' not in repr(settings)
+    monkeypatch.setenv('TTAPI_KEY', '  ')
+    assert config.Config.from_env().ttapi_key is None

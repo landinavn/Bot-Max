@@ -2469,9 +2469,13 @@ async def test_photo_style_tariff_preview_has_no_payment_or_generation(credit_db
     category = callback_event("cat_photo")
     await dispatch_callback(router, category, context)
     assert category.send.await_args.kwargs["text"] == (
-        "📸 Раздел «Фотосессия» уже совсем скоро заработает!\n\n"
-        "Мы вовсю готовим для вас потрясающие образы. Но вы уже можете посмотреть стили и тарифы, "
-        "которые будут доступны.\n\nВыбери стиль, который тебе интересен:"
+        "📸 Ура! Новогодняя фотосессия уже доступна! 🎄\n\n"
+        "Мы вовсю готовим для вас потрясающие образы, и вы уже можете попробовать наши новинки.\n\n"
+        "В тарифе «Попробовать» доступны три варианта семейных фотосессий:\n"
+        "• Семейная 3+ чел\n"
+        "• Семейная 4+ чел\n"
+        "• Семейная с малышами\n\n"
+        "👇 Выбери стиль, который тебе интересен:"
     )
     buttons = category.send.await_args.kwargs["attachments"][0].payload.buttons
     assert [(row[0].text, row[0].payload) for row in buttons] == [

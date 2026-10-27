@@ -338,13 +338,28 @@ CATEGORY_MENUS = {
     "cat_audio": (
         (),
         (
-            "🎵 Раздел в разработке!\n"
-            "Совсем скоро ты сможешь заказать персональную песню с твоим именем. Это будет хит! 🎶"
+            "🎵 Музыкальная мастерская!\n\n"
+            "Мы создаем персональные песни с вашим именем или поздравлением. Выберите формат:\n\n"
+            "🔥 «Песня по фану» (199 ₽)\n"
+            "2 варианта на выбор. Без превью — сразу после оплаты. "
+            "Если не понравится — бесплатная перегенерация. Идеально, чтобы удивить друга или коллегу.\n\n"
+            "🎁 «Песня в подарок» (490 ₽)\n"
+            "Полный трек 2–3 минуты + минусовка + текст. "
+            "Сначала послушайте превью (10–15 сек), чтобы понять стиль. "
+            "После оплаты — чистый звук без защиты. Если что-то не так — перегенерируем."
         ),
         (
+            ("🔥 Песня по фану (199 ₽)", "audio_tariff_fun"),
+            ("🎁 Песня в подарок (490 ₽)", "audio_tariff_gift"),
             ("⬅️ Назад", "back_to_main"),
         ),
     ),
+}
+
+
+AUDIO_CLICK_EVENTS = {
+    "audio_tariff_fun": "click_audio_fun",
+    "audio_tariff_gift": "click_audio_gift",
 }
 
 
@@ -901,7 +916,9 @@ def create_router(
             f"🖼 Всего сгенерировано картинок: {data['total_generated']}\n"
             "\n🖱 Интерес к новым разделам:\n"
             f"- Фотосессия (клики): {counters.get('click_photo', 0)}\n"
-            f"- Аудиопесни (клики): {counters.get('click_audio', 0)}\n\n"
+            f"- Аудиопесни (клики): {counters.get('click_audio', 0)}\n"
+            f"- Песня по фану (199 ₽): {counters.get('click_audio_fun', 0)}\n"
+            f"- Песня в подарок (490 ₽): {counters.get('click_audio_gift', 0)}\n\n"
             "📸 Интерес к Фотосессиям (клики):\n"
             f"- Стиль: Студия: {counters.get('click_photo_studio', 0)}\n"
             f"- Стиль: Прогулка: {counters.get('click_photo_walk', 0)}\n"
@@ -1156,6 +1173,24 @@ def create_router(
             await increment_counter(interest_event, user_id=user_id)
         await send_menu_examples(event, filenames)
         await _reply(event, text=text, attachments=[navigation_keyboard(buttons)])
+
+    @router.message_callback(F.callback.payload.in_(set(AUDIO_CLICK_EVENTS)))
+    async def audio_tariff_soon(event: MessageCallback, context: MemoryContext) -> None:
+        if event.message is None:
+            await event.ack(notification="Меню недоступно. Отправьте /start.")
+            return
+        await event.ack(notification="Показываю тариф…")
+        user_id = event.get_ids()[1]
+        if user_id is not None:
+            await increment_counter(AUDIO_CLICK_EVENTS[event.callback.payload], user_id=user_id)
+        await context.clear()
+        await context.set_state(PosterStates.waiting_for_mode)
+        await _reply(
+            event,
+            "🚀 Отличный выбор! Мы уже настраиваем генератор песен, и совсем скоро вы сможете создать свой хит. "
+            "Следите за обновлениями!",
+            attachments=[navigation_keyboard((("⬅️ Назад", "cat_audio"),))],
+        )
 
     async def show_photo_tariffs(event: MessageCallback, context: MemoryContext, style: str) -> None:
         await context.clear()

@@ -342,6 +342,14 @@ PHOTO_STYLES = {
     "photo_style_walk": "Прогулка",
     "photo_style_ny": "Новогодняя",
 }
+PHOTO_CLICK_EVENTS = {
+    "photo_style_studio": "click_photo_studio",
+    "photo_style_walk": "click_photo_walk",
+    "photo_style_ny": "click_photo_ny",
+    "photo_tariff_590": "click_tariff_590",
+    "photo_tariff_990": "click_tariff_990",
+    "photo_tariff_1490": "click_tariff_1490",
+}
 PHOTO_TARIFF_TEXT = (
     "Вы выбрали стиль: {style_name}.\n\n"
     "Теперь выберите тариф, который вам подходит:\n\n"
@@ -771,6 +779,13 @@ def create_router(
             "\n🖱 Интерес к новым разделам:\n"
             f"- Фотосессия (клики): {counters.get('click_photo', 0)}\n"
             f"- Аудиопесни (клики): {counters.get('click_audio', 0)}\n\n"
+            "📸 Интерес к Фотосессиям (клики):\n"
+            f"- Стиль: Студия: {counters.get('click_photo_studio', 0)}\n"
+            f"- Стиль: Прогулка: {counters.get('click_photo_walk', 0)}\n"
+            f"- Стиль: Новогодняя: {counters.get('click_photo_ny', 0)}\n\n"
+            f"- Тариф «Попробовать» (590): {counters.get('click_tariff_590', 0)}\n"
+            f"- Тариф «Фотосессия» (990): {counters.get('click_tariff_990', 0)}\n"
+            f"- Тариф «Премиум» (1490): {counters.get('click_tariff_1490', 0)}\n\n"
             f"💰 Всего покупок: {data['total_purchases']}" + source_text + admin_text
         )
 
@@ -1025,6 +1040,9 @@ def create_router(
             await event.ack(notification="Меню недоступно. Отправьте /start.")
             return
         await event.ack(notification="Показываю тарифы…")
+        user_id = event.get_ids()[1]
+        if user_id is not None:
+            await increment_counter(PHOTO_CLICK_EVENTS[event.callback.payload], user_id=user_id)
         await context.clear()
         await context.set_state(PosterStates.waiting_for_mode)
         await context.update_data(photo_style=event.callback.payload)
@@ -1039,6 +1057,9 @@ def create_router(
             await event.ack(notification="Меню недоступно. Отправьте /start.")
             return
         await event.ack(notification="Скоро будет доступно…")
+        user_id = event.get_ids()[1]
+        if user_id is not None:
+            await increment_counter(PHOTO_CLICK_EVENTS[event.callback.payload], user_id=user_id)
         await _reply(
             event, PHOTO_TARIFF_SOON_TEXT,
             attachments=[navigation_keyboard((("⬅️ Назад", "cat_photo"),))],

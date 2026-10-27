@@ -10,6 +10,20 @@ from config import Config
 BASE_URL = "https://api.ttapi.io"
 
 
+def build_song_request(details: str, scenario_title: str, audio_format: str, style: str | None = None) -> tuple[str, str, str]:
+    if audio_format not in {'fun', 'gift'} or not details.strip():
+        raise ValueError('Некорректные детали песни.')
+    chorus = "Эта песня для тебя, улыбайся, пой со мной!\nПусть удача каждый день будет рядом с тобой!"
+    prompt = f"[Verse]\n{details.strip()}\nСегодня эта песня посвящается тебе!\n[Chorus]\n{chorus}"
+    if audio_format == 'gift':
+        prompt += f"\n[Verse 2]\nЗа истории и встречи, за тепло счастливых дней,\nЗа мечты и добрый смех дорогих тебе людей!\n[Chorus]\n{chorus}\n[Outro]\nЭта песня для тебя!"
+    tags = str(style or ('upbeat pop, playful, Russian vocals, short song, 30-40 seconds' if audio_format == 'fun'
+                        else 'warm emotional pop, Russian vocals, heartfelt, 2-3 minutes'))
+    if len(prompt) > 5000 or len(tags) > 1000:
+        raise ValueError('Слишком много деталей для TTAPI.')
+    return prompt, tags, f"{scenario_title}: {details.split(',')[0]}"[:80]
+
+
 class AudioServiceError(RuntimeError):
     """Ошибка TTAPI, безопасная для журналирования без ключа и тела ответа."""
 

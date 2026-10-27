@@ -34,10 +34,10 @@ from database import (
     get_all_counters, increment_counter,
     get_advanced_stats, update_user_activity, mark_user_inactive, get_active_user_ids,
     is_promo_active, PromoUnavailableError, get_users_by_activity, start_broadcast_promo,
-    get_users_for_reminder,
+    get_users_for_reminder, get_audio_order,
 )
 from prodamus import PACKAGES, ProdamusPayments
-from audio_service import generate_song, wait_for_song, song_tracks, AudioNotConfigured, SongFailed
+from audio_service import generate_song, wait_for_song, song_tracks, build_song_request, AudioNotConfigured, SongFailed
 from max_client import log_max_error
 from image_service import (
     GenerationLimitError,
@@ -1376,6 +1376,48 @@ def create_router(
         buttons.append(("⬅️ Назад", "cat_audio"))
         await _reply(event, text, attachments=[navigation_keyboard(buttons)])
 
+    async def prepare_audio_checkout(context, user_id, audio_format, data):
+        order_id = data.get('audio_checkout_id') or f'audio-{user_id}-{uuid4().hex}'
+        await context.update_data(audio_checkout_id=order_id)
+        existing_order = await get_audio_order(order_id)
+        if existing_order and existing_order['status'] == 'paid':
+            return order_id, None
+        link = data.get('audio_checkout_link')
+        if not link:
+            scenario = data['song_scenario' if audio_format == 'fun' else 'gift_scenario']
+            details = data['song_details' if audio_format == 'fun' else 'gift_details']
+            scenarios = AUDIO_FUN_SCENARIOS if audio_format == 'fun' else AUDIO_GIFT_SCENARIOS
+            scenario_key = ('audio_fun_' if audio_format == 'fun' else 'gift_scen_') + scenario
+            prompt, tags, title = build_song_request(details, scenarios[scenario_key][0], audio_format, data.get('song_style'))
+            link = await payments.create_audio_payment_link(user_id, audio_format, scenario, details, data.get('song_style'), prompt, tags, title, order_id=order_id)
+            if not isinstance(link, str) or not link.startswith('https://'):
+                raise ValueError('Не получена ссылка Prodamus.')
+            if (await context.get_data()).get('audio_checkout_id') == order_id:
+                await context.update_data(audio_checkout_link=link)
+        return order_id, link
+
+    async def audio_payment_keyboard(event, context, audio_format, buttons):
+        fallback = navigation_keyboard(buttons)
+        user_id = event.get_ids()[1]
+        if user_id is None or user_id == admin_user_id or payments is None:
+            return fallback
+        lock = generation_locks.setdefault(user_id, asyncio.Lock())
+        if lock.locked():
+            return fallback
+        try:
+            async with lock:
+                order_id, link = await prepare_audio_checkout(context, user_id, audio_format, await context.get_data())
+                if link is None or (await context.get_data()).get('audio_checkout_id') != order_id:
+                    return fallback
+                keyboard = InlineKeyboardBuilder()
+                pay_payload = 'audio_fun_payment_soon' if audio_format == 'fun' else 'gift_payment_soon'
+                for text, payload in buttons:
+                    keyboard.row(LinkButton(text=text, url=link) if payload == pay_payload else CallbackButton(text=text, payload=payload))
+                return keyboard.as_markup()
+        except Exception as exc:
+            logger.error('Не удалось подготовить кнопку оплаты аудиопесни (%s).', type(exc).__name__)
+            return fallback  # Старый callback позволит повторить получение ссылки.
+
     async def run_song_generation(event: MessageCallback, context: MemoryContext, audio_format: str) -> None:
         if event.message is None:
             await event.ack(notification="Меню недоступно. Отправьте /start.")
@@ -1385,9 +1427,40 @@ def create_router(
             await event.ack(notification="Не удалось определить пользователя.")
             return
         if admin_user_id is None or user_id != admin_user_id:
-            await event.ack(notification="Оплата пока недоступна.")
-            await _reply(event, "💳 Оплата аудиопесен пока недоступна. Мы скоро подключим оплату — следите за обновлениями!",
-                         attachments=[navigation_keyboard((("⬅️ Назад", "audio_tariff_fun" if audio_format == "fun" else "gift_choose_scenario"),))])
+            if payments is None:
+                await event.ack(notification="Оплата пока недоступна.")
+                await _reply(event, "💳 Оплата аудиопесен пока недоступна. Мы скоро подключим оплату — следите за обновлениями!",
+                             attachments=[navigation_keyboard((("⬅️ Назад", "audio_tariff_fun" if audio_format == "fun" else "gift_choose_scenario"),))])
+                return
+            checkout_lock = generation_locks.setdefault(user_id, asyncio.Lock())
+            if checkout_lock.locked():
+                await event.ack(notification='Ссылка уже формируется. Пожалуйста, подождите.')
+                return
+            async with checkout_lock:
+                await event.ack(notification='Готовлю ссылку на оплату…')
+                data = await context.get_data()
+                expected = PosterStates.waiting_for_audio_fun_payment if audio_format == 'fun' else PosterStates.waiting_for_gift_preview
+                scenario = data.get('song_scenario' if audio_format == 'fun' else 'gift_scenario')
+                details = data.get('song_details' if audio_format == 'fun' else 'gift_details')
+                scenarios = AUDIO_FUN_SCENARIOS if audio_format == 'fun' else AUDIO_GIFT_SCENARIOS
+                scenario_key = ('audio_fun_' if audio_format == 'fun' else 'gift_scen_') + str(scenario)
+                if await context.get_state() != expected or scenario_key not in scenarios or not isinstance(details, str) or not details.strip():
+                    await _reply(event, 'Выберите сценарий и заполните детали песни заново.')
+                    return
+                try:
+                    order_id, link = await prepare_audio_checkout(context, user_id, audio_format, data)
+                    if link is None:
+                        await _reply(event, 'Оплата уже получена. Я пришлю песню по этому заказу; повторно платить не нужно.')
+                        return
+                    if (await context.get_data()).get('audio_checkout_id') != order_id:
+                        return
+                    label = 'Оплатить 199 ₽ и получить 2 варианта' if audio_format == 'fun' else 'Оплатить 490 ₽ и получить полный трек'
+                    keyboard = InlineKeyboardBuilder().row(LinkButton(text=label, url=link)).row(
+                        CallbackButton(text='⬅️ Назад', payload='audio_tariff_fun' if audio_format == 'fun' else 'gift_choose_scenario')).as_markup()
+                    await _reply(event, f'💳 Для оплаты перейдите по ссылке ниже. После оплаты я автоматически пришлю песню.\nЗаказ: {order_id}', attachments=[keyboard])
+                except Exception as exc:
+                    logger.error('Не удалось создать аудиозаказ (%s).', type(exc).__name__)
+                    await _reply(event, 'Не удалось сформировать ссылку на оплату. Попробуйте позже; повторно оплачивать ранее оплаченный заказ не нужно.')
             return
         lock = generation_locks.setdefault(user_id, asyncio.Lock())
         if lock.locked():
@@ -1431,18 +1504,9 @@ def create_router(
                     return
                 job_id = data.get("audio_job_id")
                 if not job_id:
-                    # custom=true принимает слова песни, а не инструкции для модели.
-                    label = scenarios[prefix + scenario][0]
-                    chorus = "Эта песня для тебя, улыбайся, пой со мной!\nПусть удача каждый день будет рядом с тобой!"
-                    prompt = f"[Verse]\n{details.strip()}\nСегодня эта песня посвящается тебе!\n[Chorus]\n{chorus}"
-                    if audio_format == "gift":
-                        prompt += f"\n[Verse 2]\nЗа истории и встречи, за тепло счастливых дней,\nЗа мечты и добрый смех дорогих тебе людей!\n[Chorus]\n{chorus}\n[Outro]\nЭта песня для тебя!"
-                    tags = str(data.get("song_style") or ("upbeat pop, playful, Russian vocals, short song, 30-40 seconds" if audio_format == "fun"
-                                                        else "warm emotional pop, Russian vocals, heartfelt, 2-3 minutes"))
-                    if len(prompt) > 5000 or len(tags) > 1000:
-                        raise ValueError("Слишком много деталей для TTAPI.")
+                    prompt, tags, title = build_song_request(details, scenarios[prefix + scenario][0], audio_format, data.get('song_style'))
                     await context.update_data(audio_submit_started=True)
-                    job_id = await song_generator(prompt, tags, f"{label}: {details.split(',')[0]}"[:80])
+                    job_id = await song_generator(prompt, tags, title)
                     if not await session_current():
                         return
                     await context.update_data(audio_job_id=job_id)
@@ -1479,6 +1543,28 @@ def create_router(
     @router.message_callback(F.callback.payload == "audio_fun_payment_soon")
     async def audio_fun_payment_soon(event: MessageCallback, context: MemoryContext) -> None:
         await run_song_generation(event, context, "fun")
+
+    @router.message_callback(F.callback.payload.startswith('audio_paid_download:'))
+    async def paid_audio_download(event: MessageCallback) -> None:
+        if event.message is None:
+            await event.ack(notification='Меню недоступно. Отправьте /start.')
+            return
+        parts = event.callback.payload.split(':')
+        order = await get_audio_order(parts[1]) if len(parts) == 3 else None
+        if (not order or order['user_id'] != event.get_ids()[1] or order['status'] != 'paid'
+                or parts[2] not in {'0', '1'} or not order['tracks_json']):
+            await event.ack(notification='Трек недоступен.')
+            return
+        import json
+        tracks = json.loads(order['tracks_json'])
+        index = int(parts[2])
+        if index >= len(tracks):
+            await event.ack(notification='Трек недоступен.')
+            return
+        await increment_counter('audio_download_mp3', user_id=order['user_id'])
+        await event.ack(notification='Ссылка на MP3 готова.')
+        url = tracks[index]['audioUrl']
+        await _reply(event, url, attachments=[InlineKeyboardBuilder().row(LinkButton(text='Скачать MP3', url=url)).as_markup()])
 
     @router.message_callback(F.callback.payload.in_({"audio_gift_preview", "audio_download_fun_1", "audio_download_fun_2", "audio_download_gift_1", "audio_download_gift_2",
                                                      "audio_download_gift_mp3", "audio_download_gift_instrumental"}))
@@ -1934,7 +2020,7 @@ def create_router(
             return
         await context.update_data(gift_details=details)
         await context.set_state(PosterStates.waiting_for_gift_preview)
-        await _reply(event, AUDIO_GIFT_PREVIEW_TEXT, attachments=[navigation_keyboard((
+        await _reply(event, AUDIO_GIFT_PREVIEW_TEXT, attachments=[await audio_payment_keyboard(event, context, "gift", (
             ("▶️ Послушать превью", "audio_gift_preview"),
             ("Оплатить 490 ₽ и получить полный трек", "gift_payment_soon"),
             ("⬅️ Назад", "gift_choose_scenario"),
@@ -1964,7 +2050,7 @@ def create_router(
             return
         await context.update_data(song_details=details)
         await context.set_state(PosterStates.waiting_for_audio_fun_payment)
-        await _reply(event, AUDIO_FUN_PAYMENT_TEXT, attachments=[navigation_keyboard((
+        await _reply(event, AUDIO_FUN_PAYMENT_TEXT, attachments=[await audio_payment_keyboard(event, context, "fun", (
             ("Оплатить 199 ₽ и получить 2 варианта", "audio_fun_payment_soon"),
             ("⬅️ Назад", "audio_tariff_fun"),
         ))])

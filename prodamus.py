@@ -17,7 +17,7 @@ import aiohttp
 from yarl import URL
 
 from config import Config
-from database import create_payment_order, get_payment_order
+from database import create_payment_order, get_payment_order, create_audio_order, get_audio_order
 
 PACKAGES = {
     1: (9900, "1 генерация (Открытка)"),
@@ -194,6 +194,26 @@ class ProdamusPayments:
             raise ValueError("Prodamus не вернул платёжную ссылку.")
         return _https_url(body.strip())
 
+    async def create_audio_payment_link(
+        self, user_id: int, audio_format: str, scenario: str, details: str, style: str | None,
+        prompt: str, tags: str, title: str, *, order_id: str,
+    ) -> str:
+        await create_audio_order(order_id, user_id, audio_format, scenario, details, style, prompt, tags, title)
+        order = await get_audio_order(order_id)
+        if order['status'] != 'pending':
+            raise ValueError('Аудиозаказ уже оплачен.')
+        package_id = order['package_id']
+        data = {
+            'do': 'link', 'order_id': order_id,
+            'products': [{'name': order['product_name'], 'price': f"{order['amount_kopecks'] // 100}.00", 'quantity': '1'}],
+            'customer_extra': json.dumps({'user_id': user_id, 'credits': 0, 'package_id': package_id}, separators=(',', ':')),
+            '_param_user_id': str(user_id), '_param_credits': '0', '_param_package_id': package_id,
+            'urlReturn': self.return_url, 'urlSuccess': self.return_url, 'urlNotification': self.webhook_url,
+            'payments_limit': '1',
+        }
+        data['sign'] = sign_link_payload(data, self.secret)
+        return await self._request_payment_link(data)
+
     async def validate_payment(self, data: dict):
         order_id = data.get("order_num")
         payment_id = data.get("order_id")
@@ -201,7 +221,10 @@ class ProdamusPayments:
             raise ValueError("Нет номера заказа или платежа.")
         order = await get_payment_order(order_id)
         if order is None:
+            order = await get_audio_order(order_id)
+        if order is None:
             raise ValueError("Заказ не найден.")
+        order = dict(order)
         if str(data.get("currency", "rub")).lower() != "rub":
             raise ValueError("Валюта не соответствует заказу.")
         if _kopecks(data.get("sum", data.get("amount"))) != order["amount_kopecks"]:
@@ -235,6 +258,10 @@ class ProdamusPayments:
                 raise ValueError("Метаданные пакета не соответствуют заказу.")
         # Сумма уже сверена с сохранённым заказом выше: смена прайса не должна
         # блокировать оплату ссылки, выданной до изменения цены.
-        if order["credits"] not in PACKAGES or PACKAGES[order["credits"]][1] != order["product_name"]:
+        if order.get('order_type') == 'audio':
+            expected = {'audio_fun': (19900, 'Песня по фану'), 'audio_gift': (49000, 'Песня в подарок')}
+            if expected.get(order['package_id']) != (order['amount_kopecks'], order['product_name']):
+                raise ValueError('Неизвестный аудиотариф.')
+        elif order["credits"] not in PACKAGES or PACKAGES[order["credits"]][1] != order["product_name"]:
             raise ValueError("Неизвестный пакет.")
         return order, payment_id

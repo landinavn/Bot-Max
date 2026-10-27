@@ -3251,7 +3251,7 @@ async def test_song_scenario_collects_details_without_generation_or_payment(cred
     await credit_db.grant_free_trial(456)
     before = dict(await credit_db.get_user(456))
     generator, card, payments = AsyncMock(), AsyncMock(), Mock()
-    router = create_router(generator, postcard_generator=card, payments=payments)
+    router = create_router(generator, postcard_generator=card, payments=payments, admin_user_id=456)
     context = await ready_context()
     await context.update_data(photo={'url': 'https://example.com/old.png'}, card_text='old')
     selected = callback_event(payload)
@@ -3910,8 +3910,8 @@ async def test_ttapi_one_gift_track_is_delivered():
 @pytest.mark.parametrize('admin,actor', [(None, 456), (789, 456), (456, 789)])
 @pytest.mark.parametrize('cached', [False, True])
 async def test_non_admin_audio_payment_is_placeholder_without_api_calls(credit_db, kind, admin, actor, cached):
-    submit, wait, payments = AsyncMock(), AsyncMock(), Mock()
-    router = create_router(admin_user_id=admin, song_generator=submit, song_waiter=wait, payments=payments)
+    submit, wait = AsyncMock(), AsyncMock()
+    router = create_router(admin_user_id=admin, song_generator=submit, song_waiter=wait, payments=None)
     context = await tt_context(kind)
     if cached:
         await context.update_data(audio_format=kind, audio_job_id='old-job', audio_tracks=TT_RESULT['data']['musics'])
@@ -3927,7 +3927,112 @@ async def test_non_admin_audio_payment_is_placeholder_without_api_calls(credit_d
     assert back.payload == ('audio_tariff_fun' if kind == 'fun' else 'gift_choose_scenario')
     submit.assert_not_awaited()
     wait.assert_not_awaited()
-    assert payments.mock_calls == []
     assert await context.get_state() == before_state
     assert await context.get_data() == before_data
     assert await credit_db.get_all_counters() == {}
+
+
+@pytest.mark.parametrize('kind', ['fun', 'gift'])
+async def test_audio_checkout_creates_personal_link_and_keeps_snapshot_without_generating(credit_db, kind):
+    async def create(user_id, fmt, scenario, details, style, prompt, tags, title, *, order_id):
+        await credit_db.create_audio_order(order_id, user_id, fmt, scenario, details, style, prompt, tags, title)
+        return 'https://link.payform.ru/personal-order'
+    payments = SimpleNamespace(create_audio_payment_link=AsyncMock(side_effect=create))
+    submit, wait = AsyncMock(), AsyncMock()
+    router = create_router(payments=payments, admin_user_id=999, song_generator=submit, song_waiter=wait)
+    context = await tt_context(kind)
+    event = callback_event('audio_fun_payment_soon' if kind == 'fun' else 'gift_payment_soon')
+    await dispatch_callback(router, event, context)
+    event.ack.assert_awaited_once()
+    link = event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0]
+    assert link.url == 'https://link.payform.ru/personal-order'
+    data = await context.get_data()
+    order_id = data['audio_checkout_id']
+    saved = await credit_db.get_audio_order(order_id)
+    assert saved['user_id'] == 456 and saved['audio_format'] == kind
+    assert saved['amount_kopecks'] == (19900 if kind == 'fun' else 49000)
+    assert saved['details'] == ('Сергей, любит кофе' if kind == 'fun' else 'Аня, любит горы')
+    assert saved['status'] == 'pending'
+    retry = callback_event(event.callback.payload)
+    await dispatch_callback(router, retry, context)
+    payments.create_audio_payment_link.assert_awaited_once()
+    submit.assert_not_awaited()
+    wait.assert_not_awaited()
+    await credit_db.mark_audio_paid(order_id, 'paid')
+    await dispatch_callback(router, retry, context)
+    assert 'Оплата уже получена' in retry.send.await_args.args[0]
+    payments.create_audio_payment_link.assert_awaited_once()
+    await context.clear()
+    assert (await credit_db.get_audio_order(order_id))['details'] == saved['details']
+
+
+@pytest.mark.parametrize('kind', ['fun', 'gift'])
+async def test_audio_checkout_without_details_never_creates_invoice(kind):
+    payments = SimpleNamespace(create_audio_payment_link=AsyncMock())
+    event = callback_event('audio_fun_payment_soon' if kind == 'fun' else 'gift_payment_soon')
+    await dispatch_callback(create_router(payments=payments), event, await ready_context())
+    assert 'заполните детали' in event.send.await_args.args[0]
+    payments.create_audio_payment_link.assert_not_awaited()
+
+
+async def test_concurrent_audio_checkout_creates_only_one_link(credit_db):
+    import asyncio
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def create(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return 'https://link.payform.ru/one'
+    payments = SimpleNamespace(create_audio_payment_link=AsyncMock(side_effect=create))
+    router = create_router(payments=payments)
+    context = await tt_context()
+    first = asyncio.create_task(dispatch_callback(router, callback_event('audio_fun_payment_soon'), context))
+    try:
+        await entered.wait()
+        duplicate = callback_event('audio_fun_payment_soon')
+        await dispatch_callback(router, duplicate, context)
+        duplicate.send.assert_not_awaited()
+    finally:
+        release.set()
+        await first
+    payments.create_audio_payment_link.assert_awaited_once()
+
+
+@pytest.mark.parametrize('actor', [456, 789])
+async def test_paid_audio_download_uses_persistent_order_and_checks_owner(credit_db, actor):
+    import json
+    await credit_db.create_audio_order('download-order', 456, 'gift', 'bday', 'Аня', None, '[Verse]\nАня', 'pop', 'title')
+    await credit_db.mark_audio_paid('download-order', 'paid')
+    await credit_db.update_audio_order('download-order', tracks_json=json.dumps(TT_RESULT['data']['musics']))
+    event = callback_event('audio_paid_download:download-order:1')
+    event.get_ids = lambda: (123, actor)
+    await dispatch_callback(create_router(), event, await ready_context())
+    event.ack.assert_awaited_once()
+    if actor == 456:
+        assert event.send.await_args.args[0] == 'https://audio.example/2.mp3'
+        assert (await credit_db.get_all_counters())['audio_download_mp3'] == 1
+    else:
+        event.send.assert_not_awaited()
+        assert 'audio_download_mp3' not in await credit_db.get_all_counters()
+
+
+@pytest.mark.parametrize('kind', ['fun', 'gift'])
+async def test_regular_audio_payment_screen_has_direct_url_button_before_payment(credit_db, kind):
+    async def create(user_id, fmt, scenario, details, style, prompt, tags, title, *, order_id):
+        await credit_db.create_audio_order(order_id, user_id, fmt, scenario, details, style, prompt, tags, title)
+        return 'https://link.payform.ru/personal-checkout'
+    payments = SimpleNamespace(create_audio_payment_link=AsyncMock(side_effect=create))
+    submit, wait = AsyncMock(), AsyncMock()
+    router = create_router(payments=payments, song_generator=submit, song_waiter=wait)
+    context = await ready_context()
+    scenario = 'audio_fun_boss' if kind == 'fun' else 'gift_scen_bday'
+    await dispatch_callback(router, callback_event(scenario), context)
+    event = message_event('Аня, любит горы')
+    await call_handler(router, 'echo', event, context)
+    buttons = event.message.answer.await_args.kwargs['attachments'][0].payload.buttons
+    pay = next(row[0] for row in buttons if row[0].text.startswith('Оплатить'))
+    assert pay.url == 'https://link.payform.ru/personal-checkout'
+    saved = await credit_db.get_audio_order((await context.get_data())['audio_checkout_id'])
+    assert saved['status'] == 'pending' and saved['details'] == 'Аня, любит горы'
+    payments.create_audio_payment_link.assert_awaited_once()
+    submit.assert_not_awaited()
+    wait.assert_not_awaited()

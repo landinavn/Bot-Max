@@ -3164,7 +3164,7 @@ async def test_stats_campaign_block_is_last_and_excludes_admin(credit_db):
 
 
 @pytest.mark.parametrize('tariff,counter', list(handlers.AUDIO_CLICK_EVENTS.items()))
-async def test_audio_tariffs_show_placeholder_and_return_to_workshop(credit_db, tariff, counter):
+async def test_audio_tariffs_show_scenarios_or_placeholder_and_return_to_workshop(credit_db, tariff, counter):
     await credit_db.grant_free_trial(456)
     before = dict(await credit_db.get_user(456))
     generator = AsyncMock()
@@ -3175,11 +3175,19 @@ async def test_audio_tariffs_show_placeholder_and_return_to_workshop(credit_db, 
     event = callback_event(tariff)
     await dispatch_callback(router, event, context)
     event.ack.assert_awaited_once()
-    assert event.send.await_args.args[0] == (
-        '🚀 Отличный выбор! Мы уже настраиваем генератор песен, и совсем скоро вы сможете создать свой хит. '
-        'Следите за обновлениями!'
-    )
-    back = event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0]
+    if tariff == 'audio_tariff_fun':
+        assert event.send.await_args.args[0] == handlers.AUDIO_FUN_MENU_TEXT
+        buttons = event.send.await_args.kwargs['attachments'][0].payload.buttons
+        assert [row[0].payload for row in buttons] == [
+            'audio_fun_boss', 'audio_fun_friend', 'audio_fun_cat', 'audio_fun_student',
+            'audio_fun_universal', 'audio_fun_meme', 'cat_audio',
+        ]
+    else:
+        assert event.send.await_args.args[0] == (
+            '🚀 Отличный выбор! Мы уже настраиваем генератор песен, и совсем скоро вы сможете создать свой хит. '
+            'Следите за обновлениями!'
+        )
+    back = event.send.await_args.kwargs['attachments'][0].payload.buttons[-1][0]
     assert (back.text, back.payload) == ('⬅️ Назад', 'cat_audio')
     assert await context.get_state() == PosterStates.waiting_for_mode
     assert await context.get_data() == {}
@@ -3232,3 +3240,119 @@ async def test_audio_stats_default_to_zero(credit_db):
     await call_handler(create_router(admin_user_id=456), 'stats', event)
     text = event.message.answer.await_args.args[0]
     assert '- Песня по фану (199 ₽): 0\n- Песня в подарок (490 ₽): 0' in text
+
+
+@pytest.mark.parametrize('payload', list(handlers.AUDIO_FUN_SCENARIOS))
+async def test_song_scenario_collects_details_without_generation_or_payment(credit_db, payload):
+    await credit_db.grant_free_trial(456)
+    before = dict(await credit_db.get_user(456))
+    generator, card, payments = AsyncMock(), AsyncMock(), Mock()
+    router = create_router(generator, postcard_generator=card, payments=payments)
+    context = await ready_context()
+    await context.update_data(photo={'url': 'https://example.com/old.png'}, card_text='old')
+    selected = callback_event(payload)
+    await dispatch_callback(router, selected, context)
+    selected.ack.assert_awaited_once()
+    assert selected.send.await_args.args[0] == handlers.AUDIO_FUN_SCENARIOS[payload][1]
+    scenario = payload.removeprefix('audio_fun_')
+    assert await context.get_data() == {'song_scenario': scenario}
+    assert await context.get_state() == PosterStates.waiting_for_song_details
+    answer = message_event('  Аня, любим вино и сериалы  ')
+    # Общий обработчик тоже должен маршрутизировать такое состояние.
+    await call_handler(router, 'echo', answer, context)
+    assert answer.message.answer.await_args.args[0] == handlers.AUDIO_FUN_TEST_TEXT
+    assert await context.get_state() == PosterStates.waiting_for_mode
+    assert await context.get_data() == {}
+    assert await credit_db.get_all_counters() == {'audio_scen_' + scenario: 1}
+    assert dict(await credit_db.get_user(456)) == before
+    generator.assert_not_awaited()
+    card.assert_not_awaited()
+    assert payments.mock_calls == []
+
+
+@pytest.mark.parametrize('payload', list(handlers.AUDIO_FUN_SCENARIOS))
+async def test_song_deleted_callback_does_not_change_state_or_count(credit_db, payload):
+    event = callback_event(payload, deleted=True)
+    context = await ready_context()
+    before = await context.get_data()
+    await dispatch_callback(create_router(), event, context)
+    event.ack.assert_awaited_once()
+    event.send.assert_not_awaited()
+    assert await context.get_data() == before
+    assert await credit_db.get_all_counters() == {}
+
+
+@pytest.mark.parametrize('text', ['', '   ', None])
+async def test_song_empty_details_keep_waiting(text):
+    context = await ready_context()
+    await context.set_state(PosterStates.waiting_for_song_details)
+    await context.update_data(song_scenario='cat')
+    event = message_event(text)
+    await call_handler(create_router(), 'collect_song_details', event, context)
+    assert 'текстом' in event.message.answer.await_args.args[0]
+    assert await context.get_state() == PosterStates.waiting_for_song_details
+
+
+@pytest.mark.parametrize('destination', ['cat_audio', 'audio_tariff_fun', 'back_to_main', '/cancel'])
+async def test_song_navigation_clears_details(destination):
+    context = await ready_context()
+    await context.set_state(PosterStates.waiting_for_song_details)
+    await context.update_data(song_scenario='cat', song_details='old')
+    router = create_router()
+    if destination == '/cancel':
+        await call_handler(router, 'cancel', message_event('/cancel'), context)
+    else:
+        await dispatch_callback(router, callback_event(destination), context)
+    assert await context.get_state() == PosterStates.waiting_for_mode
+    assert await context.get_data() == {}
+
+
+async def test_song_stats_count_scenarios_and_exclude_admin(credit_db):
+    router = create_router(admin_user_id=456)
+    for user_id in (101, 456):
+        for payload in handlers.AUDIO_FUN_SCENARIOS:
+            event = callback_event(payload)
+            event.get_ids = lambda user_id=user_id: (123, user_id)
+            await dispatch_callback(router, event, await ready_context())
+    stats = message_event('/stats')
+    await call_handler(router, 'stats', stats)
+    text = stats.message.answer.await_args.args[0]
+    assert '🎵 Интерес к Аудиопесням (сценарии):' in text
+    for payload, (label, _) in handlers.AUDIO_FUN_SCENARIOS.items():
+        assert '- ' + label + ': 1' in text
+        assert (await credit_db.get_all_counters())['audio_scen_' + payload.removeprefix('audio_fun_')] == 2
+
+
+@pytest.mark.parametrize('general_first', [False, True])
+async def test_dispatcher_routes_song_details_and_cancel(credit_db, monkeypatch, event_replies, general_first):
+    from maxapi import Dispatcher
+    from maxapi.context.isolation import SimpleEventIsolation
+    from maxapi.types import MessageCallback, MessageCreated, User
+    monkeypatch.setattr(handlers, '_reply', event_replies)
+    router = create_router()
+    if general_first:
+        generic = next(h for h in router.event_handlers if h.func_event.__name__ == 'echo')
+        router.event_handlers.remove(generic)
+        index = next(i for i, h in enumerate(router.event_handlers) if h.func_event.__name__ == 'collect_song_details')
+        router.event_handlers.insert(index, generic)
+    dp = Dispatcher(storage=MemoryContext, event_isolation=SimpleEventIsolation())
+    dp.include_routers(router)
+    bot = SimpleNamespace(me=User(user_id=999, first_name='Bot', is_bot=True),
+                          send_message=AsyncMock(return_value=object()), send_callback=AsyncMock())
+    user = {'user_id': 456, 'first_name': 'Test', 'is_bot': False}
+    def message(text=None, sender=None):
+        return {'sender': sender or user, 'recipient': {'chat_id': 123, 'chat_type': 'dialog'},
+                'timestamp': 1, 'body': {'mid': 'song-test', 'seq': 1, 'text': text}}
+    try:
+        for text in ('Барсик, орёт в 5 утра', '/cancel'):
+            await dp.handle(MessageCallback(timestamp=1, bot=bot, message=message(sender=bot.me.model_dump()),
+                callback={'timestamp': 1, 'callback_id': 'song', 'payload': 'audio_fun_cat', 'user': user}))
+            context = dp.fsm.get_context(chat_id=123, user_id=456)
+            assert await context.get_state() == PosterStates.waiting_for_song_details
+            await dp.handle(MessageCreated(timestamp=2, bot=bot, message=message(text)))
+            replies = [c.kwargs.get('text') for c in bot.send_message.await_args_list]
+            assert (handlers.AUDIO_FUN_TEST_TEXT if text != '/cancel' else 'Сбор данных отменён.') in replies
+            assert await context.get_state() == PosterStates.waiting_for_mode
+            assert await context.get_data() == {}
+    finally:
+        await dp.shutdown()

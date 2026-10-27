@@ -2185,7 +2185,7 @@ CATEGORY_EXPECTATIONS = {
     "sub_halloween": ([26], ["mode_halloween", "back_to_cards"]),
     "sub_goodmorning": ([20], ["mode_goodmorning", "back_to_cards"]),
     "cat_photo": (["photo_main_1.webp", "photo_main_2.webp", "photo_main_3.webp"], ["photo_style_studio", "photo_style_walk", "photo_style_ny", "back_to_main"]),
-    "cat_audio": ([], ["back_to_main"]),
+    "cat_audio": ([], ["audio_tariff_fun", "audio_tariff_gift", "back_to_main"]),
 }
 
 
@@ -3161,3 +3161,74 @@ async def test_stats_campaign_block_is_last_and_excludes_admin(credit_db):
         '📍 Статистика по кампании «Yandex New Year»:\n'
         '👥 Новые пользователи: 1\n🖼 Сгенерировали: 1\n💳 Покупатели: 1\n💰 Оплат: 99,00 ₽'
     )
+
+
+@pytest.mark.parametrize('tariff,counter', list(handlers.AUDIO_CLICK_EVENTS.items()))
+async def test_audio_tariffs_show_placeholder_and_return_to_workshop(credit_db, tariff, counter):
+    await credit_db.grant_free_trial(456)
+    before = dict(await credit_db.get_user(456))
+    generator = AsyncMock()
+    payments = Mock()
+    router = create_router(generator, payments=payments)
+    context = await ready_context()
+    await context.update_data(photo={'url': 'https://example.com/old.png'}, card_text='old')
+    event = callback_event(tariff)
+    await dispatch_callback(router, event, context)
+    event.ack.assert_awaited_once()
+    assert event.send.await_args.args[0] == (
+        '🚀 Отличный выбор! Мы уже настраиваем генератор песен, и совсем скоро вы сможете создать свой хит. '
+        'Следите за обновлениями!'
+    )
+    back = event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0]
+    assert (back.text, back.payload) == ('⬅️ Назад', 'cat_audio')
+    assert await context.get_state() == PosterStates.waiting_for_mode
+    assert await context.get_data() == {}
+    assert await credit_db.get_all_counters() == {counter: 1}
+    assert dict(await credit_db.get_user(456)) == before
+    generator.assert_not_awaited()
+    assert payments.mock_calls == []
+    workshop = callback_event(back.payload)
+    await dispatch_callback(router, workshop, context)
+    workshop.ack.assert_awaited_once()
+    assert workshop.send.await_args.kwargs['text'] == handlers.CATEGORY_MENUS['cat_audio'][1]
+    buttons = workshop.send.await_args.kwargs['attachments'][0].payload.buttons
+    assert [(row[0].text, row[0].payload) for row in buttons] == [
+        ('🔥 Песня по фану (199 ₽)', 'audio_tariff_fun'),
+        ('🎁 Песня в подарок (490 ₽)', 'audio_tariff_gift'),
+        ('⬅️ Назад', 'back_to_main'),
+    ]
+    assert await credit_db.get_all_counters() == {counter: 1, 'click_audio': 1}
+
+
+@pytest.mark.parametrize('tariff', list(handlers.AUDIO_CLICK_EVENTS))
+async def test_audio_tariff_deleted_message_is_acknowledged_without_counting(credit_db, tariff):
+    event = callback_event(tariff, deleted=True)
+    await dispatch_callback(create_router(), event, await ready_context())
+    event.ack.assert_awaited_once()
+    event.send.assert_not_awaited()
+    assert await credit_db.get_all_counters() == {}
+
+
+async def test_audio_stats_count_each_click_and_exclude_admin(credit_db):
+    router = create_router(admin_user_id=456)
+    for user_id in (101, 456):
+        for payload in ('cat_audio', 'audio_tariff_fun', 'audio_tariff_fun', 'audio_tariff_gift'):
+            event = callback_event(payload)
+            event.get_ids = lambda user_id=user_id: (123, user_id)
+            await dispatch_callback(router, event, await ready_context())
+    assert await credit_db.get_all_counters() == {
+        'click_audio': 2, 'click_audio_fun': 4, 'click_audio_gift': 2,
+    }
+    stats = message_event('/stats')
+    await call_handler(router, 'stats', stats)
+    text = stats.message.answer.await_args.args[0]
+    assert ('- Аудиопесни (клики): 1\n- Песня по фану (199 ₽): 2\n'
+            '- Песня в подарок (490 ₽): 1') in text
+    assert (await credit_db.get_global_stats())['total_generated'] == 0
+
+
+async def test_audio_stats_default_to_zero(credit_db):
+    event = message_event('/stats')
+    await call_handler(create_router(admin_user_id=456), 'stats', event)
+    text = event.message.answer.await_args.args[0]
+    assert '- Песня по фану (199 ₽): 0\n- Песня в подарок (490 ₽): 0' in text

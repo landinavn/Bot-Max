@@ -2512,8 +2512,10 @@ async def test_photo_style_tariff_preview_has_no_payment_or_generation(credit_db
     await dispatch_callback(router, callback_event(back.payload), context)
     assert await context.get_data() == {}
     assert await context.get_state() == PosterStates.waiting_for_mode
-    # Считаются только два нажатия cat_photo; стиль/тариф не добавляют генераций.
-    assert await credit_db.get_all_counters() == {"click_photo": 2}
+    # Стиль и тариф учитываются отдельно от входов в раздел и генераций.
+    style_event = {"photo_style_studio": "click_photo_studio", "photo_style_walk": "click_photo_walk", "photo_style_ny": "click_photo_ny"}[style]
+    tariff_event = {"photo_tariff_590": "click_tariff_590", "photo_tariff_990": "click_tariff_990", "photo_tariff_1490": "click_tariff_1490"}[tariff]
+    assert await credit_db.get_all_counters() == {"click_photo": 2, style_event: 1, tariff_event: 1}
     assert (await credit_db.get_user(456))["balance"] == 1
     assert (await credit_db.get_user(456))["total_generations"] == 0
     assert (await credit_db.get_user(456))["total_purchases"] == 0
@@ -2538,4 +2540,59 @@ async def test_photo_preview_handles_buttons_from_old_or_deleted_messages(credit
     deleted.ack.assert_awaited_once_with(notification="Меню недоступно. Отправьте /start.")
     deleted.send.assert_not_awaited()
     assert await context.get_data() == before
+    assert await credit_db.get_all_counters() == {handlers.PHOTO_CLICK_EVENTS[payload]: 1}
+
+
+PHOTO_CLICK_CASES = [
+    ("photo_style_studio", "click_photo_studio", "Стиль: Студия"),
+    ("photo_style_walk", "click_photo_walk", "Стиль: Прогулка"),
+    ("photo_style_ny", "click_photo_ny", "Стиль: Новогодняя"),
+    ("photo_tariff_590", "click_tariff_590", "Тариф «Попробовать» (590)"),
+    ("photo_tariff_990", "click_tariff_990", "Тариф «Фотосессия» (990)"),
+    ("photo_tariff_1490", "click_tariff_1490", "Тариф «Премиум» (1490)"),
+]
+
+
+async def test_photo_click_stats_are_separate_and_exclude_admin(credit_db):
+    await credit_db.grant_free_trial(101)
+    before = dict(await credit_db.get_user(101))
+    router = create_router(admin_user_id=456)
+    for count, (payload, _, _) in enumerate(PHOTO_CLICK_CASES, 1):
+        event = callback_event(payload)
+        event.get_ids = lambda: (123, 101)
+        for _ in range(count):
+            await dispatch_callback(router, event, await ready_context())
+        await dispatch_callback(router, callback_event(payload), await ready_context())  # Тестовый клик администратора.
+    all_counters = await credit_db.get_all_counters()
+    filtered = await credit_db.get_all_counters(admin_id=456)
+    for count, (_, event_name, _) in enumerate(PHOTO_CLICK_CASES, 1):
+        assert all_counters[event_name] == count + 1
+        assert filtered[event_name] == count
+    assert filtered["gen_unclassified"] == 0
+    assert dict(await credit_db.get_user(101)) == before
+    event = message_event("/stats")
+    await call_handler(router, "stats", event)
+    text = event.message.answer.await_args.args[0]
+    assert "📸 Интерес к Фотосессиям (клики):" in text
+    assert text.index("- Аудиопесни (клики):") < text.index("📸 Интерес к Фотосессиям (клики):")
+    for count, (_, _, label) in enumerate(PHOTO_CLICK_CASES, 1):
+        assert f"- {label}: {count}\n" in text
+    assert "🖼 Всего сгенерировано картинок: 0" in text
+    assert "8 Марта" not in text
+
+
+async def test_photo_click_stats_defaults_to_zero(credit_db):
+    event = message_event("/stats")
+    await call_handler(create_router(admin_user_id=456), "stats", event)
+    text = event.message.answer.await_args.args[0]
+    for _, _, label in PHOTO_CLICK_CASES:
+        assert f"- {label}: 0\n" in text
+
+
+@pytest.mark.parametrize("payload,event_name,label", PHOTO_CLICK_CASES)
+async def test_photo_clicks_without_user_id_are_not_counted(credit_db, payload, event_name, label):
+    event = callback_event(payload)
+    event.get_ids = lambda: (123, None)
+    await dispatch_callback(create_router(), event, await ready_context())
+    event.send.assert_awaited_once()
     assert await credit_db.get_all_counters() == {}

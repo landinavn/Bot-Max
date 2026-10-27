@@ -373,6 +373,23 @@ PHOTO_TARIFF_SOON_TEXT = (
 )
 
 
+PHOTO_NY_TRIAL_TEMPLATES = {
+    "photo_temp_fam3": ("👨‍👩‍👧 Семейная (3 чел)", "fam3"),
+    "photo_temp_fam4": ("👨‍👩‍👧‍👦 Семейная (4+ чел)", "fam4"),
+    "photo_temp_toddlers": ("👶 Семейная с малышами", "toddlers"),
+    "photo_temp_mom_daughter": ("👩‍👧 Мама + дочка", "mom_daughter"),
+    "photo_temp_rabbit": ("🐰 С кроликом", "rabbit"),
+}
+# TODO: Заменить на реальную ссылку Prodamus для 590 руб
+PHOTO_TRIAL_TEST_PAYMENT_URL = "https://fotobot.payform.ru/"
+PHOTO_TRIAL_CHECKOUT_TEXT = (
+    "Отличный выбор! Сейчас я сформирую ссылку на оплату.\n\n"
+    "Стоимость: 590 ₽ (3 фото).\n\n"
+    "После оплаты я попрошу вас загрузить фото, и мы начнем!\n\n"
+    "⚠️ Это тестовая ссылка. Оплата и обработка заказа фотосессии пока не подключены."
+)
+
+
 BROADCAST_EXAMPLE_FILES = (
     r"i (28).webp",
     r"i (25).webp",
@@ -1034,6 +1051,15 @@ def create_router(
         await send_menu_examples(event, filenames)
         await _reply(event, text=text, attachments=[navigation_keyboard(buttons)])
 
+    async def show_photo_tariffs(event: MessageCallback, context: MemoryContext, style: str) -> None:
+        await context.clear()
+        await context.set_state(PosterStates.waiting_for_mode)
+        await context.update_data(photo_style=style)
+        await _reply(
+            event, PHOTO_TARIFF_TEXT.format(style_name=PHOTO_STYLES[style]),
+            attachments=[navigation_keyboard(PHOTO_TARIFF_BUTTONS)],
+        )
+
     @router.message_callback(F.callback.payload.in_(set(PHOTO_STYLES)))
     async def photo_style_menu(event: MessageCallback, context: MemoryContext) -> None:
         if event.message is None:
@@ -1043,27 +1069,72 @@ def create_router(
         user_id = event.get_ids()[1]
         if user_id is not None:
             await increment_counter(PHOTO_CLICK_EVENTS[event.callback.payload], user_id=user_id)
-        await context.clear()
-        await context.set_state(PosterStates.waiting_for_mode)
-        await context.update_data(photo_style=event.callback.payload)
-        await _reply(
-            event, PHOTO_TARIFF_TEXT.format(style_name=PHOTO_STYLES[event.callback.payload]),
-            attachments=[navigation_keyboard(PHOTO_TARIFF_BUTTONS)],
-        )
+        await show_photo_tariffs(event, context, event.callback.payload)
 
     @router.message_callback(F.callback.payload.in_({"photo_tariff_590", "photo_tariff_990", "photo_tariff_1490"}))
-    async def photo_tariff_soon(event: MessageCallback) -> None:
+    async def photo_tariff_soon(event: MessageCallback, context: MemoryContext) -> None:
         if event.message is None:
             await event.ack(notification="Меню недоступно. Отправьте /start.")
             return
-        await event.ack(notification="Скоро будет доступно…")
+        data = await context.get_data()
+        ny_trial = data.get("photo_style") == "photo_style_ny" and event.callback.payload == "photo_tariff_590"
+        await event.ack(notification="Выберите сюжет…" if ny_trial else "Скоро будет доступно…")
         user_id = event.get_ids()[1]
         if user_id is not None:
             await increment_counter(PHOTO_CLICK_EVENTS[event.callback.payload], user_id=user_id)
+        if ny_trial:
+            await context.clear()
+            await context.set_state(PosterStates.waiting_for_mode)
+            await context.update_data(photo_style="photo_style_ny", photo_tariff="photo_tariff_590")
+            buttons = tuple((label, payload) for payload, (label, _) in PHOTO_NY_TRIAL_TEMPLATES.items())
+            await _reply(
+                event, "Отличный выбор! Выберите сюжет для вашей новогодней фотосессии (3 фото):",
+                attachments=[navigation_keyboard((*buttons, ("⬅️ Назад", "photo_tariff_back")))],
+            )
+            return
         await _reply(
             event, PHOTO_TARIFF_SOON_TEXT,
             attachments=[navigation_keyboard((("⬅️ Назад", "cat_photo"),))],
         )
+
+    @router.message_callback(F.callback.payload == "photo_tariff_back")
+    async def photo_tariff_back(event: MessageCallback, context: MemoryContext) -> None:
+        if event.message is None:
+            await event.ack(notification="Меню недоступно. Отправьте /start.")
+            return
+        await event.ack(notification="Показываю тарифы…")
+        style = (await context.get_data()).get("photo_style")
+        if style in PHOTO_STYLES:
+            await show_photo_tariffs(event, context, style)
+        else:
+            await context.clear()
+            await context.set_state(PosterStates.waiting_for_mode)
+            _, text, buttons = CATEGORY_MENUS["cat_photo"]
+            await _reply(event, text=text, attachments=[navigation_keyboard(buttons)])
+
+    @router.message_callback(F.callback.payload.in_(set(PHOTO_NY_TRIAL_TEMPLATES)))
+    async def photo_template_checkout(event: MessageCallback, context: MemoryContext) -> None:
+        if event.message is None:
+            await event.ack(notification="Меню недоступно. Отправьте /start.")
+            return
+        await event.ack(notification="Выбираю сюжет…")
+        data = await context.get_data()
+        if data.get("photo_style") != "photo_style_ny" or data.get("photo_tariff") != "photo_tariff_590":
+            await _reply(
+                event, "Выберите стиль и тариф фотосессии заново.",
+                attachments=[navigation_keyboard((("📸 Фотосессия", "cat_photo"),))],
+            )
+            return
+        template = PHOTO_NY_TRIAL_TEMPLATES[event.callback.payload][1]
+        await context.update_data(
+            template=template, photo_product_name="Фотосессия Попробовать", photo_amount_kopecks=59000,
+        )
+        # create_payment_link и webhook принимают только PACKAGES с кредитами.
+        # Не выдаём тестовую ссылку за оплачиваемый заказ и не создаём заказ пакета кредитов.
+        keyboard = InlineKeyboardBuilder().row(
+            LinkButton(text="Оплатить 590 ₽", url=PHOTO_TRIAL_TEST_PAYMENT_URL)
+        ).row(CallbackButton(text="⬅️ Назад", payload="photo_tariff_590")).as_markup()
+        await _reply(event, PHOTO_TRIAL_CHECKOUT_TEXT, attachments=[keyboard])
 
     @router.message_callback(F.callback.payload.in_({"show_examples", "show_help"}))
     async def utility_menu(event: MessageCallback) -> None:

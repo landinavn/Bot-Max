@@ -45,6 +45,7 @@ from image_service import (
     UnsupportedPhotoFormatError,
     generate_vision_boards,
     generate_postcards,
+    generate_photosession_frame, NY_FAMILY_THREE_PROMPTS,
     fix_text_with_ai,
     POSTCARD_PROMPTS,
     MAX_CARD_TEXT_LENGTH,
@@ -484,6 +485,7 @@ async def purchase_keyboard(user_id: int | None):
 class PosterStates(StatesGroup):
     waiting_for_mode = State()
     waiting_for_photo = State()
+    waiting_for_photosession_photo = State()
     waiting_for_prompt = State()
     waiting_for_card_text = State()
     # Принимать описание и из состояния, сохранённого прежней версией.
@@ -509,7 +511,9 @@ def main_keyboard():
 def photo_trial_payment_keyboard():
     return InlineKeyboardBuilder().row(
         LinkButton(text="Оплатить 590 ₽", url=PHOTO_TRIAL_PAYMENT_URL)
-    ).row(CallbackButton(text="⬅️ Назад", payload="photo_tariff_back")).as_markup()
+    ).row(CallbackButton(text="Выбрать сюжет", payload="photo_choose_template")).row(
+        CallbackButton(text="⬅️ Назад", payload="photo_tariff_back")
+    ).as_markup()
 
 
 def is_bot_message(event: MessageCreated) -> bool:
@@ -530,6 +534,7 @@ def create_router(
     admin_user_id: int | None = None,
     postcard_generator: Callable[[str, str, str], Awaitable[list[str]]] = generate_postcards,
     bot_link: str = DEFAULT_BOT_LINK,
+    photosession_generator: Callable[[str, str], Awaitable[str]] = generate_photosession_frame,
 ) -> Router:
     bot_link = validate_bot_link(bot_link)
     router = Router()
@@ -537,6 +542,75 @@ def create_router(
     broadcast_lock = asyncio.Lock()
     # FSM изолирован по чату, а баланс общий для всех чатов пользователя.
     generation_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
+
+    def family_three_selected(data):
+        return (data.get("photo_style") == "photo_style_ny"
+                and data.get("photo_tariff") == "photo_tariff_590" and data.get("template") == "fam3")
+
+    async def run_family_photosession(event, context: MemoryContext) -> None:
+        user_id = event.get_ids()[1]
+        if user_id is None:
+            await _reply(event, "Не удалось определить пользователя. Отправьте /start.")
+            return
+        lock = generation_locks.setdefault(user_id, asyncio.Lock())
+        if lock.locked():
+            await _reply(event, "Фотографии уже создаются. Пожалуйста, подождите.")
+            return
+        async with lock:
+            data = await context.get_data()
+            if not family_three_selected(data):
+                await _reply(event, "Выберите новогоднюю фотосессию, тариф 590 ₽ и сюжет «Семейная (3 чел)».")
+                return
+            photo = data.get("photo")
+            if not isinstance(photo, dict) or not photo.get("url"):
+                await context.set_state(PosterStates.waiting_for_photosession_photo)
+                await _reply(event, photo_request("Отправьте одно общее фото, где хорошо видны лица всех трёх членов семьи. /cancel — отмена."))
+                return
+            if data.get("photosession_complete"):
+                await _reply(event, "Все 3 фотографии уже отправлены.")
+                return
+            session_id = data.get("photosession_session_id") or uuid4().hex
+            await context.update_data(photosession_session_id=session_id)
+            await context.set_state(PosterStates.generating)
+            try:
+                urls = list(data.get("photosession_urls", []))
+                sent_count = data.get("photosession_sent_count", 0)
+                reference_url = photo["url"]
+                for index, prompt in enumerate(NY_FAMILY_THREE_PROMPTS):
+                    if (await context.get_data()).get("photosession_session_id") != session_id:
+                        return
+                    if index >= len(urls):
+                        await _reply(event, f"Генерирую кадр {index + 1} из 3...")
+                        url = await photosession_generator(reference_url, prompt)
+                        if not isinstance(url, str) or not url.startswith("https://"):
+                            raise RuntimeError("Генератор не вернул HTTPS-ссылку кадра.")
+                        if (await context.get_data()).get("photosession_session_id") != session_id:
+                            return
+                        urls.append(url)
+                        await context.update_data(photosession_urls=list(urls))
+                    if index >= sent_count:
+                        image = await upload_image_for_max(event.bot, urls[index])
+                        sent = await event.bot.send_message(
+                            **_recipient(event), text=f"Фотография {index + 1} из 3", attachments=[image],
+                        )
+                        if sent is None:
+                            raise RuntimeError("MAX не подтвердил отправку фотографии.")
+                        if (await context.get_data()).get("photosession_session_id") != session_id:
+                            return
+                        await context.update_data(photosession_sent_count=index + 1)
+                await context.update_data(photosession_complete=True)
+                await context.set_state(PosterStates.waiting_for_mode)
+                await _reply(event, "Готово! Все 3 фотографии отправлены.", attachments=[main_keyboard()])
+            except Exception as exc:
+                logger.error("Ошибка новогодней фотосессии для %s: %s", user_id, exc, exc_info=True)
+                await log_max_error(exc, logger)
+                if (await context.get_data()).get("photosession_session_id") != session_id:
+                    return
+                await context.set_state(PosterStates.waiting_for_mode)
+                await _reply(
+                    event, "Не удалось завершить фотосессию. Готовые кадры сохранены. Нажмите «Продолжить», чтобы повторить с места остановки.",
+                    attachments=[navigation_keyboard((("Продолжить", "photo_temp_fam3"), ("⬅️ Назад", "cat_photo")))],
+                )
 
     async def generate_and_send(
         event: MessageCreated | MessageCallback,
@@ -1099,6 +1173,19 @@ def create_router(
             attachments=[navigation_keyboard((("⬅️ Назад", "cat_photo"),))],
         )
 
+    @router.message_callback(F.callback.payload == "photo_choose_template")
+    async def photo_choose_template(event: MessageCallback, context: MemoryContext) -> None:
+        if event.message is None:
+            await event.ack(notification="Меню недоступно. Отправьте /start.")
+            return
+        await event.ack(notification="Выберите сюжет…")
+        data = await context.get_data()
+        if data.get("photo_style") != "photo_style_ny" or data.get("photo_tariff") != "photo_tariff_590":
+            await _reply(event, "Выберите стиль и тариф фотосессии заново.", attachments=[navigation_keyboard((("Фотосессия", "cat_photo"),))])
+            return
+        buttons = tuple((label, payload) for payload, (label, _) in PHOTO_NY_TRIAL_TEMPLATES.items())
+        await _reply(event, "Выберите сюжет новогодней фотосессии (3 фото):", attachments=[navigation_keyboard((*buttons, ("⬅️ Назад", "photo_tariff_back")))])
+
     @router.message_callback(F.callback.payload == "photo_tariff_back")
     async def photo_tariff_back(event: MessageCallback, context: MemoryContext) -> None:
         if event.message is None:
@@ -1119,8 +1206,14 @@ def create_router(
         if event.message is None:
             await event.ack(notification="Меню недоступно. Отправьте /start.")
             return
+        if await context.get_state() == PosterStates.generating:
+            await event.ack(notification="Фотографии уже создаются. Пожалуйста, подождите.")
+            return
         await event.ack(notification="Выбираю сюжет…")
         data = await context.get_data()
+        if event.callback.payload == "photo_temp_fam3" and data.get("photo_style") not in (None, "photo_style_ny"):
+            await _reply(event, PHOTO_TARIFF_SOON_TEXT, attachments=[navigation_keyboard((("⬅️ Назад", "cat_photo"),))])
+            return
         if data.get("photo_style") != "photo_style_ny" or data.get("photo_tariff") != "photo_tariff_590":
             await _reply(
                 event, "Выберите стиль и тариф фотосессии заново.",
@@ -1131,6 +1224,9 @@ def create_router(
         await context.update_data(
             template=template, photo_product_name="Фотосессия Попробовать", photo_amount_kopecks=59000,
         )
+        if template == "fam3":
+            await run_family_photosession(event, context)
+            return
         # Готовая ссылка Prodamus используется без создания заказа пакета кредитов.
         # Возврат и подтверждение оплаты фотосессии подключаются отдельно.
         await _reply(event, PHOTO_TRIAL_CHECKOUT_TEXT, attachments=[photo_trial_payment_keyboard()])
@@ -1290,6 +1386,25 @@ def create_router(
             await _reply(event, HELP_ANSWERS[event.callback.payload], parse_mode=ParseMode.HTML)
         else:
             await _reply(event, HELP_ANSWERS[event.callback.payload])
+
+    @router.message_created(PosterStates.waiting_for_photosession_photo)
+    async def collect_photosession_photo(event: MessageCreated, context: MemoryContext) -> None:
+        if is_bot_message(event):
+            return
+        data = await context.get_data()
+        if not family_three_selected(data):
+            await context.clear()
+            await context.set_state(PosterStates.waiting_for_mode)
+            await _reply(event, "Выберите фотосессию заново.", attachments=[main_keyboard()])
+            return
+        body = event.message.body
+        photos = [a for a in (getattr(body, "attachments", None) or []) if a.type == "image"
+                  and isinstance(a.payload, PhotoAttachmentPayload) and a.payload.url] if body else []
+        if len(photos) != 1:
+            await _reply(event, photo_request("Нужно одно общее фото семьи из трёх человек, отправленное как изображение."))
+            return
+        await context.update_data(photo=photos[0].payload.model_dump())
+        await run_family_photosession(event, context)
 
     @router.message_created(PosterStates.waiting_for_photo)
     async def collect_photo(event: MessageCreated, context: MemoryContext) -> None:

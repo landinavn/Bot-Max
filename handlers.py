@@ -45,7 +45,7 @@ from image_service import (
     UnsupportedPhotoFormatError,
     generate_vision_boards,
     generate_postcards,
-    generate_photosession_frame, NY_FAMILY_THREE_PROMPTS,
+    generate_photosession_frame, NY_FAMILY_THREE_PROMPTS, NY_FAMILY_PHOTOSESSION_PROMPTS,
     fix_text_with_ai,
     POSTCARD_PROMPTS,
     MAX_CARD_TEXT_LENGTH,
@@ -376,7 +376,7 @@ PHOTO_TARIFF_SOON_TEXT = (
 
 PHOTO_NY_TRIAL_TEMPLATES = {
     "photo_temp_fam3": ("👨‍👩‍👧 Семейная (3 чел)", "fam3"),
-    "photo_temp_fam4": ("👨‍👩‍👧‍👦 Семейная (4+ чел)", "fam4"),
+    "photo_temp_fam4": ("👨‍👩‍👧‍👦 Семейная 3+ чел", "fam4"),
     "photo_temp_toddlers": ("👶 Семейная с малышами", "toddlers"),
     "photo_temp_mom_daughter": ("👩‍👧 Мама + дочка", "mom_daughter"),
     "photo_temp_rabbit": ("🐰 С кроликом", "rabbit"),
@@ -543,9 +543,10 @@ def create_router(
     # FSM изолирован по чату, а баланс общий для всех чатов пользователя.
     generation_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
 
-    def family_three_selected(data):
+    def family_photosession_selected(data):
         return (data.get("photo_style") == "photo_style_ny"
-                and data.get("photo_tariff") == "photo_tariff_590" and data.get("template") == "fam3")
+                and data.get("photo_tariff") == "photo_tariff_590"
+                and data.get("template") in NY_FAMILY_PHOTOSESSION_PROMPTS)
 
     async def run_family_photosession(event, context: MemoryContext) -> None:
         user_id = event.get_ids()[1]
@@ -562,13 +563,17 @@ def create_router(
             return
         async with lock:
             data = await context.get_data()
-            if not family_three_selected(data):
-                await _reply(event, "Выберите новогоднюю фотосессию, тариф 590 ₽ и сюжет «Семейная (3 чел)».")
+            if not family_photosession_selected(data):
+                await _reply(event, "Выберите новогоднюю фотосессию, тариф 590 ₽ и семейный сюжет.")
                 return
             photo = data.get("photo")
             if not isinstance(photo, dict) or not photo.get("url"):
                 await context.set_state(PosterStates.waiting_for_photosession_photo)
-                await _reply(event, photo_request("Отправьте одно общее фото, где хорошо видны лица всех трёх членов семьи. /cancel — отмена."))
+                await _reply(event, photo_request(
+                    "Отправьте одно общее фото, где хорошо видны лица всех трёх членов семьи. /cancel — отмена."
+                    if data["template"] == "fam3" else
+                    "Отправьте одно общее фото семьи из 3 и более человек, где хорошо видны лица детей и родителей. /cancel — отмена."
+                ))
                 return
             if data.get("photosession_complete"):
                 await _reply(event, "Все 3 фотографии уже отправлены.")
@@ -580,7 +585,7 @@ def create_router(
                 urls = list(data.get("photosession_urls", []))
                 sent_count = data.get("photosession_sent_count", 0)
                 reference_url = photo["url"]
-                for index, prompt in enumerate(NY_FAMILY_THREE_PROMPTS):
+                for index, prompt in enumerate(NY_FAMILY_PHOTOSESSION_PROMPTS[data["template"]]):
                     if (await context.get_data()).get("photosession_session_id") != session_id:
                         return
                     if index >= len(urls):
@@ -613,7 +618,7 @@ def create_router(
                 await context.set_state(PosterStates.waiting_for_mode)
                 await _reply(
                     event, "Не удалось завершить фотосессию. Готовые кадры сохранены. Нажмите «Продолжить», чтобы повторить с места остановки.",
-                    attachments=[navigation_keyboard((("Продолжить", "photo_temp_fam3"), ("⬅️ Назад", "cat_photo")))],
+                    attachments=[navigation_keyboard((("Продолжить", f"photo_temp_{data['template']}"), ("⬅️ Назад", "cat_photo")))],
                 )
 
     async def generate_and_send(
@@ -1215,7 +1220,7 @@ def create_router(
             return
         await event.ack(notification="Выбираю сюжет…")
         data = await context.get_data()
-        if event.callback.payload == "photo_temp_fam3" and data.get("photo_style") not in (None, "photo_style_ny"):
+        if event.callback.payload in {"photo_temp_fam3", "photo_temp_fam4"} and data.get("photo_style") not in (None, "photo_style_ny"):
             await _reply(event, PHOTO_TARIFF_SOON_TEXT, attachments=[navigation_keyboard((("⬅️ Назад", "cat_photo"),))])
             return
         if data.get("photo_style") != "photo_style_ny" or data.get("photo_tariff") != "photo_tariff_590":
@@ -1228,20 +1233,23 @@ def create_router(
         await context.update_data(
             template=template, photo_product_name="Фотосессия Попробовать", photo_amount_kopecks=59000,
         )
-        if template == "fam3" and admin_user_id is not None and event.get_ids()[1] == admin_user_id:
-            if data.get("photosession_admin_bypass") and data.get("photosession_session_id"):
+        if template in NY_FAMILY_PHOTOSESSION_PROMPTS and admin_user_id is not None and event.get_ids()[1] == admin_user_id:
+            if (data.get("template") == template and data.get("photosession_admin_bypass")
+                    and data.get("photosession_session_id")):
                 await run_family_photosession(event, context)
                 return
             # Новый запуск администратора всегда запрашивает свежее общее фото.
             await context.clear()
             await context.update_data(
                 photo_style="photo_style_ny", photo_tariff="photo_tariff_590", tariff="trial_590",
-                template="fam3", photosession=True, photosession_admin_bypass=True,
+                template=template, photosession=True, photosession_admin_bypass=True,
                 photo_product_name="Фотосессия Попробовать", photo_amount_kopecks=59000,
             )
             await context.set_state(PosterStates.waiting_for_photosession_photo)
             await _reply(
                 event, "👑 Режим администратора: Оплата пропущена. Пожалуйста, загрузите общее фото семьи (3 человека) для генерации."
+                if template == "fam3" else
+                "👑 Режим администратора: Оплата пропущена. Пожалуйста, загрузите общее фото семьи (3 и более человек) для генерации."
             )
             return
         # Готовая ссылка Prodamus используется без создания заказа пакета кредитов.
@@ -1409,7 +1417,7 @@ def create_router(
         if is_bot_message(event):
             return
         data = await context.get_data()
-        if not family_three_selected(data):
+        if not family_photosession_selected(data):
             await context.clear()
             await context.set_state(PosterStates.waiting_for_mode)
             await _reply(event, "Выберите фотосессию заново.", attachments=[main_keyboard()])
@@ -1418,7 +1426,10 @@ def create_router(
         photos = [a for a in (getattr(body, "attachments", None) or []) if a.type == "image"
                   and isinstance(a.payload, PhotoAttachmentPayload) and a.payload.url] if body else []
         if len(photos) != 1:
-            await _reply(event, photo_request("Нужно одно общее фото семьи из трёх человек, отправленное как изображение."))
+            await _reply(event, photo_request(
+                "Нужно одно общее фото семьи из трёх человек, отправленное как изображение."
+                if data["template"] == "fam3" else "Нужно одно общее фото семьи из 3 и более человек, отправленное как изображение."
+            ))
             return
         await context.update_data(photo=photos[0].payload.model_dump())
         await run_family_photosession(event, context)

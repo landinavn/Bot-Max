@@ -697,6 +697,37 @@ NY_FAMILY_THREE_PROMPTS = (
 )
 
 
+NY_FAMILY_PLUS_PROMPTS = (
+    "Create a highly realistic, professional New Year photoshoot.  "
+    "CRITICAL IDENTITY & LOGIC: Focus ONLY on the children from the reference photo in this frame. "
+    "Do NOT include the adults.  CLOTHING: Elegant festive attire.  "
+    "BACKGROUND: The children are lying on a cozy rug right next to a beautifully decorated Christmas tree, "
+    "surrounded by glowing lights, ornaments, and wrapped gifts.  "
+    "POSE & CAMERA ANGLE: The children are lying on the floor, looking at the camera.  "
+    "CRITICAL ANATOMY REQUIREMENT: Perfect human anatomy. Exactly 5 fingers on each hand. No extra limbs.  "
+    "DO NOT ADD ANY TEXT.",
+    "Create a highly realistic, professional New Year photoshoot. "
+    "The image must feature EXACTLY the same people from the reference photo (3 or more people). "
+    "Preserve their exact faces perfectly.  CLOTHING: Elegant festive attire.  "
+    "BACKGROUND: Cozy interior with a beautifully decorated Christmas tree.  "
+    "POSE & CAMERA ANGLE: Full-length wide shot. The whole family is together. "
+    "Some members are standing elegantly, while others are sitting. Everyone is looking at the camera.  "
+    "CRITICAL ANATOMY REQUIREMENT: Perfect human anatomy for all people. Exactly 5 fingers on each hand. "
+    "Correct body proportions. No extra limbs.  DO NOT ADD ANY TEXT.",
+    "Create a highly realistic, professional New Year photoshoot. "
+    "Focus ONLY on the adult parents (man and woman) from the reference photo. Preserve their exact faces perfectly.  "
+    "CLOTHING: Elegant festive attire.  "
+    "BACKGROUND: Cozy interior with a beautifully decorated Christmas tree.  "
+    "POSE & CAMERA ANGLE: Full-length shot. The parents are sitting elegantly together on a sofa or chairs, "
+    "looking at the camera.  CRITICAL ANATOMY REQUIREMENT: Perfect human anatomy. Exactly 5 fingers on each hand. "
+    "Correct body proportions. No extra limbs.  DO NOT ADD ANY TEXT.",
+)
+NY_FAMILY_PHOTOSESSION_PROMPTS = {
+    "fam3": NY_FAMILY_THREE_PROMPTS,
+    "fam4": NY_FAMILY_PLUS_PROMPTS,
+}
+
+
 async def generate_photosession_frame(photo_url: str, prompt: str) -> str:
     """Один /images/edits через общий клиент с OPENAI_PROXY_URL и таймаутом 300 с.
 

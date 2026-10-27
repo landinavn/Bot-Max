@@ -2661,7 +2661,10 @@ async def test_legacy_ny_template_buttons_use_real_checkout(credit_db, label, pa
     assert (await context.get_data())["template"] == "rabbit"
     await dispatch_callback(router, callback_event("photo_tariff_back"), context)
     assert await context.get_data() == {"photo_style": "photo_style_ny"}
-    assert await credit_db.get_all_counters() == {"click_photo_ny": 1, "click_tariff_590": 1}
+    expected_counters = {"click_photo_ny": 1, "click_tariff_590": 1}
+    if template in {"fam3", "fam4", "toddlers"}:
+        expected_counters["select_photo_" + template] = 1
+    assert await credit_db.get_all_counters() == expected_counters
     payments.create_payment_link.assert_not_awaited()
     generator.assert_not_awaited()
     assert (await credit_db.get_user(456))["balance"] == 1
@@ -3604,7 +3607,7 @@ async def test_fun_regeneration_is_once_per_test_session(credit_db):
     await dispatch_callback(router, duplicate, context)
     duplicate.ack.assert_awaited_once()
     duplicate.send.assert_not_awaited()
-    assert await credit_db.get_all_counters() == {}
+    assert await credit_db.get_all_counters() == {'audio_regenerate_click': 2}
 
 
 @pytest.mark.parametrize('format_name', [None, 'gift'])
@@ -3637,3 +3640,89 @@ async def test_workshop_copy_matches_guarantees():
     assert 'Без превью — сразу после оплаты.' in text
     assert 'превью с защитой (10–15 сек)' in text
     assert 'без водяных знаков и голосового сопровождения' in text
+
+
+@pytest.mark.parametrize('payload,counter', [
+    ('photo_temp_fam3', 'select_photo_fam3'), ('photo_temp_fam4', 'select_photo_fam4'),
+    ('photo_temp_toddlers', 'select_photo_toddlers'),
+])
+async def test_photo_template_selection_counts_each_click_without_generation(credit_db, payload, counter):
+    generator = AsyncMock()
+    router = create_router(photosession_generator=generator)
+    context = await ready_context()
+    await context.update_data(photo_style='photo_style_ny', photo_tariff='photo_tariff_590')
+    for _ in range(2):
+        event = callback_event(payload)
+        await dispatch_callback(router, event, context)
+        event.ack.assert_awaited_once()
+    assert await credit_db.get_all_counters() == {counter: 2}
+    generator.assert_not_awaited()
+    assert (await credit_db.get_global_stats())['total_generated'] == 0
+
+
+@pytest.mark.parametrize('payload,counter', [
+    ('audio_download_fun_1', 'audio_download_mp3'), ('audio_download_fun_2', 'audio_download_mp3'),
+    ('audio_download_gift_mp3', 'audio_download_mp3'), ('audio_download_gift_instrumental', 'audio_download_inst'),
+    ('audio_gift_preview', None),
+])
+async def test_audio_file_click_counters_exclude_preview(credit_db, payload, counter):
+    context = await ready_context()
+    router = create_router()
+    for _ in range(2):
+        event = callback_event(payload)
+        await dispatch_callback(router, event, context)
+        event.ack.assert_awaited_once()
+        assert event.send.await_args.args[0] == 'Аудио скоро появится'
+    assert await credit_db.get_all_counters() == ({counter: 2} if counter else {})
+    assert (await credit_db.get_global_stats())['total_generated'] == 0
+
+
+async def test_regeneration_attempt_is_counted_even_when_session_is_missing(credit_db):
+    event = callback_event('audio_regenerate')
+    await dispatch_callback(create_router(), event, await ready_context())
+    event.ack.assert_awaited_once()
+    event.send.assert_not_awaited()
+    assert await credit_db.get_all_counters() == {'audio_regenerate_click': 1}
+
+
+async def test_new_engagement_stats_zero_and_admin_exclusion(credit_db):
+    expected = {
+        'select_photo_fam3': ('photo_temp_fam3', '- Семейная 3+'),
+        'select_photo_fam4': ('photo_temp_fam4', '- Семейная 4+'),
+        'select_photo_toddlers': ('photo_temp_toddlers', '- Семейная с малышами'),
+        'audio_regenerate_click': ('audio_regenerate', '- Нажали «Не то, ещё раз» (регенерация)'),
+        'audio_download_mp3': ('audio_download_gift_mp3', '- Скачали MP3'),
+        'audio_download_inst': ('audio_download_gift_instrumental', '- Скачали минусовку'),
+    }
+    router = create_router(admin_user_id=456)
+    stats = message_event('/stats')
+    await call_handler(router, 'stats', stats)
+    text = stats.message.answer.await_args.args[0]
+    for _, label in expected.values():
+        assert label + ': 0' in text
+    for user_id in (101, 456):
+        for payload, _ in expected.values():
+            context = await ready_context()
+            await context.update_data(photo_style='photo_style_ny', photo_tariff='photo_tariff_590')
+            event = callback_event(payload)
+            event.get_ids = lambda user_id=user_id: (123, user_id)
+            await dispatch_callback(router, event, context)
+    counters = await credit_db.get_all_counters()
+    assert {key: counters[key] for key in expected} == dict.fromkeys(expected, 2)
+    await call_handler(router, 'stats', stats)
+    text = stats.message.answer.await_args.args[0]
+    for _, label in expected.values():
+        assert label + ': 1' in text
+    assert text.index('🖼 Всего сгенерировано картинок:') < text.index('📸 Выбор шаблонов Фотосессий:')
+    assert text.index('📸 Выбор шаблонов Фотосессий:') < text.index('🎵 Активность Аудиопесен:')
+    assert (await credit_db.get_global_stats())['total_generated'] == 0
+
+
+@pytest.mark.parametrize('payload', ['photo_temp_fam3', 'photo_temp_fam4', 'photo_temp_toddlers',
+    'audio_regenerate', 'audio_download_fun_1', 'audio_download_fun_2',
+    'audio_download_gift_mp3', 'audio_download_gift_instrumental'])
+async def test_deleted_engagement_buttons_do_not_increment(credit_db, payload):
+    event = callback_event(payload, deleted=True)
+    await dispatch_callback(create_router(), event, await ready_context())
+    event.ack.assert_awaited_once()
+    assert await credit_db.get_all_counters() == {}

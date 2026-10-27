@@ -572,6 +572,8 @@ def create_router(
                 await _reply(event, photo_request(
                     "Отправьте одно общее фото, где хорошо видны лица всех трёх членов семьи. /cancel — отмена."
                     if data["template"] == "fam3" else
+                    "Отправьте одно общее фото семьи с малышом или малышами, где хорошо видны лица всех участников. /cancel — отмена."
+                    if data["template"] == "toddlers" else
                     "Отправьте одно общее фото семьи из 3 и более человек, где хорошо видны лица детей и родителей. /cancel — отмена."
                 ))
                 return
@@ -1220,7 +1222,7 @@ def create_router(
             return
         await event.ack(notification="Выбираю сюжет…")
         data = await context.get_data()
-        if event.callback.payload in {"photo_temp_fam3", "photo_temp_fam4"} and data.get("photo_style") not in (None, "photo_style_ny"):
+        if PHOTO_NY_TRIAL_TEMPLATES[event.callback.payload][1] in NY_FAMILY_PHOTOSESSION_PROMPTS and data.get("photo_style") not in (None, "photo_style_ny"):
             await _reply(event, PHOTO_TARIFF_SOON_TEXT, attachments=[navigation_keyboard((("⬅️ Назад", "cat_photo"),))])
             return
         if data.get("photo_style") != "photo_style_ny" or data.get("photo_tariff") != "photo_tariff_590":
@@ -1249,6 +1251,8 @@ def create_router(
             await _reply(
                 event, "👑 Режим администратора: Оплата пропущена. Пожалуйста, загрузите общее фото семьи (3 человека) для генерации."
                 if template == "fam3" else
+                "👑 Режим администратора: Оплата пропущена. Пожалуйста, загрузите общее фото семьи с малышом или малышами для генерации."
+                if template == "toddlers" else
                 "👑 Режим администратора: Оплата пропущена. Пожалуйста, загрузите общее фото семьи (3 и более человек) для генерации."
             )
             return
@@ -1428,7 +1432,10 @@ def create_router(
         if len(photos) != 1:
             await _reply(event, photo_request(
                 "Нужно одно общее фото семьи из трёх человек, отправленное как изображение."
-                if data["template"] == "fam3" else "Нужно одно общее фото семьи из 3 и более человек, отправленное как изображение."
+                if data["template"] == "fam3" else
+                "Нужно одно общее фото семьи с малышом или малышами, отправленное как изображение."
+                if data["template"] == "toddlers" else
+                "Нужно одно общее фото семьи из 3 и более человек, отправленное как изображение."
             ))
             return
         await context.update_data(photo=photos[0].payload.model_dump())

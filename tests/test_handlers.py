@@ -1793,7 +1793,7 @@ async def test_stats_excludes_admin_everywhere_and_appends_admin_test_activity(c
     assert "- Хэллоуин: 1\n" in text and "Всего сгенерировано картинок: 1" in text
     assert "- 5 генераций (299 ₽): 0" in text
     assert "Сумма оплат: 199,00 ₽" in text and "299,00 ₽" not in text
-    assert text.endswith("🛠 Тестовая активность (Админ):\n- Сгенерировано: 7\n- Покупок: 1")
+    assert "🛠 Тестовая активность (Админ):\n- Сгенерировано: 7\n- Покупок: 1" in text
 
 
 async def test_admin_stats_without_existing_admin_record_shows_zero_test_activity(credit_db):
@@ -1801,7 +1801,7 @@ async def test_admin_stats_without_existing_admin_record_shows_zero_test_activit
     await call_handler(create_router(admin_user_id=456), "stats", event)
     text = event.message.answer.await_args.args[0]
     assert "Всего запускали: 0" in text
-    assert text.endswith("🛠 Тестовая активность (Админ):\n- Сгенерировано: 0\n- Покупок: 0")
+    assert "🛠 Тестовая активность (Админ):\n- Сгенерировано: 0\n- Покупок: 0" in text
 
 
 @pytest.mark.parametrize("generated,command", [(True, "broadcast_gen"), (False, "broadcast_nogen")])
@@ -3131,3 +3131,33 @@ async def test_photo_album_failure_keeps_navigation(credit_db, example_photos, f
     await dispatch_callback(create_router(), event, await ready_context())
     assert event.send.await_args.kwargs["text"] == handlers.CATEGORY_MENUS["cat_photo"][1]
     assert event.send.await_args.kwargs["attachments"][0].payload.buttons[0][0].payload == "photo_style_studio"
+
+
+@pytest.mark.parametrize('entry', ['start', 'bot_started'])
+@pytest.mark.parametrize('payload', ['yandex_newyear', 'campaign_yandex_newyear_2027'])
+async def test_campaign_entry_preserves_first_source(credit_db, entry, payload):
+    router = create_router()
+    context = await ready_context()
+    event = message_event('/start ' + payload) if entry == 'start' else bot_started_event(payload)
+    await call_handler(router, entry, event, context)
+    original = dict(await credit_db.get_user(456))
+    assert original['first_start_source'] == 'yandex_newyear'
+    await call_handler(router, 'start', message_event('/start vk_ads'), context)
+    assert dict(await credit_db.get_user(456)) == original
+    assert await context.get_state() == PosterStates.waiting_for_mode
+
+
+async def test_stats_campaign_block_is_last_and_excludes_admin(credit_db):
+    for user_id in (456, 789):
+        await credit_db.record_first_start(user_id, 'yandex_newyear')
+        await credit_db.increment_generations(user_id)
+        await credit_db.create_payment_order(str(user_id), user_id, 1, 9900, 'test')
+        await credit_db.add_credits(user_id, 1, payment_order_id=str(user_id), provider_payment_id=str(user_id))
+    event = message_event('/stats')
+    event.get_ids = lambda: (123, 789)
+    await call_handler(create_router(admin_user_id=789), 'stats', event)
+    text = event.message.answer.await_args.args[0]
+    assert text.endswith(
+        '📍 Статистика по кампании «Yandex New Year»:\n'
+        '👥 Новые пользователи: 1\n🖼 Сгенерировали: 1\n💳 Покупатели: 1\n💰 Оплат: 99,00 ₽'
+    )

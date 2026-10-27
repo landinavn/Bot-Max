@@ -362,6 +362,25 @@ AUDIO_CLICK_EVENTS = {
     "audio_tariff_gift": "click_audio_gift",
 }
 
+AUDIO_FUN_SCENARIOS = {
+    "audio_fun_boss": ("🎤 Начальник года", "Напиши имя начальника и одну рабочую шутку или привычку (например: «Сергей, любит кофе»)"),
+    "audio_fun_friend": ("💖 Лучшая подруга", "Напиши имя подруги и одно общее воспоминание или фразу (например: «Аня, любим вино и сериалы»)"),
+    "audio_fun_cat": ("🐱 Гимн кота", "Напиши кличку кота и его привычку (например: «Барсик, орёт в 5 утра»)"),
+    "audio_fun_student": ("🎓 Вечный студент", "Напиши имя друга и его специальность или фразу (например: «Иван, сдаёт сессию»)"),
+    "audio_fun_universal": ("⏰ Поздравление на бегу", "Напиши имя и повод (например: «Маша, с днём рождения»)"),
+    "audio_fun_meme": ("🌀 Абсурдный мем", "Напиши имя (если нужно) и выбери тему: Ода холодильнику / Песня про забытые ключи / Гимн пятнице"),
+}
+
+AUDIO_FUN_MENU_TEXT = (
+    "🔥 Выбери сценарий для песни (30-40 секунд, 2 варианта на выбор). "
+    "После выбора я попрошу пару деталей, и мы создадим хит!"
+)
+
+AUDIO_FUN_TEST_TEXT = (
+    "Отличные данные! 🎵 Я отправляю их в студию. Генерация двух вариантов песни займет около минуты. "
+    "(Пока это тестовый режим, музыкальный API скоро будет подключен!)"
+)
+
 
 PHOTO_STYLES = {
     "photo_style_studio": "Студия",
@@ -513,6 +532,7 @@ class PosterStates(StatesGroup):
     waiting_for_photosession_photo = State()
     waiting_for_prompt = State()
     waiting_for_card_text = State()
+    waiting_for_song_details = State()
     # Принимать описание и из состояния, сохранённого прежней версией.
     waiting_for_sphere = State()
     generating = State()
@@ -919,6 +939,11 @@ def create_router(
             f"- Аудиопесни (клики): {counters.get('click_audio', 0)}\n"
             f"- Песня по фану (199 ₽): {counters.get('click_audio_fun', 0)}\n"
             f"- Песня в подарок (490 ₽): {counters.get('click_audio_gift', 0)}\n\n"
+            "🎵 Интерес к Аудиопесням (сценарии):\n"
+            + "\n".join(
+                f"- {label}: {counters.get('audio_scen_' + payload.removeprefix('audio_fun_'), 0)}"
+                for payload, (label, _) in AUDIO_FUN_SCENARIOS.items()
+            ) + "\n\n"
             "📸 Интерес к Фотосессиям (клики):\n"
             f"- Стиль: Студия: {counters.get('click_photo_studio', 0)}\n"
             f"- Стиль: Прогулка: {counters.get('click_photo_walk', 0)}\n"
@@ -1185,12 +1210,33 @@ def create_router(
             await increment_counter(AUDIO_CLICK_EVENTS[event.callback.payload], user_id=user_id)
         await context.clear()
         await context.set_state(PosterStates.waiting_for_mode)
+        if event.callback.payload == "audio_tariff_fun":
+            buttons = [(label, payload) for payload, (label, _) in AUDIO_FUN_SCENARIOS.items()]
+            await _reply(event, AUDIO_FUN_MENU_TEXT,
+                         attachments=[navigation_keyboard((*buttons, ("⬅️ Назад", "cat_audio")))])
+            return
         await _reply(
             event,
             "🚀 Отличный выбор! Мы уже настраиваем генератор песен, и совсем скоро вы сможете создать свой хит. "
             "Следите за обновлениями!",
             attachments=[navigation_keyboard((("⬅️ Назад", "cat_audio"),))],
         )
+
+    @router.message_callback(F.callback.payload.in_(set(AUDIO_FUN_SCENARIOS)))
+    async def audio_fun_scenario(event: MessageCallback, context: MemoryContext) -> None:
+        if event.message is None:
+            await event.ack(notification="Меню недоступно. Отправьте /start.")
+            return
+        await event.ack(notification="Жду детали песни…")
+        scenario = event.callback.payload.removeprefix("audio_fun_")
+        user_id = event.get_ids()[1]
+        if user_id is not None:
+            await increment_counter("audio_scen_" + scenario, user_id=user_id)
+        await context.clear()
+        await context.update_data(song_scenario=scenario)
+        await context.set_state(PosterStates.waiting_for_song_details)
+        await _reply(event, AUDIO_FUN_SCENARIOS[event.callback.payload][1],
+                     attachments=[navigation_keyboard((("⬅️ Назад", "audio_tariff_fun"),))])
 
     async def show_photo_tariffs(event: MessageCallback, context: MemoryContext, style: str) -> None:
         await context.clear()
@@ -1538,6 +1584,28 @@ def create_router(
             "/cancel — отмена"
         )
 
+    @router.message_created(PosterStates.waiting_for_song_details)
+    async def collect_song_details(event: MessageCreated, context: MemoryContext) -> None:
+        if is_bot_message(event):
+            return
+        data = await context.get_data()
+        if "audio_fun_" + str(data.get("song_scenario", "")) not in AUDIO_FUN_SCENARIOS:
+            await context.clear()
+            await context.set_state(PosterStates.waiting_for_mode)
+            await _reply(event, "Выбери сценарий песни заново.",
+                         attachments=[navigation_keyboard((("🔥 Песня по фану", "audio_tariff_fun"),))])
+            return
+        body = event.message.body
+        details = (body.text or "").strip() if body else ""
+        if not details:
+            await _reply(event, "Напиши имя и детали песни текстом. /cancel — отмена.")
+            return
+        await context.update_data(song_details=details)
+        await _reply(event, AUDIO_FUN_TEST_TEXT,
+                     attachments=[navigation_keyboard((("⬅️ Назад", "cat_audio"),))])
+        await context.clear()
+        await context.set_state(PosterStates.waiting_for_mode)
+
     @router.message_created(PosterStates.waiting_for_card_text)
     async def collect_card_text(event: MessageCreated, context: MemoryContext) -> None:
         if is_bot_message(event):
@@ -1641,6 +1709,9 @@ def create_router(
         if is_bot_message(event):
             return
         state = await context.get_state()
+        if state == PosterStates.waiting_for_song_details:
+            await collect_song_details(event, context)
+            return
         if state == PosterStates.waiting_for_card_text:
             # MAX останавливает поиск на первом подходящем обработчике:
             # простой return не передаст событие следующему хендлеру.

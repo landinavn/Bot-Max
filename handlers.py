@@ -1434,7 +1434,7 @@ def create_router(
                     # custom=true принимает слова песни, а не инструкции для модели.
                     label = scenarios[prefix + scenario][0]
                     chorus = "Эта песня для тебя, улыбайся, пой со мной!\nПусть удача каждый день будет рядом с тобой!"
-                    prompt = f"[Verse]\n{label.split(' ', 1)[-1]}\n{details.strip()}\nСегодня эта песня посвящается тебе!\n[Chorus]\n{chorus}"
+                    prompt = f"[Verse]\n{details.strip()}\nСегодня эта песня посвящается тебе!\n[Chorus]\n{chorus}"
                     if audio_format == "gift":
                         prompt += f"\n[Verse 2]\nЗа истории и встречи, за тепло счастливых дней,\nЗа мечты и добрый смех дорогих тебе людей!\n[Chorus]\n{chorus}\n[Outro]\nЭта песня для тебя!"
                     tags = str(data.get("song_style") or ("upbeat pop, playful, Russian vocals, short song, 30-40 seconds" if audio_format == "fun"

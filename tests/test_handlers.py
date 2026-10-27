@@ -3758,7 +3758,11 @@ async def test_ttapi_generation_returns_two_links_and_reuses_completed_task(cred
     assert submit.await_count == wait.await_count == 1
     prompt, tags, title = submit.await_args.args
     assert ('Сергей' if kind == 'fun' else 'Аня') in prompt
-    assert ('Начальник года' if kind == 'fun' else 'День рождения') in prompt
+    scenario_name = 'Начальник года' if kind == 'fun' else 'День рождения'
+    assert scenario_name not in prompt
+    assert scenario_name not in tags
+    assert scenario_name in title
+    assert prompt.startswith('[Verse]\n' + ('Сергей, любит кофе' if kind == 'fun' else 'Аня, любит горы'))
     assert ('rock' if kind == 'fun' else 'warm emotional pop') in tags
     assert len(title) <= 80
     assert 'https://audio.example/1.mp3' in event.send.await_args.args[0]

@@ -342,11 +342,13 @@ CATEGORY_MENUS = {
             "Мы создаем персональные песни с вашим именем или поздравлением. Выберите формат:\n\n"
             "🔥 «Песня по фану» (199 ₽)\n"
             "2 варианта на выбор. Без превью — сразу после оплаты. "
-            "Если не понравится — бесплатная перегенерация. Идеально, чтобы удивить друга или коллегу.\n\n"
+            "Если не понравится — 1 бесплатная перегенерация (ещё 2 варианта). "
+            "Идеально, чтобы удивить друга или коллегу.\n\n"
             "🎁 «Песня в подарок» (490 ₽)\n"
             "Полный трек 2–3 минуты + минусовка + текст. "
-            "Сначала послушайте превью (10–15 сек), чтобы понять стиль. "
-            "После оплаты — чистый звук без защиты. Если что-то не так — перегенерируем."
+            "Сначала послушайте превью с защитой (10–15 сек), чтобы понять стиль. "
+            "После оплаты — чистый звук без водяных знаков и голосового сопровождения. "
+            "Если что-то не так — бесплатно перегенерируем."
         ),
         (
             ("🔥 Песня по фану (199 ₽)", "audio_tariff_fun"),
@@ -376,9 +378,31 @@ AUDIO_FUN_MENU_TEXT = (
     "После выбора я попрошу пару деталей, и мы создадим хит!"
 )
 
-AUDIO_FUN_TEST_TEXT = (
-    "Отличные данные! 🎵 Я отправляю их в студию. Генерация двух вариантов песни займет около минуты. "
-    "(Пока это тестовый режим, музыкальный API скоро будет подключен!)"
+AUDIO_FUN_PAYMENT_TEXT = (
+    "🎵 Ваша песня почти готова!\n\n"
+    "Мы сгенерируем 2 варианта специально под ваш сценарий. Вы сможете выбрать лучший и скачать его в MP3.\n\n"
+    "Что если не понравится? Мы бесплатно перегенерируем песню 1 раз — без вопросов и доплат. "
+    "Просто нажмите «Не то, ещё раз» после прослушивания.\n\n"
+    "199 ₽ — и через минуту у вас будет два трека на выбор."
+)
+
+AUDIO_FUN_SUCCESS_TEXT = (
+    "🎧 Ваши треки готовы!\n\n"
+    "Вариант 1: Трек 1 — (стиль)\n"
+    "Вариант 2: Трек 2 — (стиль)\n\n"
+    "Прослушайте оба и выберите лучший. Если ни один не подошёл — нажмите «Не то, ещё раз», "
+    "и мы бесплатно сделаем ещё одну генерацию (2 новых варианта).\n\n"
+    "Скачать понравившийся: нажмите на кнопку под треком."
+)
+
+AUDIO_GIFT_SUCCESS_TEXT = (
+    "🎉 Ваша песня готова!\n\n"
+    "Вот ваш полный трек: [ссылка на MP3]\n"
+    "Минусовка: [ссылка]\n"
+    "Текст песни: [ссылка]\n\n"
+    "Если что-то пошло не так (файл не открывается, качество не устроило) — напишите в поддержку, "
+    "мы перегенерируем бесплатно.\n\n"
+    "Спасибо, что выбрали нас! Пусть подарок запомнится."
 )
 
 AUDIO_GIFT_TEXT = (
@@ -408,10 +432,15 @@ AUDIO_GIFT_SCENARIO_TEXT = (
 )
 
 AUDIO_GIFT_PREVIEW_TEXT = (
-    "🎧 Ваша песня почти готова!\n\n"
-    "Послушайте фрагмент (10–15 секунд), чтобы понять стиль и настроение.\n\n"
-    "(Это тестовый режим, музыкальный API скоро будет подключен!)\n\n"
-    "После оплаты вы получите полный трек (MP3), минусовку и текст песни."
+    "🎁 Ваша песня в подарок почти готова!\n\n"
+    "Послушайте фрагмент (10–15 секунд), чтобы понять стиль и настроение. "
+    "Обратите внимание: это превью с защитой — в полной версии будет чистый звук без голосового сопровождения.\n\n"
+    "Что вы получите после оплаты:\n"
+    "• Полный трек (2–3 минуты) в MP3 — чистый звук, без водяных знаков\n"
+    "• Минусовку (инструментал) — если захотите спеть сами\n"
+    "• Текст песни — чтобы сохранить на память\n\n"
+    "490 ₽ — и подарок готов. Если после прослушивания полной версии что-то пойдёт не так — "
+    "мы бесплатно перегенерируем."
 )
 
 
@@ -566,6 +595,8 @@ class PosterStates(StatesGroup):
     waiting_for_prompt = State()
     waiting_for_card_text = State()
     waiting_for_song_details = State()
+    waiting_for_audio_fun_payment = State()
+    waiting_for_audio_test_result = State()
     waiting_for_gift_bday = State()
     waiting_for_gift_anniv = State()
     waiting_for_gift_parents = State()
@@ -1331,6 +1362,70 @@ def create_router(
         await _reply(event, "💳 Оплата подарочной песни пока недоступна. Музыкальный API скоро будет подключен!",
                      attachments=[navigation_keyboard((("⬅️ Назад", "gift_choose_scenario"),))])
 
+    @router.message_callback(F.callback.payload == "audio_fun_payment_soon")
+    async def audio_fun_payment_soon(event: MessageCallback) -> None:
+        if event.message is None:
+            await event.ack(notification="Меню недоступно. Отправьте /start.")
+            return
+        await event.ack(notification="Тестовый режим — оплата пока недоступна.")
+        await _reply(event, "💳 Оплата песни пока недоступна. Музыкальный API скоро будет подключен!",
+                     attachments=[navigation_keyboard((("⬅️ Назад", "audio_tariff_fun"),))])
+
+    @router.message_callback(F.callback.payload.in_({"audio_gift_preview", "audio_download_fun_1", "audio_download_fun_2",
+                                                     "audio_download_gift_mp3", "audio_download_gift_instrumental"}))
+    async def audio_file_placeholder(event: MessageCallback) -> None:
+        if event.message is None:
+            await event.ack(notification="Меню недоступно. Отправьте /start.")
+            return
+        await event.ack(notification="Аудио скоро появится")
+        await _reply(event, "Аудио скоро появится")
+
+    def audio_fun_result_keyboard(*, can_regenerate: bool):
+        buttons = [("Скачать вариант 1", "audio_download_fun_1"), ("Скачать вариант 2", "audio_download_fun_2")]
+        if can_regenerate:
+            buttons.append(("Не то, ещё раз (бесплатно)", "audio_regenerate"))
+        return navigation_keyboard(buttons)
+
+    @router.message_created(Command("test_audio_fun_success"))
+    async def test_audio_fun_success(event: MessageCreated, context: MemoryContext) -> None:
+        if is_bot_message(event) or admin_user_id is None or event.get_ids()[1] != admin_user_id:
+            return
+        await context.clear()
+        await context.update_data(audio_test_format="fun", audio_regeneration_used=False)
+        await context.set_state(PosterStates.waiting_for_audio_test_result)
+        await _reply(event, AUDIO_FUN_SUCCESS_TEXT + "\n\n🧪 Тестовый экран: файлы ещё не созданы.",
+                     attachments=[audio_fun_result_keyboard(can_regenerate=True)])
+
+    @router.message_created(Command("test_audio_gift_success"))
+    async def test_audio_gift_success(event: MessageCreated, context: MemoryContext) -> None:
+        if is_bot_message(event) or admin_user_id is None or event.get_ids()[1] != admin_user_id:
+            return
+        await context.clear()
+        await context.update_data(audio_test_format="gift")
+        await context.set_state(PosterStates.waiting_for_audio_test_result)
+        await _reply(event, AUDIO_GIFT_SUCCESS_TEXT + "\n\n🧪 Тестовый экран: файлы ещё не созданы.",
+                     attachments=[navigation_keyboard((("Скачать MP3", "audio_download_gift_mp3"),
+                                                       ("Скачать минусовку", "audio_download_gift_instrumental"),
+                                                       ("Написать в поддержку", "help_support")))])
+
+    @router.message_callback(F.callback.payload == "audio_regenerate")
+    async def audio_regenerate(event: MessageCallback, context: MemoryContext) -> None:
+        if event.message is None:
+            await event.ack(notification="Меню недоступно. Отправьте /start.")
+            return
+        data = await context.get_data()
+        if await context.get_state() != PosterStates.waiting_for_audio_test_result or data.get("audio_test_format") != "fun":
+            await event.ack(notification="Треки ещё не созданы. Выберите формат в меню аудиопесен.")
+            return
+        if data.get("audio_regeneration_used"):
+            await event.ack(notification="Бесплатная перегенерация уже использована.")
+            return
+        await context.update_data(audio_regeneration_used=True)
+        await event.ack(notification="Бесплатная перегенерация: тестовый режим.")
+        await _reply(event, "🎧 Ещё 2 варианта песни — тестовый экран. Аудио скоро появится.\n\n"
+                     "Бесплатная перегенерация использована.",
+                     attachments=[audio_fun_result_keyboard(can_regenerate=False)])
+
     async def show_photo_tariffs(event: MessageCallback, context: MemoryContext, style: str) -> None:
         await context.clear()
         await context.set_state(PosterStates.waiting_for_mode)
@@ -1702,6 +1797,7 @@ def create_router(
         await context.update_data(gift_details=details)
         await context.set_state(PosterStates.waiting_for_gift_preview)
         await _reply(event, AUDIO_GIFT_PREVIEW_TEXT, attachments=[navigation_keyboard((
+            ("▶️ Послушать превью", "audio_gift_preview"),
             ("Оплатить 490 ₽ и получить полный трек", "gift_payment_soon"),
             ("⬅️ Назад", "gift_choose_scenario"),
         ))])
@@ -1729,10 +1825,11 @@ def create_router(
             await _reply(event, "Напиши имя и детали песни текстом. /cancel — отмена.")
             return
         await context.update_data(song_details=details)
-        await _reply(event, AUDIO_FUN_TEST_TEXT,
-                     attachments=[navigation_keyboard((("⬅️ Назад", "cat_audio"),))])
-        await context.clear()
-        await context.set_state(PosterStates.waiting_for_mode)
+        await context.set_state(PosterStates.waiting_for_audio_fun_payment)
+        await _reply(event, AUDIO_FUN_PAYMENT_TEXT, attachments=[navigation_keyboard((
+            ("Оплатить 199 ₽ и получить 2 варианта", "audio_fun_payment_soon"),
+            ("⬅️ Назад", "audio_tariff_fun"),
+        ))])
 
     @router.message_created(PosterStates.waiting_for_card_text)
     async def collect_card_text(event: MessageCreated, context: MemoryContext) -> None:

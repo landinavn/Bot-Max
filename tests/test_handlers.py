@@ -3261,9 +3261,9 @@ async def test_song_scenario_collects_details_without_generation_or_payment(cred
     answer = message_event('  Аня, любим вино и сериалы  ')
     # Общий обработчик тоже должен маршрутизировать такое состояние.
     await call_handler(router, 'echo', answer, context)
-    assert answer.message.answer.await_args.args[0] == handlers.AUDIO_FUN_TEST_TEXT
-    assert await context.get_state() == PosterStates.waiting_for_mode
-    assert await context.get_data() == {}
+    assert answer.message.answer.await_args.args[0] == handlers.AUDIO_FUN_PAYMENT_TEXT
+    assert await context.get_state() == PosterStates.waiting_for_audio_fun_payment
+    assert await context.get_data() == {'song_scenario': scenario, 'song_details': 'Аня, любим вино и сериалы'}
     assert await credit_db.get_all_counters() == {'audio_scen_' + scenario: 1}
     assert dict(await credit_db.get_user(456)) == before
     generator.assert_not_awaited()
@@ -3352,9 +3352,13 @@ async def test_dispatcher_routes_song_details_and_cancel(credit_db, monkeypatch,
             assert await context.get_state() == PosterStates.waiting_for_song_details
             await dp.handle(MessageCreated(timestamp=2, bot=bot, message=message(text)))
             replies = [c.kwargs.get('text') for c in bot.send_message.await_args_list]
-            assert (handlers.AUDIO_FUN_TEST_TEXT if text != '/cancel' else 'Сбор данных отменён.') in replies
-            assert await context.get_state() == PosterStates.waiting_for_mode
-            assert await context.get_data() == {}
+            assert (handlers.AUDIO_FUN_PAYMENT_TEXT if text != '/cancel' else 'Сбор данных отменён.') in replies
+            if text == '/cancel':
+                assert await context.get_state() == PosterStates.waiting_for_mode
+                assert await context.get_data() == {}
+            else:
+                assert await context.get_state() == PosterStates.waiting_for_audio_fun_payment
+                assert (await context.get_data())['song_details'] == text
     finally:
         await dp.shutdown()
 
@@ -3398,6 +3402,7 @@ async def test_gift_collects_details_and_shows_test_payment_without_charging(cre
     assert await context.get_data() == {'gift_scenario': scenario, 'gift_details': 'Аня, любит горы и кофе'}
     buttons = answer.message.answer.await_args.kwargs['attachments'][0].payload.buttons
     assert [(row[0].text, row[0].payload) for row in buttons] == [
+        ('▶️ Послушать превью', 'audio_gift_preview'),
         ('Оплатить 490 ₽ и получить полный трек', 'gift_payment_soon'),
         ('⬅️ Назад', 'gift_choose_scenario'),
     ]
@@ -3509,3 +3514,126 @@ async def test_dispatcher_routes_all_gift_states_and_cancel(credit_db, monkeypat
             assert await context.get_data() == {}
     finally:
         await dp.shutdown()
+
+
+async def test_fun_payment_screen_has_placeholder_and_back_without_charging(credit_db):
+    payments = Mock()
+    router = create_router(payments=payments)
+    context = await ready_context()
+    await dispatch_callback(router, callback_event('audio_fun_boss'), context)
+    text = message_event('Сергей, любит кофе')
+    await call_handler(router, 'collect_song_details', text, context)
+    assert text.message.answer.await_args.args[0] == handlers.AUDIO_FUN_PAYMENT_TEXT
+    buttons = text.message.answer.await_args.kwargs['attachments'][0].payload.buttons
+    assert [(row[0].text, row[0].payload) for row in buttons] == [
+        ('Оплатить 199 ₽ и получить 2 варианта', 'audio_fun_payment_soon'),
+        ('⬅️ Назад', 'audio_tariff_fun'),
+    ]
+    payment = callback_event('audio_fun_payment_soon')
+    await dispatch_callback(router, payment, context)
+    payment.ack.assert_awaited_once()
+    assert 'пока недоступна' in payment.send.await_args.args[0]
+    assert (await context.get_data())['song_details'] == 'Сергей, любит кофе'
+    assert payments.mock_calls == []
+    await dispatch_callback(router, callback_event('audio_tariff_fun'), context)
+    assert await context.get_data() == {}
+    assert await context.get_state() == PosterStates.waiting_for_mode
+
+
+@pytest.mark.parametrize('payload', ['audio_gift_preview', 'audio_download_fun_1', 'audio_download_fun_2',
+                                      'audio_download_gift_mp3', 'audio_download_gift_instrumental'])
+async def test_audio_file_buttons_are_placeholders(payload):
+    event = callback_event(payload)
+    await dispatch_callback(create_router(), event, await ready_context())
+    event.ack.assert_awaited_once()
+    assert event.send.await_args.args[0] == 'Аудио скоро появится'
+
+
+@pytest.mark.parametrize('command,handler_name,format_name,expected_text', [
+    ('/test_audio_fun_success', 'test_audio_fun_success', 'fun', handlers.AUDIO_FUN_SUCCESS_TEXT),
+    ('/test_audio_gift_success', 'test_audio_gift_success', 'gift', handlers.AUDIO_GIFT_SUCCESS_TEXT),
+])
+async def test_audio_success_commands_show_test_screens_without_payments(credit_db, command, handler_name, format_name, expected_text):
+    await credit_db.grant_free_trial(456)
+    before = dict(await credit_db.get_user(456))
+    generator, payments = AsyncMock(), Mock()
+    router = create_router(generator, payments=payments, admin_user_id=456)
+    context = await ready_context()
+    event = message_event(command)
+    await call_handler(router, handler_name, event, context)
+    assert event.message.answer.await_args.args[0].startswith(expected_text)
+    assert 'Тестовый экран' in event.message.answer.await_args.args[0]
+    assert await context.get_state() == PosterStates.waiting_for_audio_test_result
+    assert (await context.get_data())['audio_test_format'] == format_name
+    buttons = event.message.answer.await_args.kwargs['attachments'][0].payload.buttons
+    expected = (['audio_download_fun_1', 'audio_download_fun_2', 'audio_regenerate'] if format_name == 'fun'
+                else ['audio_download_gift_mp3', 'audio_download_gift_instrumental', 'help_support'])
+    assert [row[0].payload for row in buttons] == expected
+    assert await credit_db.get_all_counters() == {}
+    assert dict(await credit_db.get_user(456)) == before
+    assert payments.mock_calls == []
+    generator.assert_not_awaited()
+
+
+@pytest.mark.parametrize('handler_name', ['test_audio_fun_success', 'test_audio_gift_success'])
+@pytest.mark.parametrize('admin,actor,is_bot', [(None, 456, False), (789, 456, False), (456, 456, True)])
+async def test_audio_success_commands_ignore_non_admin_or_bot(handler_name, admin, actor, is_bot):
+    event = message_event('/' + handler_name)
+    event.get_ids = lambda: (123, actor)
+    event.message.sender.is_bot = is_bot
+    context = await ready_context()
+    before = await context.get_data()
+    await call_handler(create_router(admin_user_id=admin), handler_name, event, context)
+    event.message.answer.assert_not_awaited()
+    assert await context.get_data() == before
+
+
+async def test_fun_regeneration_is_once_per_test_session(credit_db):
+    router = create_router(admin_user_id=456)
+    context = await ready_context()
+    await call_handler(router, 'test_audio_fun_success', message_event('/test_audio_fun_success'), context)
+    first = callback_event('audio_regenerate')
+    await dispatch_callback(router, first, context)
+    first.ack.assert_awaited_once()
+    assert (await context.get_data())['audio_regeneration_used'] is True
+    assert 'Бесплатная перегенерация использована.' in first.send.await_args.args[0]
+    assert [row[0].payload for row in first.send.await_args.kwargs['attachments'][0].payload.buttons] == [
+        'audio_download_fun_1', 'audio_download_fun_2',
+    ]
+    duplicate = callback_event('audio_regenerate')
+    await dispatch_callback(router, duplicate, context)
+    duplicate.ack.assert_awaited_once()
+    duplicate.send.assert_not_awaited()
+    assert await credit_db.get_all_counters() == {}
+
+
+@pytest.mark.parametrize('format_name', [None, 'gift'])
+async def test_regenerate_cannot_start_from_missing_or_gift_session(format_name):
+    context = await ready_context()
+    if format_name:
+        await context.set_state(PosterStates.waiting_for_audio_test_result)
+        await context.update_data(audio_test_format=format_name)
+    before = await context.get_data()
+    event = callback_event('audio_regenerate')
+    await dispatch_callback(create_router(), event, context)
+    event.ack.assert_awaited_once()
+    event.send.assert_not_awaited()
+    assert await context.get_data() == before
+
+
+@pytest.mark.parametrize('payload', ['audio_fun_payment_soon', 'audio_gift_preview', 'audio_regenerate',
+                                      'audio_download_fun_1', 'audio_download_fun_2',
+                                      'audio_download_gift_mp3', 'audio_download_gift_instrumental'])
+async def test_deleted_new_audio_callbacks_are_acknowledged(payload):
+    event = callback_event(payload, deleted=True)
+    await dispatch_callback(create_router(), event, await ready_context())
+    event.ack.assert_awaited_once()
+    event.send.assert_not_awaited()
+
+
+async def test_workshop_copy_matches_guarantees():
+    text = handlers.CATEGORY_MENUS['cat_audio'][1]
+    assert '1 бесплатная перегенерация (ещё 2 варианта)' in text
+    assert 'Без превью — сразу после оплаты.' in text
+    assert 'превью с защитой (10–15 сек)' in text
+    assert 'без водяных знаков и голосового сопровождения' in text

@@ -3164,7 +3164,7 @@ async def test_stats_campaign_block_is_last_and_excludes_admin(credit_db):
 
 
 @pytest.mark.parametrize('tariff,counter', list(handlers.AUDIO_CLICK_EVENTS.items()))
-async def test_audio_tariffs_show_scenarios_or_placeholder_and_return_to_workshop(credit_db, tariff, counter):
+async def test_audio_tariffs_show_fun_or_gift_screen_and_return_to_workshop(credit_db, tariff, counter):
     await credit_db.grant_free_trial(456)
     before = dict(await credit_db.get_user(456))
     generator = AsyncMock()
@@ -3183,10 +3183,11 @@ async def test_audio_tariffs_show_scenarios_or_placeholder_and_return_to_worksho
             'audio_fun_universal', 'audio_fun_meme', 'cat_audio',
         ]
     else:
-        assert event.send.await_args.args[0] == (
-            '🚀 Отличный выбор! Мы уже настраиваем генератор песен, и совсем скоро вы сможете создать свой хит. '
-            'Следите за обновлениями!'
-        )
+        assert event.send.await_args.args[0] == handlers.AUDIO_GIFT_TEXT
+        buttons = event.send.await_args.kwargs['attachments'][0].payload.buttons
+        assert [(row[0].text, row[0].payload) for row in buttons] == [
+            ('Выбрать сценарий', 'gift_choose_scenario'), ('⬅️ Назад', 'cat_audio'),
+        ]
     back = event.send.await_args.kwargs['attachments'][0].payload.buttons[-1][0]
     assert (back.text, back.payload) == ('⬅️ Назад', 'cat_audio')
     assert await context.get_state() == PosterStates.waiting_for_mode
@@ -3352,6 +3353,158 @@ async def test_dispatcher_routes_song_details_and_cancel(credit_db, monkeypatch,
             await dp.handle(MessageCreated(timestamp=2, bot=bot, message=message(text)))
             replies = [c.kwargs.get('text') for c in bot.send_message.await_args_list]
             assert (handlers.AUDIO_FUN_TEST_TEXT if text != '/cancel' else 'Сбор данных отменён.') in replies
+            assert await context.get_state() == PosterStates.waiting_for_mode
+            assert await context.get_data() == {}
+    finally:
+        await dp.shutdown()
+
+
+async def test_gift_scenario_menu_keeps_order_and_clears_old_data(credit_db):
+    context = await ready_context()
+    await context.update_data(gift_scenario='cat', gift_details='old')
+    event = callback_event('gift_choose_scenario')
+    await dispatch_callback(create_router(), event, context)
+    event.ack.assert_awaited_once()
+    assert event.send.await_args.args[0].startswith('Для кого песня?')
+    buttons = event.send.await_args.kwargs['attachments'][0].payload.buttons
+    assert [row[0].payload for row in buttons] == [
+        'gift_scen_bday', 'gift_scen_anniv', 'gift_scen_parents', 'gift_scen_child',
+        'gift_scen_friend', 'gift_scen_custom', 'audio_tariff_gift',
+    ]
+    assert await context.get_state() == PosterStates.waiting_for_mode
+    assert await context.get_data() == {}
+    assert await credit_db.get_all_counters() == {}
+
+
+@pytest.mark.parametrize('payload', list(handlers.AUDIO_GIFT_SCENARIOS))
+async def test_gift_collects_details_and_shows_test_payment_without_charging(credit_db, payload):
+    await credit_db.grant_free_trial(456)
+    before = dict(await credit_db.get_user(456))
+    generator, card, payments = AsyncMock(), AsyncMock(), Mock()
+    router = create_router(generator, postcard_generator=card, payments=payments)
+    context = await ready_context()
+    await context.update_data(photo={'url': 'https://example.com/old.png'}, song_scenario='cat')
+    selected = callback_event(payload)
+    await dispatch_callback(router, selected, context)
+    selected.ack.assert_awaited_once()
+    scenario = payload.removeprefix('gift_scen_')
+    assert selected.send.await_args.args[0] == handlers.AUDIO_GIFT_SCENARIOS[payload][1]
+    assert await context.get_state() == handlers.GIFT_SCENARIO_STATES[payload]
+    assert await context.get_data() == {'gift_scenario': scenario}
+    answer = message_event('  Аня, любит горы и кофе  ')
+    await call_handler(router, 'echo', answer, context)
+    assert answer.message.answer.await_args.args[0] == handlers.AUDIO_GIFT_PREVIEW_TEXT
+    assert await context.get_state() == PosterStates.waiting_for_gift_preview
+    assert await context.get_data() == {'gift_scenario': scenario, 'gift_details': 'Аня, любит горы и кофе'}
+    buttons = answer.message.answer.await_args.kwargs['attachments'][0].payload.buttons
+    assert [(row[0].text, row[0].payload) for row in buttons] == [
+        ('Оплатить 490 ₽ и получить полный трек', 'gift_payment_soon'),
+        ('⬅️ Назад', 'gift_choose_scenario'),
+    ]
+    payment = callback_event('gift_payment_soon')
+    await dispatch_callback(router, payment, context)
+    payment.ack.assert_awaited_once()
+    assert 'пока недоступна' in payment.send.await_args.args[0]
+    assert (await context.get_data())['gift_details'] == 'Аня, любит горы и кофе'
+    assert await credit_db.get_all_counters() == {'audio_gift_' + scenario: 1}
+    assert dict(await credit_db.get_user(456)) == before
+    generator.assert_not_awaited()
+    card.assert_not_awaited()
+    assert payments.mock_calls == []
+
+
+@pytest.mark.parametrize('payload', ['gift_choose_scenario', 'gift_payment_soon', *handlers.AUDIO_GIFT_SCENARIOS])
+async def test_deleted_gift_callbacks_are_acknowledged_without_state_or_counter_changes(credit_db, payload):
+    context = await ready_context()
+    before_state, before_data = await context.get_state(), await context.get_data()
+    event = callback_event(payload, deleted=True)
+    await dispatch_callback(create_router(), event, context)
+    event.ack.assert_awaited_once()
+    event.send.assert_not_awaited()
+    assert await context.get_state() == before_state
+    assert await context.get_data() == before_data
+    assert await credit_db.get_all_counters() == {}
+
+
+@pytest.mark.parametrize('payload', list(handlers.AUDIO_GIFT_SCENARIOS))
+@pytest.mark.parametrize('text', ['', '   ', None])
+async def test_gift_empty_details_do_not_advance(payload, text):
+    context = await ready_context()
+    await context.set_state(handlers.GIFT_SCENARIO_STATES[payload])
+    await context.update_data(gift_scenario=payload.removeprefix('gift_scen_'))
+    event = message_event(text)
+    await call_handler(create_router(), 'collect_gift_details', event, context)
+    assert 'текстом' in event.message.answer.await_args.args[0]
+    assert await context.get_state() == handlers.GIFT_SCENARIO_STATES[payload]
+    assert 'gift_details' not in await context.get_data()
+
+
+@pytest.mark.parametrize('destination', ['cat_audio', 'audio_tariff_gift', 'gift_choose_scenario', 'back_to_main', '/cancel'])
+@pytest.mark.parametrize('state', [PosterStates.waiting_for_gift_child, PosterStates.waiting_for_gift_preview])
+async def test_gift_navigation_clears_collected_details(destination, state):
+    context = await ready_context()
+    await context.set_state(state)
+    await context.update_data(gift_scenario='child', gift_details='Маша, 7 лет')
+    router = create_router()
+    if destination == '/cancel':
+        await call_handler(router, 'cancel', message_event('/cancel'), context)
+    else:
+        await dispatch_callback(router, callback_event(destination), context)
+    assert await context.get_state() == PosterStates.waiting_for_mode
+    assert await context.get_data() == {}
+
+
+async def test_gift_stats_count_scenarios_and_exclude_admin(credit_db):
+    router = create_router(admin_user_id=456)
+    stats = message_event('/stats')
+    await call_handler(router, 'stats', stats)
+    empty = stats.message.answer.await_args.args[0]
+    for label, _ in handlers.AUDIO_GIFT_SCENARIOS.values():
+        assert '- ' + label + ': 0' in empty
+    for user_id in (101, 456):
+        for payload in handlers.AUDIO_GIFT_SCENARIOS:
+            event = callback_event(payload)
+            event.get_ids = lambda user_id=user_id: (123, user_id)
+            await dispatch_callback(router, event, await ready_context())
+    await call_handler(router, 'stats', stats)
+    text = stats.message.answer.await_args.args[0]
+    assert '🎁 Интерес к Аудиопесням (Подарочный формат):' in text
+    for payload, (label, _) in handlers.AUDIO_GIFT_SCENARIOS.items():
+        assert '- ' + label + ': 1' in text
+        assert (await credit_db.get_all_counters())['audio_gift_' + payload.removeprefix('gift_scen_')] == 2
+
+
+@pytest.mark.parametrize('general_first', [False, True])
+async def test_dispatcher_routes_all_gift_states_and_cancel(credit_db, monkeypatch, event_replies, general_first):
+    from maxapi import Dispatcher
+    from maxapi.context.isolation import SimpleEventIsolation
+    from maxapi.types import MessageCallback, MessageCreated, User
+    monkeypatch.setattr(handlers, '_reply', event_replies)
+    router = create_router()
+    if general_first:
+        generic = next(h for h in router.event_handlers if h.func_event.__name__ == 'echo')
+        router.event_handlers.remove(generic)
+        index = next(i for i, h in enumerate(router.event_handlers) if h.func_event.__name__ == 'collect_gift_details')
+        router.event_handlers.insert(index, generic)
+    dp = Dispatcher(storage=MemoryContext, event_isolation=SimpleEventIsolation())
+    dp.include_routers(router)
+    bot = SimpleNamespace(me=User(user_id=999, first_name='Bot', is_bot=True),
+                          send_message=AsyncMock(return_value=object()), send_callback=AsyncMock())
+    user = {'user_id': 456, 'first_name': 'Test', 'is_bot': False}
+    def message(text=None, sender=None):
+        return {'sender': sender or user, 'recipient': {'chat_id': 123, 'chat_type': 'dialog'},
+                'timestamp': 1, 'body': {'mid': 'gift-test', 'seq': 1, 'text': text}}
+    try:
+        for payload, state in handlers.GIFT_SCENARIO_STATES.items():
+            await dp.handle(MessageCallback(timestamp=1, bot=bot, message=message(sender=bot.me.model_dump()),
+                callback={'timestamp': 1, 'callback_id': 'gift', 'payload': payload, 'user': user}))
+            context = dp.fsm.get_context(chat_id=123, user_id=456)
+            assert await context.get_state() == state
+            await dp.handle(MessageCreated(timestamp=2, bot=bot, message=message('Аня, любит кофе')))
+            assert await context.get_state() == PosterStates.waiting_for_gift_preview
+            assert (await context.get_data())['gift_details'] == 'Аня, любит кофе'
+            assert bot.send_message.await_args.kwargs['text'] == handlers.AUDIO_GIFT_PREVIEW_TEXT
+            await dp.handle(MessageCreated(timestamp=3, bot=bot, message=message('/cancel')))
             assert await context.get_state() == PosterStates.waiting_for_mode
             assert await context.get_data() == {}
     finally:

@@ -665,94 +665,114 @@ async def generate_postcards(photo_url: str, mode: str, card_text: str) -> list[
     return await _generate_and_store(photo_url, "Открытка", prompt_override=prompt, postcard_text=card_text, postcard_mode=mode)
 
 
+PHOTOSESSION_BODY_ANATOMY_REQUIREMENT = (
+    "CRITICAL BODY & ANATOMY REQUIREMENT:  - Preserve the EXACT body type, weight, and proportions of the "
+    "people as seen in the reference photo. Do NOT slim or idealize their figures.  - If the reference "
+    "photo is a selfie (only showing the face/upper body), generate the lower body naturally and "
+    "proportionally to the visible upper body.  - Ensure each person has exactly 2 arms, 2 legs, and "
+    "exactly 5 fingers on each hand. No extra or missing limbs."
+)
+
 NY_FAMILY_THREE_PROMPTS = (
-    "Create a highly realistic, professional New Year family photoshoot. "
-    "The image must feature EXACTLY the same 3 people from the reference photo. "
-    "Preserve their exact faces, hairstyles, skin tones, and ages perfectly.  "
-    "CLOTHING: Dress all 3 people in matching red and green tartan plaid pajamas.  "
-    "BACKGROUND: Cozy interior, beautifully decorated Christmas tree with gold and white ornaments.  "
-    "POSE & CAMERA ANGLE: Full-length wide shot. "
-    "The 3 people are sitting together on the floor in front of the tree, smiling and looking at the camera. "
-    "Their entire bodies, from head to toe, must be fully visible in the frame, not just a close-up of their faces.  "
-    "Exactly 3 people, correct human anatomy, exactly 5 fingers on each hand. DO NOT ADD ANY TEXT.",
-    "Create a highly realistic, professional New Year family photoshoot. "
-    "The image must feature EXACTLY the same 3 people from the reference photo. Preserve their exact faces perfectly.  "
-    "CLOTHING: Same matching red and green tartan plaid pajamas.  "
-    "BACKGROUND: A large, beautifully decorated Christmas tree with glowing lights and ornaments must be clearly "
-    "visible in the frame, surrounding them.  "
-    "POSE & CAMERA ANGLE: Top-down bird's-eye view, as if the camera is mounted on the ceiling looking directly down at them. "
-    "The 3 people are lying on the floor together on a cozy rug. Waist-up shot, upper bodies visible. "
-    "They are looking up at the camera and smiling.  "
-    "CRITICAL ANATOMY REQUIREMENT: Perfect human anatomy. Each person must have exactly TWO hands "
-    "(one left hand, one right hand) with exactly 5 fingers. No extra hands, no missing hands, no deformed limbs.  "
-    "DO NOT ADD ANY TEXT.",
-    "Create a highly realistic, professional New Year family photoshoot. "
-    "The image must feature EXACTLY the same 3 people from the reference photo. Preserve their exact faces perfectly.  "
-    "CLOTHING: Same matching red and green tartan plaid pajamas.  "
-    "BACKGROUND: Same cozy interior with the decorated Christmas tree.  "
-    "POSE & CAMERA ANGLE: Waist-up shot. Only the upper half of their bodies is visible in the frame. "
-    "If the reference photo has 2 adults and 1 child, the adults are gently kissing the child on the cheeks. "
-    "If the reference photo has 1 adult and 2 children, the adult is hugging and kissing the children.  "
-    "Exactly 3 people, correct anatomy. DO NOT ADD ANY TEXT.",
+    (
+        "Create a highly realistic, professional New Year family photoshoot. The image must feature EXACTLY "
+        "the same 3 people from the reference photo. Preserve their exact faces, hairstyles, skin tones, and "
+        "ages perfectly.  CLOTHING: Dress all 3 people in matching red and green tartan plaid pajamas.  "
+        "BACKGROUND: Cozy interior, beautifully decorated Christmas tree with gold and white ornaments.  POSE "
+        "& CAMERA ANGLE: Full-length wide shot. The 3 people are sitting together on the floor in front of the "
+        "tree, smiling and looking at the camera. Their entire bodies, from head to toe, must be fully visible "
+        "in the frame, not just a close-up of their faces.  Exactly 3 people. "
+        + PHOTOSESSION_BODY_ANATOMY_REQUIREMENT
+        + " DO NOT ADD ANY TEXT."
+    ),
+    (
+        "Create a highly realistic, professional New Year family photoshoot. The image must feature EXACTLY "
+        "the same 3 people from the reference photo. Preserve their exact faces perfectly.  CLOTHING: Same "
+        "matching red and green tartan plaid pajamas.  BACKGROUND: A large, beautifully decorated Christmas "
+        "tree with glowing lights and ornaments must be clearly visible in the frame, surrounding them.  POSE "
+        "& CAMERA ANGLE: Top-down bird's-eye view, as if the camera is mounted on the ceiling looking directly "
+        "down at them. The 3 people are lying on the floor together on a cozy rug. Waist-up shot, upper bodies "
+        "visible. They are looking up at the camera and smiling.  "
+        + PHOTOSESSION_BODY_ANATOMY_REQUIREMENT
+        + " DO NOT ADD ANY TEXT."
+    ),
+    (
+        "Create a highly realistic, professional New Year family photoshoot. The image must feature EXACTLY "
+        "the same 3 people from the reference photo. Preserve their exact faces perfectly.  CLOTHING: Same "
+        "matching red and green tartan plaid pajamas.  BACKGROUND: Same cozy interior with the decorated "
+        "Christmas tree.  POSE & CAMERA ANGLE: Waist-up shot. Only the upper half of their bodies is visible "
+        "in the frame. If the reference photo has 2 adults and 1 child, the adults are gently kissing the "
+        "child on the cheeks. If the reference photo has 1 adult and 2 children, the adult is hugging and "
+        "kissing the children.  Exactly 3 people. "
+        + PHOTOSESSION_BODY_ANATOMY_REQUIREMENT
+        + " DO NOT ADD ANY TEXT."
+    ),
 )
 
 
 NY_FAMILY_PLUS_PROMPTS = (
-    "Create a highly realistic, professional New Year photoshoot. "
-    "Focus ONLY on the children from the reference photo. Do NOT include the adults.  "
-    "CLOTHING: IGNORE the clothing in the reference photo. "
-    "Dress boys in smart casual button-down shirts (no jackets) and trousers. "
-    "Dress girls in simple, elegant dresses.  "
-    "BACKGROUND: The children are lying on a cozy rug right next to a beautifully decorated Christmas tree, "
-    "surrounded by glowing lights and wrapped gifts.  "
-    "POSE: The children are lying on the floor, looking at the camera.  "
-    "CRITICAL ANATOMY: Perfect human anatomy. Exactly 5 fingers on each hand. No extra limbs. DO NOT ADD ANY TEXT.",
-    "Create a highly realistic, professional New Year photoshoot. "
-    "The image must feature EXACTLY the same people from the reference photo (3 or more people).  "
-    "CLOTHING: IGNORE the clothing in the reference photo. "
-    "Men and boys MUST wear smart casual button-down shirts (no jackets), trousers, and stylish sneakers. "
-    "Girls and women MUST wear simple, elegant dresses.  "
-    "BACKGROUND: Cozy interior with a beautifully decorated Christmas tree.  "
-    "POSE: Full-length wide shot. The whole family is together. Some are standing elegantly, others are sitting. "
-    "Everyone is looking at the camera.  "
-    "CRITICAL ANATOMY: Perfect human anatomy for all people. Exactly 5 fingers on each hand. "
-    "No extra limbs. DO NOT ADD ANY TEXT.",
-    "Create a highly realistic, professional New Year photoshoot. "
-    "Focus ONLY on the adult parents (man and woman) from the reference photo.  "
-    "CLOTHING: IGNORE the clothing in the reference photo. "
-    "The man MUST wear a smart casual button-down shirt (no jacket) and trousers. "
-    "The woman MUST wear a simple, elegant dress.  "
-    "BACKGROUND: Cozy interior with a beautifully decorated Christmas tree.  "
-    "POSE: Full-length shot. The parents are sitting elegantly together on a sofa. "
-    "CRITICAL: The woman's legs and feet must be positioned naturally and elegantly.  "
-    "CRITICAL ANATOMY: Perfect human anatomy. Exactly 5 fingers on each hand. No extra limbs. DO NOT ADD ANY TEXT.",
+    (
+        "Create a highly realistic, professional New Year photoshoot. Focus ONLY on the children from the "
+        "reference photo. Do NOT include the adults.  CLOTHING: IGNORE the clothing in the reference photo. "
+        "Dress boys in smart casual button-down shirts (no jackets) and trousers. Dress girls in simple, "
+        "elegant dresses.  BACKGROUND: The children are lying on a cozy rug right next to a beautifully "
+        "decorated Christmas tree, surrounded by glowing lights and wrapped gifts.  POSE: The children are "
+        "lying on the floor, looking at the camera.  "
+        + PHOTOSESSION_BODY_ANATOMY_REQUIREMENT
+        + " DO NOT ADD ANY TEXT."
+    ),
+    (
+        "Create a highly realistic, professional New Year photoshoot. The image must feature EXACTLY the same "
+        "people from the reference photo (3 or more people).  CLOTHING: IGNORE the clothing in the reference "
+        "photo. Men and boys MUST wear smart casual button-down shirts (no jackets), trousers, and stylish "
+        "sneakers. Girls and women MUST wear simple, elegant dresses.  BACKGROUND: Cozy interior with a "
+        "beautifully decorated Christmas tree.  POSE: Full-length wide shot. The whole family is together. "
+        "Some are standing elegantly, others are sitting. Everyone is looking at the camera.  "
+        + PHOTOSESSION_BODY_ANATOMY_REQUIREMENT
+        + " DO NOT ADD ANY TEXT."
+    ),
+    (
+        "Create a highly realistic, professional New Year photoshoot. Focus ONLY on the adult parents (man and "
+        "woman) from the reference photo.  CLOTHING: IGNORE the clothing in the reference photo. The man MUST "
+        "wear a smart casual button-down shirt (no jacket) and trousers. The woman MUST wear a simple, elegant "
+        "dress.  BACKGROUND: Cozy interior with a beautifully decorated Christmas tree.  POSE: Full-length "
+        "shot. The parents are sitting elegantly together on a sofa. CRITICAL: The woman's legs and feet must "
+        "be positioned naturally and elegantly.  "
+        + PHOTOSESSION_BODY_ANATOMY_REQUIREMENT
+        + " DO NOT ADD ANY TEXT."
+    ),
 )
 NY_FAMILY_TODDLERS_PROMPTS = (
-    "Create a highly realistic, professional New Year family photoshoot in a vintage, rustic style. "
-    "The image must feature EXACTLY the same people from the reference photo. "
-    "Preserve their exact faces and body proportions perfectly.  "
-    "CLOTHING: IGNORE the clothing in the reference photo. Dress the adults in elegant cream and beige knit sweaters. "
-    "Dress the children in cozy, warm beige winter outfits.  "
-    "BACKGROUND: A beautifully decorated Christmas tree with vintage ornaments, warm golden lighting, wooden floor, "
-    "and antique wooden toys.  POSE: Full-length shot. The adults are standing elegantly near the tree, "
-    "holding the toddlers safely in their arms.  "
-    "CRITICAL ANATOMY: Toddlers must have correct infant proportions. Exactly 5 fingers on each hand. "
-    "No extra limbs. DO NOT ADD ANY TEXT.",
-    "Create a highly realistic, professional New Year family photoshoot in a vintage, rustic style. "
-    "The image must feature EXACTLY the same people from the reference photo.  "
-    "CLOTHING: IGNORE the clothing in the reference photo. "
-    "The adults MUST be wearing elegant cream and beige knit sweaters. "
-    "The children MUST be wearing cozy, warm beige winter outfits (the exact same outfits as described before).  "
-    "BACKGROUND: In front of the decorated tree on a wooden floor.  POSE: Medium close-up. "
-    "The whole family is sitting together on the floor. The adults are holding the toddlers close.  "
-    "CRITICAL ANATOMY: Toddlers must have correct baby proportions. Exactly 5 fingers on each hand. "
-    "No extra limbs. DO NOT ADD ANY TEXT.",
-    "Create a highly realistic, professional New Year photoshoot in a vintage, rustic style. "
-    "Focus ONLY on the children from the reference photo.  "
-    "CLOTHING: IGNORE the clothing in the reference photo. The children MUST be wearing cozy, warm beige winter outfits.  "
-    "BACKGROUND: On a cozy rug right next to the tree, surrounded by warm lights and vintage wooden toys.  "
-    "POSE: The toddler/baby is LYING on their back or tummy. If there is an older child, they are SITTING next to the toddler.  "
-    "CRITICAL ANATOMY: Correct infant proportions. Exactly 5 fingers on each hand. DO NOT ADD ANY TEXT.",
+    (
+        "Create a highly realistic, professional New Year family photoshoot in a vintage, rustic style. The "
+        "image must feature EXACTLY the same people from the reference photo. Preserve their exact faces and "
+        "body proportions perfectly.  CLOTHING: IGNORE the clothing in the reference photo. Dress the adults "
+        "in elegant cream and beige knit sweaters. Dress the children in cozy, warm beige winter outfits.  "
+        "BACKGROUND: A beautifully decorated Christmas tree with vintage ornaments, warm golden lighting, "
+        "wooden floor, and antique wooden toys.  POSE: Full-length shot. The adults are standing elegantly "
+        "near the tree, holding the toddlers safely in their arms.  "
+        + PHOTOSESSION_BODY_ANATOMY_REQUIREMENT
+        + " DO NOT ADD ANY TEXT."
+    ),
+    (
+        "Create a highly realistic, professional New Year family photoshoot in a vintage, rustic style. The "
+        "image must feature EXACTLY the same people from the reference photo.  CLOTHING: IGNORE the clothing "
+        "in the reference photo. The adults MUST be wearing elegant cream and beige knit sweaters. The "
+        "children MUST be wearing cozy, warm beige winter outfits (the exact same outfits as described "
+        "before).  BACKGROUND: In front of the decorated tree on a wooden floor.  POSE: Medium close-up. The "
+        "whole family is sitting together on the floor. The adults are holding the toddlers close.  "
+        + PHOTOSESSION_BODY_ANATOMY_REQUIREMENT
+        + " DO NOT ADD ANY TEXT."
+    ),
+    (
+        "Create a highly realistic, professional New Year photoshoot in a vintage, rustic style. Focus ONLY on "
+        "the children from the reference photo.  CLOTHING: IGNORE the clothing in the reference photo. The "
+        "children MUST be wearing cozy, warm beige winter outfits.  BACKGROUND: On a cozy rug right next to "
+        "the tree, surrounded by warm lights and vintage wooden toys.  POSE: The toddler/baby is LYING on "
+        "their back or tummy. If there is an older child, they are SITTING next to the toddler.  "
+        + PHOTOSESSION_BODY_ANATOMY_REQUIREMENT
+        + " DO NOT ADD ANY TEXT."
+    ),
 )
 NY_FAMILY_PHOTOSESSION_PROMPTS = {
     "fam3": NY_FAMILY_THREE_PROMPTS,

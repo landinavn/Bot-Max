@@ -578,3 +578,35 @@ async def test_audio_webhook_acknowledges_before_background_generation_finishes(
         await asyncio.wait_for(delivered(), timeout=2)
         assert 'https://audio.example/song.mp3' in bot.send_message.await_args.kwargs['text']
         assert (await credit_db.get_user(456))['balance'] == 0
+
+
+async def test_preview_worker_runs_without_payment_configuration_and_stops_cleanly(payment_config,monkeypatch):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    import bot as bot_module
+    import max_client
+    settings=replace(payment_config,prodamus_domain=None,prodamus_secret_key=None,prodamus_return_url=None,prodamus_webhook_url=None)
+    started,stopped=asyncio.Event(),asyncio.Event()
+    async def worker_run():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+    async def polling(client):
+        await asyncio.wait_for(started.wait(),timeout=1)
+        raise RuntimeError('stop test')
+    client=Mock(close_session=AsyncMock())
+    dispatcher=Mock(start_polling=AsyncMock(side_effect=polling),shutdown=AsyncMock())
+    factory=Mock(return_value=SimpleNamespace(run=worker_run))
+    monkeypatch.setattr(bot_module.Config,'from_env',lambda:settings)
+    monkeypatch.setattr(bot_module,'init_db',AsyncMock())
+    monkeypatch.setattr(max_client,'Bot',Mock(return_value=client))
+    monkeypatch.setattr(bot_module,'Dispatcher',Mock(return_value=dispatcher))
+    monkeypatch.setattr(bot_module,'PaidAudioWorker',factory)
+    with pytest.raises(RuntimeError,match='stop test'):
+        await bot_module.main()
+    assert started.is_set() and stopped.is_set()
+    client.close_session.assert_awaited_once()
+    dispatcher.shutdown.assert_awaited_once()

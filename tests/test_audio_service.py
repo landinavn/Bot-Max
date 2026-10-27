@@ -108,3 +108,63 @@ def test_tracks_use_audio_url_and_keep_two_unique_valid_links():
         {'audioUrl': 'https://cdn.example/3.mp3'},
     ]}}) == [{'audioUrl': 'https://cdn.example/1.mp3', 'title': 'Один'},
             {'audioUrl': 'https://cdn.example/2.mp3', 'title': 'Два'}]
+
+
+@respx.mock
+async def test_lyrics_model_receives_rules_and_returns_six_sections(monkeypatch):
+    settings = Config(token='max', photo_path=Path('unused'), image_api_key='text-key')
+    monkeypatch.setattr(service.Config, 'from_env', lambda: settings)
+    lyrics = '[Verse 1]\nТы даришь свет\n[Chorus]\nПой со мной\n[Verse 2]\nВ горах Аня встречает рассвет\n[Chorus]\nПой со мной\n[Bridge]\nМечты сбываются\n[Chorus]\nПой со мной'
+    route = respx.post('https://api.openai.com/v1/chat/completions').mock(return_value=httpx.Response(200, json={
+        'id': 'lyrics', 'object': 'chat.completion', 'created': 1, 'model': 'gpt-4o-mini',
+        'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': lyrics}}],
+    }))
+    assert await service.write_song_lyrics('Аня, любит горы', 'pop', 'День рождения') == lyrics
+    body = json.loads(route.calls[0].request.content)
+    instruction = body['messages'][0]['content']
+    assert 'НЕ перечисляй факты и привычки в первом куплете' in instruction
+    assert '[Куплет 1] -> [Припев] -> [Куплет 2] -> [Припев] -> [Бридж] -> [Припев]' in instruction
+    assert 'Не пиши название песни, название сценария' in instruction
+    assert body['model'] == 'gpt-4o-mini'
+
+
+@pytest.mark.parametrize('lyrics', ['Название\n[Verse 1]\nПривет', '[Verse 1]\nПривет\n[Chorus]\nПой'])
+@respx.mock
+async def test_lyrics_rejects_heading_or_incomplete_structure(monkeypatch, lyrics):
+    monkeypatch.setattr(service.Config, 'from_env', lambda: Config(token='max', photo_path=Path('unused'), image_api_key='key'))
+    respx.post('https://api.openai.com/v1/chat/completions').mock(return_value=httpx.Response(200, json={
+        'id': 'lyrics', 'object': 'chat.completion', 'created': 1, 'model': 'gpt-4o-mini',
+        'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': lyrics}}],
+    }))
+    with pytest.raises(service.AudioServiceError):
+        await service.write_song_lyrics('details', 'pop', 'title')
+
+
+@respx.mock
+async def test_preview_is_reencoded_short_mp3_and_only_clip_is_uploaded(monkeypatch, tmp_path):
+    import io
+    import math
+    import struct
+    import subprocess
+    import wave
+    from unittest.mock import Mock
+    import image_service
+    if not service.shutil.which('ffmpeg') or not service.shutil.which('ffprobe'):
+        pytest.skip('ffmpeg/ffprobe not installed')
+    raw = io.BytesIO()
+    with wave.open(raw, 'wb') as wav:
+        wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(8000)
+        wav.writeframes(b''.join(struct.pack('<h', int(5000*math.sin(2*math.pi*220*i/8000))) for i in range(8000*20)))
+    respx.get('https://cdn.example/full.mp3').mock(return_value=httpx.Response(200, content=raw.getvalue()))
+    storage = Mock()
+    monkeypatch.setattr(image_service, '_storage_client', lambda settings: storage)
+    monkeypatch.setattr(service.Config, 'from_env', lambda: Config(token='max', photo_path=tmp_path, storage_bucket='preview-bucket'))
+    url = await service.make_protected_preview('https://cdn.example/full.mp3')
+    assert '/audio-previews/' in url and url != 'https://cdn.example/full.mp3'
+    payload = storage.put_object.call_args.kwargs
+    assert payload['ContentType'] == 'audio/mpeg'
+    result = tmp_path / 'result.mp3'; result.write_bytes(payload['Body'])
+    probe = json.loads(subprocess.check_output(['ffprobe','-v','error','-show_format','-of','json',str(result)]))
+    assert 14.9 <= float(probe['format']['duration']) <= 15.2
+    assert payload['Body'] != raw.getvalue()
+    storage.close.assert_called_once()

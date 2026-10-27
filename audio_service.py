@@ -1,9 +1,16 @@
 """Асинхронная генерация музыки TTAPI/Suno; без автоматического повторения POST."""
 
 import asyncio
-from urllib.parse import urlsplit
+import json
+import re
+import shutil
+import tempfile
+from pathlib import Path
+from uuid import uuid4
+from urllib.parse import urlsplit, quote
 
 import httpx
+from openai import AsyncOpenAI
 
 from config import Config
 
@@ -14,9 +21,9 @@ def build_song_request(details: str, scenario_title: str, audio_format: str, sty
     if audio_format not in {'fun', 'gift'} or not details.strip():
         raise ValueError('Некорректные детали песни.')
     chorus = "Эта песня для тебя, улыбайся, пой со мной!\nПусть удача каждый день будет рядом с тобой!"
-    prompt = f"[Verse]\n{details.strip()}\nСегодня эта песня посвящается тебе!\n[Chorus]\n{chorus}"
-    if audio_format == 'gift':
-        prompt += f"\n[Verse 2]\nЗа истории и встречи, за тепло счастливых дней,\nЗа мечты и добрый смех дорогих тебе людей!\n[Chorus]\n{chorus}\n[Outro]\nЭта песня для тебя!"
+    prompt = (f"[Verse 1]\nС тобою мир становится светлей,\nИ каждый день наполнен добротою.\n[Chorus]\n{chorus}"
+              f"\n[Verse 2]\n{details.strip()}\nИз этих встреч слагается история твоя.\n[Chorus]\n{chorus}"
+              f"\n[Bridge]\nПусть впереди сияет новый день,\nИ счастье остаётся рядом с нами.\n[Chorus]\n{chorus}")
     tags = str(style or ('upbeat pop, playful, Russian vocals, short song, 30-40 seconds' if audio_format == 'fun'
                         else 'warm emotional pop, Russian vocals, heartfelt, 2-3 minutes'))
     if len(prompt) > 5000 or len(tags) > 1000:
@@ -34,6 +41,93 @@ class AudioNotConfigured(AudioServiceError):
 
 class SongFailed(AudioServiceError):
     pass
+
+
+LYRICS_SYSTEM_PROMPT = (
+    'Ты профессиональный автор персональных песен на русском языке. '
+    'НЕ перечисляй факты и привычки в первом куплете. Начни песню с эмоционального или поэтического вступления '
+    '(например, о том, какой это замечательный человек). Факты и детали аккуратно вплети в повествование второго куплета или бриджа. '
+    'Соблюдай классическую структуру: [Куплет 1] -> [Припев] -> [Куплет 2] -> [Припев] -> [Бридж] -> [Припев]. '
+    'Для Suno записывай эти шесть секций как [Verse 1], [Chorus], [Verse 2], [Chorus], [Bridge], [Chorus]. '
+    'Верни ТОЛЬКО текст песни. Не пиши название песни, название сценария или заголовок. Начинай сразу с [Verse 1]. '
+    'Сохрани имена и смысл деталей, не вставляй перечень из анкеты дословно. Не добавляй пояснения или кодовые блоки. '
+    'Если нужен короткий формат 30–40 секунд, используй 1–2 строки на секцию, иначе 2–4 строки. До 5000 символов.'
+)
+
+
+async def write_song_lyrics(notes: str, tags: str, title: str) -> str:
+    settings = Config.from_env()
+    if not settings.image_api_key:
+        raise AudioNotConfigured('Не настроена текстовая модель для стихов.')
+    try:
+        async with httpx.AsyncClient(proxy=settings.openai_proxy_url, timeout=60, trust_env=False) as http_client:
+            async with AsyncOpenAI(api_key=settings.image_api_key, base_url='https://api.openai.com/v1',
+                                   http_client=http_client, max_retries=0) as client:
+                result = await client.chat.completions.create(model='gpt-4o-mini', temperature=0.7,
+                    messages=[{'role': 'system', 'content': LYRICS_SYSTEM_PROMPT},
+                              {'role': 'user', 'content': json.dumps({'details': notes, 'style': tags, 'title_for_context_only': title}, ensure_ascii=False)}])
+    except Exception as exc:
+        raise AudioServiceError('Не удалось написать стихи.') from exc
+    if not result.choices or result.choices[0].finish_reason != 'stop':
+        raise AudioServiceError('Текстовая модель не вернула полную песню.')
+    text = result.choices[0].message.content
+    if not isinstance(text, str) or len(text) > 5000:
+        raise AudioServiceError('Некорректный текст песни.')
+    text = text.strip()
+    sections = re.findall(r'\[([^\]]+)\]', text)
+    if not text.startswith('[Verse 1]') or sections != ['Verse 1','Chorus','Verse 2','Chorus','Bridge','Chorus']:
+        raise AudioServiceError('Не соблюдена структура песни.')
+    if any(not part.strip() for part in re.split(r'\[[^\]]+\]', text)[1:]):
+        raise AudioServiceError('В песне есть пустые секции.')
+    return text
+
+
+async def make_protected_preview(audio_url: str) -> str:
+    """Публичным становится только 15-секундный MP3 со звуковой меткой."""
+    parsed = urlsplit(audio_url)
+    if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password:
+        raise AudioServiceError('Некорректный URL аудио.')
+    binary = shutil.which('ffmpeg')
+    if not binary:
+        raise AudioNotConfigured('Для превью установите ffmpeg.')
+    settings = Config.from_env()
+    from image_service import _storage_client
+    client = await asyncio.to_thread(_storage_client, settings)
+    try:
+        with tempfile.TemporaryDirectory(prefix='song-preview-') as directory:
+            source, target = Path(directory)/'source.mp3', Path(directory)/'preview.mp3'
+            async with httpx.AsyncClient(timeout=60, trust_env=False, follow_redirects=False) as http:
+                async with http.stream('GET', audio_url) as response:
+                    response.raise_for_status()
+                    total = 0
+                    with source.open('wb') as file:
+                        async for chunk in response.aiter_bytes():
+                            total += len(chunk)
+                            if total > 32 * 1024 * 1024:
+                                raise AudioServiceError('Слишком большой аудиофайл.')
+                            file.write(chunk)
+            # Фильтр добавляет короткую звуковую метку каждые пять секунд.
+            process = await asyncio.create_subprocess_exec(binary, '-nostdin', '-v', 'error', '-protocol_whitelist', 'file,pipe',
+                '-i', str(source), '-f', 'lavfi', '-i', 'sine=frequency=1100:duration=15',
+                '-filter_complex', "[0:a]atrim=0:15,asetpts=PTS-STARTPTS[a];[1:a]volume='if(lt(mod(t,5),0.7),0.5,0)':eval=frame[b];[a][b]amix=inputs=2:duration=first:normalize=0[out]",
+                '-map', '[out]', '-map_metadata', '-1', '-map_chapters', '-1', '-t', '15', '-codec:a', 'libmp3lame', '-b:a', '128k', '-y', str(target),
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            try:
+                await asyncio.wait_for(process.communicate(), timeout=60)
+            except BaseException:
+                if process.returncode is None:
+                    process.kill()
+                    await process.wait()
+                raise
+            if process.returncode != 0 or not target.is_file() or not target.stat().st_size:
+                raise AudioServiceError('Не удалось создать фрагмент песни.')
+            key = f'audio-previews/{uuid4().hex}.mp3'
+            await asyncio.to_thread(client.put_object, Bucket=settings.storage_bucket, Key=key,
+                                    Body=target.read_bytes(), ContentType='audio/mpeg')
+            base = settings.storage_public_base_url or f"https://storage.yandexcloud.net/{quote(settings.storage_bucket, safe='')}"
+            return base.rstrip('/') + '/' + key
+    finally:
+        await asyncio.to_thread(client.close)
 
 
 def _headers() -> dict[str, str]:

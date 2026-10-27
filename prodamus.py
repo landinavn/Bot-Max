@@ -17,7 +17,7 @@ import aiohttp
 from yarl import URL
 
 from config import Config
-from database import create_payment_order, get_payment_order, create_audio_order, get_audio_order
+from database import create_payment_order, get_payment_order, create_audio_order, get_audio_order, update_audio_order
 
 PACKAGES = {
     1: (9900, "1 генерация (Открытка)"),
@@ -212,7 +212,9 @@ class ProdamusPayments:
             'payments_limit': '1',
         }
         data['sign'] = sign_link_payload(data, self.secret)
-        return await self._request_payment_link(data)
+        link = await self._request_payment_link(data)
+        await update_audio_order(order_id, payment_link=link)
+        return link
 
     async def validate_payment(self, data: dict):
         order_id = data.get("order_num")

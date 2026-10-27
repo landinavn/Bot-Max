@@ -380,13 +380,10 @@ PHOTO_NY_TRIAL_TEMPLATES = {
     "photo_temp_mom_daughter": ("👩‍👧 Мама + дочка", "mom_daughter"),
     "photo_temp_rabbit": ("🐰 С кроликом", "rabbit"),
 }
-# TODO: Заменить на реальную ссылку Prodamus для 590 руб
-PHOTO_TRIAL_TEST_PAYMENT_URL = "https://fotobot.payform.ru/"
+PHOTO_TRIAL_PAYMENT_URL = "https://link.payform.ru/?paymentLinkId=72139edd-76b7-4dcf-b7e4-a34f6bd9c625"
 PHOTO_TRIAL_CHECKOUT_TEXT = (
-    "Отличный выбор! Сейчас я сформирую ссылку на оплату.\n\n"
-    "Стоимость: 590 ₽ (3 фото).\n\n"
-    "После оплаты я попрошу вас загрузить фото, и мы начнем!\n\n"
-    "⚠️ Это тестовая ссылка. Оплата и обработка заказа фотосессии пока не подключены."
+    "Вы выбрали тариф «Попробовать» (3 фото) за 590 ₽.\n\n"
+    "Для продолжения, пожалуйста, оплатите заказ по ссылке ниже. После оплаты обязательно вернитесь в бота!"
 )
 
 
@@ -507,6 +504,12 @@ def main_keyboard():
     return navigation_keyboard(CATEGORY_BUTTONS, footer=(
         ("🖼 Примеры", "show_examples"), ("🆘 Помощь", "show_help"),
     ))
+
+
+def photo_trial_payment_keyboard():
+    return InlineKeyboardBuilder().row(
+        LinkButton(text="Оплатить 590 ₽", url=PHOTO_TRIAL_PAYMENT_URL)
+    ).row(CallbackButton(text="⬅️ Назад", payload="photo_tariff_back")).as_markup()
 
 
 def is_bot_message(event: MessageCreated) -> bool:
@@ -1078,19 +1081,18 @@ def create_router(
             return
         data = await context.get_data()
         ny_trial = data.get("photo_style") == "photo_style_ny" and event.callback.payload == "photo_tariff_590"
-        await event.ack(notification="Выберите сюжет…" if ny_trial else "Скоро будет доступно…")
+        await event.ack(notification="Показываю ссылку…" if ny_trial else "Скоро будет доступно…")
         user_id = event.get_ids()[1]
         if user_id is not None:
             await increment_counter(PHOTO_CLICK_EVENTS[event.callback.payload], user_id=user_id)
         if ny_trial:
             await context.clear()
             await context.set_state(PosterStates.waiting_for_mode)
-            await context.update_data(photo_style="photo_style_ny", photo_tariff="photo_tariff_590")
-            buttons = tuple((label, payload) for payload, (label, _) in PHOTO_NY_TRIAL_TEMPLATES.items())
-            await _reply(
-                event, "Отличный выбор! Выберите сюжет для вашей новогодней фотосессии (3 фото):",
-                attachments=[navigation_keyboard((*buttons, ("⬅️ Назад", "photo_tariff_back")))],
+            await context.update_data(
+                photo_style="photo_style_ny", photo_tariff="photo_tariff_590", tariff="trial_590",
+                photo_product_name="Фотосессия Попробовать", photo_amount_kopecks=59000,
             )
+            await _reply(event, PHOTO_TRIAL_CHECKOUT_TEXT, attachments=[photo_trial_payment_keyboard()])
             return
         await _reply(
             event, PHOTO_TARIFF_SOON_TEXT,
@@ -1129,12 +1131,9 @@ def create_router(
         await context.update_data(
             template=template, photo_product_name="Фотосессия Попробовать", photo_amount_kopecks=59000,
         )
-        # create_payment_link и webhook принимают только PACKAGES с кредитами.
-        # Не выдаём тестовую ссылку за оплачиваемый заказ и не создаём заказ пакета кредитов.
-        keyboard = InlineKeyboardBuilder().row(
-            LinkButton(text="Оплатить 590 ₽", url=PHOTO_TRIAL_TEST_PAYMENT_URL)
-        ).row(CallbackButton(text="⬅️ Назад", payload="photo_tariff_590")).as_markup()
-        await _reply(event, PHOTO_TRIAL_CHECKOUT_TEXT, attachments=[keyboard])
+        # Готовая ссылка Prodamus используется без создания заказа пакета кредитов.
+        # Возврат и подтверждение оплаты фотосессии подключаются отдельно.
+        await _reply(event, PHOTO_TRIAL_CHECKOUT_TEXT, attachments=[photo_trial_payment_keyboard()])
 
     @router.message_callback(F.callback.payload.in_({"show_examples", "show_help"}))
     async def utility_menu(event: MessageCallback) -> None:

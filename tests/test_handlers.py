@@ -2978,3 +2978,90 @@ async def test_family_plus_does_not_run_for_other_style_or_tariff(style, tariff)
     await context.update_data(photo_style=style, photo_tariff=tariff)
     await dispatch_callback(create_router(admin_user_id=456, photosession_generator=frames), callback_event("photo_temp_fam4"), context)
     frames.assert_not_awaited()
+
+
+async def test_toddlers_three_frames_use_same_reference_and_correct_prompts(credit_db):
+    await credit_db.grant_free_trial(456)
+    outputs = [f"https://cdn.example/toddlers-{i}.png" for i in range(3)]
+    events = []
+    async def generate(reference, prompt):
+        index = sum(e.startswith("generate") for e in events)
+        events.append(f"generate-{index}")
+        return outputs[index]
+    frames = AsyncMock(side_effect=generate)
+    router = create_router(admin_user_id=456, photosession_generator=frames)
+    context = await family_context(False)
+    selected = callback_event("photo_temp_toddlers")
+    await dispatch_callback(router, selected, context)
+    selected.ack.assert_awaited_once()
+    assert "семьи с малышом или малышами" in selected.send.await_args.args[0]
+    assert await context.get_state() == PosterStates.waiting_for_photosession_photo
+    assert (await context.get_data())["template"] == "toddlers"
+    frames.assert_not_awaited()
+    photo = photo_event()
+    async def send(**kwargs):
+        index = sum(e.startswith("send") for e in events)
+        events.append(f"send-{index}")
+        assert kwargs["text"] == f"Фотография {index + 1} из 3"
+        assert len(kwargs["attachments"]) == 1
+        return object()
+    photo.bot.send_message.side_effect = send
+    await call_handler(router, "collect_photosession_photo", photo, context)
+    assert events == ["generate-0", "send-0", "generate-1", "send-1", "generate-2", "send-2"]
+    assert frames.await_args_list == [call("https://photos.example.com/source.png", p)
+                                     for p in handlers.NY_FAMILY_PHOTOSESSION_PROMPTS["toddlers"]]
+    progress = [c.args[0] for c in photo.message.answer.await_args_list if c.args and c.args[0].startswith("Генерирую кадр")]
+    assert progress == [f"Генерирую кадр {i} из 3... ⏳ Это может занять 3-5 минут. Пожалуйста, не закрывайте чат!" for i in range(1,4)]
+    assert (await context.get_data())["photosession_urls"] == outputs
+    assert (await context.get_data())["photosession_complete"] is True
+    assert (await credit_db.get_user(456))["balance"] == 1
+
+
+@pytest.mark.parametrize("failure", ["generate", "send"])
+async def test_toddlers_resume_preserves_saved_frames(failure):
+    frames = AsyncMock(side_effect=["https://cdn.example/1.png", RuntimeError("api error"),
+                                   "https://cdn.example/2.png", "https://cdn.example/3.png"] if failure == "generate"
+                      else [f"https://cdn.example/{i}.png" for i in range(3)])
+    router = create_router(admin_user_id=456, photosession_generator=frames)
+    context = await family_context()
+    await context.update_data(template="toddlers")
+    event = callback_event("photo_temp_toddlers")
+    if failure == "send":
+        event.bot.send_message.side_effect = [object(), RuntimeError("MAX error")]
+    await dispatch_callback(router, event, context)
+    retry_button = event.send.await_args.kwargs["attachments"][0].payload.buttons[0][0]
+    assert retry_button.payload == "photo_temp_toddlers"
+    retry = callback_event(retry_button.payload)
+    await dispatch_callback(router, retry, context)
+    assert frames.await_count == (4 if failure == "generate" else 3)
+    assert retry.bot.send_message.await_count == 2
+    assert (await context.get_data())["photosession_complete"] is True
+
+
+@pytest.mark.parametrize("admin_id,style,tariff", [
+    (None, "photo_style_ny", "photo_tariff_590"), (999, "photo_style_ny", "photo_tariff_590"),
+    (456, "photo_style_walk", "photo_tariff_590"), (456, "photo_style_ny", "photo_tariff_990"),
+])
+async def test_toddlers_keeps_existing_access_and_style_restrictions(admin_id, style, tariff):
+    frames = AsyncMock()
+    context = await family_context()
+    await context.update_data(photo_style=style, photo_tariff=tariff)
+    event = callback_event("photo_temp_toddlers")
+    await dispatch_callback(create_router(admin_user_id=admin_id, photosession_generator=frames), event, context)
+    frames.assert_not_awaited()
+    if admin_id != 456:
+        assert event.send.await_args.args[0] == handlers.PHOTO_TRIAL_CHECKOUT_TEXT
+
+
+@pytest.mark.parametrize("old_template", ["fam3", "fam4"])
+async def test_switch_to_toddlers_requires_new_reference(old_template):
+    context = await family_context()
+    await context.update_data(template=old_template, photosession_complete=True,
+                              photosession_urls=["https://cdn.example/old.png"] * 3)
+    frames = AsyncMock()
+    event = callback_event("photo_temp_toddlers")
+    await dispatch_callback(create_router(admin_user_id=456, photosession_generator=frames), event, context)
+    data = await context.get_data()
+    assert data["template"] == "toddlers" and "photosession_urls" not in data and "photo" not in data
+    assert await context.get_state() == PosterStates.waiting_for_photosession_photo
+    frames.assert_not_awaited()

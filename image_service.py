@@ -6,6 +6,7 @@ import binascii
 import logging
 import re
 import textwrap
+from contextlib import asynccontextmanager
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -376,6 +377,23 @@ def _validate_inputs(photo_url: str, sphere: str) -> None:
         raise ValueError("Описание мечты должно содержать от 1 до 200 символов.")
 
 
+@asynccontextmanager
+async def _image_api_client(config: Config):
+    """Одинаковые прокси и таймаут для карт, открыток и каждого кадра фотосессии."""
+    logger.info(
+        "OpenAI Images: прокси %s, таймаут 300.0 с",
+        "настроен" if config.openai_proxy_url else "не задан",
+    )
+    async with httpx.AsyncClient(
+        proxy=config.openai_proxy_url, timeout=300.0, trust_env=False, follow_redirects=False,
+    ) as http_client:
+        async with AsyncOpenAI(
+            api_key=config.image_api_key, base_url=OPENAI_BASE_URL,
+            http_client=http_client, max_retries=0,
+        ) as client:
+            yield client
+
+
 async def _generate_image_bytes(
     photo_url: str, sphere: str, config: Config, count: int = 1, *, prompt_override: str | None = None
 ) -> list[bytes]:
@@ -447,29 +465,23 @@ async def _generate_image_bytes(
             config.image_model, config.image_quality,
         )
         logger.info("Эндпоинт API: %s/images/edits, quality: %s", OPENAI_BASE_URL, config.image_quality)
-        async with httpx.AsyncClient(
-            proxy=config.openai_proxy_url, timeout=300, trust_env=False, follow_redirects=False,
-        ) as http_client:
-            async with AsyncOpenAI(
-                api_key=config.image_api_key, base_url=OPENAI_BASE_URL,
-                http_client=http_client, max_retries=0,
-            ) as client:
-                raw = await client.images.with_raw_response.edit(
-                    model=config.image_model, quality=config.image_quality,
-                    prompt=prompt, size="1024x1536",
-                    image=(filename, photo_bytes, mime_type),
+        async with _image_api_client(config) as client:
+            raw = await client.images.with_raw_response.edit(
+                model=config.image_model, quality=config.image_quality,
+                prompt=prompt, size="1024x1536",
+                image=(filename, photo_bytes, mime_type),
+            )
+            response = raw.http_response
+            if response.status_code != 200:
+                _raise_api_error(response)
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                logger.error(
+                    "OpenAI Images API invalid JSON: HTTP %s; response body: %s",
+                    response.status_code, response.text,
                 )
-                response = raw.http_response
-                if response.status_code != 200:
-                    _raise_api_error(response)
-                try:
-                    payload = response.json()
-                except ValueError as exc:
-                    logger.error(
-                        "OpenAI Images API invalid JSON: HTTP %s; response body: %s",
-                        response.status_code, response.text,
-                    )
-                    raise ImageGenerationError("OpenAI вернул некорректный JSON.") from exc
+                raise ImageGenerationError("OpenAI вернул некорректный JSON.") from exc
     except APIStatusError as exc:
         _raise_api_error(exc.response)
     except (asyncio.TimeoutError, APITimeoutError) as exc:
@@ -678,7 +690,10 @@ NY_FAMILY_THREE_PROMPTS = (
 
 
 async def generate_photosession_frame(photo_url: str, prompt: str) -> str:
-    """Один запрос /images/edits, один отдельный файл в S3, без надписи Pillow."""
+    """Один /images/edits через общий клиент с OPENAI_PROXY_URL и таймаутом 300 с.
+
+    Результат сохраняется отдельным файлом в S3, без надписи Pillow.
+    """
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("Не задан промпт фотосессии.")
     urls = await _generate_and_store(photo_url, "Фотосессия", count=1, prompt_override=prompt)

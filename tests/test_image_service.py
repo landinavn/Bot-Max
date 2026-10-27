@@ -964,3 +964,51 @@ async def test_photosession_frame_uses_edits_storage_pipeline_without_text_overl
     assert "lying on the floor" in service.NY_FAMILY_THREE_PROMPTS[1]
     assert "2 adults and 1 child" in service.NY_FAMILY_THREE_PROMPTS[2]
     assert "1 adult and 2 children" in service.NY_FAMILY_THREE_PROMPTS[2]
+
+
+@pytest.mark.parametrize("proxy_url", ["http://94.249.177.108:8888", "http://custom-proxy.example.com:8080"])
+@pytest.mark.parametrize("outcome", ["success", "http_error", "timeout"])
+async def test_photosession_public_path_passes_proxy_and_300_second_timeout(
+    config, storage, api, monkeypatch, proxy_url, outcome,
+):
+    settings = replace(config, openai_proxy_url=proxy_url)
+    monkeypatch.setattr(service.Config, "from_env", lambda: settings)
+    clients = []
+    original_init = httpx.AsyncClient.__init__
+    def capture_init(client, *args, **kwargs):
+        clients.append((client, kwargs))
+        original_init(client, *args, **kwargs)
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", capture_init)
+    api.get(PHOTO_URL, body=PNG, content_type="image/png")
+    if outcome == "timeout":
+        api.post(IMAGE_EDIT_URL, exception=httpx.ReadTimeout("photosession timeout"))
+    else:
+        api.post(IMAGE_EDIT_URL, status=401 if outcome == "http_error" else 200,
+                 payload={"error": {"message": "bad key"}} if outcome == "http_error" else
+                         {"data": [{"b64_json": ENCODED_PNG}]})
+    api.head(PUBLIC_URL, status=200, repeat=True)
+    prompt = service.NY_FAMILY_THREE_PROMPTS[0]
+    if outcome == "success":
+        result = await service.generate_photosession_frame(PHOTO_URL, prompt)
+        assert PUBLIC_URL.fullmatch(result)
+        assert storage.uploaded_images == [PNG]
+    else:
+        expected_error = service.GenerationTimeoutError if outcome == "timeout" else service.ImageGenerationError
+        with pytest.raises(expected_error):
+            await service.generate_photosession_frame(PHOTO_URL, prompt)
+        storage.put_object.assert_not_called()
+    assert len(clients) == 1
+    client, kwargs = clients[0]
+    assert kwargs["proxy"] == proxy_url
+    assert kwargs["timeout"] == 300.0
+    assert kwargs["trust_env"] is False
+    assert client.is_closed
+    storage.close.assert_called_once()
+    requests = post_requests(api)
+    assert len(requests) == 1
+    assert str(requests[0].url) == IMAGE_EDIT_URL
+    assert requests[0].headers["Authorization"] == "Bearer test-openai-key"
+    fields = await multipart_fields(requests[0])
+    assert fields["model"].get_content() == settings.image_model
+    assert fields["quality"].get_content() == settings.image_quality
+    assert fields["prompt"].get_content() == prompt

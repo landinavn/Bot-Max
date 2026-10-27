@@ -67,6 +67,20 @@ async def init_db() -> None:
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )"""
         )
+        await db.execute(
+            """CREATE TABLE IF NOT EXISTS audio_orders (
+                order_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL,
+                audio_format TEXT NOT NULL CHECK(audio_format IN ('fun', 'gift')),
+                scenario TEXT NOT NULL, details TEXT NOT NULL, style TEXT,
+                prompt TEXT NOT NULL, tags TEXT NOT NULL, title TEXT NOT NULL,
+                amount_kopecks INTEGER NOT NULL CHECK(amount_kopecks > 0), product_name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'paid')),
+                provider_payment_id TEXT UNIQUE, created_at TEXT DEFAULT CURRENT_TIMESTAMP, paid_at TEXT,
+                submit_started INTEGER NOT NULL DEFAULT 0, job_id TEXT, tracks_json TEXT,
+                running INTEGER NOT NULL DEFAULT 0, delivered INTEGER NOT NULL DEFAULT 0,
+                failed INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL DEFAULT 0, error TEXT
+            )"""
+        )
         async with db.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'global_counters'"
         ) as cursor:
@@ -309,6 +323,9 @@ async def add_credits(
                 if order["provider_payment_id"] != provider_payment_id:
                     raise ValueError("Заказ уже оплачен другим платежом.")
                 return False
+            async with db.execute("SELECT 1 FROM audio_orders WHERE provider_payment_id = ?", (provider_payment_id,)) as cursor:
+                if await cursor.fetchone():
+                    raise ValueError("Платёж уже использован для аудиозаказа.")
             await db.execute(
                 """UPDATE payment_orders SET status = 'paid', provider_payment_id = ?,
                    paid_at = CURRENT_TIMESTAMP WHERE order_id = ?""",
@@ -569,7 +586,11 @@ async def get_source_stats(admin_id: int | None = None) -> list[dict]:
                FROM users u
                LEFT JOIN (
                  SELECT user_id, SUM(amount_kopecks) AS revenue_kopecks
-                 FROM payment_orders WHERE status = 'paid' GROUP BY user_id
+                 FROM (
+                   SELECT user_id, amount_kopecks FROM payment_orders WHERE status = 'paid'
+                   UNION ALL
+                   SELECT user_id, amount_kopecks FROM audio_orders WHERE status = 'paid'
+                 ) GROUP BY user_id
                ) p ON p.user_id = u.user_id
                WHERE (? IS NULL OR u.user_id != ?)
                GROUP BY COALESCE(u.first_start_source, 'legacy')""", (admin_id, admin_id),
@@ -627,3 +648,90 @@ async def get_shared_image(key: str) -> str | None:
         ) as cursor:
             row = await cursor.fetchone()
             return row[0] if row else None
+
+
+async def create_audio_order(order_id: str, user_id: int, audio_format: str, scenario: str,
+                             details: str, style: str | None, prompt: str, tags: str, title: str) -> str:
+    if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0 or audio_format not in {'fun', 'gift'}:
+        raise ValueError('Некорректный пользователь или аудиоформат.')
+    if not scenario or not details.strip() or not prompt or len(prompt) > 5000 or len(tags) > 1000 or len(title) > 80:
+        raise ValueError('Некорректные детали песни.')
+    amount, product = (19900, 'Песня по фану') if audio_format == 'fun' else (49000, 'Песня в подарок')
+    values = (order_id, user_id, audio_format, scenario, details, style, prompt, tags, title, amount, product)
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        await db.execute('''INSERT INTO audio_orders
+            (order_id,user_id,audio_format,scenario,details,style,prompt,tags,title,amount_kopecks,product_name)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(order_id) DO NOTHING''', values)
+        await db.commit()
+    order = await get_audio_order(order_id)
+    keys = ('order_id','user_id','audio_format','scenario','details','style','prompt','tags','title','amount_kopecks','product_name')
+    if tuple(order[key] for key in keys) != values:
+        raise ValueError('Нельзя изменить сохранённый аудиозаказ.')
+    return order_id
+
+
+async def get_audio_order(order_id: str) -> dict | None:
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute('SELECT * FROM audio_orders WHERE order_id = ?', (order_id,)) as cursor:
+            row = await cursor.fetchone()
+    if row is None:
+        return None
+    order = dict(row)
+    order.update(credits=0, package_id='audio_' + order['audio_format'], order_type='audio')
+    return order
+
+
+async def mark_audio_paid(order_id: str, payment_id: str) -> bool:
+    if not payment_id:
+        raise ValueError('Не указан платёж.')
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        await db.execute('BEGIN IMMEDIATE')
+        db.row_factory = aiosqlite.Row
+        async with db.execute('SELECT * FROM audio_orders WHERE order_id = ?', (order_id,)) as cursor:
+            order = await cursor.fetchone()
+        if order is None:
+            raise ValueError('Аудиозаказ не найден.')
+        if order['status'] == 'paid':
+            if order['provider_payment_id'] != payment_id:
+                raise ValueError('Заказ уже оплачен другим платежом.')
+            return False
+        async with db.execute('SELECT 1 FROM payment_orders WHERE provider_payment_id = ?', (payment_id,)) as cursor:
+            if await cursor.fetchone():
+                raise ValueError('Платёж уже использован для пакета кредитов.')
+        await db.execute("UPDATE audio_orders SET status='paid', provider_payment_id=?, paid_at=CURRENT_TIMESTAMP WHERE order_id=?", (payment_id,order_id))
+        await db.execute('INSERT INTO users(user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING', (order['user_id'],))
+        await increment_purchases(order['user_id'], connection=db)
+        await increment_counter('buy_audio_' + order['audio_format'], user_id=order['user_id'], connection=db)
+        await db.commit()
+    return True
+
+
+async def update_audio_order(order_id: str, **fields) -> None:
+    allowed = {'submit_started','job_id','tracks_json','running','delivered','failed','next_attempt_at','error'}
+    if not fields or not set(fields) <= allowed:
+        raise ValueError('Некорректные поля аудиозаказа.')
+    assignments = ','.join(key + '=?' for key in fields)
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        await db.execute(f'UPDATE audio_orders SET {assignments} WHERE order_id=?', (*fields.values(), order_id))
+        await db.commit()
+
+
+async def reset_audio_workers() -> None:
+    # Один экземпляр botmax; после перезапуска продолжаем только сохранённые задачи.
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        await db.execute('UPDATE audio_orders SET running=0 WHERE running=1')
+        await db.commit()
+
+
+async def pending_audio_orders() -> list[str]:
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        async with db.execute("SELECT order_id FROM audio_orders WHERE status='paid' AND delivered=0 AND failed=0 AND running=0 AND next_attempt_at <= ? ORDER BY paid_at LIMIT 4", (_now_ts(),)) as cursor:
+            return [row[0] for row in await cursor.fetchall()]
+
+
+async def claim_audio_order(order_id: str) -> bool:
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        cursor = await db.execute("UPDATE audio_orders SET running=1 WHERE order_id=? AND status='paid' AND delivered=0 AND failed=0 AND running=0 AND next_attempt_at <= ?", (order_id, _now_ts()))
+        await db.commit()
+        return cursor.rowcount == 1

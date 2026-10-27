@@ -13,6 +13,7 @@ from database import init_db
 from handlers import create_router
 from prodamus import ProdamusPayments
 from webhook import start_webhook_server
+from audio_orders import PaidAudioWorker
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ async def main() -> None:
         try:
             if payments is not None:
                 webhook_runner = await start_webhook_server(
-                    payments, config.webhook_host, config.webhook_port,
+                    payments, config.webhook_host, config.webhook_port, audio_worker=PaidAudioWorker(bot),
                 )
             logger.info("Запуск получения обновлений MAX.")
             await dispatcher.start_polling(bot)

@@ -1,5 +1,6 @@
 """Асинхронный endpoint Prodamus; подтверждение только после коммита SQLite."""
 
+import asyncio
 import json
 import logging
 import sqlite3
@@ -7,7 +8,7 @@ from urllib.parse import parse_qsl
 
 from aiohttp import web
 
-from database import add_credits
+from database import add_credits, mark_audio_paid
 from prodamus import ProdamusPayments, parse_form_fields, verify_signature
 
 logger = logging.getLogger(__name__)
@@ -22,8 +23,18 @@ def _unique_object(pairs):
     return result
 
 
-def create_webhook_app(payments: ProdamusPayments) -> web.Application:
+def create_webhook_app(payments: ProdamusPayments, *, audio_worker=None) -> web.Application:
     app = web.Application(client_max_size=128 * 1024)
+    if audio_worker is not None:
+        async def worker_context(app):
+            task = asyncio.create_task(audio_worker.run())
+            yield
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        app.cleanup_ctx.append(worker_context)
 
     async def payment_webhook(request: web.Request) -> web.Response:
         logger.info("HTTP POST Prodamus: уведомление об оплате.")
@@ -54,6 +65,10 @@ def create_webhook_app(payments: ProdamusPayments) -> web.Application:
                 logger.info("Prodamus: уведомление без успешной оплаты пропущено.")
                 return web.Response(text="OK")
             order, payment_id = await payments.validate_payment(data)
+            if order.get('order_type') == 'audio':
+                accepted = await mark_audio_paid(order['order_id'], payment_id)
+                logger.info('Prodamus: %s.', 'аудиозаказ сохранён в очереди' if accepted else 'повтор оплаты аудиозаказа')
+                return web.Response(text='OK')
             # add_credits увеличивает total_purchases и buy_<credits> по проверенному
             # заказу в той же транзакции: повтор webhook не увеличивает счётчики.
             credited = await add_credits(
@@ -74,9 +89,9 @@ def create_webhook_app(payments: ProdamusPayments) -> web.Application:
 
 
 async def start_webhook_server(
-    payments: ProdamusPayments, host: str, port: int,
+    payments: ProdamusPayments, host: str, port: int, *, audio_worker=None,
 ) -> web.AppRunner:
-    runner = web.AppRunner(create_webhook_app(payments), access_log=None)
+    runner = web.AppRunner(create_webhook_app(payments, audio_worker=audio_worker), access_log=None)
     try:
         await runner.setup()
         await web.TCPSite(runner, host, port).start()

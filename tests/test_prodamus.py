@@ -492,3 +492,89 @@ async def test_discount_webhook_rejects_price_and_package_tampering(client, paym
     assert (await post_notification(client, data)).status == 400
     assert (await credit_db.get_user(456))["balance"] == 0
     assert (await credit_db.get_user(456))["promo_redeemed_at"] is None
+
+
+async def audio_notification(payments, kind='fun', user_id=456, payment_id='audio-provider'):
+    order_id = f'audio-test-{kind}-{user_id}'
+    link = await payments.create_audio_payment_link(user_id, kind, 'boss' if kind == 'fun' else 'bday',
+        'Аня, любит горы', 'pop', '[Verse]\nАня', 'pop', 'Для Ани', order_id=order_id)
+    fields = parse_form_fields(parse_qsl(urlsplit(link).query, keep_blank_values=True))
+    return {'order_num': fields['order_id'], 'order_id': payment_id, 'sum': fields['products'][0]['price'],
+            'currency': 'rub', 'domain': 'test-shop.payform.ru', 'payment_status': 'success',
+            'products': fields['products'], 'customer_extra': fields['customer_extra'],
+            '_param_user_id': str(user_id), '_param_credits': '0', '_param_package_id': fields['_param_package_id']}
+
+
+@pytest.mark.parametrize('kind,amount', [('fun', '199.00'), ('gift', '490.00')])
+@pytest.mark.parametrize('encoding', ['form', 'json', 'multipart'])
+async def test_audio_webhook_queues_paid_order_once_without_crediting_images(client, payments, credit_db, kind, amount, encoding):
+    data = await audio_notification(payments, kind)
+    assert data['sum'] == amount
+    assert (await client.post('/prodamus/webhook', json=data, headers={'Sign': 'wrong'})).status == 403
+    for _ in range(2):
+        response = await post_notification(client, data, encoding=encoding)
+        assert response.status == 200 and await response.text() == 'OK'
+    order = await credit_db.get_audio_order(data['order_num'])
+    assert order['status'] == 'paid' and order['details'] == 'Аня, любит горы'
+    assert order['job_id'] is None
+    user = await credit_db.get_user(456)
+    assert user['balance'] == 0 and user['total_purchases'] == 1
+    assert (await credit_db.get_all_counters())['buy_audio_' + kind] == 1
+
+
+@pytest.mark.parametrize('field,value', [('sum', '99.00'), ('_param_user_id', '999'), ('_param_credits', '3'),
+    ('_param_package_id', 'package_3'), ('currency', 'usd')])
+async def test_audio_webhook_rejects_mismatched_signed_metadata(client, payments, credit_db, field, value):
+    data = await audio_notification(payments)
+    data[field] = value
+    assert (await post_notification(client, data)).status == 400
+    assert (await credit_db.get_audio_order(data['order_num']))['status'] == 'pending'
+
+
+async def test_credit_package_199_is_not_an_audio_payment(client, payments, credit_db):
+    data = await notification(payments, 3)
+    assert data['sum'] == '199.00'
+    assert (await post_notification(client, data)).status == 200
+    assert (await credit_db.get_user(456))['balance'] == 3
+    assert await credit_db.pending_audio_orders() == []
+
+
+@pytest.mark.parametrize('field,value', [('is_test', '1'), ('payment_status', 'pending')])
+async def test_audio_test_and_pending_notifications_do_not_queue(client, payments, credit_db, field, value):
+    data = await audio_notification(payments)
+    data[field] = value
+    assert (await post_notification(client, data)).status == 200
+    assert (await credit_db.get_audio_order(data['order_num']))['status'] == 'pending'
+    assert await credit_db.pending_audio_orders() == []
+
+
+@pytest.mark.parametrize('kind', ['fun', 'gift'])
+async def test_audio_webhook_acknowledges_before_background_generation_finishes(payments, credit_db, kind):
+    from types import SimpleNamespace
+    from audio_orders import PaidAudioWorker
+    entered, release = asyncio.Event(), asyncio.Event()
+    result = {'status': 'SUCCESS', 'data': {'musics': [{'audioUrl': 'https://audio.example/song.mp3', 'title': 'Песня'}]}}
+    async def wait(job):
+        entered.set()
+        await release.wait()
+        return result
+    submit = AsyncMock(return_value='paid-job')
+    bot = SimpleNamespace(send_message=AsyncMock())
+    worker = PaidAudioWorker(bot, generator=submit, waiter=wait, poll_interval=0.005)
+    data = await audio_notification(payments, kind)
+    async with TestClient(TestServer(create_webhook_app(payments, audio_worker=worker))) as client:
+        try:
+            response = await asyncio.wait_for(post_notification(client, data), timeout=2)
+            assert response.status == 200
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            assert not release.is_set()
+            assert (await post_notification(client, data)).status == 200
+            submit.assert_awaited_once()
+        finally:
+            release.set()
+        async def delivered():
+            while not (await credit_db.get_audio_order(data['order_num']))['delivered']:
+                await asyncio.sleep(0.005)
+        await asyncio.wait_for(delivered(), timeout=2)
+        assert 'https://audio.example/song.mp3' in bot.send_message.await_args.kwargs['text']
+        assert (await credit_db.get_user(456))['balance'] == 0

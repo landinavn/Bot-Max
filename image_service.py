@@ -732,30 +732,31 @@ NY_FAMILY_TODDLERS_PROMPTS = (
     "Create a highly realistic, professional New Year family photoshoot in a vintage, rustic style. "
     "The image must feature EXACTLY the same people from the reference photo. "
     "Preserve their exact faces and body proportions perfectly.  "
-    "CLOTHING: Cozy, elegant winter clothing (knitwear, warm tones).  "
-    "BACKGROUND: A beautifully decorated Christmas tree with vintage ornaments, warm golden lighting, wooden floor, "
-    "and antique wooden toys (like a rocking horse) in the background.  "
+    "CLOTHING: Cozy, elegant winter clothing (warm knitwear, soft tones). "
+    "CRITICAL: Ensure the clothing matches exactly across the entire photoshoot. "
+    "BACKGROUND: A beautifully decorated Christmas tree with vintage ornaments, warm golden lighting, "
+    "wooden floor, and antique wooden toys (like a rocking horse).  "
     "POSE & CAMERA ANGLE: Full-length shot. The adults are standing elegantly near the Christmas tree, "
     "holding the toddler(s) safely in their arms. Everyone is looking at the camera.  "
-    "CRITICAL ANATOMY REQUIREMENT: The babies/toddlers must have correct infant proportions "
-    "(large heads, chubby limbs, not looking like small adults). Perfect human anatomy for adults. "
+    "CRITICAL ANATOMY: Toddlers must have correct infant proportions (not small adults). Perfect anatomy. "
     "Exactly 5 fingers on each hand. No extra limbs.  DO NOT ADD ANY TEXT.",
     "Create a highly realistic, professional New Year family photoshoot in a vintage, rustic style. "
     "The image must feature EXACTLY the same people from the reference photo. Preserve their exact faces perfectly.  "
-    "CLOTHING: Same cozy, elegant winter clothing.  "
+    "CLOTHING: The exact same cozy, elegant winter clothing as in the previous frame. "
     "BACKGROUND: In front of the decorated Christmas tree on a wooden floor, surrounded by vintage toys and warm lights.  "
     "POSE & CAMERA ANGLE: Medium close-up shot. The whole family is sitting together on the floor. "
     "The adults are holding the toddler(s) close to them. Everyone is smiling warmly at the camera.  "
-    "CRITICAL ANATOMY REQUIREMENT: Toddlers must have correct baby proportions. Perfect human anatomy. "
-    "Exactly 5 fingers on each hand. No extra limbs.  DO NOT ADD ANY TEXT.",
+    "CRITICAL ANATOMY: Toddlers must have correct baby proportions. Exactly 5 fingers on each hand. "
+    "No extra limbs.  DO NOT ADD ANY TEXT.",
     "Create a highly realistic, professional New Year photoshoot in a vintage, rustic style. "
-    "Focus ONLY on the toddler(s)/baby(ies) from the reference photo. Preserve their exact faces perfectly.  "
-    "CLOTHING: Cozy baby winter clothes.  "
-    "BACKGROUND: Sitting or lying on a cozy rug right next to the Christmas tree. "
-    "Surrounded by warm glowing lights, vintage wooden toys (rocking horse, wooden blocks), and wrapped gifts.  "
-    "POSE & CAMERA ANGLE: The toddler(s) are sitting or lying on the floor, looking at the camera with a cute expression.  "
-    "CRITICAL ANATOMY REQUIREMENT: Toddlers must have correct infant body proportions (chubby, realistic baby anatomy). "
-    "Exactly 5 fingers on each hand, exactly 2 arms and 2 legs. No deformed limbs.  DO NOT ADD ANY TEXT.",
+    "Focus ONLY on the children from the reference photo. Preserve their exact faces perfectly.  "
+    "CLOTHING: Wearing the exact same cozy winter outfits as in the previous frames. "
+    "BACKGROUND: On a cozy rug right next to the Christmas tree. "
+    "Surrounded by warm glowing lights, vintage wooden toys, and wrapped gifts.  "
+    "POSE LOGIC: - The toddler/baby must be LYING on their back or tummy on the rug. "
+    "- If there is an older child, they must be SITTING next to the toddler. Everyone is looking at the camera. "
+    "CRITICAL ANATOMY: Correct infant and child body proportions. Exactly 5 fingers on each hand. "
+    "No deformed limbs.  DO NOT ADD ANY TEXT.",
 )
 NY_FAMILY_PHOTOSESSION_PROMPTS = {
     "fam3": NY_FAMILY_THREE_PROMPTS,

@@ -46,15 +46,25 @@ async def main() -> None:
         )
         dispatcher.include_routers(create_router(payments=payments, admin_user_id=config.admin_user_id, bot_link=config.bot_link))
         webhook_runner = None
+        audio_task = None
+        audio_worker = PaidAudioWorker(bot, payments=payments, admin_user_id=config.admin_user_id)
         try:
             if payments is not None:
                 webhook_runner = await start_webhook_server(
-                    payments, config.webhook_host, config.webhook_port, audio_worker=PaidAudioWorker(bot),
+                    payments, config.webhook_host, config.webhook_port, audio_worker=audio_worker,
                 )
+            else:
+                audio_task = asyncio.create_task(audio_worker.run())
             logger.info("Запуск получения обновлений MAX.")
             await dispatcher.start_polling(bot)
         finally:
             try:
+                if audio_task is not None:
+                    audio_task.cancel()
+                    try:
+                        await audio_task
+                    except asyncio.CancelledError:
+                        pass
                 if webhook_runner is not None:
                     await webhook_runner.cleanup()
             finally:

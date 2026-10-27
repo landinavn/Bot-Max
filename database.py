@@ -81,6 +81,15 @@ async def init_db() -> None:
                 failed INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL DEFAULT 0, error TEXT
             )"""
         )
+        async with db.execute('PRAGMA table_info(audio_orders)') as cursor:
+            audio_columns = {row[1] for row in await cursor.fetchall()}
+        for name, definition in {
+            'lyrics': 'TEXT', 'preview_url': 'TEXT', 'payment_link': 'TEXT', 'preview_requested': 'INTEGER NOT NULL DEFAULT 0',
+            'preview_delivered': 'INTEGER NOT NULL DEFAULT 0', 'free_access': 'INTEGER NOT NULL DEFAULT 0',
+            'regeneration_used': 'INTEGER NOT NULL DEFAULT 0', 'previous_tracks_json': 'TEXT',
+        }.items():
+            if name not in audio_columns:
+                await db.execute(f'ALTER TABLE audio_orders ADD COLUMN {name} {definition}')
         async with db.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'global_counters'"
         ) as cursor:
@@ -708,7 +717,8 @@ async def mark_audio_paid(order_id: str, payment_id: str) -> bool:
 
 
 async def update_audio_order(order_id: str, **fields) -> None:
-    allowed = {'submit_started','job_id','tracks_json','running','delivered','failed','next_attempt_at','error'}
+    allowed = {'submit_started','job_id','tracks_json','running','delivered','failed','next_attempt_at','error',
+               'lyrics','preview_url','preview_requested','preview_delivered','payment_link'}
     if not fields or not set(fields) <= allowed:
         raise ValueError('Некорректные поля аудиозаказа.')
     assignments = ','.join(key + '=?' for key in fields)
@@ -726,12 +736,38 @@ async def reset_audio_workers() -> None:
 
 async def pending_audio_orders() -> list[str]:
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
-        async with db.execute("SELECT order_id FROM audio_orders WHERE status='paid' AND delivered=0 AND failed=0 AND running=0 AND next_attempt_at <= ? ORDER BY paid_at LIMIT 4", (_now_ts(),)) as cursor:
+        async with db.execute("SELECT order_id FROM audio_orders WHERE ((status='paid' OR free_access=1) AND delivered=0 OR (audio_format='gift' AND status='pending' AND free_access=0 AND preview_requested=1 AND preview_delivered=0)) AND failed=0 AND running=0 AND next_attempt_at <= ? ORDER BY created_at LIMIT 4", (_now_ts(),)) as cursor:
             return [row[0] for row in await cursor.fetchall()]
 
 
 async def claim_audio_order(order_id: str) -> bool:
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
-        cursor = await db.execute("UPDATE audio_orders SET running=1 WHERE order_id=? AND status='paid' AND delivered=0 AND failed=0 AND running=0 AND next_attempt_at <= ?", (order_id, _now_ts()))
+        cursor = await db.execute("UPDATE audio_orders SET running=1 WHERE order_id=? AND ((status='paid' OR free_access=1) AND delivered=0 OR (audio_format='gift' AND status='pending' AND free_access=0 AND preview_requested=1 AND preview_delivered=0)) AND failed=0 AND running=0 AND next_attempt_at <= ?", (order_id, _now_ts()))
+        await db.commit()
+        return cursor.rowcount == 1
+
+
+async def find_gift_preview_order(user_id: int, scenario: str, details: str, style: str | None):
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        async with db.execute("SELECT order_id FROM audio_orders WHERE user_id=? AND audio_format='gift' AND scenario=? AND details=? AND style IS ? AND status='pending' AND preview_requested=1 AND failed=0 ORDER BY created_at DESC LIMIT 1", (user_id, scenario, details, style)) as cursor:
+            row = await cursor.fetchone()
+    return await get_audio_order(row[0]) if row else None
+
+
+async def grant_audio_admin_access(order_id: str, user_id: int) -> bool:
+    # Авторизацию ADMIN_USER_ID выполняет обработчик перед вызовом этой функции.
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        cursor = await db.execute('UPDATE audio_orders SET free_access=1 WHERE order_id=? AND user_id=?', (order_id, user_id))
+        await db.commit()
+        return cursor.rowcount == 1
+
+
+async def request_audio_regeneration(order_id: str, user_id: int) -> bool:
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        cursor = await db.execute("""UPDATE audio_orders SET regeneration_used=1,
+            previous_tracks_json=tracks_json, tracks_json=NULL, job_id=NULL, submit_started=0,
+            delivered=0, failed=0, error=NULL, next_attempt_at=0
+            WHERE order_id=? AND user_id=? AND (status='paid' OR free_access=1)
+            AND regeneration_used=0 AND delivered=1 AND running=0 AND tracks_json IS NOT NULL""", (order_id,user_id))
         await db.commit()
         return cursor.rowcount == 1

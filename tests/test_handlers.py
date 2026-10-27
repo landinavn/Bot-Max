@@ -3401,19 +3401,17 @@ async def test_gift_collects_details_and_shows_test_payment_without_charging(cre
     assert await context.get_data() == {'gift_scenario': scenario}
     answer = message_event('  Аня, любит горы и кофе  ')
     await call_handler(router, 'echo', answer, context)
-    assert answer.message.answer.await_args.args[0] == handlers.AUDIO_GIFT_PREVIEW_TEXT
+    assert 'Создаю песню и фрагмент' in answer.message.answer.await_args.args[0]
     assert await context.get_state() == PosterStates.waiting_for_gift_preview
-    assert await context.get_data() == {'gift_scenario': scenario, 'gift_details': 'Аня, любит горы и кофе'}
-    buttons = answer.message.answer.await_args.kwargs['attachments'][0].payload.buttons
-    assert [(row[0].text, row[0].payload) for row in buttons] == [
-        ('▶️ Послушать превью', 'audio_gift_preview'),
-        ('Оплатить 490 ₽ и получить полный трек', 'gift_payment_soon'),
-        ('⬅️ Назад', 'gift_choose_scenario'),
-    ]
+    order_id = (await context.get_data())['audio_checkout_id']
+    order = await credit_db.get_audio_order(order_id)
+    assert order['preview_requested'] == 1 and order['status'] == 'pending'
+    assert 'attachments' not in answer.message.answer.await_args.kwargs
     payment = callback_event('gift_payment_soon')
     await dispatch_callback(router, payment, context)
     payment.ack.assert_awaited_once()
-    assert 'https://audio.example/1.mp3' in payment.send.await_args.args[0]
+    assert 'Режим администратора' in payment.send.await_args.args[0]
+    assert (await credit_db.get_audio_order(order_id))['free_access'] == 1
     assert (await context.get_data())['gift_details'] == 'Аня, любит горы и кофе'
     assert await credit_db.get_all_counters() == {'audio_gift_' + scenario: 1}
     assert dict(await credit_db.get_user(456)) == before
@@ -3512,7 +3510,7 @@ async def test_dispatcher_routes_all_gift_states_and_cancel(credit_db, monkeypat
             await dp.handle(MessageCreated(timestamp=2, bot=bot, message=message('Аня, любит кофе')))
             assert await context.get_state() == PosterStates.waiting_for_gift_preview
             assert (await context.get_data())['gift_details'] == 'Аня, любит кофе'
-            assert bot.send_message.await_args.kwargs['text'] == handlers.AUDIO_GIFT_PREVIEW_TEXT
+            assert 'Создаю песню и фрагмент' in bot.send_message.await_args.kwargs['text']
             await dp.handle(MessageCreated(timestamp=3, bot=bot, message=message('/cancel')))
             assert await context.get_state() == PosterStates.waiting_for_mode
             assert await context.get_data() == {}
@@ -3641,7 +3639,7 @@ async def test_workshop_copy_matches_guarantees():
     assert '1 бесплатная перегенерация (ещё 2 варианта)' in text
     assert 'Без превью — сразу после оплаты.' in text
     assert 'превью с защитой (10–15 сек)' in text
-    assert 'без водяных знаков и голосового сопровождения' in text
+    assert 'без водяных знаков и звуковой метки' in text
 
 
 @pytest.mark.parametrize('payload,counter', [
@@ -3762,7 +3760,8 @@ async def test_ttapi_generation_returns_two_links_and_reuses_completed_task(cred
     assert scenario_name not in prompt
     assert scenario_name not in tags
     assert scenario_name in title
-    assert prompt.startswith('[Verse]\n' + ('Сергей, любит кофе' if kind == 'fun' else 'Аня, любит горы'))
+    assert prompt.startswith('[Verse 1]\n')
+    assert prompt.index('Сергей, любит кофе' if kind == 'fun' else 'Аня, любит горы') > prompt.index('[Verse 2]')
     assert ('rock' if kind == 'fun' else 'warm emotional pop') in tags
     assert len(title) <= 80
     assert 'https://audio.example/1.mp3' in event.send.await_args.args[0]
@@ -3941,6 +3940,12 @@ async def test_audio_checkout_creates_personal_link_and_keeps_snapshot_without_g
     submit, wait = AsyncMock(), AsyncMock()
     router = create_router(payments=payments, admin_user_id=999, song_generator=submit, song_waiter=wait)
     context = await tt_context(kind)
+    if kind == 'gift':
+        data = await context.get_data()
+        prompt, tags, title = handlers.build_song_request(data['gift_details'], handlers.AUDIO_GIFT_SCENARIOS['gift_scen_bday'][0], 'gift')
+        await credit_db.create_audio_order('preview-invoice', 456, 'gift', 'bday', data['gift_details'], None, prompt, tags, title)
+        await credit_db.update_audio_order('preview-invoice', preview_requested=1, preview_url='https://preview.example/clip.mp3', preview_delivered=1)
+        await context.update_data(audio_checkout_id='preview-invoice')
     event = callback_event('audio_fun_payment_soon' if kind == 'fun' else 'gift_payment_soon')
     await dispatch_callback(router, event, context)
     event.ack.assert_awaited_once()
@@ -4028,6 +4033,12 @@ async def test_regular_audio_payment_screen_has_direct_url_button_before_payment
     await dispatch_callback(router, callback_event(scenario), context)
     event = message_event('Аня, любит горы')
     await call_handler(router, 'echo', event, context)
+    if kind == 'gift':
+        assert 'Создаю песню и фрагмент' in event.message.answer.await_args.args[0]
+        assert 'attachments' not in event.message.answer.await_args.kwargs
+        payments.create_audio_payment_link.assert_not_awaited()
+        submit.assert_not_awaited()
+        return
     buttons = event.message.answer.await_args.kwargs['attachments'][0].payload.buttons
     pay = next(row[0] for row in buttons if row[0].text.startswith('Оплатить'))
     assert pay.url == 'https://link.payform.ru/personal-checkout'
@@ -4036,3 +4047,126 @@ async def test_regular_audio_payment_screen_has_direct_url_button_before_payment
     payments.create_audio_payment_link.assert_awaited_once()
     submit.assert_not_awaited()
     wait.assert_not_awaited()
+
+
+@pytest.mark.parametrize('actor', [456, 789])
+async def test_paid_regeneration_callback_checks_owner_and_does_not_create_payment(credit_db, actor):
+    import json
+    await credit_db.create_audio_order('regen-order',456,'gift','bday','Аня',None,'[Verse]\nАня','pop','title')
+    await credit_db.mark_audio_paid('regen-order','paid')
+    await credit_db.update_audio_order('regen-order', tracks_json=json.dumps(TT_RESULT['data']['musics']), delivered=1)
+    payments = SimpleNamespace(create_audio_payment_link=AsyncMock())
+    event = callback_event('audio_regenerate:regen-order')
+    event.get_ids = lambda: (123,actor)
+    router = create_router(payments=payments)
+    await dispatch_callback(router,event,await ready_context())
+    event.ack.assert_awaited_once()
+    assert (await credit_db.get_audio_order('regen-order'))['regeneration_used'] == (1 if actor==456 else 0)
+    payments.create_audio_payment_link.assert_not_awaited()
+    if actor==456:
+        duplicate = callback_event('audio_regenerate:regen-order')
+        await dispatch_callback(router,duplicate,await ready_context())
+        duplicate.send.assert_not_awaited()
+
+
+async def test_admin_real_song_regenerates_saved_details_once_without_payment(credit_db):
+    submit = AsyncMock(side_effect=['original-job','new-job'])
+    payments = Mock()
+    router = create_router(admin_user_id=456,payments=payments,song_generator=submit,song_waiter=AsyncMock(return_value=TT_RESULT))
+    context = await tt_context()
+    await dispatch_callback(router,callback_event('audio_fun_payment_soon'),context)
+    event = callback_event('audio_regenerate')
+    await dispatch_callback(router,event,context)
+    assert submit.await_count==2
+    assert submit.await_args_list[0].args == submit.await_args_list[1].args
+    assert (await context.get_data())['audio_regeneration_used'] is True
+    duplicate = callback_event('audio_regenerate')
+    await dispatch_callback(router,duplicate,context)
+    assert submit.await_count==2
+    assert payments.mock_calls==[]
+
+
+async def test_gift_full_download_is_denied_before_payment_even_when_tracks_exist(credit_db):
+    import json
+    await credit_db.create_audio_order('locked-gift',456,'gift','bday','Аня',None,'lyrics','pop','title')
+    await credit_db.update_audio_order('locked-gift', tracks_json=json.dumps(TT_RESULT['data']['musics']),preview_url='https://preview.example/safe.mp3')
+    event = callback_event('audio_paid_download:locked-gift:0')
+    await dispatch_callback(create_router(),event,await ready_context())
+    event.send.assert_not_awaited()
+    event.ack.assert_awaited_once()
+
+
+async def test_paid_download_has_regeneration_and_direct_support_link(credit_db):
+    import json
+    await credit_db.create_audio_order('actions',456,'gift','bday','Аня',None,'lyrics','pop','title')
+    await credit_db.mark_audio_paid('actions','paid')
+    await credit_db.update_audio_order('actions', tracks_json=json.dumps(TT_RESULT['data']['musics']),delivered=1)
+    event = callback_event('audio_paid_download:actions:0')
+    await dispatch_callback(create_router(),event,await ready_context())
+    buttons = [row[0].model_dump() for row in event.send.await_args.kwargs['attachments'][0].payload.buttons]
+    assert any(button.get('payload')=='audio_regenerate:actions' for button in buttons)
+    assert any(button.get('url')==handlers.SUPPORT_URL for button in buttons)
+    assert any(button.get('payload')=='audio_paid_instrumental:actions' for button in buttons)
+
+
+async def test_same_unpaid_gift_details_reuse_preview_order_without_new_song(credit_db):
+    router=create_router()
+    context=await ready_context()
+    for _ in range(2):
+        await dispatch_callback(router,callback_event('gift_scen_bday'),context)
+        event=message_event('Аня, любит горы')
+        await call_handler(router,'echo',event,context)
+        current=(await context.get_data())['audio_checkout_id']
+        if _==0:
+            original=current
+        else:
+            assert current==original
+    assert await credit_db.pending_audio_orders()==[original]
+
+
+async def test_gift_checkout_from_preview_survives_lost_fsm(credit_db):
+    await credit_db.create_audio_order('preview-pay',456,'gift','bday','Аня',None,'lyrics','pop','title')
+    await credit_db.update_audio_order('preview-pay',preview_url='https://preview.example/clip.mp3',preview_requested=1,preview_delivered=1)
+    payments=SimpleNamespace(create_audio_payment_link=AsyncMock(return_value='https://pay.example/490'))
+    event=callback_event('audio_gift_checkout:preview-pay')
+    await dispatch_callback(create_router(payments=payments),event,await ready_context())
+    link=event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0]
+    assert link.url=='https://pay.example/490'
+    assert payments.create_audio_payment_link.await_args.kwargs['order_id']=='preview-pay'
+
+
+async def test_admin_can_unlock_preview_without_a_second_generation_or_purchase(credit_db):
+    import json
+    await credit_db.create_audio_order('admin-preview',456,'gift','bday','Аня',None,'lyrics','pop','title')
+    await credit_db.update_audio_order('admin-preview',preview_url='https://preview.example/clip.mp3',preview_requested=1,
+                                       preview_delivered=1,tracks_json=json.dumps(TT_RESULT['data']['musics']))
+    event=callback_event('audio_admin_full:admin-preview')
+    await dispatch_callback(create_router(admin_user_id=456),event,await ready_context())
+    saved=await credit_db.get_audio_order('admin-preview')
+    assert saved['free_access']==1 and saved['status']=='pending'
+    assert await credit_db.pending_audio_orders()==['admin-preview']
+    assert (await credit_db.get_global_stats())['total_purchases']==0
+
+
+async def test_gift_preview_is_queued_while_another_admin_generation_is_running(credit_db):
+    import asyncio
+    entered,release=asyncio.Event(),asyncio.Event()
+    async def wait(job):
+        entered.set()
+        await release.wait()
+        return TT_RESULT
+    router=create_router(admin_user_id=456,song_generator=AsyncMock(return_value='job'),song_waiter=wait)
+    first_context=await tt_context()
+    first=asyncio.create_task(dispatch_callback(router,callback_event('audio_fun_payment_soon'),first_context))
+    try:
+        await entered.wait()
+        gift_context=await ready_context()
+        await gift_context.clear()
+        await gift_context.update_data(gift_scenario='bday')
+        await gift_context.set_state(PosterStates.waiting_for_gift_bday)
+        await call_handler(router,'collect_gift_details',message_event('Аня, любит горы'),gift_context)
+        order_id=(await gift_context.get_data())['audio_checkout_id']
+        assert order_id in await credit_db.pending_audio_orders()
+    finally:
+        release.set()
+        await first

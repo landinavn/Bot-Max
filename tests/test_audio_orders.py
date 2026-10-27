@@ -180,3 +180,100 @@ async def test_worker_shutdown_preserves_job_for_next_worker(credit_db):
     await next_worker.process(name)
     next_submit.assert_not_awaited()
     assert (await credit_db.get_audio_order(name))['delivered'] == 1
+
+
+async def test_gift_preview_before_payment_never_reveals_full_url_and_payment_reuses_job(credit_db):
+    name = await order(credit_db, kind='gift')
+    await credit_db.update_audio_order(name, preview_requested=1)
+    submit, wait = AsyncMock(return_value='preview-job'), AsyncMock(return_value=RESULT)
+    preview = AsyncMock(return_value='https://preview.example/safe.mp3')
+    payments = SimpleNamespace(create_audio_payment_link=AsyncMock(return_value='https://pay.example/490'))
+    bot = SimpleNamespace(send_message=AsyncMock())
+    worker = PaidAudioWorker(bot, generator=submit, waiter=wait, preview_maker=preview, payments=payments)
+    await worker.process(name)
+    saved = await credit_db.get_audio_order(name)
+    assert saved['status'] == 'pending' and saved['preview_delivered'] == 1 and saved['delivered'] == 0
+    message = bot.send_message.await_args.kwargs
+    assert 'https://preview.example/safe.mp3' in message['text']
+    assert 'https://audio.example/one.mp3' not in message['text']
+    buttons = message['attachments'][0].payload.buttons
+    assert buttons[0][0].url == 'https://preview.example/safe.mp3'
+    assert buttons[1][0].url == 'https://pay.example/490'
+    await credit_db.mark_audio_paid(name, 'paid-after-preview')
+    await worker.process(name)
+    submit.assert_awaited_once()
+    wait.assert_awaited_once_with('preview-job')
+    assert 'https://audio.example/one.mp3' in bot.send_message.await_args.kwargs['text']
+    assert (await credit_db.get_audio_order(name))['delivered'] == 1
+
+
+async def test_failed_preview_exposes_no_payment_or_full_song(credit_db):
+    name = await order(credit_db, kind='gift')
+    await credit_db.update_audio_order(name, preview_requested=1)
+    payments = SimpleNamespace(create_audio_payment_link=AsyncMock())
+    bot = SimpleNamespace(send_message=AsyncMock())
+    worker = PaidAudioWorker(bot, generator=AsyncMock(return_value='job'), waiter=AsyncMock(return_value=RESULT),
+        preview_maker=AsyncMock(side_effect=RuntimeError('ffmpeg failed')), payments=payments)
+    await worker.process(name)
+    payments.create_audio_payment_link.assert_not_awaited()
+    assert (await credit_db.get_audio_order(name))['preview_url'] is None
+    assert all('https://audio.example/' not in call.kwargs['text'] for call in bot.send_message.await_args_list)
+
+
+async def test_free_regeneration_is_atomic_persistent_and_keeps_original_purchase(credit_db):
+    name = await order(credit_db)
+    await credit_db.mark_audio_paid(name, 'paid')
+    submit = AsyncMock(side_effect=['first-job','second-job'])
+    worker = PaidAudioWorker(SimpleNamespace(send_message=AsyncMock()), generator=submit, waiter=AsyncMock(return_value=RESULT))
+    await worker.process(name)
+    results = await asyncio.gather(*(credit_db.request_audio_regeneration(name, 123) for _ in range(5)))
+    assert sum(results) == 1
+    await credit_db.init_db()
+    await worker.process(name)
+    assert submit.await_count == 2
+    assert (await credit_db.get_user(123))['total_purchases'] == 1
+    assert not await credit_db.request_audio_regeneration(name, 123)
+    assert (await credit_db.get_audio_order(name))['previous_tracks_json']
+
+
+async def test_unpaid_or_other_user_cannot_regenerate(credit_db):
+    name = await order(credit_db, kind='gift')
+    await credit_db.update_audio_order(name, preview_requested=1, tracks_json=json.dumps(RESULT['data']['musics']))
+    assert not await credit_db.request_audio_regeneration(name, 123)
+    await credit_db.mark_audio_paid(name, 'paid')
+    await credit_db.update_audio_order(name, delivered=1)
+    assert not await credit_db.request_audio_regeneration(name, 999)
+
+
+async def test_checkout_failure_does_not_hide_ready_preview(credit_db):
+    name=await order(credit_db,kind='gift')
+    await credit_db.update_audio_order(name,preview_requested=1)
+    bot=SimpleNamespace(send_message=AsyncMock())
+    payments=SimpleNamespace(create_audio_payment_link=AsyncMock(side_effect=RuntimeError('Prodamus timeout')))
+    worker=PaidAudioWorker(bot,generator=AsyncMock(return_value='job'),waiter=AsyncMock(return_value=RESULT),payments=payments)
+    await worker.process(name)
+    sent=bot.send_message.await_args.kwargs
+    assert 'https://preview.example/clip.mp3' in sent['text']
+    assert 'https://audio.example/one.mp3' not in sent['text']
+    buttons=sent['attachments'][0].payload.buttons
+    assert buttons[1][0].payload=='audio_gift_checkout:'+name
+    assert (await credit_db.get_audio_order(name))['preview_delivered']==1
+
+
+@pytest.mark.parametrize('access',['paid','admin'])
+async def test_unlocked_gift_before_preview_is_delivered_only_once(credit_db,access):
+    name=await order(credit_db,kind='gift')
+    await credit_db.update_audio_order(name,preview_requested=1)
+    if access=='paid':
+        await credit_db.mark_audio_paid(name,'paid')
+    else:
+        await credit_db.grant_audio_admin_access(name,123)
+    submit=AsyncMock(return_value='job')
+    preview=AsyncMock()
+    worker=PaidAudioWorker(SimpleNamespace(send_message=AsyncMock()),generator=submit,
+        waiter=AsyncMock(return_value=RESULT),preview_maker=preview)
+    await worker.process(name)
+    await worker.process(name)
+    assert await credit_db.pending_audio_orders()==[]
+    submit.assert_awaited_once()
+    preview.assert_not_awaited()

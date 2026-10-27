@@ -136,6 +136,8 @@ async def test_partial_migration_keeps_existing_counter(credit_db):
 
 @pytest.mark.parametrize("payload,source", [
     ("vk_ads", "vk_ads"), ("yandex_ads", "yandex_ads"),
+    ("yandex_newyear", "yandex_newyear"), ("start=yandex_newyear_campaign", "yandex_newyear"),
+    ("share_https://example.com/yandex_newyear.png", "unmarked"),
     (None, "unmarked"), ("", "unmarked"), ("  ", "unmarked"),
     ("unexpected-label", "unmarked"), ("<script>", "unmarked"),
 ])
@@ -147,7 +149,7 @@ async def test_first_start_records_source_and_event_date(credit_db, payload, sou
     assert user["balance"] == 0 and user["free_trial_used"] == 0
 
 
-@pytest.mark.parametrize("first,later", [("vk_ads", "yandex_ads"), ("yandex_ads", None), (None, "vk_ads")])
+@pytest.mark.parametrize("first,later", [("vk_ads", "yandex_ads"), ("yandex_ads", None), (None, "vk_ads"), ("yandex_newyear", "vk_ads"), (None, "yandex_newyear"), ("vk_ads", "yandex_newyear")])
 async def test_first_source_and_date_are_not_overwritten(credit_db, first, later):
     await credit_db.record_first_start(123, first, timestamp_ms=1792526400000)
     original = dict(await credit_db.get_user(123))
@@ -219,7 +221,7 @@ async def test_source_funnel_counts_users_once_and_sums_only_paid_amounts(credit
 
 async def test_empty_source_stats_include_zero_rows_for_all_ad_labels(credit_db):
     rows = await credit_db.get_source_stats()
-    assert [row["label"] for row in rows] == ["Реклама VK", "Реклама Яндекса", "Без метки"]
+    assert [row["label"] for row in rows] == ["Реклама VK", "Реклама Яндекса", "Yandex New Year", "Без метки"]
     assert all(row["new_users"] == row["buyers"] == row["revenue_kopecks"] == 0 for row in rows)
 
 
@@ -611,3 +613,33 @@ async def test_reminder_migration_preserves_promo_deadline(credit_db):
     before = dict(await credit_db.get_user(1))
     await credit_db.init_db()
     assert dict(await credit_db.get_user(1)) == before
+
+
+async def test_campaign_funnel_excludes_admin_pending_and_duplicate_payments(credit_db):
+    from decimal import Decimal
+    for user_id, source in [(101, 'yandex_newyear'), (102, 'yandex_newyear'),
+                            (103, 'yandex_newyear'), (999, 'yandex_newyear'), (201, 'yandex_ads')]:
+        await credit_db.record_first_start(user_id, source)
+    for user_id in (101, 101, 102, 999, 201):
+        await credit_db.increment_generations(user_id)
+    for order, user_id, credits, amount in [
+        ('first', 101, 1, 9900), ('second', 101, 5, 29900),
+        ('admin', 999, 15, 79900), ('other', 201, 1, 9900),
+    ]:
+        await credit_db.create_payment_order(order, user_id, credits, amount, 'test')
+        assert await credit_db.add_credits(user_id, credits, payment_order_id=order, provider_payment_id=order)
+        assert not await credit_db.add_credits(user_id, credits, payment_order_id=order, provider_payment_id=order)
+    await credit_db.create_payment_order('pending', 102, 15, 79900, 'test')
+    await credit_db.record_first_start(101, 'vk_ads')
+    assert await credit_db.get_stats_by_source('yandex_newyear', admin_id=999) == {
+        'total_users': 3, 'total_generated': 2, 'total_buyers': 1,
+        'total_revenue': Decimal('398.00'),
+    }
+    await credit_db.init_db()
+    assert (await credit_db.get_stats_by_source('yandex_newyear'))['total_revenue'] == Decimal('1197.00')
+
+
+async def test_empty_campaign_stats_are_zero(credit_db):
+    assert await credit_db.get_stats_by_source('yandex_newyear') == {
+        'total_users': 0, 'total_generated': 0, 'total_buyers': 0, 'total_revenue': 0,
+    }

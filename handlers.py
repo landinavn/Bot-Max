@@ -30,7 +30,7 @@ from config import DEFAULT_BOT_LINK, validate_bot_link
 
 from database import (
     deduct_credit, get_user, grant_free_trial, get_global_stats, increment_generations,
-    record_first_start, get_source_stats, register_shared_image, get_shared_image,
+    record_first_start, get_source_stats, get_stats_by_source, register_shared_image, get_shared_image,
     get_all_counters, increment_counter,
     get_advanced_stats, update_user_activity, mark_user_inactive, get_active_user_ids,
     is_promo_active, PromoUnavailableError, get_users_by_activity, start_broadcast_promo,
@@ -843,6 +843,14 @@ def create_router(
         activity = await get_advanced_stats(admin_id=admin_user_id)
         counters = await get_all_counters(admin_id=admin_user_id)
         sources = await get_source_stats(admin_id=admin_user_id)
+        yandex = await get_stats_by_source("yandex_newyear", admin_id=admin_user_id)
+        campaign_text = (
+            "\n\n📍 Статистика по кампании «Yandex New Year»:\n"
+            f"👥 Новые пользователи: {yandex['total_users']}\n"
+            f"🖼 Сгенерировали: {yandex['total_generated']}\n"
+            f"💳 Покупатели: {yandex['total_buyers']}\n"
+            f"💰 Оплат: {yandex['total_revenue']:.2f} ₽".replace(".", ",")
+        )
         admin = await get_user(admin_user_id)
         admin_text = (
             "\n\n🛠 Тестовая активность (Админ):\n"
@@ -901,7 +909,7 @@ def create_router(
             f"- Тариф «Попробовать» (590): {counters.get('click_tariff_590', 0)}\n"
             f"- Тариф «Фотосессия» (990): {counters.get('click_tariff_990', 0)}\n"
             f"- Тариф «Премиум» (1490): {counters.get('click_tariff_1490', 0)}\n\n"
-            f"💰 Всего покупок: {data['total_purchases']}" + source_text + admin_text
+            f"💰 Всего покупок: {data['total_purchases']}" + source_text + admin_text + campaign_text
         )
 
     @router.message_created(Command("broadcast"))

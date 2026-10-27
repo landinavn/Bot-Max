@@ -1,6 +1,7 @@
 """Постоянный баланс пользователей. Все изменения фиксируются в SQLite."""
 
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from secrets import token_urlsafe
 from zoneinfo import ZoneInfo
@@ -21,6 +22,7 @@ def _now_ts() -> int:
 SOURCE_LABELS = {
     "vk_ads": "Реклама VK",
     "yandex_ads": "Реклама Яндекса",
+    "yandex_newyear": "Yandex New Year",
     "unmarked": "Без метки",
     "legacy": "Источник неизвестен (до отслеживания)",
 }
@@ -530,7 +532,9 @@ async def record_first_start(user_id: int, payload: str | None = None, *, timest
     if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
         raise ValueError("Некорректный user_id.")
     source = payload.strip() if isinstance(payload, str) else None
-    if source not in {"vk_ads", "yandex_ads"}:
+    if source and "yandex_newyear" in source and not source.startswith("share_"):
+        source = "yandex_newyear"
+    if source not in {"vk_ads", "yandex_ads", "yandex_newyear"}:
         source = "unmarked"
     started_at = (
         datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
@@ -581,6 +585,22 @@ async def get_source_stats(admin_id: int | None = None) -> list[dict]:
         })
         result.append({**row, "label": label})
     return result
+
+
+async def get_stats_by_source(source_name: str, admin_id: int | None = None) -> dict:
+    """Статистика первого источника; total_revenue — подтверждённые оплаты в рублях.
+
+    Источник хранится в существующей TEXT-колонке first_start_source.
+    Агрегация заказов до соединения исключает повторный подсчёт пользователей.
+    """
+    rows = await get_source_stats(admin_id=admin_id)
+    row = next((row for row in rows if row["source"] == source_name), None)
+    return {
+        "total_users": row["total_users"] if row else 0,
+        "total_generated": row["users_with_generation"] if row else 0,
+        "total_buyers": row["buyers"] if row else 0,
+        "total_revenue": Decimal(row["revenue_kopecks"] if row else 0) / 100,
+    }
 
 
 async def register_shared_image(image_url: str) -> str:

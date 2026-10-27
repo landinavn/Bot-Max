@@ -3388,7 +3388,7 @@ async def test_gift_collects_details_and_shows_test_payment_without_charging(cre
     await credit_db.grant_free_trial(456)
     before = dict(await credit_db.get_user(456))
     generator, card, payments = AsyncMock(), AsyncMock(), Mock()
-    router = create_router(generator, postcard_generator=card, payments=payments,
+    router = create_router(generator, postcard_generator=card, payments=payments, admin_user_id=456,
                            song_generator=AsyncMock(return_value='job'), song_waiter=AsyncMock(return_value=TT_RESULT))
     context = await ready_context()
     await context.update_data(photo={'url': 'https://example.com/old.png'}, song_scenario='cat')
@@ -3522,7 +3522,7 @@ async def test_dispatcher_routes_all_gift_states_and_cancel(credit_db, monkeypat
 
 async def test_fun_payment_screen_has_placeholder_and_back_without_charging(credit_db):
     payments = Mock()
-    router = create_router(payments=payments, song_generator=AsyncMock(return_value='job'),
+    router = create_router(payments=payments, admin_user_id=456, song_generator=AsyncMock(return_value='job'),
                            song_waiter=AsyncMock(return_value=TT_RESULT))
     context = await ready_context()
     await dispatch_callback(router, callback_event('audio_fun_boss'), context)
@@ -3749,7 +3749,7 @@ async def tt_context(kind='fun'):
 async def test_ttapi_generation_returns_two_links_and_reuses_completed_task(credit_db, kind):
     submit, wait = AsyncMock(return_value='job-123'), AsyncMock(return_value=TT_RESULT)
     payments = Mock()
-    router = create_router(payments=payments, song_generator=submit, song_waiter=wait)
+    router = create_router(payments=payments, admin_user_id=456, song_generator=submit, song_waiter=wait)
     context = await tt_context(kind)
     payload = 'audio_fun_payment_soon' if kind == 'fun' else 'gift_payment_soon'
     event = callback_event(payload)
@@ -3763,7 +3763,10 @@ async def test_ttapi_generation_returns_two_links_and_reuses_completed_task(cred
     assert len(title) <= 80
     assert 'https://audio.example/1.mp3' in event.send.await_args.args[0]
     assert 'https://audio.example/2.mp3' in event.send.await_args.args[0]
-    assert event.send.await_args_list[0].args[0] == '🎵 Генерирую ваши треки... Это займет около 1-2 минут.'
+    assert [c.args[0] for c in event.send.await_args_list[:2]] == [
+        '👑 Режим администратора: Оплата пропущена. Запускаю генерацию...',
+        '🎵 Генерирую ваши треки... Это займет около 1-2 минут.',
+    ]
     assert await context.get_state() == PosterStates.waiting_for_audio_result
     assert (await context.get_data())['audio_job_id'] == 'job-123'
     await dispatch_callback(router, callback_event(payload), context)
@@ -3782,7 +3785,7 @@ async def test_ttapi_generation_returns_two_links_and_reuses_completed_task(cred
 async def test_ttapi_timeout_resumes_existing_job_without_resubmitting():
     submit = AsyncMock(return_value='existing-job')
     wait = AsyncMock(side_effect=[TimeoutError(), TT_RESULT])
-    router = create_router(song_generator=submit, song_waiter=wait)
+    router = create_router(admin_user_id=456, song_generator=submit, song_waiter=wait)
     context = await tt_context()
     first = callback_event('audio_fun_payment_soon')
     await dispatch_callback(router, first, context)
@@ -3795,10 +3798,10 @@ async def test_ttapi_timeout_resumes_existing_job_without_resubmitting():
 
 async def test_ttapi_delivery_failure_keeps_tracks_for_retry():
     submit, wait = AsyncMock(return_value='job'), AsyncMock(return_value=TT_RESULT)
-    router = create_router(song_generator=submit, song_waiter=wait)
+    router = create_router(admin_user_id=456, song_generator=submit, song_waiter=wait)
     context = await tt_context()
     event = callback_event('audio_fun_payment_soon')
-    event.send.side_effect = [object(), RuntimeError('MAX delivery failed'), object()]
+    event.send.side_effect = [object(), object(), RuntimeError('MAX delivery failed'), object()]
     await dispatch_callback(router, event, context)
     assert (await context.get_data())['audio_tracks']
     retry = callback_event('audio_fun_payment_soon')
@@ -3816,7 +3819,7 @@ async def test_ttapi_concurrent_click_does_not_submit_second_task():
         await release.wait()
         return TT_RESULT
     submit = AsyncMock(return_value='job')
-    router = create_router(song_generator=submit, song_waiter=wait)
+    router = create_router(admin_user_id=456, song_generator=submit, song_waiter=wait)
     context = await tt_context()
     task = asyncio.create_task(dispatch_callback(router, callback_event('audio_fun_payment_soon'), context))
     try:
@@ -3838,7 +3841,7 @@ async def test_ttapi_navigation_during_polling_does_not_restore_old_session():
         entered.set()
         await release.wait()
         return TT_RESULT
-    router = create_router(song_generator=AsyncMock(return_value='job'), song_waiter=wait)
+    router = create_router(admin_user_id=456, song_generator=AsyncMock(return_value='job'), song_waiter=wait)
     context = await tt_context()
     event = callback_event('audio_fun_payment_soon')
     task = asyncio.create_task(dispatch_callback(router, event, context))
@@ -3848,7 +3851,7 @@ async def test_ttapi_navigation_during_polling_does_not_restore_old_session():
     finally:
         release.set()
         await task
-    assert event.send.await_count == 1  # Only the progress message.
+    assert event.send.await_count == 2  # Admin notice and progress, no stale result.
     assert await context.get_data() == {}
     assert await context.get_state() == PosterStates.waiting_for_mode
 
@@ -3856,7 +3859,7 @@ async def test_ttapi_navigation_during_polling_does_not_restore_old_session():
 async def test_ttapi_uncertain_submit_blocks_duplicate_post():
     from audio_service import AudioServiceError
     submit, wait = AsyncMock(side_effect=AudioServiceError('unknown submit outcome')), AsyncMock()
-    router = create_router(song_generator=submit, song_waiter=wait)
+    router = create_router(admin_user_id=456, song_generator=submit, song_waiter=wait)
     context = await tt_context()
     await dispatch_callback(router, callback_event('audio_fun_payment_soon'), context)
     retry = callback_event('audio_fun_payment_soon')
@@ -3869,7 +3872,7 @@ async def test_ttapi_uncertain_submit_blocks_duplicate_post():
 async def test_ttapi_missing_key_can_retry_after_configuration():
     from audio_service import AudioNotConfigured
     submit = AsyncMock(side_effect=[AudioNotConfigured(), 'job'])
-    router = create_router(song_generator=submit, song_waiter=AsyncMock(return_value=TT_RESULT))
+    router = create_router(admin_user_id=456, song_generator=submit, song_waiter=AsyncMock(return_value=TT_RESULT))
     context = await tt_context()
     event = callback_event('audio_fun_payment_soon')
     await dispatch_callback(router, event, context)
@@ -3883,7 +3886,7 @@ async def test_ttapi_missing_key_can_retry_after_configuration():
 async def test_ttapi_old_payment_button_without_details_never_generates(kind):
     submit, wait = AsyncMock(), AsyncMock()
     event = callback_event('audio_fun_payment_soon' if kind == 'fun' else 'gift_payment_soon')
-    await dispatch_callback(create_router(song_generator=submit, song_waiter=wait), event, await ready_context())
+    await dispatch_callback(create_router(admin_user_id=456, song_generator=submit, song_waiter=wait), event, await ready_context())
     event.ack.assert_awaited_once()
     event.send.assert_not_awaited()
     submit.assert_not_awaited()
@@ -3893,7 +3896,34 @@ async def test_ttapi_old_payment_button_without_details_never_generates(kind):
 async def test_ttapi_one_gift_track_is_delivered():
     result = {'status': 'SUCCESS', 'data': {'musics': TT_RESULT['data']['musics'][:1]}}
     event = callback_event('gift_payment_soon')
-    await dispatch_callback(create_router(song_generator=AsyncMock(return_value='job'),
+    await dispatch_callback(create_router(admin_user_id=456, song_generator=AsyncMock(return_value='job'),
         song_waiter=AsyncMock(return_value=result)), event, await tt_context('gift'))
     assert 'https://audio.example/1.mp3' in event.send.await_args.args[0]
     assert 'Вариант 2' not in event.send.await_args.args[0]
+
+
+@pytest.mark.parametrize('kind', ['fun', 'gift'])
+@pytest.mark.parametrize('admin,actor', [(None, 456), (789, 456), (456, 789)])
+@pytest.mark.parametrize('cached', [False, True])
+async def test_non_admin_audio_payment_is_placeholder_without_api_calls(credit_db, kind, admin, actor, cached):
+    submit, wait, payments = AsyncMock(), AsyncMock(), Mock()
+    router = create_router(admin_user_id=admin, song_generator=submit, song_waiter=wait, payments=payments)
+    context = await tt_context(kind)
+    if cached:
+        await context.update_data(audio_format=kind, audio_job_id='old-job', audio_tracks=TT_RESULT['data']['musics'])
+    before_state, before_data = await context.get_state(), await context.get_data()
+    event = callback_event('audio_fun_payment_soon' if kind == 'fun' else 'gift_payment_soon')
+    # chat_id администратора сам по себе не предоставляет доступ.
+    event.get_ids = lambda: (456, actor)
+    await dispatch_callback(router, event, context)
+    event.ack.assert_awaited_once_with(notification='Оплата пока недоступна.')
+    assert 'Оплата аудиопесен пока недоступна' in event.send.await_args.args[0]
+    assert 'Режим администратора' not in event.send.await_args.args[0]
+    back = event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0]
+    assert back.payload == ('audio_tariff_fun' if kind == 'fun' else 'gift_choose_scenario')
+    submit.assert_not_awaited()
+    wait.assert_not_awaited()
+    assert payments.mock_calls == []
+    assert await context.get_state() == before_state
+    assert await context.get_data() == before_data
+    assert await credit_db.get_all_counters() == {}

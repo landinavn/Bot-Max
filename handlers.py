@@ -1384,6 +1384,11 @@ def create_router(
         if user_id is None:
             await event.ack(notification="Не удалось определить пользователя.")
             return
+        if admin_user_id is None or user_id != admin_user_id:
+            await event.ack(notification="Оплата пока недоступна.")
+            await _reply(event, "💳 Оплата аудиопесен пока недоступна. Мы скоро подключим оплату — следите за обновлениями!",
+                         attachments=[navigation_keyboard((("⬅️ Назад", "audio_tariff_fun" if audio_format == "fun" else "gift_choose_scenario"),))])
+            return
         lock = generation_locks.setdefault(user_id, asyncio.Lock())
         if lock.locked():
             await event.ack(notification="Генерация уже идёт. Пожалуйста, подождите.")
@@ -1417,6 +1422,10 @@ def create_router(
                 return (await context.get_data()).get("audio_session_id") == session
 
             try:
+                if not data.get("audio_job_id"):
+                    await _reply(event, "👑 Режим администратора: Оплата пропущена. Запускаю генерацию...")
+                    if not await session_current():
+                        return
                 await _reply(event, "🎵 Генерирую ваши треки... Это займет около 1-2 минут.")
                 if not await session_current():
                     return

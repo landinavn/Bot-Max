@@ -732,31 +732,28 @@ NY_FAMILY_TODDLERS_PROMPTS = (
     "Create a highly realistic, professional New Year family photoshoot in a vintage, rustic style. "
     "The image must feature EXACTLY the same people from the reference photo. "
     "Preserve their exact faces and body proportions perfectly.  "
-    "CLOTHING: Cozy, elegant winter clothing (warm knitwear, soft tones). "
-    "CRITICAL: Ensure the clothing matches exactly across the entire photoshoot. "
-    "BACKGROUND: A beautifully decorated Christmas tree with vintage ornaments, warm golden lighting, "
-    "wooden floor, and antique wooden toys (like a rocking horse).  "
-    "POSE & CAMERA ANGLE: Full-length shot. The adults are standing elegantly near the Christmas tree, "
-    "holding the toddler(s) safely in their arms. Everyone is looking at the camera.  "
-    "CRITICAL ANATOMY: Toddlers must have correct infant proportions (not small adults). Perfect anatomy. "
-    "Exactly 5 fingers on each hand. No extra limbs.  DO NOT ADD ANY TEXT.",
+    "CLOTHING: IGNORE the clothing in the reference photo. Dress the adults in elegant cream and beige knit sweaters. "
+    "Dress the children in cozy, warm beige winter outfits.  "
+    "BACKGROUND: A beautifully decorated Christmas tree with vintage ornaments, warm golden lighting, wooden floor, "
+    "and antique wooden toys.  POSE: Full-length shot. The adults are standing elegantly near the tree, "
+    "holding the toddlers safely in their arms.  "
+    "CRITICAL ANATOMY: Toddlers must have correct infant proportions. Exactly 5 fingers on each hand. "
+    "No extra limbs. DO NOT ADD ANY TEXT.",
     "Create a highly realistic, professional New Year family photoshoot in a vintage, rustic style. "
-    "The image must feature EXACTLY the same people from the reference photo. Preserve their exact faces perfectly.  "
-    "CLOTHING: The exact same cozy, elegant winter clothing as in the previous frame. "
-    "BACKGROUND: In front of the decorated Christmas tree on a wooden floor, surrounded by vintage toys and warm lights.  "
-    "POSE & CAMERA ANGLE: Medium close-up shot. The whole family is sitting together on the floor. "
-    "The adults are holding the toddler(s) close to them. Everyone is smiling warmly at the camera.  "
+    "The image must feature EXACTLY the same people from the reference photo.  "
+    "CLOTHING: IGNORE the clothing in the reference photo. "
+    "The adults MUST be wearing elegant cream and beige knit sweaters. "
+    "The children MUST be wearing cozy, warm beige winter outfits (the exact same outfits as described before).  "
+    "BACKGROUND: In front of the decorated tree on a wooden floor.  POSE: Medium close-up. "
+    "The whole family is sitting together on the floor. The adults are holding the toddlers close.  "
     "CRITICAL ANATOMY: Toddlers must have correct baby proportions. Exactly 5 fingers on each hand. "
-    "No extra limbs.  DO NOT ADD ANY TEXT.",
+    "No extra limbs. DO NOT ADD ANY TEXT.",
     "Create a highly realistic, professional New Year photoshoot in a vintage, rustic style. "
-    "Focus ONLY on the children from the reference photo. Preserve their exact faces perfectly.  "
-    "CLOTHING: Wearing the exact same cozy winter outfits as in the previous frames. "
-    "BACKGROUND: On a cozy rug right next to the Christmas tree. "
-    "Surrounded by warm glowing lights, vintage wooden toys, and wrapped gifts.  "
-    "POSE LOGIC: - The toddler/baby must be LYING on their back or tummy on the rug. "
-    "- If there is an older child, they must be SITTING next to the toddler. Everyone is looking at the camera. "
-    "CRITICAL ANATOMY: Correct infant and child body proportions. Exactly 5 fingers on each hand. "
-    "No deformed limbs.  DO NOT ADD ANY TEXT.",
+    "Focus ONLY on the children from the reference photo.  "
+    "CLOTHING: IGNORE the clothing in the reference photo. The children MUST be wearing cozy, warm beige winter outfits.  "
+    "BACKGROUND: On a cozy rug right next to the tree, surrounded by warm lights and vintage wooden toys.  "
+    "POSE: The toddler/baby is LYING on their back or tummy. If there is an older child, they are SITTING next to the toddler.  "
+    "CRITICAL ANATOMY: Correct infant proportions. Exactly 5 fingers on each hand. DO NOT ADD ANY TEXT.",
 )
 NY_FAMILY_PHOTOSESSION_PROMPTS = {
     "fam3": NY_FAMILY_THREE_PROMPTS,

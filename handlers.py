@@ -552,6 +552,10 @@ def create_router(
         if user_id is None:
             await _reply(event, "Не удалось определить пользователя. Отправьте /start.")
             return
+        if admin_user_id is None or user_id != admin_user_id:
+            await context.set_state(PosterStates.waiting_for_mode)
+            await _reply(event, PHOTO_TRIAL_CHECKOUT_TEXT, attachments=[photo_trial_payment_keyboard()])
+            return
         lock = generation_locks.setdefault(user_id, asyncio.Lock())
         if lock.locked():
             await _reply(event, "Фотографии уже создаются. Пожалуйста, подождите.")
@@ -1224,8 +1228,21 @@ def create_router(
         await context.update_data(
             template=template, photo_product_name="Фотосессия Попробовать", photo_amount_kopecks=59000,
         )
-        if template == "fam3":
-            await run_family_photosession(event, context)
+        if template == "fam3" and admin_user_id is not None and event.get_ids()[1] == admin_user_id:
+            if data.get("photosession_admin_bypass") and data.get("photosession_session_id"):
+                await run_family_photosession(event, context)
+                return
+            # Новый запуск администратора всегда запрашивает свежее общее фото.
+            await context.clear()
+            await context.update_data(
+                photo_style="photo_style_ny", photo_tariff="photo_tariff_590", tariff="trial_590",
+                template="fam3", photosession=True, photosession_admin_bypass=True,
+                photo_product_name="Фотосессия Попробовать", photo_amount_kopecks=59000,
+            )
+            await context.set_state(PosterStates.waiting_for_photosession_photo)
+            await _reply(
+                event, "👑 Режим администратора: Оплата пропущена. Пожалуйста, загрузите общее фото семьи (3 человека) для генерации."
+            )
             return
         # Готовая ссылка Prodamus используется без создания заказа пакета кредитов.
         # Возврат и подтверждение оплаты фотосессии подключаются отдельно.

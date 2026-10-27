@@ -2731,7 +2731,7 @@ async def family_context(with_photo=True):
     await context.clear()
     await context.update_data(photo_style="photo_style_ny", photo_tariff="photo_tariff_590", tariff="trial_590")
     if with_photo:
-        await context.update_data(photo={"url": "https://photos.example.com/source.png"})
+        await context.update_data(photo={"url": "https://photos.example.com/source.png"}, photosession_admin_bypass=True, photosession_session_id="test-session", photosession=True)
     await context.set_state(PosterStates.waiting_for_mode)
     return context
 
@@ -2746,7 +2746,7 @@ async def test_family_three_sequential_frames_use_same_reference_and_no_card_gen
         return outputs[index]
     frames = AsyncMock(side_effect=generate)
     cards, visions = AsyncMock(), AsyncMock()
-    router = create_router(visions, postcard_generator=cards, photosession_generator=frames)
+    router = create_router(visions, postcard_generator=cards, photosession_generator=frames, admin_user_id=456)
     event = callback_event("photo_temp_fam3")
     async def send(**kwargs):
         order.append("send-" + str(len([v for v in order if v.startswith("send")])))
@@ -2772,12 +2772,12 @@ async def test_family_three_sequential_frames_use_same_reference_and_no_card_gen
 
 async def test_family_three_requests_reference_then_generates_without_congratulation_text(credit_db):
     frames = AsyncMock(side_effect=[f"https://cdn.example/{i}.png" for i in range(3)])
-    router = create_router(photosession_generator=frames)
+    router = create_router(photosession_generator=frames, admin_user_id=456)
     context = await family_context(False)
     event = callback_event("photo_temp_fam3")
     await dispatch_callback(router, event, context)
     assert await context.get_state() == PosterStates.waiting_for_photosession_photo
-    assert "трёх членов семьи" in event.send.await_args.args[0]
+    assert event.send.await_args.args[0] == "👑 Режим администратора: Оплата пропущена. Пожалуйста, загрузите общее фото семьи (3 человека) для генерации."
     frames.assert_not_awaited()
     await call_handler(router, "collect_photosession_photo", message_event("hello"), context)
     frames.assert_not_awaited()
@@ -2791,7 +2791,7 @@ async def test_family_three_requests_reference_then_generates_without_congratula
 @pytest.mark.parametrize("failure", ["generate", "send"])
 async def test_family_three_resume_does_not_repeat_ready_frames(failure):
     frames = AsyncMock(side_effect=["https://cdn.example/1.png", RuntimeError("api error"), "https://cdn.example/2.png", "https://cdn.example/3.png"] if failure == "generate" else [f"https://cdn.example/{i}.png" for i in range(3)])
-    router = create_router(photosession_generator=frames)
+    router = create_router(photosession_generator=frames, admin_user_id=456)
     context = await family_context()
     event = callback_event("photo_temp_fam3")
     if failure == "send":
@@ -2808,7 +2808,7 @@ async def test_family_three_resume_does_not_repeat_ready_frames(failure):
 @pytest.mark.parametrize("style,tariff", [("photo_style_studio", "photo_tariff_590"), ("photo_style_walk", "photo_tariff_590"), ("photo_style_ny", "photo_tariff_990")])
 async def test_family_three_only_runs_for_new_year_trial(style, tariff):
     frames = AsyncMock()
-    router = create_router(photosession_generator=frames)
+    router = create_router(photosession_generator=frames, admin_user_id=456)
     context = await family_context()
     await context.update_data(photo_style=style, photo_tariff=tariff)
     event = callback_event("photo_temp_fam3")
@@ -2838,7 +2838,7 @@ async def test_family_three_stops_if_navigation_clears_session():
         return "https://cdn.example/result.png"
     frames = AsyncMock(side_effect=generate)
     event = callback_event("photo_temp_fam3")
-    await dispatch_callback(create_router(photosession_generator=frames), event, context)
+    await dispatch_callback(create_router(photosession_generator=frames, admin_user_id=456), event, context)
     frames.assert_awaited_once()
     event.bot.send_message.assert_not_awaited()
     assert await context.get_data() == {}
@@ -2855,7 +2855,7 @@ async def test_family_three_duplicate_callback_cannot_start_second_batch():
             await dispatch_callback(router, duplicate, context)
         return f"https://cdn.example/{calls}.png"
     frames = AsyncMock(side_effect=generate)
-    router = create_router(photosession_generator=frames)
+    router = create_router(photosession_generator=frames, admin_user_id=456)
     await dispatch_callback(router, callback_event("photo_temp_fam3"), context)
     assert frames.await_count == 3
     duplicate.ack.assert_awaited_once_with(notification="Фотографии уже создаются. Пожалуйста, подождите.")
@@ -2867,5 +2867,55 @@ async def test_family_three_wrong_tariff_does_not_run(tariff):
     frames = AsyncMock()
     context = await family_context()
     await context.update_data(photo_tariff=tariff)
-    await dispatch_callback(create_router(photosession_generator=frames), callback_event("photo_temp_fam3"), context)
+    await dispatch_callback(create_router(photosession_generator=frames, admin_user_id=456), callback_event("photo_temp_fam3"), context)
     frames.assert_not_awaited()
+
+
+async def test_admin_family_template_requests_fresh_photo_without_payment(credit_db):
+    frames = AsyncMock(side_effect=[f"https://cdn.example/admin-{i}.png" for i in range(3)])
+    payments = SimpleNamespace(create_payment_link=AsyncMock())
+    router = create_router(admin_user_id=456, photosession_generator=frames, payments=payments)
+    context = await ready_context()
+    await context.update_data(photo_style="photo_style_ny", photo_tariff="photo_tariff_590")
+    event = callback_event("photo_temp_fam3")
+    await dispatch_callback(router, event, context)
+    event.send.assert_awaited_once_with(
+        "👑 Режим администратора: Оплата пропущена. Пожалуйста, загрузите общее фото семьи (3 человека) для генерации."
+    )
+    assert await context.get_state() == PosterStates.waiting_for_photosession_photo
+    data = await context.get_data()
+    assert data["template"] == "fam3" and data["photosession"] is True
+    assert data["photosession_admin_bypass"] is True
+    assert "photo" not in data
+    frames.assert_not_awaited()
+    await call_handler(router, "collect_photosession_photo", photo_event(), context)
+    assert frames.await_count == 3
+    assert all(c.args[0] == "https://photos.example.com/source.png" for c in frames.await_args_list)
+    payments.create_payment_link.assert_not_awaited()
+
+
+@pytest.mark.parametrize("admin_id", [None, 999])
+async def test_nonadmin_family_template_only_receives_payment_link(credit_db, admin_id):
+    frames = AsyncMock()
+    router = create_router(admin_user_id=admin_id, photosession_generator=frames)
+    context = await family_context()
+    event = callback_event("photo_temp_fam3")
+    await dispatch_callback(router, event, context)
+    assert event.send.await_args.args[0] == handlers.PHOTO_TRIAL_CHECKOUT_TEXT
+    button = event.send.await_args.kwargs["attachments"][0].payload.buttons[0][0]
+    assert button.text == "Оплатить 590 ₽"
+    assert button.url == handlers.PHOTO_TRIAL_PAYMENT_URL
+    assert await context.get_state() == PosterStates.waiting_for_mode
+    frames.assert_not_awaited()
+
+
+async def test_nonadmin_cannot_generate_from_stale_admin_photo_state():
+    frames = AsyncMock()
+    context = await family_context()
+    await context.update_data(template="fam3", photosession_admin_bypass=True)
+    await context.set_state(PosterStates.waiting_for_photosession_photo)
+    event = photo_event()
+    await call_handler(create_router(admin_user_id=999, photosession_generator=frames), "collect_photosession_photo", event, context)
+    frames.assert_not_awaited()
+    assert event.message.answer.await_args.args[0] == handlers.PHOTO_TRIAL_CHECKOUT_TEXT
+    assert await context.get_state() == PosterStates.waiting_for_mode

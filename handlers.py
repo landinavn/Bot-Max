@@ -29,7 +29,7 @@ from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
 from config import DEFAULT_BOT_LINK, validate_bot_link
 from video_service import generate_video_from_avatar
-from media_service import merge_video_and_audio
+from media_service import VIDEO_MERGE_POLICY, merge_video_and_audio
 from metrika_service import extract_yclid, send_offline_conversion
 
 from database import (
@@ -829,7 +829,7 @@ def create_router(
         if is_video_placeholder(raw):
             return raw
         data.update(video_raw_source=image_url, video_raw_url=raw)
-        key = [raw, audio_url]
+        key = [VIDEO_MERGE_POLICY, raw, audio_url]
         if data.get('video_merged_source') != key or not data.get('video_merged_url'):
             data['video_merged_url'] = await merge_video_and_audio(raw, audio_url)
             data['video_merged_source'] = key
@@ -1770,7 +1770,7 @@ def create_router(
                     return
                 if not isinstance(result, str) or not result.startswith('https://'):
                     raise ValueError('PiAPI не вернул HTTPS-ссылку на видео.')
-                await _reply(event, '🎬 Ваша анимация готова (5 секунд): ' + result,
+                await _reply(event, '🎬 Ваше видео с песней готово: ' + result,
                              attachments=[InlineKeyboardBuilder().row(LinkButton(text='⬇️ Скачать видео', url=result)).row(
                                  CallbackButton(text='⬅️ Главное меню', payload='back_to_main')).as_markup()])
                 await context.set_state(PosterStates.waiting_for_mode)
@@ -2040,7 +2040,7 @@ def create_router(
                     return
                 if not isinstance(result, str) or not result.startswith('https://'):
                     raise ValueError('Генератор видео не вернул HTTPS-ссылку.')
-                await _reply(event, '🎬 Ваша анимация готова (5 секунд): ' + result, attachments=[
+                await _reply(event, '🎬 Ваше видео с песней готово: ' + result, attachments=[
                     InlineKeyboardBuilder().row(LinkButton(text='⬇️ Скачать видео', url=result)).row(
                         CallbackButton(text='⬅️ Главное меню', payload='back_to_main')).as_markup()])
                 await context.update_data(video_complete=True, video_result_url=result)

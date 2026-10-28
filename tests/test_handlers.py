@@ -5040,7 +5040,7 @@ async def test_video_teacher_collects_details_creates_formal_text_and_keeps_card
     original = await context.get_data()
     chosen = callback_event('audio_video_teacher')
     await dispatch_callback(router, chosen, context)
-    assert chosen.send.await_args.args[0] == 'Напишите имя тренера/учителя, вид спорта или предмет, и одно качество или воспоминание (например: «Ирина Петровна, математика, строгая но справедливая»).'
+    assert chosen.send.await_args.args[0] == 'Напишите имя тренера, лучший тренер по .... (например: «Иван, лучший тренер по футболу»).'
     assert await context.get_state() == PosterStates.waiting_for_video_teacher_details
     assert 'payform' not in str(chosen.send.await_args_list)
     event = message_event('Ирина Петровна, математика, строгая но справедливая')
@@ -5229,7 +5229,7 @@ async def test_late_teacher_lyrics_do_not_overwrite_cancelled_or_reopened_menu(a
 
 @pytest.mark.parametrize('mode,field,info,question,event_name', [
     ('mode_teacher', 'teacher_info', 'Ирина Петровна, математика', 'Напишите имя учителя и его предмет (например: «Ирина Петровна, математика»).', 'gen_teacher'),
-    ('mode_coach', 'coach_info', 'Сергей Иванович, футбол', 'Напишите имя тренера и вид спорта (например: «Сергей Иванович, футбол»).', 'gen_coach'),
+    ('mode_coach', 'coach_info', 'Сергей Иванович, футбол', 'Напишите имя тренера, лучший тренер по .... (например: «Иван, лучший тренер по футболу»).', 'gen_coach'),
 ])
 async def test_role_cards_collect_context_before_photo_then_generate_and_count(credit_db, mode, field, info, question, event_name):
     await credit_db.add_credits(456, 2)

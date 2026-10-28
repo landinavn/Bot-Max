@@ -694,7 +694,8 @@ async def test_music_webhook_worker_renders_after_payment_and_reuses_result_for_
     notified=asyncio.Event()
     async def send(**kwargs):
         assert kwargs['user_id']==456
-        notified.set()
+        if kwargs.get('attachments'):
+            notified.set()
         return object()
     bot=SimpleNamespace(send_message=AsyncMock(side_effect=send))
     render=AsyncMock(return_value='https://cdn.example/paid.mp4')
@@ -714,5 +715,5 @@ async def test_music_webhook_worker_renders_after_payment_and_reuses_result_for_
         duplicate=await post_notification(client,data)
         assert duplicate.status==200
     render.assert_awaited_once_with('https://cdn.example/card.jpg','https://cdn.example/full.mp3')
-    bot.send_message.assert_awaited_once()
+    assert bot.send_message.await_count == 2
     assert (await credit_db.get_musical_order('music_test'))['delivered']==1

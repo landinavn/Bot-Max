@@ -18,6 +18,10 @@ from image_service import _storage_client
 logger = logging.getLogger(__name__)
 VIDEO_MERGE_POLICY = 'loop-full-song-v1'
 MUSICAL_VIDEO_POLICY = 'static-image-full-song-v1'
+MUSICAL_VIDEO_WAIT_MESSAGE = (
+    '🎵 Создаю вашу музыкальную открытку. Пожалуйста, подождите около 1-2 минут — '
+    'я накладываю музыку и готовлю видео-файл. Не закрывайте чат!'
+)
 
 
 class MediaServiceError(RuntimeError):

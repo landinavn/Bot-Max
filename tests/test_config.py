@@ -153,3 +153,19 @@ def test_metrika_settings_from_dotenv_environment_and_hidden_token(tmp_path, mon
     monkeypatch.setenv('YANDEX_METRIKA_OAUTH_TOKEN', '')
     assert config.Config.from_env().yandex_metrika_counter_id is None
     assert config.Config.from_env().yandex_metrika_oauth_token is None
+
+
+def test_piapi_key_from_dotenv_environment_and_hidden_repr(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, 'BASE_DIR', tmp_path)
+    monkeypatch.setenv('MAX_BOT_TOKEN', 'test-token')
+    monkeypatch.delenv('PIAPI_KEY', raising=False)
+    (tmp_path / '.env').write_text('PIAPI_KEY=dotenv-piapi-key\n')
+    settings = config.Config.from_env()
+    assert settings.piapi_key == 'dotenv-piapi-key'
+    assert 'dotenv-piapi-key' not in repr(settings)
+    monkeypatch.setenv('PIAPI_KEY', ' environment-piapi-key ')
+    settings = config.Config.from_env()
+    assert settings.piapi_key == 'environment-piapi-key'
+    assert 'environment-piapi-key' not in repr(settings)
+    monkeypatch.setenv('PIAPI_KEY', '  ')
+    assert config.Config.from_env().piapi_key is None

@@ -188,6 +188,13 @@ def photo_request(text: str) -> str:
     return text + "\n\n" + PHOTO_GUIDANCE
 
 
+VIDEO_SONG_CUSTOM_TEXT_PROMPT = (
+    'Отличный выбор! Теперь напишите имя и фразу для припева '
+    '(например: «Иван, лучший тренер по футболу!» или «Маша, с днём рождения!»). '
+    'Эта фраза обязательно прозвучит в песне.'
+)
+
+
 CARD_TEXT_PROMPT = (
     "✍️ Отлично! Теперь напиши текст поздравления и имя (например: «С днём рождения, Аня! Будь счастлива!»).\n\n"
     "Этот текст появится на открытке.\n\n"
@@ -809,27 +816,26 @@ def create_router(
     cartoon_video_generator = cartoon_video_generator or generate_video
 
     async def prepare_video_song(data, scenario):
-        from_greeting = data.get('video_flow') and data.get('video_product') == 'direct'
-        details = (data.get('card_text') if from_greeting else
+        custom_song = data.get('video_flow') and data.get('video_product') == 'direct'
+        details = (data.get('song_custom_text') if custom_song else
                    data.get('video_song_phrase') or data.get('video_teacher_details') or data.get('song_details') or data.get('card_text')
                    or data.get('teacher_info') or data.get('coach_info') or 'Пожелания счастья, радости и исполнения мечты')
         if not isinstance(details, str) or not details.strip():
-            raise ValueError('Не сохранён текст поздравления для песни.')
-        source = [scenario, details, 'from_greeting'] if from_greeting else [scenario, details]
+            raise ValueError('Не сохранена фраза для припева. Выберите песню и введите текст заново.')
+        source = [scenario, details, 'custom_text'] if custom_song else [scenario, details]
         if data.get('video_song_source') == source and data.get('video_song_url'):
             return data['video_song_url']
         existing = data.get('chosen_song_url') if data.get('chosen_song') == scenario else None
-        if existing and not from_greeting and not is_video_placeholder(existing):
+        if existing and not custom_song and not is_video_placeholder(existing):
             data.update(video_song_source=source, video_song_url=existing)
             return existing
         if data.get('video_song_job_source') != source or not data.get('video_song_job_id'):
             label = VIDEO_SONG_SCENARIOS[scenario][0]
             notes, tags, title = build_song_request(details, label, 'fun',
                 TEACHER_MUSIC_TAGS if data.get('mode') == 'mode_coach' else None)
-            lyrics = data.get('video_song_lyrics') if scenario == 'audio_video_teacher' and not from_greeting else None
+            lyrics = data.get('video_song_lyrics') if scenario == 'audio_video_teacher' and not custom_song else None
             if not lyrics:
-                lyrics = (await lyric_writer(notes, tags, title, preserve_chorus=False) if from_greeting else
-                          await lyric_writer(notes, tags, title))
+                lyrics = await lyric_writer(notes, tags, title)
             validate_song_arguments(lyrics, tags, title)
             data.update(video_song_job_source=source, video_song_lyrics=lyrics, video_song_job_id=None)
             data['video_song_job_id'] = await song_generator(lyrics, tags, title)
@@ -1983,19 +1989,16 @@ def create_router(
             return
         user_id = event.get_ids()[1]
         if data.get('video_product') == 'direct':
-            await event.ack(notification='Создаю песню из поздравления…')
+            await event.ack(notification='Жду фразу для припева…')
             if scenario == 'audio_video_teacher' and user_id is not None:
                 await increment_counter('audio_scen_teacher_video', user_id=user_id)
             elif scenario in {'audio_fun_ny', 'audio_gift_ny'} and user_id is not None:
                 await increment_counter('audio_scen_ny_video', user_id=user_id)
-            if not data.get('card_text'):
-                await context.set_state(PosterStates.waiting_for_card_text)
-                await _reply(event, CARD_TEXT_PROMPT)
-                return
-            await context.update_data(video_song_scenario=scenario, video_song_phrase=None, video_teacher_details=None,
-                                      video_song_lyrics=None, video_teacher_session_id=None, video_teacher_lyrics_source=None,
-                                      video_song_tags=None, video_song_title=None)
-            await finish_video_selection(event, context)
+            await context.update_data(video_song_scenario=scenario, song_custom_text=None, video_song_phrase=None,
+                                      video_teacher_details=None, video_song_lyrics=None, video_teacher_session_id=None,
+                                      video_teacher_lyrics_source=None, video_song_tags=None, video_song_title=None)
+            await context.set_state(PosterStates.waiting_for_video_song_phrase)
+            await _reply(event, VIDEO_SONG_CUSTOM_TEXT_PROMPT)
             return
         if scenario == 'audio_video_teacher':
             await event.ack(notification='Жду данные учителя или тренера…')
@@ -2040,9 +2043,12 @@ def create_router(
             body = event.message.body
             phrase = (body.text or '').strip() if body else ''
             if not phrase or len(phrase) > 500:
-                await _reply(event, scenarios[scenario][1] + ' До 500 символов. /cancel — отмена.')
+                await _reply(event, (VIDEO_SONG_CUSTOM_TEXT_PROMPT if not cartoon and data.get('video_product') == 'direct'
+                                     else scenarios[scenario][1]) + ' До 500 символов. /cancel — отмена.')
                 return
             changes = {'video_song_phrase': phrase}
+            if not cartoon and data.get('video_product') == 'direct':
+                changes['song_custom_text'] = phrase
             if cartoon:
                 if data.get('chosen_song_phrase') != phrase:
                     changes['chosen_song_url'] = None

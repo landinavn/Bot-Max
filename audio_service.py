@@ -23,10 +23,16 @@ BASE_URL = "https://api.ttapi.io"
 LONG_WAIT_MESSAGE = "⏳ Трек все еще создается, это занимает больше времени, чем обычно. Пожалуйста, подождите, я пришлю его, как только он будет готов."
 
 TEACHER_SCENARIO_TITLE = '👨‍🏫 Для тренера / учителя'
+TEACHER_MUSIC_TAGS = 'upbeat pop rock, energetic, stadium anthem, motivational'
+TEACHER_MUSIC_INSTRUCTION = (
+    'Стиль: энергичный поп-рок, стадионный гимн или динамичный рэп. '
+    'Используй мотивирующие слова и образы: победа, сила, команда, вперед. '
+    'Поддержи чувство единства, движения и уверенности; не используй медленную балладу.'
+)
 TEACHER_LYRICS_INSTRUCTION = (
-    'Напиши текст официальной и трогательной песни-благодарности на «Вы» для тренера или учителя. '
+    'Напиши текст энергичной и мотивирующей песни-благодарности на «Вы» для тренера или учителя. '
     'Включи слова благодарности за вложенные усилия, терпение, поддержку и знания. '
-    'Используй имя и детали, которые ввел пользователь. Стиль: элегантный поп или баллада. '
+    'Используй имя и детали, которые ввел пользователь. ' + TEACHER_MUSIC_INSTRUCTION + ' '
     'Введённая пользователем фраза должна стать смысловой основой каждого припева [Chorus]. '
     'Сохрани имя, вид спорта или предмет и именно ту оценку, которую ввёл пользователь. '
     'Например, «Иван, лучший тренер по футболу» должно звучать в припеве как признание Ивана лучшим тренером по футболу, '
@@ -59,11 +65,13 @@ def build_song_request(details: str, scenario_title: str, audio_format: str, sty
                                                 'heartfelt family memories and wishes, 2-3 minutes')
 
     if scenario_title == TEACHER_SCENARIO_TITLE:
-        prompt = (f'[Verse 1]\nВаш труд оставит в сердце добрый свет,\nИ благодарность бережно хранится.\n'
-                  f'[Chorus]\n{chorus}\n[Verse 2]\n{details.strip()}\nВаш пример поможет нам стремиться.\n'
+        prompt = (f'[Verse 1]\nВ каждом сердце сила, и команда рядом,\nВперед, к новым высотам, уверенным шагом!\n'
+                  f'[Chorus]\n{chorus}\n[Verse 2]\n{details.strip()}\nПобеда ждёт, Ваш пример помогает нам стремиться.\n'
                   f'[Chorus]\n{chorus}\n[Bridge]\nСпасибо Вам за знания и труд, за веру в нас, терпение, поддержку.\n[Chorus]\n{chorus}')
-        tags = str(style or 'elegant pop ballad') + ', formal respectful Russian vocals, gratitude, '
-        tags += 'short song, 30 seconds' if audio_format == 'fun' else 'touching ballad, 2-3 minutes'
+        tags = TEACHER_MUSIC_TAGS + ', Russian vocals, '
+        tags += 'short song, 30 seconds' if audio_format == 'fun' else '2-3 minutes'
+    elif style == TEACHER_MUSIC_TAGS:
+        prompt = prompt.replace('[Bridge]\n', '[Bridge]\nПобеда, сила, команда — вперед!\n', 1)
     if len(prompt) > 5000 or len(tags) > 1000:
         raise ValueError('Слишком много деталей для TTAPI.')
     return prompt, tags, f"{scenario_title}: {details.split(',')[0]}"[:80]
@@ -93,7 +101,7 @@ def validate_song_arguments(prompt, tags, title) -> None:
             raise InvalidSongArguments(f'{name}: не более {limit} символов.')
 
 
-LYRICS_SYSTEM_PROMPT = (
+LYRICS_STRUCTURE_PROMPT = (
     'Ты профессиональный автор персональных песен на русском языке. '
     'НЕ перечисляй факты и привычки в первом куплете. Начни песню с эмоционального или поэтического вступления '
     '(например, о том, какой это замечательный человек). Факты и детали аккуратно вплети в повествование второго куплета или бриджа. '
@@ -102,31 +110,46 @@ LYRICS_SYSTEM_PROMPT = (
     'Верни ТОЛЬКО текст песни. Не пиши название песни, название сценария или заголовок. Начинай сразу с [Verse 1]. '
     'Сохрани имена и смысл деталей; кроме обязательной фразы припева, не вставляй перечень из анкеты дословно. Не добавляй пояснения или кодовые блоки. '
     'Если нужен короткий формат 30–40 секунд, используй 1–2 строки на секцию, иначе 2–4 строки. До 5000 символов.'
+)
+LYRICS_SYSTEM_PROMPT = LYRICS_STRUCTURE_PROMPT + (
     ' CRITICAL REQUIREMENT: В припеве обязательно должна прозвучать фраза, которую ввел пользователь. Используй её дословно. '
     'Поле required_chorus_phrase содержит эту фразу целиком, включая имя. Включи её в каждый [Chorus] без изменения слов, '
     'пунктуации и регистра. Не исправляй и не склоняй её, не заменяй синонимами. Остальные строки можно сочинять свободно.'
 )
+VIDEO_GREETING_LYRICS_PROMPT = LYRICS_STRUCTURE_PROMPT + (
+    ' Это песня для ожившей открытки. greeting_source — поздравление пользователя, а не готовый припев. '
+    'Сам сформулируй из него короткий, естественный припев и куплеты. Сохрани имена, адресата, повод и смысл пожеланий. '
+    'Не требуй отдельную фразу припева и не копируй поздравление целиком дословно. Не выдумывай имена, предмет или вид спорта.'
+)
 
 
-async def write_song_lyrics(notes: str, tags: str, title: str) -> str:
+async def write_song_lyrics(notes: str, tags: str, title: str, *, preserve_chorus: bool = True) -> str:
     settings = Config.from_env()
     if not settings.image_api_key:
         raise AudioNotConfigured('Не настроена текстовая модель для стихов.')
     chorus = re.search(r'\[Chorus\]\s*\n(.*?)(?=\n\[|$)', notes, flags=re.S)
-    required_phrase = chorus.group(1).strip() if chorus else None
-    instruction = LYRICS_SYSTEM_PROMPT
+    source_phrase = chorus.group(1).strip() if chorus else None
+    required_phrase = source_phrase if preserve_chorus else None
+    instruction = LYRICS_SYSTEM_PROMPT if preserve_chorus else VIDEO_GREETING_LYRICS_PROMPT
     if title.startswith(TEACHER_SCENARIO_TITLE + ':'):
-        instruction += ' ' + TEACHER_LYRICS_INSTRUCTION
+        instruction += (' ' + TEACHER_LYRICS_INSTRUCTION if preserve_chorus else
+                        ' Напиши уважительную песню-благодарность для учителя или тренера на Вы, '
+                        'сохраняя имя и смысл исходного поздравления. ' + TEACHER_MUSIC_INSTRUCTION)
         if '30 seconds' in tags:
             instruction += ' Длина около 30 секунд: по 1–2 короткие строки в секции.'
+    elif tags.startswith(TEACHER_MUSIC_TAGS):
+        instruction += ' ' + TEACHER_MUSIC_INSTRUCTION
     try:
         async with httpx.AsyncClient(proxy=settings.openai_proxy_url, timeout=60, trust_env=False) as http_client:
             async with AsyncOpenAI(api_key=settings.image_api_key, base_url='https://api.openai.com/v1',
                                    http_client=http_client, max_retries=0) as client:
+                user_data = {'details': notes, 'style': tags, 'title_for_context_only': title,
+                             'required_chorus_phrase': required_phrase}
+                if not preserve_chorus:
+                    user_data['greeting_source'] = source_phrase
                 result = await client.chat.completions.create(model='gpt-4o-mini', temperature=0.7,
                     messages=[{'role': 'system', 'content': instruction},
-                              {'role': 'user', 'content': json.dumps({'details': notes, 'style': tags, 'title_for_context_only': title,
-                                  'required_chorus_phrase': required_phrase}, ensure_ascii=False)}])
+                              {'role': 'user', 'content': json.dumps(user_data, ensure_ascii=False)}])
     except Exception as exc:
         raise AudioServiceError('Не удалось написать стихи.') from exc
     if not result.choices or result.choices[0].finish_reason != 'stop':

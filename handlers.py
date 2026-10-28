@@ -30,7 +30,7 @@ from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 from config import DEFAULT_BOT_LINK, validate_bot_link
 from video_service import generate_video_from_avatar
 from media_service import VIDEO_MERGE_POLICY, merge_video_and_audio
-from audio_service import song_audio_url
+from audio_service import song_audio_url, TEACHER_MUSIC_TAGS
 from metrika_service import extract_yclid, send_offline_conversion
 
 from database import (
@@ -475,7 +475,7 @@ AUDIO_GIFT_SCENARIO_TEXT = (
     "🤝 Для друга / подруги — общие истории и шутки.\n"
     "🎯 Свой вариант — любой человек и повод.\n"
     "🎄 Новогодняя — семейные воспоминания и тёплые пожелания.\n"
-    "👨‍🏫 Для тренера / учителя — официальная и трогательная благодарность."
+    "👨‍🏫 Для тренера / учителя — энергичный гимн, мотивация и благодарность."
 )
 
 
@@ -808,20 +808,27 @@ def create_router(
     cartoon_video_generator = cartoon_video_generator or generate_video
 
     async def prepare_video_song(data, scenario):
-        details = (data.get('video_song_phrase') or data.get('video_teacher_details') or data.get('song_details') or data.get('card_text')
+        from_greeting = data.get('video_flow') and data.get('video_product') == 'direct'
+        details = (data.get('card_text') if from_greeting else
+                   data.get('video_song_phrase') or data.get('video_teacher_details') or data.get('song_details') or data.get('card_text')
                    or data.get('teacher_info') or data.get('coach_info') or 'Пожелания счастья, радости и исполнения мечты')
-        source = [scenario, details]
+        if not isinstance(details, str) or not details.strip():
+            raise ValueError('Не сохранён текст поздравления для песни.')
+        source = [scenario, details, 'from_greeting'] if from_greeting else [scenario, details]
         if data.get('video_song_source') == source and data.get('video_song_url'):
             return data['video_song_url']
         existing = data.get('chosen_song_url') if data.get('chosen_song') == scenario else None
-        if existing and not is_video_placeholder(existing):
+        if existing and not from_greeting and not is_video_placeholder(existing):
             data.update(video_song_source=source, video_song_url=existing)
             return existing
         if data.get('video_song_job_source') != source or not data.get('video_song_job_id'):
             label = VIDEO_SONG_SCENARIOS[scenario][0]
-            notes, tags, title = build_song_request(details, label, 'fun')
-            lyrics = data.get('video_song_lyrics') if scenario == 'audio_video_teacher' else None
-            lyrics = lyrics or await lyric_writer(notes, tags, title)
+            notes, tags, title = build_song_request(details, label, 'fun',
+                TEACHER_MUSIC_TAGS if data.get('mode') == 'mode_coach' else None)
+            lyrics = data.get('video_song_lyrics') if scenario == 'audio_video_teacher' and not from_greeting else None
+            if not lyrics:
+                lyrics = (await lyric_writer(notes, tags, title, preserve_chorus=False) if from_greeting else
+                          await lyric_writer(notes, tags, title))
             validate_song_arguments(lyrics, tags, title)
             data.update(video_song_job_source=source, video_song_lyrics=lyrics, video_song_job_id=None)
             data['video_song_job_id'] = await song_generator(lyrics, tags, title)
@@ -1966,6 +1973,21 @@ def create_router(
             await event.ack(notification='Выберите видео и заполните данные заново.')
             return
         user_id = event.get_ids()[1]
+        if data.get('video_product') == 'direct':
+            await event.ack(notification='Создаю песню из поздравления…')
+            if scenario == 'audio_video_teacher' and user_id is not None:
+                await increment_counter('audio_scen_teacher_video', user_id=user_id)
+            elif scenario in {'audio_fun_ny', 'audio_gift_ny'} and user_id is not None:
+                await increment_counter('audio_scen_ny_video', user_id=user_id)
+            if not data.get('card_text'):
+                await context.set_state(PosterStates.waiting_for_card_text)
+                await _reply(event, CARD_TEXT_PROMPT)
+                return
+            await context.update_data(video_song_scenario=scenario, video_song_phrase=None, video_teacher_details=None,
+                                      video_song_lyrics=None, video_teacher_session_id=None, video_teacher_lyrics_source=None,
+                                      video_song_tags=None, video_song_title=None)
+            await finish_video_selection(event, context)
+            return
         if scenario == 'audio_video_teacher':
             await event.ack(notification='Жду данные учителя или тренера…')
             if user_id is not None:
@@ -3019,9 +3041,10 @@ def create_router(
             await context.update_data(video_flow=True, video_amount_kopecks=29900, video_product='direct')
         if mode in ROLE_CARD_FIELDS:
             await context.update_data(card_role_session=uuid4().hex)
-            await context.set_state(PosterStates.waiting_for_card_role_info)
-            await _reply(event, ROLE_CARD_QUESTIONS[mode])
-            return
+            if not video:
+                await context.set_state(PosterStates.waiting_for_card_role_info)
+                await _reply(event, ROLE_CARD_QUESTIONS[mode])
+                return
         await context.set_state(PosterStates.waiting_for_photo)
         if mode == "mode_ny_family":
             text = "Отправьте одно общее фото семьи, где видны лица всех участников. Затем напишите поздравление для открытки. /cancel — отмена."
@@ -3115,7 +3138,7 @@ def create_router(
         if is_bot_message(event):
             return
         data = await context.get_data()
-        if data.get('mode') in ROLE_CARD_FIELDS and not data.get(ROLE_CARD_FIELDS[data['mode']]):
+        if not data.get('video_flow') and data.get('mode') in ROLE_CARD_FIELDS and not data.get(ROLE_CARD_FIELDS[data['mode']]):
             await context.set_state(PosterStates.waiting_for_card_role_info)
             await _reply(event, ROLE_CARD_QUESTIONS[data['mode']])
             return
@@ -3218,7 +3241,7 @@ def create_router(
             await context.set_state(PosterStates.waiting_for_mode)
             await _reply(event, "Выберите открытку в меню.", attachments=[main_keyboard()])
             return
-        if data['mode'] in ROLE_CARD_FIELDS and not data.get(ROLE_CARD_FIELDS[data['mode']]):
+        if not data.get('video_flow') and data['mode'] in ROLE_CARD_FIELDS and not data.get(ROLE_CARD_FIELDS[data['mode']]):
             await context.set_state(PosterStates.waiting_for_card_role_info)
             await _reply(event, ROLE_CARD_QUESTIONS[data['mode']])
             return
@@ -3240,6 +3263,8 @@ def create_router(
         await context.update_data(card_text=text, sphere=data["mode"])
         if data.get('video_flow'):
             if data['mode'] in ROLE_CARD_FIELDS:
+                # Тематика берётся из уже введённого поздравления, без отдельного вопроса.
+                await context.update_data(**{ROLE_CARD_FIELDS[data['mode']]: text})
                 await generate_role_video_preview(event, context)
             else:
                 await show_video_songs(event, context)

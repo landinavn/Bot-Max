@@ -17,7 +17,7 @@ def mock_music_composer_and_preview(monkeypatch):
     from unittest.mock import AsyncMock
     import handlers
     import audio_orders
-    writer = AsyncMock(side_effect=lambda notes, tags, title: notes)
+    writer = AsyncMock(side_effect=lambda notes, tags, title, **kwargs: notes)
     monkeypatch.setattr(handlers, 'write_song_lyrics', writer)
     monkeypatch.setattr(handlers, 'generate_song', AsyncMock(return_value='inline-test-job'))
     result = {'status': 'SUCCESS', 'data': {'musics': [{'audioUrl': 'https://audio.example/1.mp3', 'title': 'Один'}, {'audioUrl': 'https://audio.example/2.mp3', 'title': 'Два'}]}}

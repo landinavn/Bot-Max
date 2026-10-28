@@ -1,0 +1,73 @@
+"""Постоянная очередь создания и отправки оплаченных музыкальных открыток."""
+import asyncio
+import logging
+import time
+
+from maxapi.types import LinkButton
+from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
+
+from database import (get_musical_order, update_musical_order, claim_musical_order,
+                      pending_musical_orders, reset_musical_workers)
+from media_service import create_musical_video, upload_video_for_max
+from audio_orders import SUPPORT_URL
+
+logger = logging.getLogger(__name__)
+
+
+class PaidMusicalWorker:
+    def __init__(self, bot, *, renderer=None, uploader=None, poll_interval=2):
+        self.bot = bot
+        self.renderer = renderer or create_musical_video
+        self.uploader = uploader or upload_video_for_max
+        self.poll_interval = poll_interval
+
+    async def run(self):
+        initialized = False
+        while True:
+            try:
+                if not initialized:
+                    await reset_musical_workers()
+                    initialized = True
+                for order_id in await pending_musical_orders():
+                    await self.process(order_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception('Ошибка очереди музыкальных открыток:')
+            await asyncio.sleep(self.poll_interval)
+
+    async def process(self, order_id):
+        if not await claim_musical_order(order_id):
+            return
+        order = None
+        try:
+            order = await get_musical_order(order_id)
+            result = order['result_url']
+            if not result:
+                result = await self.renderer(order['image_url'], order['audio_url'])
+                if not isinstance(result, str) or not result.startswith('https://'):
+                    raise ValueError('Не получена HTTPS-ссылка на музыкальную открытку.')
+                await asyncio.shield(update_musical_order(order_id, result_url=result))
+            video = await self.uploader(self.bot, result)
+            keyboard = InlineKeyboardBuilder().row(LinkButton(text='⬇️ Скачать MP4', url=result)).as_markup()
+            sent = await self.bot.send_message(user_id=order['user_id'],
+                text='🎵 Ваша музыкальная открытка готова!', attachments=[video, keyboard])
+            if sent is None:
+                raise RuntimeError('MAX не подтвердил отправку музыкальной открытки.')
+            await update_musical_order(order_id, delivered=1, error=None)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception('Ошибка музыкального заказа %s:', order_id)
+            attempts = (order or {}).get('attempts', 0) + 1
+            await update_musical_order(order_id, attempts=attempts, failed=int(attempts >= 3),
+                next_attempt_at=int(time.time()) + 60, error='render_or_delivery_failed')
+            if attempts >= 3 and order:
+                try:
+                    await self.bot.send_message(user_id=order['user_id'], text=
+                        'Не удалось выдать музыкальную открытку. Оплата сохранена. Напишите в поддержку и укажите заказ ' + order_id,
+                        attachments=[InlineKeyboardBuilder().row(LinkButton(text='🆘 Поддержка', url=SUPPORT_URL)).as_markup()])
+                except Exception:
+                    logger.exception('Не удалось сообщить об ошибке заказа %s:', order_id)
+        finally:
+            await asyncio.shield(update_musical_order(order_id, running=0))

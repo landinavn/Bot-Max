@@ -17,6 +17,7 @@ from image_service import _storage_client
 
 logger = logging.getLogger(__name__)
 VIDEO_MERGE_POLICY = 'loop-full-song-v1'
+MUSICAL_VIDEO_POLICY = 'static-image-full-song-v1'
 
 
 class MediaServiceError(RuntimeError):
@@ -106,3 +107,49 @@ async def merge_video_and_audio(video_url: str, audio_url: str) -> str:
             return result
     finally:
         await asyncio.to_thread(client.close)
+
+
+async def create_musical_video(image_url: str, audio_url: str) -> str:
+    """Статичная картинка и полная песня в совместимом с MAX MP4."""
+    binary = shutil.which('ffmpeg')
+    if not binary:
+        raise MediaServiceError('Для музыкальной открытки установите ffmpeg.')
+    settings = Config.from_env()
+    client = await asyncio.to_thread(_storage_client, settings)
+    try:
+        with tempfile.TemporaryDirectory(prefix='musical-card-') as directory:
+            image, audio, target = (Path(directory)/name for name in ('image.jpg', 'audio.mp3', 'output.mp4'))
+            logger.info('Скачиваю картинку и полную песню для музыкальной открытки.')
+            async with httpx.AsyncClient(timeout=120, trust_env=False, follow_redirects=False) as http:
+                await _download(http, image_url, image, 32 * 1024 * 1024)
+                await _download(http, audio_url, audio, 32 * 1024 * 1024)
+            duration = await audio_duration(audio)
+            # pad нужен для нечётных размеров; исходное изображение не кадрируется.
+            await run_media_process(binary, '-nostdin', '-v', 'error', '-protocol_whitelist', 'file,pipe',
+                '-y', '-loop', '1', '-framerate', '25', '-i', str(image), '-i', str(audio),
+                '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'libx264', '-tune', 'stillimage',
+                '-vf', 'pad=ceil(iw/2)*2:ceil(ih/2)*2', '-c:a', 'aac', '-b:a', '192k',
+                '-pix_fmt', 'yuv420p', '-t', f'{duration:.6f}', '-shortest', '-movflags', '+faststart',
+                '-map_metadata', '-1', '-map_chapters', '-1', str(target), timeout=600)
+            if not target.is_file() or not target.stat().st_size:
+                raise MediaServiceError('ffmpeg не создал музыкальную открытку.')
+            result = await asyncio.to_thread(_upload_video, client, settings, target)
+            logger.info('Музыкальная открытка готова, длительность %.2f секунд.', duration)
+            return result
+    finally:
+        await asyncio.to_thread(client.close)
+
+
+async def upload_video_for_max(bot, video_url: str):
+    """Загрузить MP4 в MAX, чтобы отправить сам видеофайл вместе со ссылкой."""
+    from maxapi.types import InputMedia
+    from maxapi.enums.upload_type import UploadType
+    with tempfile.TemporaryDirectory(prefix='max-musical-video-') as directory:
+        path = Path(directory)/'musical-card.mp4'
+        async with httpx.AsyncClient(timeout=120, trust_env=False, follow_redirects=False) as http:
+            await _download(http, video_url, path, 128 * 1024 * 1024)
+        attachment = await bot.upload_media(InputMedia(path=str(path), type=UploadType.VIDEO))
+        token = attachment.payload.token
+        if not isinstance(token, str) or not token.strip():
+            raise MediaServiceError('MAX вернул пустой media token видео.')
+        return attachment

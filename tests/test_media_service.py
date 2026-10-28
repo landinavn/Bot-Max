@@ -150,3 +150,82 @@ async def test_looped_video_accepts_kling_result_without_any_audio(storage, samp
     result = json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams','-of','json',str(target)]))
     assert [s['codec_type'] for s in result['streams']] == ['video','audio']
     assert float(result['streams'][1]['duration']) >= 3.4
+
+
+@pytest.mark.parametrize('duration', [3.5, 51.25])
+@respx.mock
+async def test_musical_card_is_static_h264_with_full_aac_song_and_cleans_files(storage, sample_media, tmp_path, monkeypatch, duration):
+    import array
+    import io
+    from PIL import Image
+    image = Image.new('RGB', (65, 67), '#d6326b')
+    image.paste('#236ac4', (10, 10, 50, 50))
+    source = io.BytesIO(); image.save(source, 'WEBP')
+    song = tmp_path/'full.wav'
+    subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i',f'sine=frequency=880:duration={duration}',str(song)], check=True)
+    respx.get('https://input.example/card.webp').respond(200, content=source.getvalue())
+    respx.get('https://input.example/song.mp3').respond(200, content=song.read_bytes())
+    paths = []
+    download = media._download
+    async def record(*args):
+        paths.append(args[2])
+        return await download(*args)
+    monkeypatch.setattr(media, '_download', record)
+    url = await media.create_musical_video('https://input.example/card.webp', 'https://input.example/song.mp3')
+    assert url.startswith('https://cdn.example/videos/') and url.endswith('.mp4')
+    assert storage.objects[0]['ContentType'] == 'video/mp4'
+    result = tmp_path/'musical.mp4'; result.write_bytes(storage.objects[0]['Body'])
+    probe = json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams','-show_format','-of','json',str(result)]))
+    video, sound = probe['streams']
+    assert video['codec_name'] == 'h264' and video['pix_fmt'] == 'yuv420p'
+    assert (video['width'],video['height']) == (66,68)
+    assert sound['codec_name'] == 'aac'
+    assert abs(float(sound['duration'])-duration) < 0.1
+    assert abs(float(probe['format']['duration'])-duration) < 0.15
+    frames = []
+    for seek in (0.2,duration-0.3):
+        frames.append(subprocess.check_output(['ffmpeg','-v','error','-ss',str(seek),'-i',str(result),'-vframes','1','-f','rawvideo','-pix_fmt','rgb24','-']))
+    assert len(frames[0]) == len(frames[1]) == 66*68*3
+    # H.264 может слегка менять квантование одинаковых кадров.
+    assert sum(abs(a-b) for a,b in zip(*frames))/len(frames[0]) < 5
+    pcm = array.array('h', subprocess.check_output(['ffmpeg','-v','error','-i',str(result),'-ss','1','-t','1','-f','s16le','-ac','1','-ar','8000','-']))
+    frequency = sum(a < 0 <= b for a,b in zip(pcm, pcm[1:]))/(len(pcm)/8000)
+    assert 850 < frequency < 910
+    assert all(not path.exists() and not path.parent.exists() for path in paths)
+    storage.close.assert_called_once()
+
+
+@respx.mock
+async def test_musical_card_download_error_cleans_temp_without_upload(storage, monkeypatch):
+    paths=[]
+    original=media._download
+    async def record(*args):
+        paths.append(args[2]); await original(*args)
+    monkeypatch.setattr(media,'_download',record)
+    respx.get('https://input.example/image.jpg').respond(503)
+    with pytest.raises(httpx.HTTPStatusError):
+        await media.create_musical_video('https://input.example/image.jpg','https://input.example/song.mp3')
+    storage.put_object.assert_not_called(); storage.close.assert_called_once()
+    assert not paths[0].parent.exists()
+
+
+async def test_musical_card_missing_ffmpeg_is_clear(monkeypatch):
+    monkeypatch.setattr(media.shutil,'which',lambda name:None)
+    with pytest.raises(media.MediaServiceError,match='установите ffmpeg'):
+        await media.create_musical_video('https://input.example/image.jpg','https://input.example/song.mp3')
+
+
+@respx.mock
+async def test_musical_mp4_is_uploaded_as_video_attachment_to_max_and_temp_removed():
+    from maxapi.types import AttachmentUpload
+    respx.get('https://cdn.example/musical.mp4').respond(200,content=b'MP4-CONTENT')
+    paths=[]
+    async def upload(media_file):
+        assert media_file.type.value == 'video'
+        path=Path(media_file.path); paths.append(path)
+        assert path.read_bytes() == b'MP4-CONTENT'
+        return AttachmentUpload(type='video',payload={'token':'video-token'})
+    bot=SimpleNamespace(upload_media=AsyncMock(side_effect=upload))
+    attachment=await media.upload_video_for_max(bot,'https://cdn.example/musical.mp4')
+    assert attachment.type.value == 'video' and attachment.payload.token == 'video-token'
+    assert not paths[0].parent.exists()

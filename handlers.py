@@ -29,11 +29,12 @@ from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
 from config import DEFAULT_BOT_LINK, validate_bot_link
 from video_service import build_video_prompt, generate_video_from_avatar
-from media_service import VIDEO_MERGE_POLICY, merge_video_and_audio
+from media_service import VIDEO_MERGE_POLICY, MUSICAL_VIDEO_POLICY, merge_video_and_audio, create_musical_video, upload_video_for_max
 from audio_service import create_audio_preview, song_audio_url, TEACHER_MUSIC_TAGS
 from metrika_service import extract_yclid, send_offline_conversion
 
 from database import (
+    create_musical_order, get_musical_order,
     deduct_credit, get_user, grant_free_trial, get_global_stats, increment_generations,
     record_first_start, save_yclid, get_source_stats, get_stats_by_source, register_shared_image, get_shared_image,
     get_all_counters, increment_counter,
@@ -257,7 +258,7 @@ SONG_UPSELL_TEXT = (
 SONG_PROMO_EXPIRED_TEXT = 'К сожалению, 48 часов уже прошли. Вы можете приобрести песню по обычной цене 490 ₽.'
 
 CATEGORY_BUTTONS = (
-    ("🎬 Ожившая открытка (Видео) — Новинка 🔥", "cat_video"),
+    ("🎵 Музыкальная открытка — Новинка 🔥", "cat_video"),
     ("🎬 Мульт-открытка (10-15 сек) — Новинка 🔥", "cat_cartoon"),
     ("🎬 Мульт-поздравление (30 сек) — Новинка 🔥", "cat_cartoon_long"),
     ("📸 Нейрофотосессия", "cat_photo"),
@@ -510,7 +511,7 @@ VIDEO_CARD_SCREENS = {'cat_cards', 'sub_ny', 'sub_bday', 'sub_halloween', 'sub_g
 VIDEO_PAYMENT_PLACEHOLDER_URL = 'https://link.payform.ru/'  # TODO: Заменить на реальную ссылку
 VIDEO_UPSELL_TEXT = (
     'Ваша открытка готова! 🎄\n\n'
-    '✨ А хотите сделать её настоящим сюрпризом? Мы можем добавить анимацию или создать полноценное видео с песней!'
+    '✨ А хотите сделать её настоящим музыкальным подарком? Мы можем наложить на вашу открытку короткую персональную песню (30-40 секунд) и сделать красивый видеоролик, который можно отправить в мессенджере.'
 )
 
 
@@ -866,7 +867,7 @@ def create_router(
             data['video_merged_source'] = key
         return data['video_merged_url']
 
-    async def generate_card_video(data: dict) -> str:
+    async def prepare_card_video_image(data: dict) -> str:
         image_url = data.get('video_source_image')
         if not image_url:
             mode = data.get('mode')
@@ -883,7 +884,16 @@ def create_router(
                 raise ValueError('Генератор открытки не вернул HTTPS-ссылку.')
             image_url = urls[0]
             data['video_source_image'] = image_url
-        return await render_video_with_song(data, image_url, data['video_song_scenario'])
+        return image_url
+
+    async def generate_card_video(data: dict) -> str:
+        image_url = await prepare_card_video_image(data)
+        audio_url = await prepare_video_song(data, data['video_song_scenario'])
+        key = [MUSICAL_VIDEO_POLICY, image_url, audio_url]
+        if data.get('video_merged_source') != key or not data.get('video_merged_url'):
+            data['video_merged_url'] = await create_musical_video(image_url, audio_url)
+            data['video_merged_source'] = key
+        return data['video_merged_url']
 
     video_generator = video_generator or generate_card_video
     lyric_writer = lyric_writer or write_song_lyrics
@@ -1117,9 +1127,7 @@ def create_router(
             data = await context.get_data()
             if is_postcard and not data.get('video_upsell_sent'):
                 keyboard = InlineKeyboardBuilder().row(
-                    CallbackButton(text='✨ Оживить картинку (снег, огни) — 199 ₽', payload='upsell_animate')
-                ).row(
-                    CallbackButton(text='🎬 Полное видео с песней — 249 ₽', payload='upsell_video')
+                    CallbackButton(text='🎵 Наложить песню на открытку — 149 ₽', payload='upsell_music')
                 ).row(LinkButton(text='⬇️ Нет, просто скачать картинку', url=urls[0])).as_markup()
                 await _reply(event, VIDEO_UPSELL_TEXT, attachments=[keyboard])
                 await context.update_data(video_upsell_sent=True)
@@ -1224,14 +1232,20 @@ def create_router(
                 try:
                     result = job.get('result_url')
                     if not result:
-                        # Второй аргумент — песня для адаптера, а не промпт Kling.
-                        result = (await generate_video(job['avatar_url'], job['song_url'], mode=job.get('mode') or '')
-                                  if default_cartoon_video else await cartoon_video_generator(job['avatar_url'], job['song_url']))
+                        if job.get('render_kind') == 'musical':
+                            result = await create_musical_video(job['avatar_url'], job['song_url'])
+                        else:
+                            # Старые и мульт-задачи сохраняют исходный адаптер Kling.
+                            result = (await generate_video(job['avatar_url'], job['song_url'], mode=job.get('mode') or '')
+                                      if default_cartoon_video else await cartoon_video_generator(job['avatar_url'], job['song_url']))
                         if is_video_placeholder(result) or not isinstance(result, str) or not result.startswith('https://'):
                             raise ValueError('Видеосервис пока не вернул готовое видео.')
                         await save_pending_video_result(job['id'], result)
+                    attachments = [InlineKeyboardBuilder().row(LinkButton(text='⬇️ Скачать видео', url=result)).as_markup()]
+                    if job.get('render_kind') == 'musical':
+                        attachments.append(await upload_video_for_max(event.bot, result))
                     sent = await event.bot.send_message(user_id=job['user_id'], text='🎬 Ваше видео готово: ' + result,
-                        attachments=[InlineKeyboardBuilder().row(LinkButton(text='⬇️ Скачать видео', url=result)).as_markup()])
+                        attachments=attachments)
                     if sent is None:
                         raise RuntimeError('MAX не подтвердил отправку видео.')
                     await mark_video_completed(job['id'])
@@ -1324,8 +1338,9 @@ def create_router(
             f"- Песня в подарок (490 ₽): {counters.get('click_audio_gift', 0)}\n"
             f"- Медитации (клики): {counters.get('click_meditation', 0)}\n"
             f"- Видео — вход в меню: {counters.get('click_video_menu', 0)}\n"
-            f"- Анимация за 199 ₽ (клики): {counters.get('click_video_animate_199', 0)}\n"
-            f"- Видео с песней за 249 ₽ (клики): {counters.get('click_video_full_249', 0)}\n\n"
+            f"- Старая кнопка анимации (клики): {counters.get('click_video_animate_199', 0)}\n"
+            f"- Старая кнопка видео (клики): {counters.get('click_video_full_249', 0)}\n"
+            f"- Музыкальный апселл за 149 ₽ (клики): {counters.get('click_music_upsell_149', 0)}\n\n"
             "🎵 Интерес к Аудиопесням (сценарии):\n"
             + "\n".join(
                 f"- {label}: {counters.get(AUDIO_FUN_COUNTERS[payload], 0)}"
@@ -1613,6 +1628,14 @@ def create_router(
         user_id = event.get_ids()[1]
         if event.message is None or user_id is None:
             await event.ack(notification='Отправьте /start, чтобы открыть меню.')
+            return
+        if admin_user_id is None or user_id != admin_user_id:
+            await event.ack(notification='Раздел скоро откроется.')
+            await increment_counter('click_cartoon_short' if event.callback.payload == 'cat_cartoon' else 'click_cartoon_long', user_id=user_id)
+            await context.clear()
+            await context.set_state(PosterStates.waiting_for_mode)
+            await _reply(event, '🎬 Раздел «Мульт-открытка» уже совсем скоро заработает! Мы заканчиваем настройку оплаты, и в ближайшее время вы сможете создавать настоящие мультфильмы с вашим лицом. Следите за обновлениями! 🚀',
+                         attachments=[navigation_keyboard((('⬅️ Назад', 'back_to_main'),))])
             return
         await event.ack(notification='Выберите стиль…')
         flow, price, text, _ = CARTOON_PRODUCTS[event.callback.payload]
@@ -1927,7 +1950,7 @@ def create_router(
         await context.clear()
         await context.update_data(video_flow=True, video_amount_kopecks=29900, video_product='direct')
         await context.set_state(PosterStates.waiting_for_mode)
-        await _reply(event, '🎬 Создаем настоящее видео-поздравление! Выберите стиль открытки:',
+        await _reply(event, '🎵 Создаем музыкальную открытку! Выберите стиль открытки:',
                      attachments=[video_style_keyboard('cat_cards')])
 
     @router.message_callback(F.callback.payload.startswith('video_style:'))
@@ -1950,11 +1973,11 @@ def create_router(
             await context.set_state(PosterStates.waiting_for_mode)
             filenames, text, _ = CATEGORY_MENUS[target]
             if target == 'cat_cards':
-                text = '🎬 Создаем настоящее видео-поздравление! Выберите стиль открытки:'
+                text = '🎵 Создаем музыкальную открытку! Выберите стиль открытки:'
             await send_menu_examples(event, filenames)
             await _reply(event, text, attachments=[video_style_keyboard(target)])
 
-    @router.message_callback(F.callback.payload.in_({'upsell_animate', 'upsell_video'}))
+    @router.message_callback(F.callback.payload.in_({'upsell_music', 'upsell_animate', 'upsell_video'}))
     async def video_upsell(event: MessageCallback, context: MemoryContext):
         if event.message is None:
             await event.ack(notification='Отправьте /start, чтобы открыть меню.')
@@ -1963,15 +1986,16 @@ def create_router(
         user_id = event.get_ids()[1]
         animate = event.callback.payload == 'upsell_animate'
         if user_id is not None:
-            await increment_counter('click_video_animate_199' if animate else 'click_video_full_249', user_id=user_id)
+            await increment_counter('click_music_upsell_149', user_id=user_id)
+            if event.callback.payload != 'upsell_music':
+                await increment_counter('click_video_animate_199' if animate else 'click_video_full_249', user_id=user_id)
         data = await context.get_data()
         image_url = data.get('last_image_url')
         if data.get('mode') not in POSTCARD_PROMPTS or not isinstance(image_url, str) or not image_url.startswith('https://'):
             await _reply(event, 'Сначала создайте открытку, затем выберите её анимацию или видео.', attachments=[main_keyboard()])
             return
         await context.update_data(video_flow=True, video_source_image=image_url,
-                                  video_amount_kopecks=19900 if animate else 24900,
-                                  video_product='animate' if animate else 'upsell')
+                                  video_amount_kopecks=14900, video_product='upsell')
         await show_video_songs(event, context)
 
     @router.message_callback(F.callback.payload.startswith('video_song:') | (F.callback.payload == 'audio_video_teacher'))
@@ -1982,7 +2006,7 @@ def create_router(
         data = await context.get_data()
         scenario = event.callback.payload.removeprefix('video_song:')
         scenarios = VIDEO_SHORT_SCENARIOS if data.get('video_product') in {'animate', 'upsell'} else VIDEO_SONG_SCENARIOS
-        expected_price = {'direct': 29900, 'upsell': 24900, 'animate': 19900}.get(data.get('video_product'))
+        expected_price = {'direct': 29900, 'upsell': 14900, 'animate': 14900}.get(data.get('video_product'))
         if (not data.get('video_flow') or scenario not in scenarios or expected_price is None
                 or data.get('video_amount_kopecks') != expected_price
                 or await context.get_state() not in (PosterStates.waiting_for_video_song, PosterStates.waiting_for_video_payment)):
@@ -2177,7 +2201,7 @@ def create_router(
             await context.set_state(PosterStates.generating)
             generation_id = uuid4().hex
             await context.update_data(video_generation_id=generation_id)
-            await _reply(event, VIDEO_GENERATION_MESSAGE)
+            await _reply(event, '🎵 Создаю музыкальную открытку с вашей картинкой и персональной песней. ⏳ Пожалуйста, подождите.')
             video_data = dict(await context.get_data())
             try:
                 result = await video_generator(video_data)
@@ -2187,19 +2211,24 @@ def create_router(
                     image_url = (video_data.get('video_source_image') or video_data.get('chosen_avatar')
                                  or (video_data.get('photo') or {}).get('url'))
                     song_url = video_data.get('chosen_song_url') or video_data.get('video_song_url') or ''
-                    await save_pending_video(event.get_ids()[1], image_url, song_url, mode=video_data.get('mode') or '')
+                    await save_pending_video(event.get_ids()[1], image_url, song_url, mode=video_data.get('mode') or '', render_kind='musical')
                     await _reply(event, PENDING_VIDEO_MESSAGE, attachments=[main_keyboard()])
                     await context.set_state(PosterStates.waiting_for_mode)
                     return
                 if not isinstance(result, str) or not result.startswith('https://'):
                     raise ValueError('Генератор видео не вернул HTTPS-ссылку.')
-                await _reply(event, '🎬 Ваше видео с песней готово: ' + result, attachments=[
+                video_attachment = await upload_video_for_max(event.bot, result)
+                if (await context.get_data()).get('video_generation_id') != generation_id:
+                    return
+                sent = await _reply(event, '🎵 Ваша музыкальная открытка готова: ' + result, attachments=[
                     InlineKeyboardBuilder().row(LinkButton(text='⬇️ Скачать видео', url=result)).row(
-                        CallbackButton(text='⬅️ Главное меню', payload='back_to_main')).as_markup()])
+                        CallbackButton(text='⬅️ Главное меню', payload='back_to_main')).as_markup(), video_attachment])
+                if sent is None:
+                    raise RuntimeError('MAX не подтвердил отправку музыкальной открытки.')
                 await context.update_data(video_complete=True, video_result_url=result)
                 await context.set_state(PosterStates.waiting_for_mode)
             except Exception:
-                logger.exception('Ошибка генерации видео PiAPI:')
+                logger.exception('Ошибка создания музыкальной открытки:')
                 if (await context.get_data()).get('video_generation_id') != generation_id:
                     return
                 await context.set_state(PosterStates.waiting_for_video_song)
@@ -2211,15 +2240,73 @@ def create_router(
                     await context.update_data(**video_cache(video_data))
             return
         price = data['video_amount_kopecks'] // 100
-        text = ('Отлично! Мы создадим статичную открытку, оживим её (добавим анимацию) и наложим песню.\n\n'
-                f'Стоимость видео-подарка — {price} ₽. Это волшебство займет около 5 минут, не закрывайте чат!')
-        if price == 199:
-            text = 'Генерация анимации скоро появится\n\nСтоимость — 199 ₽. Выбран сценарий: ' + scenarios[scenario][0]
-        elif price == 249:
-            text = 'Генерация видео с песней скоро появится\n\n' + text
-        await _reply(event, text, attachments=[InlineKeyboardBuilder().row(
-            LinkButton(text=f'Оплатить {price} ₽' + (' и оживить открытку' if price == 199 else ' и создать видео'), url=VIDEO_PAYMENT_PLACEHOLDER_URL)).row(
-            CallbackButton(text='⬅️ Назад', payload='back_to_main')).as_markup()])
+        text = (f'Стоимость музыкальной открытки — {price} ₽. '
+                'Вы получите готовый MP4-файл с вашей открыткой и персональной песней, который можно отправить в мессенджере.')
+        if payments is None:
+            await _reply(event, text + '\n\nОплата временно недоступна. Попробуйте позже.',
+                attachments=[navigation_keyboard(((f'Повторить оплату {price} ₽', 'retry_music_checkout'), ('⬅️ Назад', 'back_to_main')))])
+            return
+        token = uuid4().hex
+        await context.update_data(music_checkout_session=token)
+        await context.set_state(PosterStates.generating)
+        checkout = dict(await context.get_data())
+        try:
+            image_url = await prepare_card_video_image(checkout)
+            if (await context.get_data()).get('music_checkout_session') != token:
+                return
+            audio_url = await prepare_video_song(checkout, checkout['video_song_scenario'])
+            tariff = 'direct' if checkout['video_product'] == 'direct' else 'upsell'
+            key = [image_url, audio_url, tariff]
+            order_id = checkout.get('music_checkout_id') if checkout.get('music_checkout_source') == key else None
+            order = await get_musical_order(order_id) if order_id else None
+            if (await context.get_data()).get('music_checkout_session') != token:
+                return
+            if order and order['status'] == 'paid':
+                keyboard = InlineKeyboardBuilder().row(CallbackButton(text='⬅️ Главное меню', payload='back_to_main'))
+                if order['result_url']:
+                    keyboard.row(LinkButton(text='⬇️ Скачать MP4', url=order['result_url']))
+                await _reply(event, 'Этот заказ уже оплачен. Музыкальная открытка будет отправлена автоматически.', attachments=[keyboard.as_markup()])
+                return
+            if not order:
+                order_id = f'music_{event.get_ids()[1]}_{uuid4().hex}'
+                await create_musical_order(order_id, event.get_ids()[1], image_url, audio_url, tariff)
+                order = await get_musical_order(order_id)
+            if (await context.get_data()).get('music_checkout_session') != token:
+                return
+            await context.update_data(music_checkout_id=order_id, music_checkout_source=key)
+            link = await payments.create_musical_payment_link(order_id=order_id, amount=price, description=order['product_name'])
+            if (await context.get_data()).get('music_checkout_session') != token:
+                return
+            sent = await _reply(event, text, attachments=[InlineKeyboardBuilder().row(
+                LinkButton(text=f'Оплатить {price} ₽', url=link)).row(
+                CallbackButton(text='⬅️ Назад', payload='back_to_main')).as_markup()])
+            if sent is None:
+                raise RuntimeError('MAX не подтвердил отправку платёжной ссылки.')
+        except Exception:
+            logger.exception('Ошибка подготовки оплаты музыкальной открытки:')
+            if (await context.get_data()).get('music_checkout_session') == token:
+                await _reply(event, 'Не удалось создать ссылку на оплату. Данные сохранены, попробуйте ещё раз.',
+                    attachments=[navigation_keyboard((('Повторить оплату', 'retry_music_checkout'),))])
+        finally:
+            if (await context.get_data()).get('music_checkout_session') == token:
+                if checkout.get('video_source_image'):
+                    await context.update_data(video_source_image=checkout['video_source_image'])
+                await context.update_data(**video_cache(checkout))
+                await context.set_state(PosterStates.waiting_for_video_payment)
+
+    @router.message_callback(F.callback.payload == 'retry_music_checkout')
+    async def retry_music_checkout(event: MessageCallback, context: MemoryContext):
+        data = await context.get_data()
+        if (event.message is None or not data.get('video_flow') or not data.get('video_song_scenario')
+                or await context.get_state() != PosterStates.waiting_for_video_payment):
+            await event.ack(notification='Откройте музыкальные открытки заново.')
+            return
+        await event.ack(notification='Готовлю оплату…')
+        lock = video_locks.setdefault(event.get_ids()[1], asyncio.Lock())
+        if lock.locked():
+            return
+        async with lock:
+            await run_selected_video(event, context)
 
     @router.message_callback(F.callback.payload.in_({*CATEGORY_MENUS, "back_to_cards"}))
     async def category_menu(event: MessageCallback, context: MemoryContext) -> None:

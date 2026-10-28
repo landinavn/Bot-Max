@@ -747,3 +747,17 @@ async def test_pending_video_style_survives_restart_and_participates_in_deduplic
     assert await credit_db.save_pending_video(123, avatar, song, mode='mode_ny') == ny
     await credit_db.init_db()
     assert [(job['id'], job['mode']) for job in await credit_db.get_all_pending_videos()] == [(ny, 'mode_ny'), (birthday, 'mode_bday_young')]
+
+
+async def test_pending_video_render_kind_survives_restart_and_deduplicates_separately(credit_db, tmp_path, monkeypatch):
+    database = credit_db
+    monkeypatch.setattr(database, 'DATABASE_PATH', tmp_path/'pending-kind.sqlite3')
+    await database.init_db()
+    args=(123, 'https://cdn.example/card.jpg','https://cdn.example/song.mp3')
+    legacy=await database.save_pending_video(*args)
+    musical=await database.save_pending_video(*args,render_kind='musical')
+    assert musical != legacy
+    assert await database.save_pending_video(*args,render_kind='musical') == musical
+    await database.init_db()
+    jobs=await database.get_all_pending_videos()
+    assert [job['render_kind'] for job in jobs] == ['kling','musical']

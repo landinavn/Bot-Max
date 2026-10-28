@@ -611,13 +611,16 @@ async def test_postcard_uses_template_and_stores_text_overlay(config, storage, a
     Image.new("RGB", (1024, 1536), "#243c58").save(buffer, format="PNG")
     generated = buffer.getvalue()
     register_generation(api, payload={"data": [{"b64_json": base64.b64encode(generated).decode()}]})
-    urls = await service.generate_postcards(PHOTO_URL, mode, "Счастья тебе, Аня!")
+    info = {'mode_teacher': 'Ирина Петровна, математика', 'mode_coach': 'Сергей Иванович, футбол'}.get(mode)
+    kwargs = {'theme_info': info} if info else {}
+    urls = await service.generate_postcards(PHOTO_URL, mode, "Счастья тебе, Аня!", **kwargs)
     assert len(urls) == 1
     assert storage.uploaded_images == [service.add_text_to_image(generated, "Счастья тебе, Аня!", mode=mode)]
     assert storage.uploaded_images[0] != generated
     fields = await multipart_fields(post_requests(api)[0])
     prompt = fields["prompt"].get_content()
-    assert prompt.startswith(service.POSTCARD_PROMPTS[mode])
+    expected_prompt = service.POSTCARD_PROMPTS[mode].format(teacher_info=info, coach_info=info) if info else service.POSTCARD_PROMPTS[mode]
+    assert prompt.startswith(expected_prompt)
     assert "Preserve every reference person's identity" in prompt
     if mode == "mode_modern_card":
         assert "Keep the left 42%" in prompt
@@ -1063,4 +1066,35 @@ async def test_cartoon_avatar_invalid_style_never_calls_openai(monkeypatch):
     monkeypatch.setattr(service, '_generate_and_store', generate)
     with pytest.raises(ValueError, match='Неизвестный стиль'):
         await service.generate_cartoon_avatar(PHOTO_URL, 'mode_invalid')
+    generate.assert_not_awaited()
+
+
+@pytest.mark.parametrize('mode,info', [('mode_teacher', 'Ирина Петровна, математика'), ('mode_coach', 'Сергей Иванович, футбол')])
+@pytest.mark.parametrize('preview', [False, True])
+async def test_role_card_dynamic_background_and_preview_watermark_before_public_upload(config, storage, api, mode, info, preview):
+    buffer = BytesIO()
+    Image.new('RGB', (1024, 1536), '#243c58').save(buffer, format='PNG')
+    source = buffer.getvalue()
+    register_generation(api, payload={'data': [{'b64_json': base64.b64encode(source).decode()}]})
+    await service.generate_postcards(PHOTO_URL, mode, 'Спасибо за Ваш труд!', theme_info=info, preview=preview)
+    fields = await multipart_fields(post_requests(api)[0])
+    prompt = fields['prompt'].get_content()
+    assert info in prompt and '{teacher_info}' not in prompt and '{coach_info}' not in prompt
+    assert ('following subject:' if mode == 'mode_teacher' else 'following sport:') in prompt
+    assert "Preserve the person's face exactly" in prompt
+    assert 'Спасибо за Ваш труд!' not in prompt
+    rendered = service.add_text_to_image(source, 'Спасибо за Ваш труд!', mode=mode)
+    expected = service.add_preview_watermark(rendered) if preview else rendered
+    assert storage.uploaded_images == [expected]
+    if preview:
+        assert expected != rendered
+
+
+@pytest.mark.parametrize('mode', ['mode_teacher', 'mode_coach'])
+@pytest.mark.parametrize('info', [None, '', ' ', 'а'*501])
+async def test_role_card_requires_background_details_before_paid_image_request(monkeypatch, mode, info):
+    generate = AsyncMock()
+    monkeypatch.setattr(service, '_generate_and_store', generate)
+    with pytest.raises(ValueError, match='имя и предмет или спорт'):
+        await service.generate_postcards(PHOTO_URL, mode, 'Спасибо!', theme_info=info)
     generate.assert_not_awaited()

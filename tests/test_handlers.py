@@ -16,6 +16,19 @@ import handlers
 from handlers import EXAMPLE_TEXT, NO_CREDITS_TEXT, PACKAGES_TEXT, PosterStates, create_router
 
 
+ROLE_SAMPLE_INFO = {'mode_teacher': 'Ирина Петровна, математика', 'mode_coach': 'Сергей Иванович, футбол'}
+
+
+def role_generation_kwargs(mode):
+    return {'theme_info': ROLE_SAMPLE_INFO[mode]} if mode in ROLE_SAMPLE_INFO else {}
+
+
+async def provide_role_info(router, context, mode):
+    event = message_event(ROLE_SAMPLE_INFO[mode])
+    await call_handler(router, 'collect_card_role_info', event, context)
+    return event
+
+
 @pytest.fixture(autouse=True)
 async def isolated_database(credit_db):
     return credit_db
@@ -880,9 +893,15 @@ async def test_mode_selection_clears_previous_result_and_requests_photo(mode):
     event = callback_event(mode)
     await dispatch_callback(create_router(), event, context)
     event.ack.assert_awaited_once()
-    assert await context.get_data() == {"mode": mode}
-    assert await context.get_state() == PosterStates.waiting_for_photo
-    assert "фото" in event.send.await_args.args[0]
+    if mode in ROLE_SAMPLE_INFO:
+        data = await context.get_data()
+        assert data['mode'] == mode and data['card_role_session']
+        assert await context.get_state() == PosterStates.waiting_for_card_role_info
+        assert event.send.await_args.args[0] == handlers.ROLE_CARD_QUESTIONS[mode]
+    else:
+        assert await context.get_data() == {"mode": mode}
+        assert await context.get_state() == PosterStates.waiting_for_photo
+        assert "фото" in event.send.await_args.args[0]
 
 
 def photo_event():
@@ -1179,6 +1198,8 @@ async def test_all_modes_send_persistent_bot_share_link_and_only_vision_invites_
     router = create_router(vision, postcard_generator=card, bot_link="https://max.ru/custom_bot")
     context = await ready_context()
     await context.update_data(mode=mode)
+    if mode in ROLE_SAMPLE_INFO:
+        await provide_role_info(router, context, mode)
     if mode == "mode_vision":
         event = message_event("Моя мечта")
         await call_handler(router, "collect_sphere", event, context)
@@ -1187,7 +1208,7 @@ async def test_all_modes_send_persistent_bot_share_link_and_only_vision_invites_
         assert card.await_count == 0
         event = message_event("Оля, счастья и добра!")
         await call_handler(router, "collect_card_text", event, context)
-        card.assert_awaited_once_with("https://photos.example.com/source.png", mode, "Оля, счастья и добра!")
+        card.assert_awaited_once_with("https://photos.example.com/source.png", mode, "Оля, счастья и добра!", **role_generation_kwargs(mode))
     calls = event.message.answer.await_args_list
     share = next(c for c in calls if c.args and c.args[0] == "👇 Хочешь поделиться с друзьями?")
     button = share.kwargs["attachments"][0].model_dump()["payload"]["buttons"][0][0]
@@ -1342,6 +1363,9 @@ async def test_dispatcher_routes_card_text_to_generation(
         )
         await dp.handle(callback)
         context = dp.fsm.get_context(chat_id=123, user_id=456)
+        if mode in ROLE_SAMPLE_INFO:
+            assert await context.get_state() == PosterStates.waiting_for_card_role_info
+            await dp.handle(MessageCreated(timestamp=2, bot=bot, message=message(text=ROLE_SAMPLE_INFO[mode])))
         assert await context.get_state() == PosterStates.waiting_for_photo
         photo = MessageCreated(timestamp=2, bot=bot, message=message(attachments=[{
             "type": "image", "payload": {"photo_id": 1, "token": "photo", "url": "https://cdn.example/source.png"},
@@ -1356,7 +1380,7 @@ async def test_dispatcher_routes_card_text_to_generation(
         with caplog.at_level(logging.INFO, logger=handlers.__name__):
             await dp.handle(MessageCreated(timestamp=3, bot=bot, message=message(text=user_text)))
         text_correction.assert_awaited_once_with(user_text)
-        generator.assert_awaited_once_with("https://cdn.example/source.png", mode, fixed_text)
+        generator.assert_awaited_once_with("https://cdn.example/source.png", mode, fixed_text, **role_generation_kwargs(mode))
         assert f"Исходный текст: {user_text} | Исправленный: {fixed_text}" in caplog.text
         assert f"Начинаю генерацию открытки с текстом: {user_text}" in caplog.text
         replies = [call.kwargs.get("text") for call in bot.send_message.await_args_list]
@@ -1501,8 +1525,12 @@ async def test_more_restarts_with_new_photo_then_corrected_text_or_dream(credit_
     vision = AsyncMock(return_value=["https://cdn.example/new.png"])
     router = create_router(vision, postcard_generator=card)
     await dispatch_callback(router, callback_event("more"), context)
+    if mode in ROLE_SAMPLE_INFO:
+        assert await context.get_state() == PosterStates.waiting_for_card_role_info
+        await provide_role_info(router, context, mode)
+    else:
+        assert await context.get_data() == {"mode": mode}
     assert await context.get_state() == PosterStates.waiting_for_photo
-    assert await context.get_data() == {"mode": mode}
     event = photo_event()
     event.message.body.attachments[0].payload.url = "https://cdn.example/new-reference.png"
     await call_handler(router, "collect_photo", event, context)
@@ -1519,7 +1547,7 @@ async def test_more_restarts_with_new_photo_then_corrected_text_or_dream(credit_
         assert await context.get_state() == PosterStates.waiting_for_card_text
         await call_handler(router, "echo", message_event("Счастя, Аня!"), context)
         text_correction.assert_awaited_once_with("Счастя, Аня!")
-        card.assert_awaited_once_with("https://cdn.example/new-reference.png", mode, "Счастья, Аня!")
+        card.assert_awaited_once_with("https://cdn.example/new-reference.png", mode, "Счастья, Аня!", **role_generation_kwargs(mode))
     assert await context.get_state() is None
     assert (await credit_db.get_user(456))["balance"] == 1
 
@@ -1636,7 +1664,7 @@ async def test_activity_middleware_ignores_bot_messages(credit_db):
 def test_new_menu_starts_with_five_new_year_modes_and_hides_march():
     modes = [payload for _, payload in handlers.MODE_BUTTONS]
     assert modes[:5] == ["mode_ny", "mode_ny_family", "mode_ny_cozy", "mode_ny_fairytale", "mode_ny_elegant"]
-    assert len(modes) == 12 and len(set(modes)) == 12
+    assert len(modes) == 14 and len(set(modes)) == 14
     assert "mode_8march" not in modes
     assert {"mode_halloween", "mode_bday_old_elegant"} <= set(modes)
     assert "🎨 Первая генерация — бесплатно!" in handlers.WELCOME_TEXT
@@ -1704,11 +1732,13 @@ async def test_photo_guidance_is_shown_for_every_mode_and_more(mode):
     event = callback_event(mode)
     router = create_router()
     await dispatch_callback(router, event, context)
-    assert handlers.PHOTO_GUIDANCE in event.send.await_args.args[0]
+    first_text = (await provide_role_info(router, context, mode)).message.answer.await_args.args[0] if mode in ROLE_SAMPLE_INFO else event.send.await_args.args[0]
+    assert handlers.PHOTO_GUIDANCE in first_text
     assert await context.get_state() == PosterStates.waiting_for_photo
     more = callback_event("more")
     await dispatch_callback(router, more, context)
-    assert handlers.PHOTO_GUIDANCE in more.send.await_args.args[0]
+    more_text = (await provide_role_info(router, context, mode)).message.answer.await_args.args[0] if mode in ROLE_SAMPLE_INFO else more.send.await_args.args[0]
+    assert handlers.PHOTO_GUIDANCE in more_text
     if mode == "mode_ny_family":
         assert "общее фото семьи" in event.send.await_args.args[0]
         assert "общее фото семьи" in more.send.await_args.args[0]
@@ -2196,7 +2226,7 @@ async def test_vision_invitation_not_duplicated_after_share_retry(credit_db):
 
 CATEGORY_EXPECTATIONS = {
     "cat_vision": ([1], ["mode_vision", "back_to_main"]),
-    "cat_cards": ([28, 22, 25, 29, 27, 21], ["sub_ny", "sub_bday", "sub_halloween", "sub_goodmorning", "back_to_main"]),
+    "cat_cards": ([28, 22, 25, 29, 27, 21], ["sub_ny", "sub_bday", "sub_halloween", "sub_goodmorning", "mode_teacher", "mode_coach", "back_to_main"]),
     "sub_ny": ([28, 22, 23, 24, 25], ["mode_ny", "mode_ny_family", "mode_ny_cozy", "mode_ny_fairytale", "mode_ny_elegant", "back_to_cards"]),
     "sub_bday": ([29, 27, 21], ["mode_bday_young", "mode_bday_old", "mode_bday_old_elegant", "mode_modern_card", "back_to_cards"]),
     "sub_halloween": ([26], ["mode_halloween", "back_to_cards"]),
@@ -2258,8 +2288,10 @@ async def test_categories_preserve_photo_and_text_generation_flow(credit_db, exa
     context = await ready_context()
     await dispatch_callback(router, callback_event(screen), context)
     await dispatch_callback(router, callback_event(mode), context)
+    if mode in ROLE_SAMPLE_INFO:
+        await provide_role_info(router, context, mode)
     assert await context.get_state() == PosterStates.waiting_for_photo
-    assert await context.get_data() == {"mode": mode}
+    assert (await context.get_data())["mode"] == mode
     await call_handler(router, "collect_photo", photo_event(), context)
     assert await context.get_state() == (PosterStates.waiting_for_prompt if mode == "mode_vision" else PosterStates.waiting_for_card_text)
     vision.assert_not_awaited()
@@ -2269,7 +2301,7 @@ async def test_categories_preserve_photo_and_text_generation_flow(credit_db, exa
         vision.assert_awaited_once_with("https://photos.example.com/source.png", "Моя мечта")
     else:
         await call_handler(router, "collect_card_text", message_event("Счастья, Аня!"), context)
-        card.assert_awaited_once_with("https://photos.example.com/source.png", mode, "Счастья, Аня!")
+        card.assert_awaited_once_with("https://photos.example.com/source.png", mode, "Счастья, Аня!", **role_generation_kwargs(mode))
     assert (await credit_db.get_user(456))["balance"] == 1
     assert (await credit_db.get_user(456))["total_generations"] == 1
     assert await context.get_state() is None
@@ -2364,10 +2396,15 @@ async def test_legacy_generation_buttons_request_photo_without_counting(credit_d
     event = callback_event(mode)
     await dispatch_callback(create_router(vision, postcard_generator=card), event, context)
     event.ack.assert_awaited_once()
-    assert await context.get_state() == PosterStates.waiting_for_photo
+    assert await context.get_state() == (PosterStates.waiting_for_card_role_info if mode in ROLE_SAMPLE_INFO else PosterStates.waiting_for_photo)
     expected = {"mode_bday": "mode_bday_young", "create_poster": "mode_vision"}.get(mode, mode)
-    assert await context.get_data() == {"mode": expected}
-    assert "фото" in event.send.await_args.args[0]
+    data = await context.get_data()
+    if mode in ROLE_SAMPLE_INFO:
+        assert data.pop('card_role_session')
+        assert event.send.await_args.args[0] == handlers.ROLE_CARD_QUESTIONS[mode]
+    else:
+        assert "фото" in event.send.await_args.args[0]
+    assert data == {"mode": expected}
     assert (await credit_db.get_user(456))["balance"] == 1
     assert (await credit_db.get_user(456))["total_generations"] == 0
     assert await credit_db.get_all_counters() == {}
@@ -2378,7 +2415,7 @@ async def test_legacy_generation_buttons_request_photo_without_counting(credit_d
 @pytest.mark.parametrize("mode", [payload for _, payload in handlers.MODE_BUTTONS])
 async def test_generation_events_follow_existing_modes_only_after_success(credit_db, mode):
     await credit_db.add_credits(456, 2)
-    async def generate(*args):
+    async def generate(*args, **kwargs):
         assert await credit_db.get_all_counters() == {}
         assert (await credit_db.get_user(456))["total_generations"] == 0
         return ["https://cdn.example/counted.png"]
@@ -2386,6 +2423,8 @@ async def test_generation_events_follow_existing_modes_only_after_success(credit
     router = create_router(generator, postcard_generator=generator)
     context = await ready_context()
     await context.update_data(mode=mode)
+    if mode in ROLE_SAMPLE_INFO:
+        await provide_role_info(router, context, mode)
     if mode == "mode_vision":
         await call_handler(router, "collect_sphere", message_event("Моя мечта"), context)
     else:
@@ -2397,7 +2436,7 @@ async def test_generation_events_follow_existing_modes_only_after_success(credit
         "mode_ny_elegant": "gen_ny_elegant", "mode_bday_young": "gen_bday_young",
         "mode_bday_old": "gen_bday_old", "mode_bday_old_elegant": "gen_bday_old_elegant",
         "mode_halloween": "gen_halloween", "mode_goodmorning": "gen_goodmorning",
-        "mode_modern_card": "gen_scrapbook",
+        "mode_modern_card": "gen_scrapbook", "mode_teacher": "gen_teacher", "mode_coach": "gen_coach",
     }
     assert await credit_db.get_all_counters() == {expected_events[mode]: 1}
     assert (await credit_db.get_user(456))["total_generations"] == 1
@@ -5180,3 +5219,141 @@ async def test_late_teacher_lyrics_do_not_overwrite_cancelled_or_reopened_menu(a
         await task
     assert not any(call.args and TEACHER_TEST_LYRICS in call.args[0] for call in event.message.answer.await_args_list)
     assert await context.get_state() == (PosterStates.waiting_for_mode if action == 'cancel' else PosterStates.waiting_for_video_song)
+
+
+@pytest.mark.parametrize('mode,field,info,question,event_name', [
+    ('mode_teacher', 'teacher_info', 'Ирина Петровна, математика', 'Напишите имя учителя и его предмет (например: «Ирина Петровна, математика»).', 'gen_teacher'),
+    ('mode_coach', 'coach_info', 'Сергей Иванович, футбол', 'Напишите имя тренера и вид спорта (например: «Сергей Иванович, футбол»).', 'gen_coach'),
+])
+async def test_role_cards_collect_context_before_photo_then_generate_and_count(credit_db, mode, field, info, question, event_name):
+    await credit_db.add_credits(456, 2)
+    card = AsyncMock(return_value=['https://cdn.example/role-card.png'])
+    router, context = create_router(postcard_generator=card), await ready_context()
+    selected = callback_event(mode)
+    await dispatch_callback(router, selected, context)
+    assert selected.send.await_args.args[0] == question
+    assert await context.get_state() == PosterStates.waiting_for_card_role_info
+    await call_handler(router, 'echo', message_event(info), context)
+    assert (await context.get_data())[field] == info
+    assert await context.get_state() == PosterStates.waiting_for_photo
+    await call_handler(router, 'collect_photo', photo_event(), context)
+    assert await context.get_state() == PosterStates.waiting_for_card_text
+    card.assert_not_awaited()
+    text = message_event('Спасибо за Ваш труд!')
+    await call_handler(router, 'echo', text, context)
+    card.assert_awaited_once_with('https://photos.example.com/source.png', mode, 'Спасибо за Ваш труд!', theme_info=info)
+    assert text.bot.send_message.await_args.kwargs['text'] == 'Ваша открытка готова!'
+    assert (await credit_db.get_user(456))['balance'] == 1
+    assert (await credit_db.get_all_counters())[event_name] == 1
+    stats = message_event('/stats')
+    await call_handler(create_router(admin_user_id=456), 'stats', stats)
+    # Админский снимок исключает собственные тестовые генерации.
+    assert ('- Учителям: 0' if mode == 'mode_teacher' else '- Тренерам: 0') in stats.message.answer.await_args.args[0]
+
+
+@pytest.mark.parametrize('mode,field,info,event_name', [
+    ('mode_teacher', 'teacher_info', 'Ирина Петровна, химия', 'gen_teacher'),
+    ('mode_coach', 'coach_info', 'Сергей Иванович, плавание', 'gen_coach'),
+])
+async def test_video_role_card_generates_marked_preview_before_music_without_spending_card_credit(credit_db, mode, field, info, event_name):
+    await credit_db.grant_free_trial(456)
+    card = AsyncMock(return_value=['https://cdn.example/preview.png'])
+    router, context = create_router(postcard_generator=card), await ready_context()
+    await dispatch_callback(router, callback_event('cat_video'), context)
+    await dispatch_callback(router, callback_event('video_style:' + mode), context)
+    assert await context.get_state() == PosterStates.waiting_for_card_role_info
+    await call_handler(router, 'echo', message_event(info), context)
+    await call_handler(router, 'collect_photo', photo_event(), context)
+    text = message_event('Спасибо!')
+    await call_handler(router, 'echo', text, context)
+    card.assert_awaited_once_with('https://photos.example.com/source.png', mode, 'Спасибо!', theme_info=info, preview=True)
+    replies = text.message.answer.await_args_list
+    assert any(call.args and call.args[0] == 'Превью открытки для видео (PREVIEW):' for call in replies)
+    assert replies[-1].args[0] == '🎵 Выберите сценарий песни для видео-поздравления:'
+    assert await context.get_state() == PosterStates.waiting_for_video_song
+    data = await context.get_data()
+    assert data[field] == info and data['video_preview_url'] == 'https://cdn.example/preview.png'
+    assert data['video_amount_kopecks'] == 29900
+    assert (await credit_db.get_user(456))['balance'] == 1
+    assert (await credit_db.get_all_counters())[event_name] == 1
+    handlers.send_offline_conversion.assert_awaited_once_with(456, goal_id='bot_generation')
+    await dispatch_callback(router, callback_event('video_song:audio_fun_ny'), context)
+    assert await context.get_state() == PosterStates.waiting_for_video_payment
+    assert (await context.get_data())[field] == info
+    handlers.generate_song.assert_not_awaited()
+
+
+async def test_role_video_preview_retry_keeps_image_and_counts_once(credit_db, max_image_upload):
+    card = AsyncMock(return_value=['https://cdn.example/preview.png'])
+    router, context = create_router(postcard_generator=card), await ready_context()
+    await dispatch_callback(router, callback_event('cat_video'), context)
+    await dispatch_callback(router, callback_event('video_style:mode_teacher'), context)
+    await call_handler(router, 'echo', message_event('Ирина Петровна, математика'), context)
+    await call_handler(router, 'collect_photo', photo_event(), context)
+    max_image_upload.side_effect = [RuntimeError('MAX upload failed'), AttachmentUpload(type='image', payload={'token': 'retry'})]
+    await call_handler(router, 'echo', message_event('Спасибо!'), context)
+    assert await context.get_state() == PosterStates.waiting_for_card_text
+    assert (await context.get_data())['video_preview_url']
+    await call_handler(router, 'echo', message_event('Спасибо!'), context)
+    assert await context.get_state() == PosterStates.waiting_for_video_song
+    card.assert_awaited_once()
+    assert (await credit_db.get_all_counters())['gen_teacher'] == 1
+    handlers.send_offline_conversion.assert_awaited_once()
+
+
+@pytest.mark.parametrize('video', [False, True])
+@pytest.mark.parametrize('info', ['', ' ', 'а'*501])
+async def test_missing_or_oversized_role_info_never_generates(video, info):
+    card = AsyncMock()
+    router, context = create_router(postcard_generator=card), await ready_context()
+    if video:
+        await dispatch_callback(router, callback_event('cat_video'), context)
+    await dispatch_callback(router, callback_event('video_style:mode_coach' if video else 'mode_coach'), context)
+    await call_handler(router, 'echo', message_event(info), context)
+    assert await context.get_state() == PosterStates.waiting_for_card_role_info
+    assert 'coach_info' not in await context.get_data()
+    card.assert_not_awaited()
+
+
+async def test_role_preview_generation_failure_does_not_increment_or_lose_context(credit_db):
+    card = AsyncMock(side_effect=RuntimeError('OpenAI failed'))
+    router, context = create_router(postcard_generator=card), await ready_context()
+    await dispatch_callback(router, callback_event('cat_video'), context)
+    await dispatch_callback(router, callback_event('video_style:mode_coach'), context)
+    await call_handler(router, 'echo', message_event('Сергей, футбол'), context)
+    await call_handler(router, 'collect_photo', photo_event(), context)
+    await call_handler(router, 'echo', message_event('Спасибо!'), context)
+    data = await context.get_data()
+    assert data['coach_info'] == 'Сергей, футбол' and data['photo']['url']
+    assert await context.get_state() == PosterStates.waiting_for_card_text
+    assert (await credit_db.get_all_counters()).get('gen_coach', 0) == 0
+    handlers.send_offline_conversion.assert_not_awaited()
+
+
+async def test_cancel_during_role_preview_drops_late_result(credit_db):
+    import asyncio
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def generate(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return ['https://cdn.example/late-preview.png']
+
+    router, context = create_router(postcard_generator=generate), await ready_context()
+    await dispatch_callback(router, callback_event('cat_video'), context)
+    await dispatch_callback(router, callback_event('video_style:mode_teacher'), context)
+    await call_handler(router, 'echo', message_event('Ирина, математика'), context)
+    await call_handler(router, 'collect_photo', photo_event(), context)
+    text = message_event('Спасибо!')
+    task = asyncio.create_task(call_handler(router, 'echo', text, context))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        await call_handler(router, 'cancel', message_event('/cancel'), context)
+    finally:
+        release.set()
+        await task
+    assert await context.get_state() == PosterStates.waiting_for_mode
+    assert not (await context.get_data()).get('video_preview_url')
+    assert (await credit_db.get_all_counters()).get('gen_teacher', 0) == 0
+    handlers.send_offline_conversion.assert_not_awaited()
+    assert not any(call.args and 'PREVIEW' in call.args[0] for call in text.message.answer.await_args_list)

@@ -54,7 +54,7 @@ from image_service import (
     generate_cartoon_avatar, generate_photosession_frame, NY_FAMILY_THREE_PROMPTS, NY_FAMILY_PHOTOSESSION_PROMPTS,
     fix_text_with_ai,
     POSTCARD_PROMPTS,
-    MAX_CARD_TEXT_LENGTH,
+    MAX_CARD_TEXT_LENGTH, MAX_THEME_INFO_LENGTH,
     upload_image_for_max,
 )
 
@@ -97,6 +97,14 @@ GENERATION_EVENTS = {
     "mode_ny_elegant": "gen_ny_elegant",
     "mode_bday_old_elegant": "gen_bday_old_elegant",
     "mode_halloween": "gen_halloween",
+    "mode_teacher": "gen_teacher",
+    "mode_coach": "gen_coach",
+}
+
+ROLE_CARD_FIELDS = {'mode_teacher': 'teacher_info', 'mode_coach': 'coach_info'}
+ROLE_CARD_QUESTIONS = {
+    'mode_teacher': 'Напишите имя учителя и его предмет (например: «Ирина Петровна, математика»).',
+    'mode_coach': 'Напишите имя тренера и вид спорта (например: «Сергей Иванович, футбол»).',
 }
 
 
@@ -152,6 +160,8 @@ MODE_BUTTONS = (
     ("🎃 Хэллоуин", "mode_halloween"),
     ("☀️ Открытка: С Добрым утром", "mode_goodmorning"),
     ("🎨 Скрапбукинг", "mode_modern_card"),
+    ("👨‍🏫 Учителям", "mode_teacher"),
+    ("🏆 Тренерам", "mode_coach"),
 )
 
 
@@ -276,6 +286,8 @@ CATEGORY_MENUS = {
             ("🎂 День рождения", "sub_bday"),
             ("🎃 Хэллоуин", "sub_halloween"),
             ("☀️ Доброе утро", "sub_goodmorning"),
+            ("👨‍🏫 Учителям", "mode_teacher"),
+            ("🏆 Тренерам", "mode_coach"),
             ("⬅️ Назад", "back_to_main"),
         ),
     ),
@@ -646,6 +658,7 @@ async def purchase_keyboard(user_id: int | None):
 class PosterStates(StatesGroup):
     waiting_for_mode = State()
     waiting_for_photo = State()
+    waiting_for_card_role_info = State()
     waiting_for_photosession_photo = State()
     waiting_for_cartoon_style = State()
     waiting_for_avatar_photo = State()
@@ -937,7 +950,10 @@ def create_router(
                         data = await context.update_data(
                             fixed_card_text=fixed_text, fixed_card_text_source=text,
                         )
-                    urls = await postcard_generator(photo["url"], data["mode"], fixed_text)
+                    kwargs = {'theme_info': data[ROLE_CARD_FIELDS[mode]]} if mode in ROLE_CARD_FIELDS else {}
+                    urls = await postcard_generator(photo["url"], data["mode"], fixed_text, **kwargs)
+                    if mode in ROLE_CARD_FIELDS and (await context.get_data()).get('card_role_session') != data.get('card_role_session'):
+                        return
                 else:
                     urls = await generator(photo["url"], sphere)
                 if len(urls) != 1 or not all(isinstance(url, str) and url.startswith("https://") for url in urls):
@@ -1137,7 +1153,9 @@ def create_router(
             f"- Элегантный НГ: {counters.get('gen_ny_elegant', 0)}\n"
             f"- ДР Старшим 2: {counters.get('gen_bday_old_elegant', 0)}\n"
             f"- Хэллоуин: {counters.get('gen_halloween', 0)}\n"
-            f"- Скрапбукинг: {counters.get('gen_scrapbook', 0)}\n\n"
+            f"- Скрапбукинг: {counters.get('gen_scrapbook', 0)}\n"
+            f"- Учителям: {counters.get('gen_teacher', 0)}\n"
+            f"- Тренерам: {counters.get('gen_coach', 0)}\n\n"
             f"Без разбивки по шаблонам (раньше): {counters.get('gen_unclassified', 0)}\n"
             f"🖼 Всего сгенерировано картинок: {data['total_generated']}\n"
             "\n📸 Выбор шаблонов Фотосессий:\n"
@@ -1419,6 +1437,8 @@ def create_router(
     def cartoon_style_keyboard(screen='cat_cards'):
         buttons = []
         for label, payload in CATEGORY_MENUS[screen][2]:
+            if payload in ROLE_CARD_FIELDS:
+                continue
             target = ('back_to_main' if payload == 'back_to_main' else
                       'cartoon_style:cat_cards' if payload == 'back_to_cards' else 'cartoon_style:' + payload)
             buttons.append((label, target))
@@ -1456,7 +1476,7 @@ def create_router(
         data = await context.get_data()
         target = event.callback.payload.removeprefix('cartoon_style:')
         product = cartoon_product(data)
-        if event.message is None or product is None or target not in VIDEO_CARD_SCREENS | set(POSTCARD_PROMPTS):
+        if event.message is None or product is None or target not in VIDEO_CARD_SCREENS | (set(POSTCARD_PROMPTS) - set(ROLE_CARD_FIELDS)):
             await event.ack(notification='Откройте раздел мульт-открыток заново.')
             return
         if await context.get_state() == PosterStates.cartoon_generating:
@@ -1638,6 +1658,72 @@ def create_router(
         await _reply(event, text, attachments=[InlineKeyboardBuilder().row(
             LinkButton(text=f'Оплатить {price} ₽', url=VIDEO_PAYMENT_PLACEHOLDER_URL)).row(
             CallbackButton(text='⬅️ Назад', payload='back_to_main')).as_markup()])
+
+    async def collect_card_role_info(event: MessageCreated, context: MemoryContext):
+        if is_bot_message(event):
+            return
+        data = await context.get_data()
+        mode = data.get('mode')
+        if mode not in ROLE_CARD_FIELDS:
+            await context.clear()
+            await context.set_state(PosterStates.waiting_for_mode)
+            await _reply(event, 'Выберите шаблон открытки заново.', attachments=[main_keyboard()])
+            return
+        body = event.message.body
+        text = (body.text or '').strip() if body else ''
+        if not text or len(text) > MAX_THEME_INFO_LENGTH:
+            await _reply(event, ROLE_CARD_QUESTIONS[mode] + f' До {MAX_THEME_INFO_LENGTH} символов. /cancel — отмена.')
+            return
+        await context.update_data(**{ROLE_CARD_FIELDS[mode]: text})
+        await context.set_state(PosterStates.waiting_for_photo)
+        await _reply(event, photo_request('Теперь загрузите фото для открытки. Затем напишите поздравление. /cancel — отмена.'))
+
+    async def generate_role_video_preview(event, context):
+        user_id = event.get_ids()[1]
+        if user_id is None:
+            return
+        lock = generation_locks.setdefault(user_id, asyncio.Lock())
+        if lock.locked():
+            await _reply(event, 'Превью уже создаётся. Пожалуйста, подождите.')
+            return
+        async with lock:
+            data = await context.get_data()
+            mode = data['mode']
+            session = data.get('card_role_session')
+            info = data[ROLE_CARD_FIELDS[mode]]
+            key = [mode, data['photo']['url'], info, data['card_text']]
+            await context.set_state(PosterStates.generating)
+            try:
+                if data.get('video_preview_key') != key or not data.get('video_preview_url'):
+                    await _reply(event, '🎨 Создаю превью открытки для видео...')
+                    fixed = data.get('fixed_card_text') if data.get('fixed_card_text_source') == data['card_text'] else None
+                    fixed = fixed or await fix_text_with_ai(data['card_text'])
+                    if (await context.get_data()).get('card_role_session') != session:
+                        return
+                    urls = await postcard_generator(data['photo']['url'], mode, fixed, theme_info=info, preview=True)
+                    if len(urls) != 1 or not isinstance(urls[0], str) or not urls[0].startswith('https://'):
+                        raise ValueError('Генератор не вернул HTTPS-ссылку превью.')
+                    if (await context.get_data()).get('card_role_session') != session:
+                        return
+                    await context.update_data(video_preview_key=key, video_preview_url=urls[0], video_preview_counted=False,
+                                              fixed_card_text=fixed, fixed_card_text_source=data['card_text'])
+                    data = await context.get_data()
+                if not data.get('video_preview_counted'):
+                    await increment_generations(user_id, event_name=GENERATION_EVENTS[mode])
+                    await context.update_data(video_preview_counted=True)
+                    await send_offline_conversion(user_id, goal_id='bot_generation')
+                image = await upload_image_for_max(event.bot, data['video_preview_url'])
+                if (await context.get_data()).get('card_role_session') != session:
+                    return
+                sent = await _reply(event, 'Превью открытки для видео (PREVIEW):', attachments=[image])
+                if sent is None:
+                    raise RuntimeError('MAX не подтвердил отправку превью.')
+                await show_video_songs(event, context)
+            except Exception:
+                logger.exception('Ошибка создания или отправки предметного превью для видео:')
+                if (await context.get_data()).get('card_role_session') == session:
+                    await context.set_state(PosterStates.waiting_for_card_text)
+                    await _reply(event, 'Не удалось создать или отправить превью. Отправьте поздравление ещё раз или /cancel; готовое превью будет использовано повторно.')
 
     def video_style_keyboard(screen):
         buttons = []
@@ -2639,6 +2725,7 @@ def create_router(
         await _reply(event, "Сбор данных отменён.", attachments=[main_keyboard()])
 
     # Команды /start, /buy и /cancel должны обрабатываться раньше ожидания фото.
+    router.message_created(PosterStates.waiting_for_card_role_info)(collect_card_role_info)
     router.message_created(PosterStates.waiting_for_avatar_photo)(collect_cartoon_photo)
     router.message_created(PosterStates.waiting_for_video_teacher_details)(collect_video_teacher_details)
 
@@ -2661,6 +2748,11 @@ def create_router(
         await context.update_data(mode=mode)
         if video:
             await context.update_data(video_flow=True, video_amount_kopecks=29900, video_product='direct')
+        if mode in ROLE_CARD_FIELDS:
+            await context.update_data(card_role_session=uuid4().hex)
+            await context.set_state(PosterStates.waiting_for_card_role_info)
+            await _reply(event, ROLE_CARD_QUESTIONS[mode])
+            return
         await context.set_state(PosterStates.waiting_for_photo)
         if mode == "mode_ny_family":
             text = "Отправьте одно общее фото семьи, где видны лица всех участников. Затем напишите поздравление для открытки. /cancel — отмена."
@@ -2752,6 +2844,11 @@ def create_router(
     @router.message_created(PosterStates.waiting_for_photo)
     async def collect_photo(event: MessageCreated, context: MemoryContext) -> None:
         if is_bot_message(event):
+            return
+        data = await context.get_data()
+        if data.get('mode') in ROLE_CARD_FIELDS and not data.get(ROLE_CARD_FIELDS[data['mode']]):
+            await context.set_state(PosterStates.waiting_for_card_role_info)
+            await _reply(event, ROLE_CARD_QUESTIONS[data['mode']])
             return
         body = event.message.body
         attachments = (body.attachments or []) if body else []
@@ -2852,6 +2949,10 @@ def create_router(
             await context.set_state(PosterStates.waiting_for_mode)
             await _reply(event, "Выберите открытку в меню.", attachments=[main_keyboard()])
             return
+        if data['mode'] in ROLE_CARD_FIELDS and not data.get(ROLE_CARD_FIELDS[data['mode']]):
+            await context.set_state(PosterStates.waiting_for_card_role_info)
+            await _reply(event, ROLE_CARD_QUESTIONS[data['mode']])
+            return
         photo = data.get("photo")
         if not isinstance(photo, dict) or not isinstance(photo.get("url"), str) or not photo["url"]:
             await context.set_state(PosterStates.waiting_for_photo)
@@ -2869,7 +2970,10 @@ def create_router(
             )
         await context.update_data(card_text=text, sphere=data["mode"])
         if data.get('video_flow'):
-            await show_video_songs(event, context)
+            if data['mode'] in ROLE_CARD_FIELDS:
+                await generate_role_video_preview(event, context)
+            else:
+                await show_video_songs(event, context)
             return
         logger.info("Начинаю генерацию открытки с текстом: %s", text)
         await generate_and_send(event, context)
@@ -2917,6 +3021,9 @@ def create_router(
         if mode not in GENERATION_EVENTS:
             mode = "mode_vision"
         await event.ack(notification="Жду новое фото.")
+        if mode in ROLE_CARD_FIELDS:
+            await start_mode_photo(event, context, mode)
+            return
         await context.clear()
         await context.update_data(mode=mode)
         await context.set_state(PosterStates.waiting_for_photo)
@@ -2949,6 +3056,9 @@ def create_router(
         if is_bot_message(event):
             return
         state = await context.get_state()
+        if state == PosterStates.waiting_for_card_role_info:
+            await collect_card_role_info(event, context)
+            return
         if state == PosterStates.waiting_for_video_teacher_details:
             await collect_video_teacher_details(event, context)
             return

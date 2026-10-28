@@ -837,16 +837,21 @@ async def pending_audio_orders() -> list[str]:
             return [row[0] for row in await cursor.fetchall()]
 
 
-async def claim_audio_order(order_id: str) -> bool:
+async def claim_audio_order(order_id: str, *, inline_preview: bool = False) -> bool:
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
-        cursor = await db.execute("UPDATE audio_orders SET running=1 WHERE order_id=? AND ((status='paid' OR free_access=1) AND delivered=0 OR (audio_format='gift' AND status='pending' AND free_access=0 AND preview_requested=1 AND preview_delivered=0)) AND failed=0 AND running=0 AND next_attempt_at <= ?", (order_id, _now_ts()))
+        cursor = await db.execute("""UPDATE audio_orders SET running=1,
+            preview_requested=CASE WHEN ? THEN 0 ELSE preview_requested END
+            WHERE order_id=? AND ((status='paid' OR free_access=1) AND delivered=0 OR
+            (audio_format='gift' AND status='pending' AND free_access=0 AND (preview_requested=1 OR ?)
+             AND preview_delivered=0)) AND failed=0 AND running=0 AND (next_attempt_at <= ? OR ?)""",
+            (inline_preview, order_id, inline_preview, _now_ts(), inline_preview))
         await db.commit()
         return cursor.rowcount == 1
 
 
 async def find_gift_preview_order(user_id: int, scenario: str, details: str, style: str | None):
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
-        async with db.execute("SELECT order_id FROM audio_orders WHERE user_id=? AND audio_format='gift' AND scenario=? AND details=? AND style IS ? AND status='pending' AND preview_requested=1 AND failed=0 ORDER BY created_at DESC LIMIT 1", (user_id, scenario, details, style)) as cursor:
+        async with db.execute("SELECT order_id FROM audio_orders WHERE user_id=? AND audio_format='gift' AND scenario=? AND details=? AND style IS ? AND status='pending' AND failed=0 ORDER BY created_at DESC LIMIT 1", (user_id, scenario, details, style)) as cursor:
             row = await cursor.fetchone()
     return await get_audio_order(row[0]) if row else None
 

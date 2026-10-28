@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from maxapi.types import CallbackButton, LinkButton
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
-from audio_service import generate_song, wait_for_song, wait_for_song_with_progress, song_tracks, write_song_lyrics, make_protected_preview, validate_song_arguments, InvalidSongArguments, AudioNotConfigured, SongFailed
+from audio_service import generate_song, wait_for_song_result, wait_for_song_with_progress, song_tracks, write_song_lyrics, make_protected_preview, validate_song_arguments, InvalidSongArguments, AudioNotConfigured, SongFailed
 from database import (get_audio_order, update_audio_order, pending_audio_orders,
                       claim_audio_order, reset_audio_workers, song_checkout_order)
 
@@ -17,7 +17,7 @@ SUPPORT_URL = 'https://max.ru/u/f9LHodD0cOL0i7XGM4uyyUo-bFy4nt4Hqc-XMNmvGygT83X2
 
 
 class PaidAudioWorker:
-    def __init__(self, bot, *, generator=generate_song, waiter=wait_for_song, poll_interval=2,
+    def __init__(self, bot, *, generator=generate_song, waiter=wait_for_song_result, poll_interval=2,
                  lyric_writer=None, preview_maker=None, payments=None, admin_user_id=None):
         self.bot, self.generator, self.waiter = bot, generator, waiter
         self.poll_interval = poll_interval

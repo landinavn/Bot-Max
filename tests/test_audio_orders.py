@@ -414,3 +414,14 @@ async def test_lyrics_failure_is_visible_before_ttapi_and_user_is_not_left_witho
     assert any(r.exc_info for r in caplog.records)
     assert bot.send_message.await_args.kwargs['text']
     assert (await credit_db.get_audio_order(name))['running'] == 0
+
+
+async def test_inline_claim_is_atomic_for_unqueued_gift_and_does_not_allow_unpaid_fun(credit_db):
+    gift = await order(credit_db, name='inline-gift', kind='gift')
+    fun = await order(credit_db, name='unpaid-fun', kind='fun')
+    assert not await credit_db.claim_audio_order(gift)
+    assert not await credit_db.claim_audio_order(fun, inline_preview=True)
+    claims = await asyncio.gather(*(credit_db.claim_audio_order(gift, inline_preview=True) for _ in range(5)))
+    assert sum(claims) == 1
+    assert (await credit_db.get_audio_order(gift))['preview_requested'] == 0
+    assert await credit_db.pending_audio_orders() == []

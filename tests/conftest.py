@@ -19,6 +19,11 @@ def mock_music_composer_and_preview(monkeypatch):
     import audio_orders
     writer = AsyncMock(side_effect=lambda notes, tags, title: notes)
     monkeypatch.setattr(handlers, 'write_song_lyrics', writer)
+    monkeypatch.setattr(handlers, 'generate_song', AsyncMock(return_value='inline-test-job'))
+    result = {'status': 'SUCCESS', 'data': {'musics': [{'audioUrl': 'https://audio.example/1.mp3', 'title': 'Один'}, {'audioUrl': 'https://audio.example/2.mp3', 'title': 'Два'}]}}
+    monkeypatch.setattr(handlers, 'wait_for_song', AsyncMock(return_value=result))
+    monkeypatch.setattr(handlers, 'wait_for_song_result', AsyncMock(return_value=result))
+    monkeypatch.setattr(handlers, 'make_protected_preview', AsyncMock(return_value='https://preview.example/clip.mp3'))
     monkeypatch.setattr(audio_orders, 'write_song_lyrics', writer)
     monkeypatch.setattr(audio_orders, 'make_protected_preview', AsyncMock(return_value='https://preview.example/clip.mp3'))
 

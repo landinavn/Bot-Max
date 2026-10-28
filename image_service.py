@@ -417,6 +417,34 @@ def _validate_inputs(photo_url: str, sphere: str) -> None:
         raise ValueError("Описание мечты должно содержать от 1 до 200 символов.")
 
 
+async def count_people_in_photo(image_url: str) -> int:
+    """Посчитать людей через vision gpt-4o-mini; неопределённый результат — 0."""
+    try:
+        _validate_inputs(image_url, 'Подсчёт людей')
+        config = Config.from_env()
+        if not config.image_api_key:
+            logger.warning('Подсчёт людей недоступен: не задан IMAGE_API_KEY. Возвращаю 0.')
+            return 0
+        async with httpx.AsyncClient(
+            proxy=config.openai_proxy_url, timeout=60, trust_env=False, follow_redirects=False,
+        ) as http_client:
+            async with AsyncOpenAI(api_key=config.image_api_key, base_url=OPENAI_BASE_URL,
+                                   http_client=http_client, max_retries=0) as client:
+                result = await client.chat.completions.create(model='gpt-4o-mini', temperature=0, max_tokens=10,
+                    messages=[{'role': 'user', 'content': [
+                        {'type': 'text', 'text': "Count the number of people in this image. Return ONLY the number, nothing else. If you can't count, return 0."},
+                        {'type': 'image_url', 'image_url': {'url': image_url, 'detail': 'auto'}},
+                    ]}])
+        if result.choices and result.choices[0].finish_reason == 'stop':
+            text = result.choices[0].message.content
+            if isinstance(text, str) and re.fullmatch(r'[0-9]+', text.strip()):
+                return int(text.strip())
+        logger.warning('OpenAI не вернул корректное число людей. Возвращаю 0.')
+    except Exception as exc:
+        logger.warning('Не удалось подсчитать людей (%s). Возвращаю 0.', type(exc).__name__)
+    return 0
+
+
 @asynccontextmanager
 async def _image_api_client(config: Config):
     """Одинаковые прокси и таймаут для карт, открыток и каждого кадра фотосессии."""

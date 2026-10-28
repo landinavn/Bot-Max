@@ -158,4 +158,66 @@ async def test_default_avatar_prompt_matches_smiling_and_blinking_request(fast_p
     post = respx.post(video.TASK_URL).respond(200, json={'data': {'task_id': 'avatar'}})
     respx.get(video.TASK_URL + '/avatar').respond(200, json={'data': {'status': 'completed', 'output': {'video': 'https://video.example/avatar.mp4'}}})
     assert await video.generate_video_from_avatar('https://images.example/avatar.png') == 'https://video.example/avatar.mp4'
-    assert json.loads(post.calls[0].request.content)['input']['prompt'] == 'The character is smiling and blinking naturally'
+    assert json.loads(post.calls[0].request.content)['input']['prompt'] == video.DEFAULT_ANIMATION_PROMPT
+
+
+@pytest.mark.parametrize('mode,addition', [
+    ('mode_ny', ' Snow is gently falling in the background.'),
+    ('mode_ny_family', ' Snow is gently falling in the background.'),
+    ('mode_ny_cozy', ' Snow is gently falling in the background.'),
+    ('mode_ny_fairytale', ' Snow is gently falling in the background.'),
+    ('mode_ny_elegant', ' Snow is gently falling in the background.'),
+    ('mode_bday_young', ' If there is a birthday cake, the candles are flickering gently.'),
+    ('mode_bday_old', ' If there is a birthday cake, the candles are flickering gently.'),
+    ('mode_bday_old_elegant', ' If there is a birthday cake, the candles are flickering gently.'),
+    ('mode_goodmorning', ' If there is a coffee cup, warm steam is rising from it.'),
+    ('mode_modern_card', ''),
+    ('mode_scrapbook_winter', ' Snow is gently falling in the background.'),
+    ('mode_modern_card_winter', ' Snow is gently falling in the background.'),
+    ('mode_scrapbook_spring', ''),
+    ('mode_teacher', ''), ('mode_coach', ''), ('mode_halloween', ''), ('', ''), ('unknown', ''),
+])
+@respx.mock
+async def test_style_specific_prompt_reaches_piapi_and_is_logged(mode, addition, fast_poll, caplog):
+    base = ('Subtle cinematic animation. The people in the photo are smiling warmly and blinking naturally. '
+            'Any string lights or garlands in the background are glowing softly. High quality, photorealistic.')
+    post = respx.post(video.TASK_URL).respond(200, json={'data': {'task_id': 'styled'}})
+    respx.get(video.TASK_URL + '/styled').respond(200, json={'data': {'status': 'completed', 'output': {'video': 'https://video.example/styled.mp4'}}})
+    with caplog.at_level(logging.INFO, logger=video.__name__):
+        assert await video.generate_video_from_avatar('https://images.example/card.png', mode=mode) == 'https://video.example/styled.mp4'
+    payload = json.loads(post.calls[0].request.content)
+    assert payload['input']['prompt'] == base + addition
+    assert payload['input']['mode'] == 'std' and payload['input']['enable_audio'] is False
+    assert f'Промпт для Kling ({mode}): {base + addition}' in caplog.text
+    assert post.call_count == 1
+
+
+@pytest.mark.parametrize('count', [0, 1, 5, 6, 40])
+@respx.mock
+async def test_crowd_threshold_controls_real_piapi_prompt_and_logs_count(count, fast_poll, monkeypatch, caplog):
+    counter = AsyncMock(return_value=count)
+    monkeypatch.setattr(video, 'count_people_in_photo', counter)
+    post = respx.post(video.TASK_URL).respond(200, json={'data':{'task_id':'crowd'}})
+    respx.get(video.TASK_URL + '/crowd').respond(200, json={'data':{'status':'completed','output':{'video':'https://video.example/crowd.mp4'}}})
+    with caplog.at_level(logging.INFO, logger=video.__name__):
+        await video.generate_video_from_avatar('https://images.example/group.png', mode='mode_ny')
+    counter.assert_awaited_once_with('https://images.example/group.png')
+    prompt = json.loads(post.calls[0].request.content)['input']['prompt']
+    if count > 5:
+        assert prompt == ('Cinematic background animation only. The glowing lights shimmer, and there is a subtle camera zoom. '
+            'The people remain completely still like in a photograph. DO NOT animate faces or bodies.')
+        assert 'Snow' not in prompt and 'smiling' not in prompt
+    else:
+        assert 'smiling warmly and blinking naturally' in prompt and 'Snow is gently falling' in prompt
+    assert f'На фото найдено {count} человек. Промпт для Kling: {prompt}' in caplog.text
+
+
+@respx.mock
+async def test_supplied_count_avoids_duplicate_vision_and_custom_prompt_cannot_animate_crowd(fast_poll, monkeypatch):
+    counter = AsyncMock()
+    monkeypatch.setattr(video, 'count_people_in_photo', counter)
+    post = respx.post(video.TASK_URL).respond(200, json={'data':{'task_id':'checked'}})
+    respx.get(video.TASK_URL + '/checked').respond(200, json={'data':{'status':'completed','output':{'video':'https://video.example/checked.mp4'}}})
+    await video.generate_video_from_avatar('https://images.example/group.png', 'Make everyone dance', mode='mode_bday_young', people_count=6)
+    counter.assert_not_awaited()
+    assert json.loads(post.calls[0].request.content)['input']['prompt'] == video.CROWD_VIDEO_PROMPT

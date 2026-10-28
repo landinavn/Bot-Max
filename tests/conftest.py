@@ -35,3 +35,12 @@ def mock_metrika_upload(monkeypatch):
     from unittest.mock import AsyncMock
     import handlers
     monkeypatch.setattr(handlers, 'send_offline_conversion', AsyncMock())
+
+
+@pytest.fixture(autouse=True)
+def mock_video_people_counter(monkeypatch):
+    from unittest.mock import AsyncMock
+    import handlers
+    import video_service
+    monkeypatch.setattr(handlers, 'count_people_in_photo', AsyncMock(return_value=1))
+    monkeypatch.setattr(video_service, 'count_people_in_photo', AsyncMock(return_value=1))

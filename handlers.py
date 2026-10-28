@@ -28,7 +28,7 @@ from maxapi.types import (
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
 from config import DEFAULT_BOT_LINK, validate_bot_link
-from video_service import generate_video_from_avatar
+from video_service import build_video_prompt, generate_video_from_avatar
 from media_service import VIDEO_MERGE_POLICY, merge_video_and_audio
 from audio_service import song_audio_url, TEACHER_MUSIC_TAGS
 from metrika_service import extract_yclid, send_offline_conversion
@@ -49,6 +49,7 @@ from audio_service import generate_song, wait_for_song, wait_for_song_result, ma
 from audio_orders import PaidAudioWorker, SUPPORT_URL
 from max_client import log_max_error
 from image_service import (
+    count_people_in_photo,
     GenerationLimitError,
     GenerationNotConfigured,
     GenerationTimeoutError,
@@ -746,11 +747,11 @@ def result_keyboard(url: str):
     ).as_markup()
 
 
-async def generate_video(avatar_url: str, song_url: str) -> str:
+async def generate_video(avatar_url: str, song_url: str, *, mode: str = '') -> str:
     """Оживить аватар и склеить результат с уже готовой песней из очереди."""
     if not song_url or is_video_placeholder(song_url):
         raise ValueError('Для видео нужна готовая песня, а не тестовая ссылка.')
-    video_url = await generate_video_from_avatar(avatar_url)
+    video_url = await generate_video_from_avatar(avatar_url, mode=mode)
     if is_video_placeholder(video_url):
         return video_url
     return await merge_video_and_audio(video_url, song_url)
@@ -772,7 +773,7 @@ PENDING_VIDEO_MESSAGE = (
 def video_cache(data):
     keys = ('video_raw_source', 'video_raw_url', 'video_song_source', 'video_song_url',
             'video_song_job_source', 'video_song_job_id', 'video_song_lyrics',
-            'video_merged_source', 'video_merged_url', 'audio_url')
+            'video_merged_source', 'video_merged_url', 'audio_url', 'video_people_source', 'video_people_count')
     return {key: data[key] for key in keys if key in data}
 
 
@@ -841,11 +842,17 @@ def create_router(
 
     async def render_video_with_song(data, image_url, scenario):
         audio_url = await prepare_video_song(data, scenario)
-        raw = data.get('video_raw_url') if data.get('video_raw_source') == image_url else None
-        raw = raw or await generate_video_from_avatar(image_url)
+        mode = (data.get('cartoon_mode') if data.get('cartoon_flow') else data.get('mode')) or ''
+        people_count = data.get('video_people_count') if data.get('video_people_source') == image_url else None
+        if not isinstance(people_count, int) or isinstance(people_count, bool) or people_count < 0:
+            people_count = await count_people_in_photo(image_url)
+            data.update(video_people_source=image_url, video_people_count=people_count)
+        source = [image_url, mode, people_count, build_video_prompt(mode, people_count)]
+        raw = data.get('video_raw_url') if data.get('video_raw_source') == source else None
+        raw = raw or await generate_video_from_avatar(image_url, mode=mode, people_count=people_count)
         if is_video_placeholder(raw):
             return raw
-        data.update(video_raw_source=image_url, video_raw_url=raw)
+        data.update(video_raw_source=source, video_raw_url=raw)
         key = [VIDEO_MERGE_POLICY, raw, audio_url]
         if data.get('video_merged_source') != key or not data.get('video_merged_url'):
             data['video_merged_url'] = await merge_video_and_audio(raw, audio_url)
@@ -1211,7 +1218,8 @@ def create_router(
                     result = job.get('result_url')
                     if not result:
                         # Второй аргумент — песня для адаптера, а не промпт Kling.
-                        result = await cartoon_video_generator(job['avatar_url'], job['song_url'])
+                        result = (await generate_video(job['avatar_url'], job['song_url'], mode=job.get('mode') or '')
+                                  if default_cartoon_video else await cartoon_video_generator(job['avatar_url'], job['song_url']))
                         if is_video_placeholder(result) or not isinstance(result, str) or not result.startswith('https://'):
                             raise ValueError('Видеосервис пока не вернул готовое видео.')
                         await save_pending_video_result(job['id'], result)
@@ -1789,7 +1797,8 @@ def create_router(
                 if (await context.get_data()).get('cartoon_session_id') != data.get('cartoon_session_id'):
                     return
                 if is_video_placeholder(result):
-                    await save_pending_video(event.get_ids()[1], data['chosen_avatar'], data.get('video_song_url') or song_url)
+                    await save_pending_video(event.get_ids()[1], data['chosen_avatar'], data.get('video_song_url') or song_url,
+                                             mode=data.get('cartoon_mode') or '')
                     await _reply(event, PENDING_VIDEO_MESSAGE, attachments=[main_keyboard()])
                     await context.set_state(PosterStates.waiting_for_mode)
                     return
@@ -2158,7 +2167,7 @@ def create_router(
                     image_url = (video_data.get('video_source_image') or video_data.get('chosen_avatar')
                                  or (video_data.get('photo') or {}).get('url'))
                     song_url = video_data.get('chosen_song_url') or video_data.get('video_song_url') or ''
-                    await save_pending_video(event.get_ids()[1], image_url, song_url)
+                    await save_pending_video(event.get_ids()[1], image_url, song_url, mode=video_data.get('mode') or '')
                     await _reply(event, PENDING_VIDEO_MESSAGE, attachments=[main_keyboard()])
                     await context.set_state(PosterStates.waiting_for_mode)
                     return

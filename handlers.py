@@ -5,7 +5,7 @@ import logging
 import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from urllib.parse import unquote, urlencode
+from urllib.parse import unquote, urlencode, urlsplit
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
@@ -40,6 +40,7 @@ from database import (
     get_users_for_reminder, get_audio_order, create_audio_order, find_gift_preview_order,
     update_audio_order, grant_audio_admin_access, request_audio_regeneration,
     set_song_promo, check_song_promo, song_checkout_order, latest_gift_preview, claim_audio_order,
+    save_pending_video, get_all_pending_videos, mark_video_completed, save_pending_video_result,
 )
 from prodamus import PACKAGES, ProdamusPayments
 from audio_service import generate_song, wait_for_song, wait_for_song_result, make_protected_preview, TEACHER_SCENARIO_TITLE, song_tracks, build_song_request, write_song_lyrics, validate_song_arguments, InvalidSongArguments, AudioNotConfigured, SongFailed
@@ -745,6 +746,26 @@ async def generate_video(avatar_url: str, song_url: str) -> str:
     return await generate_video_from_avatar(avatar_url)
 
 
+PENDING_VIDEO_MESSAGE = (
+    '🎬 Видео-сервис временно настраивается. Мы сохранили ваш аватар и песню! '
+    'Как только сервис заработает, мы автоматически создадим и пришлем вам видео. '
+    'Вам не нужно ничего делать заново.'
+)
+
+
+def is_video_placeholder(result) -> bool:
+    if not isinstance(result, str):
+        return False
+    lower = result.lower()
+    if any(marker in lower for marker in ('заглушка', 'видеосервис будет подключ', 'тестовая генерация')):
+        return True
+    try:
+        host = urlsplit(result).hostname or ''
+    except ValueError:
+        return False
+    return host == 'example.com' or host.endswith('.example.com')
+
+
 def create_router(
     generator: PosterGenerator = generate_vision_boards,
     *, payments: ProdamusPayments | None = None,
@@ -790,6 +811,7 @@ def create_router(
     router = Router()
     router.register_outer_middleware(UserActivityMiddleware())
     broadcast_lock = asyncio.Lock()
+    pending_video_lock = asyncio.Lock()
     # FSM изолирован по чату, а баланс общий для всех чатов пользователя.
     generation_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
     preview_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
@@ -1102,6 +1124,37 @@ def create_router(
             return
         # Сохраняем режим для «Ещё» и кэш результата для повторной отправки.
         await context.set_state(None)
+
+    @router.message_created(Command('process_pending_videos'))
+    async def process_pending_videos(event: MessageCreated):
+        if is_bot_message(event) or admin_user_id is None or event.get_ids()[1] != admin_user_id:
+            return
+        if pending_video_lock.locked():
+            await _reply(event, 'Отложенные видео уже обрабатываются. Дождитесь завершения.')
+            return
+        async with pending_video_lock:
+            jobs = await get_all_pending_videos()
+            await _reply(event, f'🎬 Начинаю обработку отложенных видео: {len(jobs)}.')
+            success = failed = 0
+            for job in jobs:
+                try:
+                    result = job.get('result_url')
+                    if not result:
+                        # Второй аргумент — песня для адаптера, а не промпт Kling.
+                        result = await cartoon_video_generator(job['avatar_url'], job['song_url'])
+                        if is_video_placeholder(result) or not isinstance(result, str) or not result.startswith('https://'):
+                            raise ValueError('Видеосервис пока не вернул готовое видео.')
+                        await save_pending_video_result(job['id'], result)
+                    sent = await event.bot.send_message(user_id=job['user_id'], text='🎬 Ваше видео готово: ' + result,
+                        attachments=[InlineKeyboardBuilder().row(LinkButton(text='⬇️ Скачать видео', url=result)).as_markup()])
+                    if sent is None:
+                        raise RuntimeError('MAX не подтвердил отправку видео.')
+                    await mark_video_completed(job['id'])
+                    success += 1
+                except Exception:
+                    failed += 1
+                    logger.exception('Ошибка отложенного видео %s для пользователя %s:', job['id'], job['user_id'])
+            await _reply(event, f'✅ Обработка видео завершена! Успешно: {success}, Ошибок: {failed}.')
 
     @router.message_created(Command("stats"))
     async def stats(event: MessageCreated) -> None:
@@ -1645,7 +1698,8 @@ def create_router(
             await event.ack(notification='Сначала выберите и одобрите аватар.')
             return
         await event.ack(notification='Песня выбрана.')
-        song_url = CARTOON_TEST_SONG_URL + '?' + urlencode({'scenario': song})
+        song_url = data.get('chosen_song_url') if data.get('chosen_song') == song else None
+        song_url = song_url or CARTOON_TEST_SONG_URL + '?' + urlencode({'scenario': song})
         await context.update_data(chosen_song=song, chosen_song_url=song_url)
         if admin_user_id is not None and event.get_ids()[1] == admin_user_id:
             await context.set_state(PosterStates.cartoon_generating)
@@ -1653,6 +1707,11 @@ def create_router(
             try:
                 result = await cartoon_video_generator(data['chosen_avatar'], song_url)
                 if (await context.get_data()).get('cartoon_session_id') != data.get('cartoon_session_id'):
+                    return
+                if is_video_placeholder(result):
+                    await save_pending_video(event.get_ids()[1], data['chosen_avatar'], song_url)
+                    await _reply(event, PENDING_VIDEO_MESSAGE, attachments=[main_keyboard()])
+                    await context.set_state(PosterStates.waiting_for_mode)
                     return
                 if not isinstance(result, str) or not result.startswith('https://'):
                     raise ValueError('PiAPI не вернул HTTPS-ссылку на видео.')
@@ -1912,6 +1971,14 @@ def create_router(
             try:
                 result = await video_generator(video_data)
                 if (await context.get_data()).get('video_generation_id') != generation_id:
+                    return
+                if is_video_placeholder(result):
+                    image_url = (video_data.get('video_source_image') or video_data.get('chosen_avatar')
+                                 or (video_data.get('photo') or {}).get('url'))
+                    song_url = video_data.get('chosen_song_url') or video_data.get('video_song_url') or ''
+                    await save_pending_video(event.get_ids()[1], image_url, song_url)
+                    await _reply(event, PENDING_VIDEO_MESSAGE, attachments=[main_keyboard()])
+                    await context.set_state(PosterStates.waiting_for_mode)
                     return
                 if not isinstance(result, str) or not result.startswith('https://'):
                     raise ValueError('Генератор видео не вернул HTTPS-ссылку.')

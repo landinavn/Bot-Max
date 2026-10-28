@@ -699,3 +699,41 @@ async def test_yclid_parameter_does_not_hide_first_campaign(credit_db, payload, 
     await credit_db.save_yclid(456, '2222')
     user = await credit_db.get_user(456)
     assert user['first_start_source'] == source and user['yclid'] == '2222'
+
+
+async def test_pending_video_queue_survives_init_and_filters_completed(credit_db):
+    first = await credit_db.save_pending_video(123, 'https://images.example/avatar.png', 'https://audio.example/song.mp3')
+    second = await credit_db.save_pending_video(456, 'https://images.example/other.png', 'https://audio.example/other.mp3')
+    await credit_db.save_pending_video_result(first, 'https://video.example/result.mp4')
+    await credit_db.init_db()
+    jobs = await credit_db.get_all_pending_videos()
+    assert [job['id'] for job in jobs] == [first, second]
+    assert jobs[0]['user_id'] == 123 and jobs[0]['avatar_url'] == 'https://images.example/avatar.png'
+    assert jobs[0]['song_url'] == 'https://audio.example/song.mp3'
+    assert jobs[0]['created_at'] and jobs[0]['status'] == 'pending'
+    assert jobs[0]['result_url'] == 'https://video.example/result.mp4'
+    await credit_db.mark_video_completed(first)
+    await credit_db.mark_video_completed(first)
+    await credit_db.init_db()
+    assert [job['id'] for job in await credit_db.get_all_pending_videos()] == [second]
+
+
+async def test_pending_video_repeated_concurrent_save_is_deduplicated(credit_db):
+    ids = await asyncio.gather(*(credit_db.save_pending_video(123, 'https://images.example/a.png', 'https://audio.example/a.mp3') for _ in range(12)))
+    assert len(set(ids)) == 1
+    assert len(await credit_db.get_all_pending_videos()) == 1
+    # Завершённый заказ не подавляет новую заявку на те же исходники.
+    await credit_db.mark_video_completed(ids[0])
+    assert await credit_db.save_pending_video(123, 'https://images.example/a.png', 'https://audio.example/a.mp3') != ids[0]
+
+
+async def test_pending_video_adds_delivery_cache_to_requested_legacy_schema(credit_db):
+    import aiosqlite
+    async with aiosqlite.connect(credit_db.DATABASE_PATH) as db:
+        await db.execute('DROP TABLE pending_videos')
+        await db.execute("CREATE TABLE pending_videos(id INTEGER PRIMARY KEY, user_id INTEGER, avatar_url TEXT, song_url TEXT, status TEXT DEFAULT 'pending', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+        await db.execute("INSERT INTO pending_videos(user_id, avatar_url, song_url) VALUES (123, 'https://images.example/a.png', 'https://audio.example/a.mp3')")
+        await db.commit()
+    await credit_db.init_db()
+    jobs = await credit_db.get_all_pending_videos()
+    assert jobs[0]['user_id'] == 123 and jobs[0]['result_url'] is None

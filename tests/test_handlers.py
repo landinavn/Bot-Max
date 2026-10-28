@@ -4838,7 +4838,7 @@ async def test_second_avatar_rejection_notifies_admin_once_with_client_id(credit
 @pytest.mark.parametrize('entry', ['cat_cartoon', 'cat_cartoon_long'])
 @pytest.mark.parametrize('admin_id', [456, None])
 async def test_cartoon_admin_bypass_calls_video_stub_with_approved_avatar_and_song_url(credit_db, entry, admin_id):
-    video = AsyncMock(return_value='https://example.com/test-result.mp4')
+    video = AsyncMock(return_value='https://video.example/test-result.mp4')
     router = create_router(avatar_generator=AsyncMock(return_value='https://cdn.example/avatar.png'),
                            cartoon_video_generator=video, admin_user_id=admin_id)
     context = await ready_context()
@@ -4850,7 +4850,7 @@ async def test_cartoon_admin_bypass_calls_video_stub_with_approved_avatar_and_so
     if admin_id == 456:
         video.assert_awaited_once_with('https://cdn.example/avatar.png', handlers.CARTOON_TEST_SONG_URL + '?scenario=audio_fun_friend')
         assert result.send.await_args_list[0].args[0] == '👑 Режим администратора: Оплата пропущена...'
-        assert 'https://example.com/test-result.mp4' in result.send.await_args_list[1].args[0]
+        assert 'https://video.example/test-result.mp4' in result.send.await_args_list[1].args[0]
         assert not any('payform.ru' in str(call) for call in result.send.await_args_list)
         assert await context.get_state() == PosterStates.waiting_for_mode
     else:
@@ -5495,3 +5495,154 @@ async def test_cancel_during_piapi_does_not_restore_old_card_flow(credit_db, pia
     assert await context.get_state() == PosterStates.waiting_for_mode
     assert not (await context.get_data()).get('video_source_image')
     assert 'https://video.example/late.mp4' not in str(event.send.await_args_list)
+
+
+@pytest.mark.parametrize('result', ['https://example.com/cartoon-test-video.mp4', 'Это заглушка; видеосервис будет подключён позже.'])
+async def test_cartoon_placeholder_is_persisted_before_promising_later_delivery(credit_db, result):
+    video = AsyncMock(return_value=result)
+    router = create_router(admin_user_id=456, avatar_generator=AsyncMock(return_value='https://cdn.example/avatar.png'), cartoon_video_generator=video)
+    context = await ready_context()
+    await start_cartoon(router, context)
+    await call_handler(router, 'collect_cartoon_photo', cartoon_photo(), context)
+    await dispatch_callback(router, callback_event('avatar_ok_1'), context)
+    event = callback_event('cartoon_song:audio_fun_ny')
+    await dispatch_callback(router, event, context)
+    jobs = await credit_db.get_all_pending_videos()
+    assert len(jobs) == 1
+    assert jobs[0]['avatar_url'] == 'https://cdn.example/avatar.png' and jobs[0]['user_id'] == 456
+    assert jobs[0]['song_url'] == video.await_args.args[1]
+    assert event.send.await_args.args[0] == handlers.PENDING_VIDEO_MESSAGE
+    assert await context.get_state() == PosterStates.waiting_for_mode
+    assert 'Скачать видео' not in str(event.send.await_args_list)
+
+
+async def test_card_placeholder_preserves_image_and_song_in_queue(credit_db):
+    router = create_router(admin_user_id=456, video_generator=AsyncMock(return_value='https://example.com/test-video.mp4'))
+    context = await ready_context()
+    await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png', chosen_song_url='https://audio.example/song.mp3')
+    await dispatch_callback(router, callback_event('upsell_animate'), context)
+    event = callback_event('video_song:audio_fun_ny')
+    await dispatch_callback(router, event, context)
+    jobs = await credit_db.get_all_pending_videos()
+    assert len(jobs) == 1 and jobs[0]['avatar_url'] == 'https://cdn.example/card.png'
+    assert jobs[0]['song_url'] == 'https://audio.example/song.mp3'
+    assert event.send.await_args.args[0] == handlers.PENDING_VIDEO_MESSAGE
+
+
+@pytest.mark.parametrize('admin_id,actor', [(None, 456), (999, 456)])
+async def test_process_pending_videos_is_admin_only(credit_db, admin_id, actor):
+    generate = AsyncMock()
+    event = message_event('/process_pending_videos')
+    event.get_ids = lambda: (123, actor)
+    await credit_db.save_pending_video(123, 'https://images.example/a.png', 'https://audio.example/a.mp3')
+    await call_handler(create_router(admin_user_id=admin_id, cartoon_video_generator=generate), 'process_pending_videos', event)
+    generate.assert_not_awaited()
+    event.bot.send_message.assert_not_awaited()
+    event.message.answer.assert_not_awaited()
+
+
+async def test_process_pending_videos_continues_after_failure_and_marks_only_delivered(credit_db, caplog):
+    first = await credit_db.save_pending_video(123, 'https://images.example/a.png', 'https://audio.example/a.mp3')
+    await credit_db.save_pending_video(789, 'https://images.example/b.png', 'https://audio.example/b.mp3')
+    generate = AsyncMock(side_effect=[RuntimeError('PiAPI unavailable'), 'https://video.example/b.mp4'])
+    event = message_event('/process_pending_videos')
+    await call_handler(create_router(admin_user_id=456, cartoon_video_generator=generate), 'process_pending_videos', event)
+    assert generate.await_args_list == [call('https://images.example/a.png', 'https://audio.example/a.mp3'), call('https://images.example/b.png', 'https://audio.example/b.mp3')]
+    event.bot.send_message.assert_awaited_once()
+    assert event.bot.send_message.await_args.kwargs['user_id'] == 789
+    assert [job['id'] for job in await credit_db.get_all_pending_videos()] == [first]
+    assert 'Успешно: 1, Ошибок: 1' in event.message.answer.await_args.args[0]
+    assert any(record.exc_info and 'Ошибка отложенного видео' in record.message for record in caplog.records)
+
+
+async def test_pending_video_failed_delivery_reuses_result_after_restart(credit_db):
+    await credit_db.save_pending_video(123, 'https://images.example/a.png', 'https://audio.example/a.mp3')
+    generate = AsyncMock(return_value='https://video.example/a.mp4')
+    event = message_event('/process_pending_videos')
+    event.bot.send_message.side_effect = RuntimeError('MAX unavailable')
+    await call_handler(create_router(admin_user_id=456, cartoon_video_generator=generate), 'process_pending_videos', event)
+    assert (await credit_db.get_all_pending_videos())[0]['result_url'] == 'https://video.example/a.mp4'
+    await credit_db.init_db()
+    retry = message_event('/process_pending_videos')
+    await call_handler(create_router(admin_user_id=456, cartoon_video_generator=generate), 'process_pending_videos', retry)
+    generate.assert_awaited_once()
+    assert await credit_db.get_all_pending_videos() == []
+    assert 'https://video.example/a.mp4' in retry.bot.send_message.await_args.kwargs['text']
+
+
+async def test_pending_video_placeholder_is_never_completed_or_sent(credit_db):
+    await credit_db.save_pending_video(123, 'https://images.example/a.png', 'https://audio.example/a.mp3')
+    event = message_event('/process_pending_videos')
+    await call_handler(create_router(admin_user_id=456, cartoon_video_generator=AsyncMock(return_value='https://example.com/test.mp4')), 'process_pending_videos', event)
+    event.bot.send_message.assert_not_awaited()
+    assert len(await credit_db.get_all_pending_videos()) == 1
+
+
+async def test_process_pending_videos_empty_queue_reports_zero(credit_db):
+    event = message_event('/process_pending_videos')
+    await call_handler(create_router(admin_user_id=456), 'process_pending_videos', event)
+    assert 'Успешно: 0, Ошибок: 0' in event.message.answer.await_args.args[0]
+    event.bot.send_message.assert_not_awaited()
+
+
+async def test_process_pending_video_uses_real_piapi_adapter_without_song_as_prompt(credit_db, monkeypatch, piapi_animation):
+    await credit_db.save_pending_video(123, 'https://images.example/a.png', 'https://audio.example/a.mp3')
+    event = message_event('/process_pending_videos')
+    await call_handler(create_router(admin_user_id=456), 'process_pending_videos', event)
+    piapi_animation.assert_awaited_once_with('https://images.example/a.png')
+    assert await credit_db.get_all_pending_videos() == []
+
+
+async def test_process_pending_videos_serializes_repeated_admin_commands(credit_db):
+    import asyncio
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def generate(*args):
+        entered.set()
+        await release.wait()
+        return 'https://video.example/a.mp4'
+    await credit_db.save_pending_video(123, 'https://images.example/a.png', 'https://audio.example/a.mp3')
+    router = create_router(admin_user_id=456, cartoon_video_generator=generate)
+    first, second = message_event('/process_pending_videos'), message_event('/process_pending_videos')
+    task = asyncio.create_task(call_handler(router, 'process_pending_videos', first))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        await call_handler(router, 'process_pending_videos', second)
+        assert 'уже обрабатываются' in second.message.answer.await_args.args[0]
+    finally:
+        release.set()
+        await task
+    first.bot.send_message.assert_awaited_once()
+    second.bot.send_message.assert_not_awaited()
+
+
+async def test_cartoon_queue_preserves_existing_song_url(credit_db):
+    router = create_router(admin_user_id=456, avatar_generator=AsyncMock(return_value='https://cdn.example/avatar.png'),
+                           cartoon_video_generator=AsyncMock(return_value='https://example.com/test.mp4'))
+    context = await ready_context()
+    await start_cartoon(router, context)
+    await call_handler(router, 'collect_cartoon_photo', cartoon_photo(), context)
+    await dispatch_callback(router, callback_event('avatar_ok_1'), context)
+    await context.update_data(chosen_song='audio_fun_ny', chosen_song_url='https://audio.example/real-track.mp3')
+    await dispatch_callback(router, callback_event('cartoon_song:audio_fun_ny'), context)
+    assert (await credit_db.get_all_pending_videos())[0]['song_url'] == 'https://audio.example/real-track.mp3'
+
+
+async def test_failed_queue_save_never_promises_delivery(credit_db, monkeypatch):
+    monkeypatch.setattr(handlers, 'save_pending_video', AsyncMock(side_effect=RuntimeError('DB unavailable')))
+    router = create_router(admin_user_id=456, video_generator=AsyncMock(return_value='Это заглушка'))
+    context = await ready_context()
+    await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png')
+    await dispatch_callback(router, callback_event('upsell_animate'), context)
+    event = callback_event('video_song:audio_fun_ny')
+    await dispatch_callback(router, event, context)
+    assert handlers.PENDING_VIDEO_MESSAGE not in str(event.send.await_args_list)
+    assert await context.get_state() == PosterStates.waiting_for_video_song
+
+
+async def test_pending_video_none_delivery_confirmation_keeps_job_pending(credit_db):
+    await credit_db.save_pending_video(123, 'https://images.example/a.png', 'https://audio.example/a.mp3')
+    event = message_event('/process_pending_videos')
+    event.bot.send_message.return_value = None
+    await call_handler(create_router(admin_user_id=456), 'process_pending_videos', event)
+    assert len(await credit_db.get_all_pending_videos()) == 1
+    assert 'Успешно: 0, Ошибок: 1' in event.message.answer.await_args.args[0]

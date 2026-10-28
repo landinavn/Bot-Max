@@ -2184,7 +2184,8 @@ CATEGORY_EXPECTATIONS = {
     "sub_bday": ([29, 27, 21], ["mode_bday_young", "mode_bday_old", "mode_bday_old_elegant", "mode_modern_card", "back_to_cards"]),
     "sub_halloween": ([26], ["mode_halloween", "back_to_cards"]),
     "sub_goodmorning": ([20], ["mode_goodmorning", "back_to_cards"]),
-    "cat_photo": (["photo_main_1.webp", "photo_main_2.webp", "photo_main_3.webp"], ["photo_style_studio", "photo_style_walk", "photo_style_ny", "back_to_main"]),
+    "cat_photo": (["photo_main_1.webp", "photo_main_2.webp", "photo_main_3.webp"], ["photo_style_ny", "photo_style_studio", "photo_style_walk", "back_to_main"]),
+    "cat_meditation": ([], ["back_to_main"]),
     "cat_audio": ([], ["audio_tariff_fun", "audio_tariff_gift", "back_to_main"]),
 }
 
@@ -2303,7 +2304,7 @@ async def test_navigation_only_counts_interest_clicks(credit_db, example_photos)
     for payload in [*CATEGORY_EXPECTATIONS, "back_to_main", "back_to_cards", "cat_photo", "cat_audio", "cat_photo"]:
         await dispatch_callback(router, callback_event(payload), context)
     counters = await credit_db.get_all_counters()
-    assert counters == {"gen_vision": 1, "click_photo": 3, "click_audio": 2}
+    assert counters == {"gen_vision": 1, "click_photo": 3, "click_audio": 2, "click_meditation": 1}
     assert dict(await credit_db.get_user(456)) == before
     assert await credit_db.get_global_stats() == before_stats
 
@@ -2311,18 +2312,21 @@ async def test_navigation_only_counts_interest_clicks(credit_db, example_photos)
 async def test_stats_interest_counts_per_user_and_excludes_admin(credit_db, example_photos):
     router = create_router(admin_user_id=456)
     for uid, payload in [(101, "cat_photo"), (101, "cat_photo"), (102, "cat_audio"),
-                         (456, "cat_photo"), (456, "cat_audio")]:
+                         (456, "cat_photo"), (456, "cat_audio"),
+                         (101, "cat_meditation"), (101, "cat_meditation"), (456, "cat_meditation")]:
         event = callback_event(payload)
         event.get_ids = lambda uid=uid: (123, uid)
         await dispatch_callback(router, event, await ready_context())
-    assert await credit_db.get_all_counters() == {"click_photo": 3, "click_audio": 2}
+    assert await credit_db.get_all_counters() == {"click_photo": 3, "click_audio": 2, "click_meditation": 3}
     filtered = await credit_db.get_all_counters(admin_id=456)
     assert filtered["click_photo"] == 2 and filtered["click_audio"] == 1
+    assert filtered["click_meditation"] == 2
     assert filtered["gen_unclassified"] == 0
     event = message_event("/stats")
     await call_handler(router, "stats", event)
     text = event.message.answer.await_args.args[0]
     assert "🖱 Интерес к новым разделам:\n- Фотосессия (клики): 2\n- Аудиопесни (клики): 1" in text
+    assert "- Медитации (клики): 2" in text
     assert text.index("🖼 Всего сгенерировано картинок:") < text.index("🖱 Интерес к новым разделам:") < text.index("📍 Источники")
     assert "🖼 Всего сгенерировано картинок: 0" in text
     assert "8 Марта" not in text
@@ -2487,8 +2491,8 @@ async def test_photo_style_tariff_preview_has_no_payment_or_generation(credit_db
     )
     buttons = category.send.await_args.kwargs["attachments"][0].payload.buttons
     assert [(row[0].text, row[0].payload) for row in buttons] == [
-        ("🏙 Студия", "photo_style_studio"), ("🌳 Прогулка", "photo_style_walk"),
-        ("🎄 Новогодняя", "photo_style_ny"), ("⬅️ Назад", "back_to_main"),
+        ("🎄 Новогодняя", "photo_style_ny"), ("🏙 Студия", "photo_style_studio"),
+        ("🌳 Прогулка", "photo_style_walk"), ("⬅️ Назад", "back_to_main"),
     ]
     event = callback_event(style)
     await dispatch_callback(router, event, context)
@@ -3133,7 +3137,7 @@ async def test_photo_album_failure_keeps_navigation(credit_db, example_photos, f
         event.send.side_effect = [RuntimeError("send failed"), object()]
     await dispatch_callback(create_router(), event, await ready_context())
     assert event.send.await_args.kwargs["text"] == handlers.CATEGORY_MENUS["cat_photo"][1]
-    assert event.send.await_args.kwargs["attachments"][0].payload.buttons[0][0].payload == "photo_style_studio"
+    assert event.send.await_args.kwargs["attachments"][0].payload.buttons[0][0].payload == "photo_style_ny"
 
 
 @pytest.mark.parametrize('entry', ['start', 'bot_started'])

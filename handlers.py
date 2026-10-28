@@ -224,10 +224,11 @@ PHOTO_FAMILY_EXAMPLE_FILES = (
 )
 
 CATEGORY_BUTTONS = (
-    ("🖼 Карта Желаний", "cat_vision"),
-    ("🎁 Открытки", "cat_cards"),
     ("📸 Фотосессия", "cat_photo"),
     ("🎵 Аудиопесни", "cat_audio"),
+    ("🎁 Открытки", "cat_cards"),
+    ("🖼 Карта Желаний", "cat_vision"),
+    ("🧘 Медитации на исполнение желаний", "cat_meditation"),
 )
 
 # Файлы, текст и кнопки каждого экрана. mode_* остаются текущими входами в FSM.
@@ -332,11 +333,17 @@ CATEGORY_MENUS = {
             "👇 Выбери стиль, который тебе интересен:"
         ),
         (
+            ("🎄 Новогодняя", "photo_style_ny"),
             ("🏙 Студия", "photo_style_studio"),
             ("🌳 Прогулка", "photo_style_walk"),
-            ("🎄 Новогодняя", "photo_style_ny"),
             ("⬅️ Назад", "back_to_main"),
         ),
+    ),
+    "cat_meditation": (
+        (),
+        "🧘‍♀️ Медитации на исполнение желаний\n\n"
+        "Этот раздел уже в разработке! Скоро вы сможете слушать аудио-медитации и настраиваться на исполнение мечт. Следите за обновлениями! 🚀",
+        (("⬅️ Назад", "back_to_main"),),
     ),
     "cat_audio": (
         (),
@@ -1027,7 +1034,8 @@ def create_router(
             f"- Фотосессия (клики): {counters.get('click_photo', 0)}\n"
             f"- Аудиопесни (клики): {counters.get('click_audio', 0)}\n"
             f"- Песня по фану (199 ₽): {counters.get('click_audio_fun', 0)}\n"
-            f"- Песня в подарок (490 ₽): {counters.get('click_audio_gift', 0)}\n\n"
+            f"- Песня в подарок (490 ₽): {counters.get('click_audio_gift', 0)}\n"
+            f"- Медитации (клики): {counters.get('click_meditation', 0)}\n\n"
             "🎵 Интерес к Аудиопесням (сценарии):\n"
             + "\n".join(
                 f"- {label}: {counters.get('audio_scen_' + payload.removeprefix('audio_fun_'), 0)}"
@@ -1286,7 +1294,8 @@ def create_router(
         await context.set_state(PosterStates.waiting_for_mode)
         screen = "cat_cards" if event.callback.payload == "back_to_cards" else event.callback.payload
         filenames, text, buttons = CATEGORY_MENUS[screen]
-        interest_event = {"cat_photo": "click_photo", "cat_audio": "click_audio"}.get(screen)
+        interest_event = {"cat_photo": "click_photo", "cat_audio": "click_audio",
+                          "cat_meditation": "click_meditation"}.get(screen)
         user_id = event.get_ids()[1]
         if interest_event is not None and user_id is not None:
             await increment_counter(interest_event, user_id=user_id)

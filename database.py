@@ -69,6 +69,21 @@ async def init_db() -> None:
             )"""
         )
         await db.execute(
+            """CREATE TABLE IF NOT EXISTS pending_videos (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                avatar_url TEXT NOT NULL,
+                song_url TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'completed')),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                result_url TEXT
+            )"""
+        )
+        async with db.execute('PRAGMA table_info(pending_videos)') as cursor:
+            pending_columns = {row[1] for row in await cursor.fetchall()}
+        if 'result_url' not in pending_columns:
+            await db.execute('ALTER TABLE pending_videos ADD COLUMN result_url TEXT')
+        await db.execute(
             """CREATE TABLE IF NOT EXISTS audio_orders (
                 order_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL,
                 audio_format TEXT NOT NULL CHECK(audio_format IN ('fun', 'gift')),
@@ -201,6 +216,49 @@ async def init_db() -> None:
                    SELECT user_id, 'buy_3_promo', COUNT(*) FROM payment_orders
                    WHERE status = 'paid' AND package_id = 'promo_3' GROUP BY user_id"""
             )
+        await db.commit()
+
+
+async def save_pending_video(user_id: int, avatar_url: str, song_url: str) -> int:
+    """Сохранить данные до ответа клиенту; повторное нажатие не дублирует pending-заказ."""
+    if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
+        raise ValueError('Некорректный user_id видео.')
+    if not isinstance(avatar_url, str) or not avatar_url.startswith('https://'):
+        raise ValueError('Не задана HTTPS-ссылка на аватар.')
+    if not isinstance(song_url, str):
+        raise ValueError('Некорректная ссылка на песню.')
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        await db.execute('BEGIN IMMEDIATE')
+        async with db.execute(
+            "SELECT id FROM pending_videos WHERE user_id=? AND avatar_url=? AND song_url=? AND status='pending' ORDER BY id LIMIT 1",
+            (user_id, avatar_url, song_url),
+        ) as cursor:
+            existing = await cursor.fetchone()
+        if existing:
+            return existing[0]
+        cursor = await db.execute('INSERT INTO pending_videos(user_id, avatar_url, song_url) VALUES (?, ?, ?)',
+                                  (user_id, avatar_url, song_url))
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def get_all_pending_videos() -> list[dict]:
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM pending_videos WHERE status='pending' ORDER BY id") as cursor:
+            return [dict(row) for row in await cursor.fetchall()]
+
+
+async def save_pending_video_result(video_id: int, result_url: str) -> None:
+    """Кеш результата: сбой отправки MAX не требует ещё одной платной генерации."""
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        await db.execute("UPDATE pending_videos SET result_url=? WHERE id=? AND status='pending'", (result_url, video_id))
+        await db.commit()
+
+
+async def mark_video_completed(video_id: int) -> None:
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        await db.execute("UPDATE pending_videos SET status='completed' WHERE id=? AND status='pending'", (video_id,))
         await db.commit()
 
 

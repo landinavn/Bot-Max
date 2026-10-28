@@ -27,7 +27,7 @@ async def test_submit_exact_custom_music_request_and_fetch():
         result = await service.fetch_song('job-1')
     calls = list(http.requests.values())
     assert calls[0][0].kwargs['json'] == {'custom': True, 'instrumental': False, 'mv': 'chirp-v6',
-        'prompt': 'Текст песни', 'title': 'Для Ани', 'tags': 'pop', 'audio_format': 'mp3'}
+        'prompt': 'Текст песни', 'title': 'Для Ани', 'tags': 'pop, start immediately with vocals, no long intro', 'audio_format': 'mp3'}
     assert calls[0][0].kwargs['headers']['TT-API-KEY'] == 'secret-test-ttapi'
     assert result['status'] == 'SUCCESS'
 
@@ -350,3 +350,42 @@ async def test_teacher_llm_system_prompt_demands_respectful_gratitude(monkeypatc
     assert 'на «Вы»' in system and 'терпение, поддержку и знания' in system
     assert ('Длина около 30 секунд' in system) == (kind == 'fun')
     assert 'Ирина Петровна' in body['messages'][1]['content']
+
+
+@pytest.mark.parametrize('duration,expected_start', [(40, '00:00:20'), (25, '00:00:05')])
+@respx.mock
+async def test_preview_seeks_into_vocals_instead_of_silent_intro(monkeypatch, tmp_path, duration, expected_start):
+    import array
+    import io
+    import math
+    import struct
+    import subprocess
+    import wave
+    import image_service
+    monkeypatch.setattr(service.Config, 'from_env', lambda: Config(token='test', photo_path=tmp_path, storage_bucket='preview-bucket'))
+    if not service.shutil.which('ffmpeg') or not service.shutil.which('ffprobe'):
+        pytest.skip('ffmpeg/ffprobe not installed')
+    start = 20 if duration >= 35 else 5
+    raw = io.BytesIO()
+    with wave.open(raw, 'wb') as wav:
+        wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(8000)
+        wav.writeframes(b'\0\0' * (8000*start))
+        wav.writeframes(b''.join(struct.pack('<h', int(5000*math.sin(2*math.pi*440*i/8000))) for i in range(8000*(duration-start))))
+    respx.get('https://cdn.example/full.mp3').respond(200, content=raw.getvalue())
+    storage = Mock()
+    monkeypatch.setattr(image_service, '_storage_client', lambda settings: storage)
+    original = service.asyncio.create_subprocess_exec
+    commands = []
+    async def record(*args, **kwargs):
+        commands.append(args)
+        return await original(*args, **kwargs)
+    monkeypatch.setattr(service.asyncio, 'create_subprocess_exec', record)
+    await service.make_protected_preview('https://cdn.example/full.mp3')
+    command = next(args for args in commands if '-ss' in args)
+    assert command[command.index('-ss')+1] == expected_start
+    assert command[command.index('-t')+1] == '00:00:15'
+    result = tmp_path/'preview.mp3'
+    result.write_bytes(storage.put_object.call_args.kwargs['Body'])
+    pcm = array.array('h', subprocess.check_output(['ffmpeg','-v','error','-i',str(result),'-ss','1','-t','1','-f','s16le','-ac','1','-ar','8000','-']))
+    assert max(abs(value) for value in pcm) > 2000
+    storage.close.assert_called_once()

@@ -24,6 +24,7 @@ def mock_music_composer_and_preview(monkeypatch):
     monkeypatch.setattr(handlers, 'wait_for_song', AsyncMock(return_value=result))
     monkeypatch.setattr(handlers, 'wait_for_song_result', AsyncMock(return_value=result))
     monkeypatch.setattr(handlers, 'make_protected_preview', AsyncMock(return_value='https://preview.example/clip.mp3'))
+    monkeypatch.setattr(handlers, 'merge_video_and_audio', AsyncMock(side_effect=lambda video, audio: video))
     monkeypatch.setattr(audio_orders, 'write_song_lyrics', writer)
     monkeypatch.setattr(audio_orders, 'make_protected_preview', AsyncMock(return_value='https://preview.example/clip.mp3'))
 

@@ -15,6 +15,7 @@ import httpx
 from openai import AsyncOpenAI
 
 from config import Config
+from media_service import audio_duration
 
 logger = logging.getLogger(__name__)
 
@@ -156,11 +157,14 @@ async def make_protected_preview(audio_url: str) -> str:
                             if total > 32 * 1024 * 1024:
                                 raise AudioServiceError('Слишком большой аудиофайл.')
                             file.write(chunk)
+            duration = await audio_duration(source)
+            start = '00:00:20' if duration >= 35 else ('00:00:05' if duration > 5 else '00:00:00')
+            logger.info('Превью песни: длительность %.2f с, начало %s.', duration, start)
             # Фильтр добавляет короткую звуковую метку каждые пять секунд.
             process = await asyncio.create_subprocess_exec(binary, '-nostdin', '-v', 'error', '-protocol_whitelist', 'file,pipe',
-                '-i', str(source), '-f', 'lavfi', '-i', 'sine=frequency=1100:duration=15',
+                '-ss', start, '-i', str(source), '-f', 'lavfi', '-i', 'sine=frequency=1100:duration=15',
                 '-filter_complex', "[0:a]atrim=0:15,asetpts=PTS-STARTPTS[a];[1:a]volume='if(lt(mod(t,5),0.7),0.5,0)':eval=frame[b];[a][b]amix=inputs=2:duration=first:normalize=0[out]",
-                '-map', '[out]', '-map_metadata', '-1', '-map_chapters', '-1', '-t', '15', '-codec:a', 'libmp3lame', '-b:a', '128k', '-y', str(target),
+                '-map', '[out]', '-map_metadata', '-1', '-map_chapters', '-1', '-t', '00:00:15', '-codec:a', 'libmp3lame', '-b:a', '128k', '-y', str(target),
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
             try:
                 await asyncio.wait_for(process.communicate(), timeout=60)
@@ -215,6 +219,9 @@ async def _request(method: str, path: str, **kwargs) -> dict:
 
 
 async def generate_song(prompt: str, tags: str, title: str) -> str:
+    validate_song_arguments(prompt, tags, title)
+    suffix = ', start immediately with vocals, no long intro'
+    tags = tags if tags.endswith(suffix) else tags + suffix
     validate_song_arguments(prompt, tags, title)
     result = await _request('POST', '/suno/v1/music', json={
         'custom': True, 'instrumental': False, 'mv': 'chirp-v6',

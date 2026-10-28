@@ -29,6 +29,7 @@ from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
 from config import DEFAULT_BOT_LINK, validate_bot_link
 from video_service import generate_video_from_avatar
+from media_service import merge_video_and_audio
 from metrika_service import extract_yclid, send_offline_conversion
 
 from database import (
@@ -742,8 +743,13 @@ def result_keyboard(url: str):
 
 
 async def generate_video(avatar_url: str, song_url: str) -> str:
-    """Оживить одобренный аватар. Наложение выбранной песни подключается отдельно."""
-    return await generate_video_from_avatar(avatar_url)
+    """Оживить аватар и склеить результат с уже готовой песней из очереди."""
+    if not song_url or is_video_placeholder(song_url):
+        raise ValueError('Для видео нужна готовая песня, а не тестовая ссылка.')
+    video_url = await generate_video_from_avatar(avatar_url)
+    if is_video_placeholder(video_url):
+        return video_url
+    return await merge_video_and_audio(video_url, song_url)
 
 
 PENDING_VIDEO_MESSAGE = (
@@ -751,6 +757,13 @@ PENDING_VIDEO_MESSAGE = (
     'Как только сервис заработает, мы автоматически создадим и пришлем вам видео. '
     'Вам не нужно ничего делать заново.'
 )
+
+
+def video_cache(data):
+    keys = ('video_raw_source', 'video_raw_url', 'video_song_source', 'video_song_url',
+            'video_song_job_source', 'video_song_job_id', 'video_song_lyrics',
+            'video_merged_source', 'video_merged_url')
+    return {key: data[key] for key in keys if key in data}
 
 
 def is_video_placeholder(result) -> bool:
@@ -781,7 +794,47 @@ def create_router(
     cartoon_video_generator: Callable[[str, str], Awaitable[str]] | None = None,
 ) -> Router:
     avatar_generator = avatar_generator or generate_cartoon_avatar
+    default_cartoon_video = cartoon_video_generator is None
     cartoon_video_generator = cartoon_video_generator or generate_video
+
+    async def prepare_video_song(data, scenario):
+        details = (data.get('video_teacher_details') or data.get('song_details') or data.get('card_text')
+                   or data.get('teacher_info') or data.get('coach_info') or 'Пожелания счастья, радости и исполнения мечты')
+        source = [scenario, details]
+        if data.get('video_song_source') == source and data.get('video_song_url'):
+            return data['video_song_url']
+        existing = data.get('chosen_song_url') if data.get('chosen_song') == scenario else None
+        if existing and not is_video_placeholder(existing):
+            data.update(video_song_source=source, video_song_url=existing)
+            return existing
+        if data.get('video_song_job_source') != source or not data.get('video_song_job_id'):
+            label = VIDEO_SONG_SCENARIOS[scenario][0]
+            notes, tags, title = build_song_request(details, label, 'fun')
+            lyrics = data.get('video_song_lyrics') if scenario == 'audio_video_teacher' else None
+            lyrics = lyrics or await lyric_writer(notes, tags, title)
+            validate_song_arguments(lyrics, tags, title)
+            data.update(video_song_job_source=source, video_song_lyrics=lyrics, video_song_job_id=None)
+            data['video_song_job_id'] = await song_generator(lyrics, tags, title)
+        result = await song_waiter(data['video_song_job_id'])
+        audio_url = song_tracks(result)[0]['audioUrl']
+        if is_video_placeholder(audio_url):
+            raise ValueError('TTAPI вернул тестовую ссылку вместо песни.')
+        data.update(video_song_source=source, video_song_url=audio_url)
+        return audio_url
+
+    async def render_video_with_song(data, image_url, scenario):
+        audio_url = await prepare_video_song(data, scenario)
+        raw = data.get('video_raw_url') if data.get('video_raw_source') == image_url else None
+        raw = raw or await generate_video_from_avatar(image_url)
+        if is_video_placeholder(raw):
+            return raw
+        data.update(video_raw_source=image_url, video_raw_url=raw)
+        key = [raw, audio_url]
+        if data.get('video_merged_source') != key or not data.get('video_merged_url'):
+            data['video_merged_url'] = await merge_video_and_audio(raw, audio_url)
+            data['video_merged_source'] = key
+        return data['video_merged_url']
+
     async def generate_card_video(data: dict) -> str:
         image_url = data.get('video_source_image')
         if not image_url:
@@ -799,7 +852,7 @@ def create_router(
                 raise ValueError('Генератор открытки не вернул HTTPS-ссылку.')
             image_url = urls[0]
             data['video_source_image'] = image_url
-        return await generate_video_from_avatar(image_url)
+        return await render_video_with_song(data, image_url, data['video_song_scenario'])
 
     video_generator = video_generator or generate_card_video
     lyric_writer = lyric_writer or write_song_lyrics
@@ -1705,11 +1758,13 @@ def create_router(
             await context.set_state(PosterStates.cartoon_generating)
             await _reply(event, '👑 Режим администратора: Оплата пропущена...')
             try:
-                result = await cartoon_video_generator(data['chosen_avatar'], song_url)
+                data.update(chosen_song=song, chosen_song_url=song_url)
+                result = (await render_video_with_song(data, data['chosen_avatar'], song) if default_cartoon_video else
+                          await cartoon_video_generator(data['chosen_avatar'], song_url))
                 if (await context.get_data()).get('cartoon_session_id') != data.get('cartoon_session_id'):
                     return
                 if is_video_placeholder(result):
-                    await save_pending_video(event.get_ids()[1], data['chosen_avatar'], song_url)
+                    await save_pending_video(event.get_ids()[1], data['chosen_avatar'], data.get('video_song_url') or song_url)
                     await _reply(event, PENDING_VIDEO_MESSAGE, attachments=[main_keyboard()])
                     await context.set_state(PosterStates.waiting_for_mode)
                     return
@@ -1725,6 +1780,9 @@ def create_router(
                     return
                 await context.set_state(PosterStates.waiting_for_cartoon_song)
                 await _reply(event, 'Не удалось создать видео. Подробности записаны в журнал. Выберите песню ещё раз.')
+            finally:
+                if (await context.get_data()).get('cartoon_session_id') == data.get('cartoon_session_id'):
+                    await context.update_data(**video_cache(data))
             return
         await context.set_state(PosterStates.waiting_for_cartoon_payment)
         price = product[1] // 100
@@ -1996,6 +2054,8 @@ def create_router(
             finally:
                 if video_data.get('video_source_image') and (await context.get_data()).get('video_generation_id') == generation_id:
                     await context.update_data(video_source_image=video_data['video_source_image'])
+                if (await context.get_data()).get('video_generation_id') == generation_id:
+                    await context.update_data(**video_cache(video_data))
             return
         price = data['video_amount_kopecks'] // 100
         text = ('Отлично! Мы создадим статичную открытку, оживим её (добавим анимацию) и наложим песню.\n\n'

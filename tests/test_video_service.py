@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -43,7 +43,10 @@ async def test_create_exact_kling_task_and_log(caplog):
 
 
 @respx.mock
-async def test_poll_processing_then_completed(fast_poll, caplog):
+async def test_poll_processing_then_completed(fast_poll, caplog, monkeypatch):
+    budget = Mock(wraps=asyncio.timeout)
+    monkeypatch.setattr(video.asyncio, 'timeout', budget)
+    monkeypatch.setattr(video, 'monotonic', Mock(side_effect=[1000, 1315, 1900]))
     route = respx.get(video.TASK_URL + '/task-123').mock(side_effect=[
         httpx.Response(200, json={'data': {'status': 'processing'}}),
         httpx.Response(200, json={'data': {'status': 'completed', 'output': {'video': 'https://video.example/result.mp4'}}}),
@@ -51,9 +54,12 @@ async def test_poll_processing_then_completed(fast_poll, caplog):
     with caplog.at_level(logging.INFO, logger=video.__name__):
         assert await video.poll_video_task('task-123') == 'https://video.example/result.mp4'
     assert route.call_count == 2
-    assert [call.args for call in fast_poll.await_args_list] == [(10,), (10,)]
+    assert [call.args for call in fast_poll.await_args_list] == [(15,), (15,)]
+    budget.assert_called_once_with(1200)
     assert all(call.request.headers['X-API-Key'] == 'test-piapi-secret' for call in route.calls)
     assert 'processing' in caplog.text and 'completed' in caplog.text and 'видео готово' in caplog.text
+    assert 'прошло 315 сек, осталось 885 сек' in caplog.text
+    assert 'прошло 900 сек, осталось 300 сек' in caplog.text
 
 
 @respx.mock

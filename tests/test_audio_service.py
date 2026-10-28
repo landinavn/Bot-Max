@@ -340,7 +340,7 @@ def test_teacher_song_notes_are_formal_and_use_right_duration(kind, duration):
 @respx.mock
 async def test_teacher_llm_system_prompt_demands_respectful_gratitude(monkeypatch, kind):
     monkeypatch.setattr(service.Config, 'from_env', lambda: Config(token='max', photo_path=Path('unused'), image_api_key='test-key'))
-    text = '[Verse 1]\nВаш труд хранит тепло\n[Chorus]\nСпасибо Вам\n[Verse 2]\nИрина Петровна, Вы дарите знания\n[Chorus]\nСпасибо Вам\n[Bridge]\nЗа терпение и поддержку\n[Chorus]\nСпасибо Вам'
+    text = '[Verse 1]\nВаш труд хранит тепло\n[Chorus]\nИван, лучший тренер по футболу\n[Verse 2]\nИрина Петровна, Вы дарите знания\n[Chorus]\nИван, лучший тренер по футболу\n[Bridge]\nЗа терпение и поддержку\n[Chorus]\nИван, лучший тренер по футболу'
     api = respx.post('https://api.openai.com/v1/chat/completions').mock(return_value=httpx.Response(200, json={
         'id': 'teacher', 'object': 'chat.completion', 'created': 1, 'model': 'gpt-4o-mini',
         'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': text}}]}))
@@ -413,3 +413,55 @@ def test_song_audio_url_never_falls_back_to_lyrics(result):
     with pytest.raises(service.AudioServiceError) as error:
         service.song_audio_url(result)
     assert 'PRIVATE LYRICS' not in str(error.value)
+
+
+CHORUS_CASES = [
+    ('🎤 Начальник года', 'fun', 'Сергей, лучший босс!'),
+    ('💖 Лучшая подруга', 'fun', 'Аня, ты моя сестра!'),
+    ('🐱 Гимн кота', 'fun', 'Барсик, самый крутой кот!'),
+    ('🎓 Вечный студент', 'fun', 'Иван, сдай сессию!'),
+    ('⏰ Поздравление на бегу', 'fun', 'Маша, с днём рождения!'),
+    ('🌀 Абсурдный мем', 'fun', 'Холодильник, ты мой герой!'),
+    ('🎄 Новогодняя', 'fun', 'С Новым годом, друзья!'),
+    ('🎂 День рождения', 'gift', 'Маша, будь счастлива!'),
+    ('💍 Годовщина / Свадьба', 'gift', 'Аня и Ваня, навсегда!'),
+    ('👵 Для родителей', 'gift', 'Мама, спасибо за всё!'),
+    ('🧸 Для ребёнка', 'gift', 'Саша, расти большой!'),
+    ('🤝 Для друга / подруги', 'gift', 'Игорь, ты лучший друг!'),
+    ('🎯 Свой вариант', 'gift', 'Лена, с юбилеем, сияй всегда!'),
+    ('🎄 Новогодняя', 'gift', 'С Новым годом, родные!'),
+    (service.TEACHER_SCENARIO_TITLE, 'gift', 'Иван, лучший тренер по футболу'),
+]
+
+
+@pytest.mark.parametrize('scenario,kind,phrase', CHORUS_CASES)
+@respx.mock
+async def test_every_song_scenario_passes_exact_chorus_phrase_to_llm(scenario, kind, phrase, monkeypatch):
+    monkeypatch.setattr(service.Config, 'from_env', lambda: Config(token='test', photo_path=Path('unused'), image_api_key='test-key'))
+    notes, tags, title = service.build_song_request(phrase, scenario, kind)
+    choruses = re.findall(r'\[Chorus\]\n(.*?)(?=\n\[|$)', notes, flags=re.S)
+    assert choruses == [phrase, phrase, phrase]
+    route = respx.post('https://api.openai.com/v1/chat/completions').respond(200, json={
+        'id': 'chorus', 'object': 'chat.completion', 'created': 1, 'model': 'gpt-4o-mini',
+        'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': notes}}]})
+    assert await service.write_song_lyrics(notes, tags, title) == notes
+    body = json.loads(route.calls[0].request.content)
+    assert json.loads(body['messages'][1]['content'])['required_chorus_phrase'] == phrase
+    assert 'CRITICAL REQUIREMENT: В припеве обязательно должна прозвучать фраза, которую ввел пользователь. Используй её дословно.' in body['messages'][0]['content']
+
+
+@pytest.mark.parametrize('mutation', ['case', 'punctuation', 'one_chorus', 'inline'])
+@respx.mock
+async def test_llm_rewording_or_missing_literal_chorus_is_rejected_before_suno(monkeypatch, mutation):
+    monkeypatch.setattr(service.Config, 'from_env', lambda: Config(token='test', photo_path=Path('unused'), image_api_key='test-key'))
+    phrase = 'Аня, ты моя сестра! ❤️'
+    notes, tags, title = service.build_song_request(phrase, '💖 Лучшая подруга', 'fun')
+    changed = {'case': notes.replace(phrase, phrase.lower()),
+               'punctuation': notes.replace(phrase, phrase.replace('!', '.')),
+               'one_chorus': notes.replace('[Chorus]\n' + phrase, '[Chorus]\nТы замечательный человек', 1),
+               'inline': notes.replace('[Chorus]\n', '[Chorus] ')}[mutation]
+    respx.post('https://api.openai.com/v1/chat/completions').respond(200, json={
+        'id': 'chorus', 'object': 'chat.completion', 'created': 1, 'model': 'gpt-4o-mini',
+        'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': changed}}]})
+    with pytest.raises(service.AudioServiceError, match='фразу припева'):
+        await service.write_song_lyrics(notes, tags, title)

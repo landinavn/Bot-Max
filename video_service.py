@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+from time import monotonic
 from urllib.parse import quote, urlsplit
 
 import httpx
@@ -11,7 +12,7 @@ from config import Config
 
 logger = logging.getLogger(__name__)
 TASK_URL = "https://api.piapi.ai/api/v1/task"
-POLL_INTERVAL = 10
+POLL_INTERVAL = 15
 REQUEST_TIMEOUT = 30
 DEFAULT_ANIMATION_PROMPT = "The character is smiling and blinking naturally"
 
@@ -86,14 +87,15 @@ async def create_video_task(image_url: str, prompt: str) -> str:
     return task_id
 
 
-async def poll_video_task(task_id: str, timeout: int = 300) -> str:
-    """Опрос каждые 10 секунд; общий таймаут включает ожидание HTTP."""
+async def poll_video_task(task_id: str, timeout: int = 1200) -> str:
+    """Опрос каждые 15 секунд, до 20 минут; общий таймаут включает ожидание HTTP."""
     if not isinstance(task_id, str) or not task_id.strip():
         raise ValueError("Не задан task_id PiAPI.")
     if timeout <= 0:
         raise ValueError("Таймаут PiAPI должен быть положительным.")
     key = _api_key()
-    logger.info("PiAPI: начинаю ожидание задачи %s", task_id)
+    started_at = monotonic()
+    logger.info("PiAPI: начинаю ожидание задачи %s (лимит %s секунд)", task_id, timeout)
     try:
         async with asyncio.timeout(timeout):
             async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT, trust_env=False) as client:
@@ -104,7 +106,10 @@ async def poll_video_task(task_id: str, timeout: int = 300) -> str:
                     if not isinstance(data, dict):
                         raise VideoServiceError("Нет data в ответе PiAPI.")
                     status = data.get("status")
-                    logger.info("PiAPI: задача %s, статус %s", task_id, status)
+                    elapsed = max(0, monotonic() - started_at)
+                    remaining = max(0, timeout - elapsed)
+                    logger.info("PiAPI: задача %s, статус %s, прошло %.0f сек, осталось %.0f сек",
+                                task_id, status, elapsed, remaining)
                     if status == "completed":
                         output = data.get("output")
                         video_url = output.get("video") if isinstance(output, dict) else None

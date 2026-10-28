@@ -932,10 +932,17 @@ async def test_postcard_requires_custom_text_and_uses_shared_balance(credit_db, 
         assert await context.get_state() is None
         offers = [call for call in event.message.answer.await_args_list if call.args and call.args[0] == handlers.SONG_UPSELL_TEXT]
         assert len(offers) == 1
+        video_offers = [call for call in event.message.answer.await_args_list if call.args and call.args[0] == handlers.VIDEO_UPSELL_TEXT]
+        assert len(video_offers) == 1
+        video_buttons = video_offers[0].kwargs['attachments'][0].payload.buttons
+        assert [row[0].payload for row in video_buttons[:2]] == ['upsell_animate', 'upsell_video']
+        assert video_buttons[2][0].text == '⬇️ Нет, просто скачать картинку'
+        assert video_buttons[2][0].url == 'https://cdn.example/card.png'
         assert await credit_db.check_song_promo(456)
         buttons = offers[0].kwargs['attachments'][0].payload.buttons
         assert [row[0].payload for row in buttons] == ['upsell_song_discount', 'dismiss_upsell']
     else:
+        assert not any(call.args and call.args[0] == handlers.VIDEO_UPSELL_TEXT for call in event.message.answer.await_args_list)
         assert not await credit_db.check_song_promo(456)
         handlers.send_offline_conversion.assert_not_awaited()
         postcard.assert_not_awaited()
@@ -4381,3 +4388,144 @@ async def test_gift_queue_then_worker_logs_actual_ttapi_start_and_all_arguments(
     assert 'Запускаю audio_service.generate_song для пользователя 456' in caplog.text
     assert 'job_id=diagnostic-job' in caplog.text
     assert saved['preview_delivered'] == 1
+
+
+@pytest.mark.parametrize('mode', ['mode_ny', 'mode_ny_family', 'mode_ny_cozy', 'mode_ny_fairytale', 'mode_ny_elegant',
+    'mode_bday_young', 'mode_bday_old', 'mode_bday_old_elegant', 'mode_modern_card', 'mode_halloween', 'mode_goodmorning'])
+async def test_video_299_reuses_card_fsm_but_never_generates_before_payment(credit_db, mode):
+    await credit_db.grant_free_trial(456)
+    cards, visions, songs = AsyncMock(), AsyncMock(), AsyncMock()
+    router = create_router(visions, postcard_generator=cards, song_generator=songs)
+    context = await ready_context()
+    await dispatch_callback(router, callback_event('cat_video'), context)
+    await dispatch_callback(router, callback_event('video_style:' + mode), context)
+    assert await context.get_state() == PosterStates.waiting_for_photo
+    assert (await context.get_data())['mode'] == mode
+    await call_handler(router, 'collect_photo', photo_event(), context)
+    assert await context.get_state() == PosterStates.waiting_for_card_text
+    text = message_event('Аня, с праздником!')
+    await call_handler(router, 'collect_card_text', text, context)
+    assert await context.get_state() == PosterStates.waiting_for_video_song
+    scenario_buttons = text.message.answer.await_args.kwargs['attachments'][0].payload.buttons
+    assert any(row[0].text == '🎤 Начальник года' for row in scenario_buttons)
+    assert any(row[0].text == '🎂 День рождения' for row in scenario_buttons)
+    pay = callback_event('video_song:gift_scen_bday')
+    await dispatch_callback(router, pay, context)
+    data = await context.get_data()
+    assert data['mode'] == mode and data['photo']['url'] and data['card_text'] == 'Аня, с праздником!'
+    assert data['video_song_scenario'] == 'gift_scen_bday' and data['video_amount_kopecks'] == 29900
+    assert await context.get_state() == PosterStates.waiting_for_video_payment
+    assert pay.send.await_args.args[0] == (
+        'Отлично! Мы создадим статичную открытку, оживим её (добавим анимацию) и наложим песню.\n\n'
+        'Стоимость видео-подарка — 299 ₽. Это волшебство займет около 5 минут, не закрывайте чат!')
+    button = pay.send.await_args.kwargs['attachments'][0].payload.buttons[0][0]
+    assert button.text == 'Оплатить 299 ₽ и создать видео' and button.url == 'https://link.payform.ru/'
+    cards.assert_not_awaited()
+    visions.assert_not_awaited()
+    songs.assert_not_awaited()
+    handlers.send_offline_conversion.assert_not_awaited()
+    assert (await credit_db.get_user(456))['balance'] == 1
+    assert (await credit_db.get_user(456))['total_generations'] == 0
+
+
+async def test_video_menu_first_and_matches_existing_style_labels(credit_db, example_photos):
+    first = handlers.main_keyboard().payload.buttons[0][0]
+    assert (first.text, first.payload) == ('🎬 Ожившая открытка (Видео) — Новинка 🔥', 'cat_video')
+    router, context = create_router(), await ready_context()
+    await context.update_data(photo={'url': 'old'}, card_text='old', audio_job_id='old')
+    entry = callback_event('cat_video')
+    await dispatch_callback(router, entry, context)
+    assert 'old' not in str(await context.get_data())
+    assert entry.send.await_args.args[0] == '🎬 Создаем настоящее видео-поздравление! Выберите стиль открытки:'
+    for screen, payload in [('cat_cards', 'cat_video'), ('sub_ny', 'video_style:sub_ny'), ('sub_bday', 'video_style:sub_bday')]:
+        event = callback_event(payload)
+        await dispatch_callback(router, event, context)
+        rows = event.send.await_args.kwargs['attachments'][0].payload.buttons
+        assert [row[0].text for row in rows] == [label for label, _ in handlers.CATEGORY_MENUS[screen][2]]
+        assert all(row[0].payload.startswith('video_style:') or row[0].payload == 'back_to_main' for row in rows)
+    await dispatch_callback(router, callback_event('video_style:cat_cards'), context)
+    assert (await context.get_data())['video_amount_kopecks'] == 29900
+    await dispatch_callback(router, callback_event('back_to_main'), context)
+    assert await context.get_data() == {}
+
+
+@pytest.mark.parametrize('payload,price', [('upsell_animate', 199), ('upsell_video', 249)])
+async def test_static_card_video_upsells_keep_source_and_do_not_generate(credit_db, payload, price):
+    context = await ready_context()
+    await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png',
+                              photo={'url': 'https://cdn.example/source.jpg'}, card_text='С праздником!')
+    cards, songs = AsyncMock(), AsyncMock()
+    router = create_router(postcard_generator=cards, song_generator=songs)
+    event = callback_event(payload)
+    await dispatch_callback(router, event, context)
+    first_reply = event.send.await_args_list[0]
+    assert ('Генерация анимации скоро появится' if price == 199 else 'Генерация видео с песней скоро появится') == first_reply.args[0]
+    button = first_reply.kwargs['attachments'][0].payload.buttons[0][0]
+    assert str(price) in button.text and button.url == 'https://link.payform.ru/'
+    data = await context.get_data()
+    assert data['video_source_image'] == 'https://cdn.example/card.png'
+    assert data['video_amount_kopecks'] == price * 100
+    if price == 249:
+        pay = callback_event('video_song:audio_fun_friend')
+        await dispatch_callback(router, pay, context)
+        assert (await context.get_data())['video_song_scenario'] == 'audio_fun_friend'
+        assert '249 ₽' in pay.send.await_args.args[0]
+    assert await context.get_state() == PosterStates.waiting_for_video_payment
+    cards.assert_not_awaited()
+    songs.assert_not_awaited()
+
+
+async def test_video_click_statistics_exclude_admin_and_never_increment_generations(credit_db):
+    router = create_router(admin_user_id=456)
+    for user_id in (101, 456):
+        context = await ready_context()
+        for payload in ('cat_video', 'upsell_animate', 'upsell_video'):
+            await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png')
+            event = callback_event(payload)
+            event.get_ids = lambda uid=user_id: (123, uid)
+            await dispatch_callback(router, event, context)
+    counters = await credit_db.get_all_counters()
+    assert counters == {'click_video_menu': 2, 'click_video_animate_199': 2, 'click_video_full_249': 2}
+    assert (await credit_db.get_global_stats())['total_generated'] == 0
+    event = message_event('/stats')
+    await call_handler(router, 'stats', event)
+    text = event.message.answer.await_args.args[0]
+    assert '- Видео — вход в меню: 1' in text
+    assert '- Анимация за 199 ₽ (клики): 1' in text
+    assert '- Видео с песней за 249 ₽ (клики): 1' in text
+
+
+@pytest.mark.parametrize('payload', ['video_style:mode_ny', 'video_song:gift_scen_bday', 'upsell_video', 'upsell_animate'])
+async def test_stale_video_buttons_are_safe_without_fsm(payload):
+    cards, songs = AsyncMock(), AsyncMock()
+    event = callback_event(payload)
+    await dispatch_callback(create_router(postcard_generator=cards, song_generator=songs), event, await ready_context())
+    event.ack.assert_awaited_once()
+    cards.assert_not_awaited()
+    songs.assert_not_awaited()
+
+
+async def test_video_offer_not_repeated_when_sharing_fails_after_card_delivery(credit_db):
+    await credit_db.add_credits(456, 2)
+    context = await ready_context()
+    await context.update_data(mode='mode_ny')
+    cards = AsyncMock(return_value=['https://cdn.example/card.png'])
+    router = create_router(postcard_generator=cards)
+    await call_handler(router, 'collect_photo', photo_event(), context)
+    event = message_event('С праздником!')
+    failed = False
+    async def reply(text=None, **kwargs):
+        nonlocal failed
+        if text == '👇 Хочешь поделиться с друзьями?' and not failed:
+            failed = True
+            raise RuntimeError('share message failed')
+        return object()
+    event.message.answer.side_effect = reply
+    await call_handler(router, 'collect_card_text', event, context)
+    assert await context.get_state() == PosterStates.waiting_for_card_text
+    retry = callback_event('postcard_retry')
+    await dispatch_callback(router, retry, context)
+    assert sum(call.args and call.args[0] == handlers.VIDEO_UPSELL_TEXT for call in event.message.answer.await_args_list) == 1
+    assert not any(call.args and call.args[0] == handlers.VIDEO_UPSELL_TEXT for call in retry.send.await_args_list)
+    cards.assert_awaited_once()
+    assert (await credit_db.get_user(456))['balance'] == 1

@@ -132,3 +132,24 @@ def test_ttapi_key_loads_dotenv_environment_and_is_hidden(tmp_path, monkeypatch)
     assert 'environment-test-key' not in repr(settings)
     monkeypatch.setenv('TTAPI_KEY', '  ')
     assert config.Config.from_env().ttapi_key is None
+
+
+def test_metrika_settings_from_dotenv_environment_and_hidden_token(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, 'BASE_DIR', tmp_path)
+    monkeypatch.setenv('MAX_BOT_TOKEN', 'max-test')
+    for key in ('YANDEX_METRIKA_COUNTER_ID', 'YANDEX_METRIKA_OAUTH_TOKEN'):
+        monkeypatch.delenv(key, raising=False)
+    (tmp_path / '.env').write_text('YANDEX_METRIKA_COUNTER_ID=123456\nYANDEX_METRIKA_OAUTH_TOKEN=test-secret\n')
+    settings = config.Config.from_env()
+    assert settings.yandex_metrika_counter_id == '123456'
+    assert settings.yandex_metrika_oauth_token == 'test-secret'
+    assert 'test-secret' not in repr(settings)
+    monkeypatch.setenv('YANDEX_METRIKA_COUNTER_ID', ' 654321 ')
+    monkeypatch.setenv('YANDEX_METRIKA_OAUTH_TOKEN', ' other-secret ')
+    settings = config.Config.from_env()
+    assert settings.yandex_metrika_counter_id == '654321'
+    assert settings.yandex_metrika_oauth_token == 'other-secret'
+    monkeypatch.setenv('YANDEX_METRIKA_COUNTER_ID', '')
+    monkeypatch.setenv('YANDEX_METRIKA_OAUTH_TOKEN', '')
+    assert config.Config.from_env().yandex_metrika_counter_id is None
+    assert config.Config.from_env().yandex_metrika_oauth_token is None

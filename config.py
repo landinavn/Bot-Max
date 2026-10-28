@@ -44,6 +44,8 @@ class Config:
     admin_user_id: int | None = None
     bot_link: str = DEFAULT_BOT_LINK
     ttapi_key: str | None = field(default=None, repr=False)
+    yandex_metrika_counter_id: str | None = None
+    yandex_metrika_oauth_token: str | None = field(default=None, repr=False)
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -69,6 +71,8 @@ class Config:
             photo_path=photo_path,
             image_api_key=image_api_key,
             ttapi_key=os.environ.get("TTAPI_KEY", "").strip() or None,
+            yandex_metrika_counter_id=os.environ.get("YANDEX_METRIKA_COUNTER_ID", "").strip() or None,
+            yandex_metrika_oauth_token=os.environ.get("YANDEX_METRIKA_OAUTH_TOKEN", "").strip() or None,
             image_model=image_model,
             admin_user_id=admin_user_id,
             bot_link=validate_bot_link(os.environ.get("BOT_LINK", "").strip() or DEFAULT_BOT_LINK),

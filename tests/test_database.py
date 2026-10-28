@@ -14,7 +14,7 @@ async def test_trial_is_atomic_under_concurrent_starts(credit_db):
         "first_start_source": None, "first_started_at": None,
         "is_active": 1, "days_active": 1, "last_active_at": None,
         "promo_expires_at": None, "promo_redeemed_at": None, "promo_campaign_id": None,
-        "song_promo_expires_at": None,
+        "song_promo_expires_at": None, "yclid": "",
     }
 
 
@@ -672,3 +672,30 @@ async def test_song_promo_cannot_discount_fun_or_unqualified_user(credit_db):
         with pytest.raises(error):
             await credit_db.create_audio_order('invalid', 456, kind, 'bday', 'Аня', None, 'lyrics', 'pop', 'title', song_discount=True)
     assert await credit_db.get_audio_order('invalid') is None
+
+
+async def test_yclid_migration_last_click_and_user_id_fallback(credit_db):
+    await credit_db.save_yclid(456)
+    user = await credit_db.get_user(456)
+    assert user['user_id'] == 456 and user['yclid'] == ''
+    await credit_db.save_yclid(456, '111111')
+    await credit_db.init_db()
+    assert (await credit_db.get_user(456))['yclid'] == '111111'
+    await credit_db.save_yclid(456, '222222')
+    await credit_db.save_yclid(456, None)
+    await credit_db.save_yclid(456, '')
+    assert (await credit_db.get_user(456))['yclid'] == '222222'
+    assert (await credit_db.get_user(456))['balance'] == 0
+
+
+@pytest.mark.parametrize('payload,source', [
+    ('vk_ads?yclid=1111', 'vk_ads'), ('yandex_ads&yclid=1111', 'yandex_ads'),
+    ('yandex_newyear?yclid=1111', 'yandex_newyear'), ('vk_ads%3Fyclid%3D1111', 'vk_ads'),
+])
+async def test_yclid_parameter_does_not_hide_first_campaign(credit_db, payload, source):
+    await credit_db.record_first_start(456, payload)
+    await credit_db.save_yclid(456, '1111')
+    await credit_db.record_first_start(456, 'yandex_newyear?yclid=2222')
+    await credit_db.save_yclid(456, '2222')
+    user = await credit_db.get_user(456)
+    assert user['first_start_source'] == source and user['yclid'] == '2222'

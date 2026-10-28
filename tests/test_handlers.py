@@ -926,6 +926,7 @@ async def test_postcard_requires_custom_text_and_uses_shared_balance(credit_db, 
         {event_name: 1} if balance or admin else {}
     )
     if balance or admin:
+        handlers.send_offline_conversion.assert_awaited_once_with(456, goal_id='bot_generation')
         postcard.assert_awaited_once_with("https://photos.example.com/source.png", mode, "Аня, будь счастлива!")
         assert (await credit_db.get_user(456))["balance"] == (balance if admin else balance - 1)
         assert await context.get_state() is None
@@ -936,6 +937,7 @@ async def test_postcard_requires_custom_text_and_uses_shared_balance(credit_db, 
         assert [row[0].payload for row in buttons] == ['upsell_song_discount', 'dismiss_upsell']
     else:
         assert not await credit_db.check_song_promo(456)
+        handlers.send_offline_conversion.assert_not_awaited()
         postcard.assert_not_awaited()
         assert event.message.answer.await_args.args == (NO_CREDITS_TEXT,)
         assert await context.get_state() == PosterStates.waiting_for_card_text
@@ -956,12 +958,14 @@ async def test_postcard_send_retry_reuses_paid_result_and_more_creates_new(credi
     assert await context.get_state() == PosterStates.waiting_for_card_text
     await dispatch_callback(router, callback_event("postcard_retry"), context)
     assert postcard.await_count == 1
+    assert handlers.send_offline_conversion.await_count == 1
     assert (await credit_db.get_user(456))["balance"] == 2
     await dispatch_callback(router, callback_event("more"), context)
     assert postcard.await_count == 1
     await call_handler(router, "collect_photo", photo_event(), context)
     await call_handler(router, "collect_card_text", message_event("Оля, поздравляю!"), context)
     assert postcard.await_count == 2
+    assert handlers.send_offline_conversion.await_count == 2
     assert (await credit_db.get_user(456))["balance"] == 1
 
 
@@ -4267,3 +4271,74 @@ async def test_failed_card_delivery_does_not_start_song_promotion(credit_db):
     await call_handler(router, 'collect_card_text', event, context)
     assert not await credit_db.check_song_promo(456)
     assert not any(call.args and call.args[0] == handlers.SONG_UPSELL_TEXT for call in event.message.answer.await_args_list)
+
+
+@pytest.mark.parametrize('entry', ['start', 'bot_started'])
+async def test_start_saves_latest_yclid_without_changing_first_source(credit_db, example_photos, monkeypatch, event_replies, entry):
+    monkeypatch.setattr(handlers, '_reply', event_replies)
+    router = create_router()
+    context = await ready_context()
+    def start_event(payload):
+        return bot_started_event(payload) if entry == 'bot_started' else message_event('/start' + (' ' + payload if payload else ''))
+    await call_handler(router, entry, start_event('yandex_newyear?yclid=111111'), context)
+    user = await credit_db.get_user(456)
+    assert user['yclid'] == '111111' and user['first_start_source'] == 'yandex_newyear'
+    first_time = user['first_started_at']
+    await call_handler(router, entry, start_event('yclid=222222'), context)
+    await call_handler(router, entry, start_event(None), context)
+    user = await credit_db.get_user(456)
+    assert user['yclid'] == '222222'
+    assert user['first_started_at'] == first_time and user['first_start_source'] == 'yandex_newyear'
+    assert user['user_id'] == 456 and user['balance'] == 1
+    handlers.send_offline_conversion.assert_not_awaited()
+
+
+async def test_vision_metrika_only_after_success_not_navigation_or_redelivery(credit_db):
+    await credit_db.add_credits(456, 3)
+    generator = AsyncMock(side_effect=[RuntimeError('generation failed'), ['https://cdn.example/vision.png']])
+    router = create_router(generator)
+    context = await ready_context()
+    event = message_event('Мечта')
+    await call_handler(router, 'collect_sphere', event, context)
+    handlers.send_offline_conversion.assert_not_awaited()
+    await call_handler(router, 'collect_sphere', event, context)
+    handlers.send_offline_conversion.assert_awaited_once_with(456, goal_id='bot_generation')
+    await call_handler(router, 'collect_sphere', event, context)
+    handlers.send_offline_conversion.assert_awaited_once()
+
+
+async def test_photosession_tracks_each_new_frame_and_does_not_repeat_on_resend(credit_db):
+    frames = AsyncMock(side_effect=[f'https://cdn.example/frame-{i}.png' for i in range(3)])
+    router = create_router(photosession_generator=frames, admin_user_id=456)
+    context = await family_context()
+    event = callback_event('photo_temp_fam3')
+    # Первый кадр создан, но не отправлен. Повторная доставка не создаёт новую конверсию.
+    event.bot.send_message.side_effect = RuntimeError('delivery failed')
+    await dispatch_callback(router, event, context)
+    assert handlers.send_offline_conversion.await_count == 1
+    await dispatch_callback(router, callback_event('photo_temp_fam3'), context)
+    assert frames.await_count == 3
+    assert handlers.send_offline_conversion.await_args_list == [call(456, goal_id='bot_generation')]*3
+
+
+async def test_metrika_http_failure_does_not_break_postcard_delivery(credit_db, monkeypatch, caplog):
+    from aioresponses import aioresponses
+    import metrika_service
+    from config import Config
+    monkeypatch.setattr(metrika_service.Config, 'from_env', lambda: Config(token='test', photo_path=Path('unused'),
+        yandex_metrika_counter_id='123', yandex_metrika_oauth_token='fake-token'))
+    monkeypatch.setattr(handlers, 'send_offline_conversion', metrika_service.send_offline_conversion)
+    await credit_db.add_credits(456, 2)
+    context = await ready_context()
+    await context.update_data(mode='mode_ny')
+    router = create_router(postcard_generator=AsyncMock(return_value=['https://cdn.example/card.png']))
+    await call_handler(router, 'collect_photo', photo_event(), context)
+    event = message_event('С праздником!')
+    with aioresponses() as http:
+        http.post(metrika_service.BASE_URL + '/management/v1/counter/123/offline_conversions/upload', status=500, body='service unavailable')
+        await call_handler(router, 'collect_card_text', event, context)
+    assert event.bot.send_message.await_args.kwargs['text'] == 'Ваша открытка готова!'
+    assert (await credit_db.get_user(456))['total_generations'] == 1
+    assert (await credit_db.get_user(456))['balance'] == 1
+    assert 'Ошибка Метрики: HTTP 500' in caplog.text
+    assert await context.get_state() is None

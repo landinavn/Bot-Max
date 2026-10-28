@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
@@ -321,3 +322,31 @@ def test_new_year_song_has_required_mood_wishes_and_duration(kind, duration):
 def test_new_year_custom_style_keeps_duration_and_festive_theme():
     _, tags, _ = service.build_song_request('Сергей', '🎄 Новогодняя', 'fun', 'rock')
     assert tags.startswith('rock,') and '30-40 seconds' in tags and 'New Year' in tags
+
+
+@pytest.mark.parametrize('kind,duration', [('fun', '30 seconds'), ('gift', '2-3 minutes')])
+def test_teacher_song_notes_are_formal_and_use_right_duration(kind, duration):
+    prompt, tags, title = service.build_song_request('Ирина Петровна, математика, строгая но справедливая', service.TEACHER_SCENARIO_TITLE, kind)
+    assert 'Спасибо Вам' in prompt and 'терпение' in prompt and 'поддержку' in prompt
+    assert 'Ирина Петровна' in prompt and 'математика' in prompt
+    assert 'elegant pop ballad' in tags and duration in tags
+    assert not re.search(r'\b(ты|тебя|тобой)\b', prompt, flags=re.I)
+    assert title.startswith(service.TEACHER_SCENARIO_TITLE + ':')
+
+
+@pytest.mark.parametrize('kind', ['fun', 'gift'])
+@respx.mock
+async def test_teacher_llm_system_prompt_demands_respectful_gratitude(monkeypatch, kind):
+    monkeypatch.setattr(service.Config, 'from_env', lambda: Config(token='max', photo_path=Path('unused'), image_api_key='test-key'))
+    text = '[Verse 1]\nВаш труд хранит тепло\n[Chorus]\nСпасибо Вам\n[Verse 2]\nИрина Петровна, Вы дарите знания\n[Chorus]\nСпасибо Вам\n[Bridge]\nЗа терпение и поддержку\n[Chorus]\nСпасибо Вам'
+    api = respx.post('https://api.openai.com/v1/chat/completions').mock(return_value=httpx.Response(200, json={
+        'id': 'teacher', 'object': 'chat.completion', 'created': 1, 'model': 'gpt-4o-mini',
+        'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': text}}]}))
+    prompt, tags, title = service.build_song_request('Ирина Петровна, математика', service.TEACHER_SCENARIO_TITLE, kind)
+    assert await service.write_song_lyrics(prompt, tags, title) == text
+    body = json.loads(api.calls[0].request.content)
+    system = body['messages'][0]['content']
+    assert service.TEACHER_LYRICS_INSTRUCTION in system
+    assert 'на «Вы»' in system and 'терпение, поддержку и знания' in system
+    assert ('Длина около 30 секунд' in system) == (kind == 'fun')
+    assert 'Ирина Петровна' in body['messages'][1]['content']

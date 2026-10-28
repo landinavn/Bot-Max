@@ -1,7 +1,7 @@
 import asyncio
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -168,3 +168,80 @@ async def test_preview_is_reencoded_short_mp3_and_only_clip_is_uploaded(monkeypa
     assert 14.9 <= float(probe['format']['duration']) <= 15.2
     assert payload['Body'] != raw.getvalue()
     storage.close.assert_called_once()
+
+
+async def test_poll_default_timeout_is_six_minutes_and_logs_each_status(monkeypatch, caplog):
+    timeout = Mock(wraps=asyncio.timeout)
+    monkeypatch.setattr(service.asyncio, 'timeout', timeout)
+    monkeypatch.setattr(service, 'fetch_song', AsyncMock(side_effect=[{'status': 'PENDING'}, {'status': 'SUCCESS'}]))
+    monkeypatch.setattr(service.asyncio, 'sleep', AsyncMock())
+    with caplog.at_level('INFO', logger='audio_service'):
+        await service.wait_for_song('long-job')
+    timeout.assert_called_once_with(360)
+    assert 'TTAPI статус: PENDING (job_id=long-job)' in caplog.text
+    assert 'TTAPI статус: SUCCESS (job_id=long-job)' in caplog.text
+
+
+@pytest.mark.parametrize('status', ['FAILED', 'ERROR'])
+async def test_poll_failure_logs_complete_response(monkeypatch, caplog, status):
+    response = {'status': status, 'data': {'reason': 'lyrics too long', 'code': 42}}
+    monkeypatch.setattr(service, 'fetch_song', AsyncMock(return_value=response))
+    with pytest.raises(service.SongFailed):
+        await service.wait_for_song('failed-job')
+    assert repr(response) in caplog.text
+    assert 'failed-job' in caplog.text
+
+
+async def test_progress_delayed_once_and_result_preserved():
+    ready = asyncio.Event()
+    result = {'status': 'SUCCESS'}
+    async def wait(job):
+        await ready.wait()
+        return result
+    async def notify(text):
+        assert text == service.LONG_WAIT_MESSAGE
+        ready.set()
+    notify_mock = AsyncMock(side_effect=notify)
+    assert await service.wait_for_song_with_progress('job', notify_mock, waiter=wait, notification_delay=0.001) is result
+    notify_mock.assert_awaited_once()
+
+
+@pytest.mark.parametrize('error', [None, service.SongFailed(), TimeoutError()])
+async def test_fast_completion_never_sends_delayed_notification(error):
+    notify = AsyncMock()
+    waiter = AsyncMock(return_value={'status': 'SUCCESS'}, side_effect=error)
+    if error is None:
+        assert await service.wait_for_song_with_progress('job', notify, waiter=waiter) == {'status': 'SUCCESS'}
+    else:
+        with pytest.raises(type(error)):
+            await service.wait_for_song_with_progress('job', notify, waiter=waiter)
+    notify.assert_not_awaited()
+
+
+async def test_progress_send_failure_does_not_abort_song():
+    ready = asyncio.Event()
+    async def wait(job):
+        await ready.wait()
+        return {'status': 'SUCCESS'}
+    async def notify(text):
+        ready.set()
+        raise RuntimeError('MAX unavailable')
+    assert await service.wait_for_song_with_progress('job', notify, waiter=wait, notification_delay=0.001) == {'status': 'SUCCESS'}
+
+
+async def test_cancel_wait_cleans_up_polling_task():
+    started, cancelled = asyncio.Event(), asyncio.Event()
+    async def wait(job):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+    notify = AsyncMock()
+    task = asyncio.create_task(service.wait_for_song_with_progress('job', notify, waiter=wait))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cancelled.is_set()
+    notify.assert_not_awaited()

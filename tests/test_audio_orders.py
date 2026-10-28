@@ -277,3 +277,32 @@ async def test_unlocked_gift_before_preview_is_delivered_only_once(credit_db,acc
     assert await credit_db.pending_audio_orders()==[]
     submit.assert_awaited_once()
     preview.assert_not_awaited()
+
+
+@pytest.mark.parametrize('kind', ['fun', 'gift'])
+async def test_worker_notifies_during_long_song_and_delivers_same_job(credit_db, monkeypatch, kind):
+    import audio_orders
+    from audio_service import wait_for_song_with_progress, LONG_WAIT_MESSAGE
+    ready = asyncio.Event()
+    async def short_progress(job, notify, **kwargs):
+        return await wait_for_song_with_progress(job, notify, notification_delay=0.001, **kwargs)
+    monkeypatch.setattr(audio_orders, 'wait_for_song_with_progress', short_progress)
+    name = await order(credit_db, kind=kind)
+    if kind == 'gift':
+        await credit_db.update_audio_order(name, preview_requested=1)
+    else:
+        await credit_db.mark_audio_paid(name, 'provider')
+    async def send(**kwargs):
+        if kwargs['text'] == LONG_WAIT_MESSAGE:
+            ready.set()
+    async def wait(job):
+        await ready.wait()
+        return RESULT
+    bot = SimpleNamespace(send_message=AsyncMock(side_effect=send))
+    submit = AsyncMock(return_value='long-job')
+    await asyncio.wait_for(PaidAudioWorker(bot, generator=submit, waiter=wait).process(name), 2)
+    assert sum(call.kwargs['text'] == LONG_WAIT_MESSAGE for call in bot.send_message.await_args_list) == 1
+    saved = await credit_db.get_audio_order(name)
+    assert saved['preview_delivered' if kind == 'gift' else 'delivered'] == 1
+    assert saved['job_id'] == 'long-job'
+    submit.assert_awaited_once()

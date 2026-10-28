@@ -38,7 +38,7 @@ from database import (
     update_audio_order, grant_audio_admin_access, request_audio_regeneration,
 )
 from prodamus import PACKAGES, ProdamusPayments
-from audio_service import generate_song, wait_for_song, song_tracks, build_song_request, write_song_lyrics, AudioNotConfigured, SongFailed
+from audio_service import generate_song, wait_for_song, wait_for_song_with_progress, song_tracks, build_song_request, write_song_lyrics, AudioNotConfigured, SongFailed
 from audio_orders import PaidAudioWorker, SUPPORT_URL
 from max_client import log_max_error
 from image_service import (
@@ -1560,7 +1560,11 @@ def create_router(
                     if not await session_current():
                         return
                     await context.update_data(audio_job_id=job_id)
-                result = await song_waiter(job_id)
+                async def notify_long_wait(text):
+                    if await session_current():
+                        await _reply(event, text)
+
+                result = await wait_for_song_with_progress(job_id, notify_long_wait, waiter=song_waiter)
                 if not await session_current():
                     return
                 tracks = song_tracks(result)

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import re
 import shutil
 import tempfile
@@ -14,7 +15,10 @@ from openai import AsyncOpenAI
 
 from config import Config
 
+logger = logging.getLogger(__name__)
+
 BASE_URL = "https://api.ttapi.io"
+LONG_WAIT_MESSAGE = "⏳ Трек все еще создается, это занимает больше времени, чем обычно. Пожалуйста, подождите, я пришлю его, как только он будет готов."
 
 
 def build_song_request(details: str, scenario_title: str, audio_format: str, style: str | None = None) -> tuple[str, str, str]:
@@ -160,7 +164,8 @@ async def generate_song(prompt: str, tags: str, title: str) -> str:
         "custom": True, "instrumental": False, "mv": "chirp-v6",
         "prompt": prompt, "title": title, "tags": tags, "audio_format": "mp3",
     })
-    if result.get("status") == "FAILED":
+    if result.get("status") in {"FAILED", "ERROR"}:
+        logger.error("TTAPI отклонил запрос: %r", result)
         raise SongFailed("TTAPI отклонил генерацию.")
     data = result.get("data")
     job_id = result.get("jobId") or (data.get("jobId") if isinstance(data, dict) else None)
@@ -175,20 +180,40 @@ async def fetch_song(job_id: str) -> dict:
     return await _request("GET", "/suno/v2/fetch", params={"jobId": job_id})
 
 
-async def wait_for_song(job_id: str, timeout: int = 300) -> dict:
+async def wait_for_song(job_id: str, timeout: int = 360) -> dict:
     if timeout <= 0:
         raise TimeoutError("Истекло время ожидания песни.")
     async with asyncio.timeout(timeout):
         while True:
             result = await fetch_song(job_id)
             status = result.get("status")
+            logger.info("TTAPI статус: %s (job_id=%s)", status, job_id)
             if status == "SUCCESS":
                 return result
-            if status == "FAILED":
+            if status in {"FAILED", "ERROR"}:
+                logger.error("TTAPI ошибка генерации (job_id=%s): %r", job_id, result)
                 raise SongFailed("Генерация песни завершилась ошибкой.")
             if status not in {"ON_QUEUE", "PROCESSING", "PENDING", "QUEUED", "IN_PROGRESS"}:
+                logger.error("TTAPI неизвестный статус (job_id=%s): %r", job_id, result)
                 raise AudioServiceError("TTAPI вернул неизвестный статус задачи.")
             await asyncio.sleep(5)
+
+
+async def wait_for_song_with_progress(job_id, notify, *, waiter=None, notification_delay=120):
+    """Уведомление один раз за ожидание; отмена не оставляет фоновых задач."""
+    task = asyncio.create_task((waiter or wait_for_song)(job_id))
+    try:
+        done, _ = await asyncio.wait({task}, timeout=notification_delay)
+        if not done:
+            try:
+                await notify(LONG_WAIT_MESSAGE)
+            except Exception:
+                logger.warning("Не удалось отправить уведомление ожидания TTAPI (job_id=%s).", job_id)
+        return await task
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 def song_tracks(result: dict) -> list[dict[str, str]]:

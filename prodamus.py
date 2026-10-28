@@ -17,7 +17,7 @@ import aiohttp
 from yarl import URL
 
 from config import Config
-from database import create_payment_order, get_payment_order, create_audio_order, get_audio_order, update_audio_order, SONG_PROMO_PRODUCT
+from database import get_musical_order, update_musical_order, MUSICAL_TARIFFS, create_payment_order, get_payment_order, create_audio_order, get_audio_order, update_audio_order, SONG_PROMO_PRODUCT
 
 PACKAGES = {
     1: (9900, "1 генерация (Открытка)"),
@@ -218,6 +218,25 @@ class ProdamusPayments:
         await update_audio_order(order_id, payment_link=link)
         return link
 
+    async def create_musical_payment_link(self, *, order_id: str, amount: int, description: str) -> str:
+        order = await get_musical_order(order_id)
+        if not order or order['status'] != 'pending' or order['amount_kopecks'] != amount * 100 or order['product_name'] != description:
+            raise ValueError('Параметры оплаты не совпадают с музыкальным заказом.')
+        if order['payment_link']:
+            return order['payment_link']
+        data = {
+            'do': 'link', 'order_id': order_id,
+            'products': [{'name': description, 'price': f'{amount}.00', 'quantity': '1'}],
+            'customer_extra': json.dumps({'user_id': order['user_id'], 'credits': 0, 'package_id': order['package_id']}, separators=(',', ':')),
+            '_param_user_id': str(order['user_id']), '_param_credits': '0', '_param_package_id': order['package_id'],
+            'urlReturn': self.return_url, 'urlSuccess': self.return_url, 'urlNotification': self.webhook_url,
+            'payments_limit': '1',
+        }
+        data['sign'] = sign_link_payload(data, self.secret)
+        link = await self._request_payment_link(data)
+        await update_musical_order(order_id, payment_link=link)
+        return link
+
     async def validate_payment(self, data: dict):
         order_id = data.get("order_num")
         payment_id = data.get("order_id")
@@ -226,6 +245,8 @@ class ProdamusPayments:
         order = await get_payment_order(order_id)
         if order is None:
             order = await get_audio_order(order_id)
+        if order is None and order_id.startswith('music_'):
+            order = await get_musical_order(order_id)
         if order is None:
             raise ValueError("Заказ не найден.")
         order = dict(order)
@@ -267,6 +288,9 @@ class ProdamusPayments:
                         'audio_gift_first': (39200, SONG_PROMO_PRODUCT)}
             if expected.get(order['package_id']) != (order['amount_kopecks'], order['product_name']):
                 raise ValueError('Неизвестный аудиотариф.')
+        elif order.get('order_type') == 'musical':
+            if MUSICAL_TARIFFS.get(order['tariff']) != (order['amount_kopecks'], order['product_name']):
+                raise ValueError('Неизвестный музыкальный тариф.')
         elif order["credits"] not in PACKAGES or PACKAGES[order["credits"]][1] != order["product_name"]:
             raise ValueError("Неизвестный пакет.")
         return order, payment_id

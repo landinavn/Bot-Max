@@ -633,3 +633,86 @@ async def test_discounted_gift_payment_validated_and_accounted_once_even_after_e
     assert user['total_purchases'] == 1 and user['balance'] == 0
     assert (await credit_db.get_all_counters())['buy_audio_gift'] == 1
     assert (await credit_db.get_stats_by_source('yandex_newyear'))['total_revenue'] == 392
+
+
+async def music_notification(payments, credit_db, tariff='direct', order_id='music_test', payment_id='music-provider-1'):
+    await credit_db.create_musical_order(order_id,456,'https://cdn.example/card.jpg','https://cdn.example/full.mp3',tariff)
+    order=await credit_db.get_musical_order(order_id)
+    link=await payments.create_musical_payment_link(order_id=order_id,amount=order['amount_kopecks']//100,description=order['product_name'])
+    fields=parse_form_fields(parse_qsl(urlsplit(link).query,keep_blank_values=True))
+    return {'order_num':order_id,'order_id':payment_id,'sum':fields['products'][0]['price'],
+        'currency':'rub','payment_status':'success','domain':'test-shop.payform.ru',
+        'products':fields['products'],'customer_extra':fields['customer_extra'],
+        '_param_user_id':'456','_param_credits':'0','_param_package_id':fields['_param_package_id']}
+
+
+@pytest.mark.parametrize('tariff,amount',[('direct','299.00'),('upsell','149.00')])
+async def test_music_personal_checkout_signed_webhook_is_persistent_and_idempotent(client,payments,credit_db,tariff,amount):
+    data=await music_notification(payments,credit_db,tariff)
+    assert data['sum'] == amount and data['order_num'].startswith('music_')
+    outgoing=payments._request_payment_link.await_args.args[0]
+    unsigned={key:value for key,value in outgoing.items() if key != 'sign'}
+    assert outgoing['sign'] == sign_link_payload(unsigned,SECRET)
+    first=await post_notification(client,data); assert first.status == 200
+    second=await post_notification(client,data); assert second.status == 200
+    order=await credit_db.get_musical_order('music_test')
+    assert order['status'] == 'paid' and order['audio_url'] == 'https://cdn.example/full.mp3'
+    assert await credit_db.pending_musical_orders() == ['music_test']
+    user=await credit_db.get_user(456)
+    assert user['total_purchases'] == 1 and user['balance'] == 0
+    assert (await credit_db.get_all_counters())['buy_music_'+tariff] == 1
+    stats=await credit_db.get_stats_by_source('legacy')
+    assert stats['total_revenue'] == int(amount.split('.')[0])
+
+
+@pytest.mark.parametrize('tamper',['sum','user','product','package','signature'])
+async def test_music_webhook_rejects_invalid_payment(client,payments,credit_db,tamper):
+    data=await music_notification(payments,credit_db)
+    if tamper=='sum': data['sum']='1.00'
+    elif tamper=='user': data['_param_user_id']='999'
+    elif tamper=='product': data['products'][0]['name']='Песня по фану'
+    elif tamper=='package': data['_param_package_id']='package_3'
+    result=await post_notification(client,data,signature='0'*64 if tamper=='signature' else None)
+    assert result.status == (403 if tamper=='signature' else 400)
+    assert (await credit_db.get_musical_order('music_test'))['status'] == 'pending'
+    assert await credit_db.pending_musical_orders() == []
+
+
+async def test_music_payment_id_cannot_be_reused_for_audio_or_credits(client,payments,credit_db):
+    data=await music_notification(payments,credit_db)
+    assert (await post_notification(client,data)).status==200
+    credits=await notification(payments,payment_id=data['order_id'])
+    assert (await post_notification(client,credits)).status==400
+    await credit_db.create_audio_order('audio-collision',456,'fun','boss','Иван',None,'lyrics','pop','title')
+    with pytest.raises(ValueError):
+        await credit_db.mark_audio_paid('audio-collision',data['order_id'])
+
+
+async def test_music_webhook_worker_renders_after_payment_and_reuses_result_for_duplicate(payments,credit_db):
+    from types import SimpleNamespace
+    from musical_orders import PaidMusicalWorker
+    notified=asyncio.Event()
+    async def send(**kwargs):
+        assert kwargs['user_id']==456
+        notified.set()
+        return object()
+    bot=SimpleNamespace(send_message=AsyncMock(side_effect=send))
+    render=AsyncMock(return_value='https://cdn.example/paid.mp4')
+    upload=AsyncMock(return_value=object())
+    worker=PaidMusicalWorker(bot,renderer=render,uploader=upload,poll_interval=0.01)
+    data=await music_notification(payments,credit_db)
+    async with TestClient(TestServer(create_webhook_app(payments,musical_worker=worker))) as client:
+        render.assert_not_awaited()
+        response=await post_notification(client,data)
+        assert response.status==200 and await response.text()=='OK'
+        await asyncio.wait_for(notified.wait(),timeout=3)
+        # Дожидаемся коммита delivered перед повтором уведомления.
+        for attempt in range(30):
+            if (await credit_db.get_musical_order('music_test'))['delivered']:
+                break
+            await asyncio.sleep(0.01)
+        duplicate=await post_notification(client,data)
+        assert duplicate.status==200
+    render.assert_awaited_once_with('https://cdn.example/card.jpg','https://cdn.example/full.mp3')
+    bot.send_message.assert_awaited_once()
+    assert (await credit_db.get_musical_order('music_test'))['delivered']==1

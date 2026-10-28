@@ -45,3 +45,12 @@ def mock_video_people_counter(monkeypatch):
     import video_service
     monkeypatch.setattr(handlers, 'count_people_in_photo', AsyncMock(return_value=1))
     monkeypatch.setattr(video_service, 'count_people_in_photo', AsyncMock(return_value=1))
+
+
+@pytest.fixture(autouse=True)
+def mock_musical_card_media(monkeypatch):
+    from unittest.mock import AsyncMock
+    from maxapi.types import AttachmentUpload
+    import handlers
+    monkeypatch.setattr(handlers, 'create_musical_video', AsyncMock(return_value='https://video.example/musical.mp4'))
+    monkeypatch.setattr(handlers, 'upload_video_for_max', AsyncMock(return_value=AttachmentUpload(type='video', payload={'token': 'musical-video-token'})))

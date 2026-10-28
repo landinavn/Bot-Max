@@ -145,3 +145,11 @@ async def test_generate_avatar_video_end_to_end(fast_poll):
     get = respx.get(video.TASK_URL + '/new-task').respond(200, json={'data': {'status': 'completed', 'output': {'video': 'https://video.example/a.mp4'}}})
     assert await video.generate_video_from_avatar('https://image.example/avatar.png', 'Animate') == 'https://video.example/a.mp4'
     assert post.call_count == get.call_count == 1
+
+
+@respx.mock
+async def test_default_avatar_prompt_matches_smiling_and_blinking_request(fast_poll):
+    post = respx.post(video.TASK_URL).respond(200, json={'data': {'task_id': 'avatar'}})
+    respx.get(video.TASK_URL + '/avatar').respond(200, json={'data': {'status': 'completed', 'output': {'video': 'https://video.example/avatar.mp4'}}})
+    assert await video.generate_video_from_avatar('https://images.example/avatar.png') == 'https://video.example/avatar.mp4'
+    assert json.loads(post.calls[0].request.content)['input']['prompt'] == 'The character is smiling and blinking naturally'

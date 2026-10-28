@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 TASK_URL = "https://api.piapi.ai/api/v1/task"
 POLL_INTERVAL = 10
 REQUEST_TIMEOUT = 30
+DEFAULT_ANIMATION_PROMPT = "The character is smiling and blinking naturally"
 
 
 class VideoServiceError(RuntimeError):
@@ -118,7 +119,7 @@ async def poll_video_task(task_id: str, timeout: int = 300) -> str:
         raise TimeoutError(f"Таймаут ожидания PiAPI ({timeout} секунд), task_id={task_id}") from None
 
 
-async def generate_video_from_avatar(avatar_url: str, prompt: str) -> str:
+async def generate_video_from_avatar(avatar_url: str, prompt: str = DEFAULT_ANIMATION_PROMPT) -> str:
     """Создать задачу по аватару и вернуть ссылку на готовое видео."""
     task_id = await create_video_task(avatar_url, prompt)
     return await poll_video_task(task_id)

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from secrets import token_urlsafe
+from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 
 import aiosqlite
@@ -161,6 +162,8 @@ async def init_db() -> None:
                                    ("song_promo_expires_at", "TIMESTAMP")):
             if column not in columns:
                 await db.execute(f"ALTER TABLE users ADD COLUMN {column} {definition}")
+        if "yclid" not in columns:
+            await db.execute("ALTER TABLE users ADD COLUMN yclid TEXT NOT NULL DEFAULT ''")
         if "promo_campaign_id" not in columns:
             await db.execute("ALTER TABLE users ADD COLUMN promo_campaign_id TEXT")
         async with db.execute("PRAGMA table_info(payment_orders)") as cursor:
@@ -559,6 +562,10 @@ async def record_first_start(user_id: int, payload: str | None = None, *, timest
     if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
         raise ValueError("Некорректный user_id.")
     source = payload.strip() if isinstance(payload, str) else None
+    if source and not source.startswith('share_'):
+        campaign = unquote(source).split('?', 1)[0].split('&', 1)[0]
+        if campaign in {'vk_ads', 'yandex_ads', 'yandex_newyear'}:
+            source = campaign
     if source and "yandex_newyear" in source and not source.startswith("share_"):
         source = "yandex_newyear"
     if source not in {"vk_ads", "yandex_ads", "yandex_newyear"}:
@@ -580,6 +587,20 @@ async def record_first_start(user_id: int, payload: str | None = None, *, timest
         )
         await db.commit()
         return cursor.rowcount == 1
+
+
+async def save_yclid(user_id: int, yclid: str | None = None) -> None:
+    """Последний переданный click ID; запуск без метки не стирает прежний.
+
+    Сам user_id (первичный ключ users) служит запасным UserId для Метрики.
+    """
+    if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
+        raise ValueError('Некорректный user_id.')
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        await db.execute('INSERT INTO users(user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING', (user_id,))
+        if isinstance(yclid, str) and yclid.strip():
+            await db.execute('UPDATE users SET yclid = ? WHERE user_id = ?', (yclid.strip(), user_id))
+        await db.commit()
 
 
 async def get_source_stats(admin_id: int | None = None) -> list[dict]:

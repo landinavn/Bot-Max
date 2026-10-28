@@ -21,3 +21,11 @@ def mock_music_composer_and_preview(monkeypatch):
     monkeypatch.setattr(handlers, 'write_song_lyrics', writer)
     monkeypatch.setattr(audio_orders, 'write_song_lyrics', writer)
     monkeypatch.setattr(audio_orders, 'make_protected_preview', AsyncMock(return_value='https://preview.example/clip.mp3'))
+
+
+@pytest.fixture(autouse=True)
+def mock_metrika_upload(monkeypatch):
+    # Сервис тестируется отдельно; роутер не отправляет аналитику в настоящий счётчик.
+    from unittest.mock import AsyncMock
+    import handlers
+    monkeypatch.setattr(handlers, 'send_offline_conversion', AsyncMock())

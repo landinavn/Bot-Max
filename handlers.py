@@ -27,10 +27,11 @@ from maxapi.types import (
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
 from config import DEFAULT_BOT_LINK, validate_bot_link
+from metrika_service import extract_yclid, send_offline_conversion
 
 from database import (
     deduct_credit, get_user, grant_free_trial, get_global_stats, increment_generations,
-    record_first_start, get_source_stats, get_stats_by_source, register_shared_image, get_shared_image,
+    record_first_start, save_yclid, get_source_stats, get_stats_by_source, register_shared_image, get_shared_image,
     get_all_counters, increment_counter,
     get_advanced_stats, update_user_activity, mark_user_inactive, get_active_user_ids,
     is_promo_active, PromoUnavailableError, get_users_by_activity, start_broadcast_promo,
@@ -740,6 +741,7 @@ def create_router(
                             return
                         urls.append(url)
                         await context.update_data(photosession_urls=list(urls))
+                        await send_offline_conversion(user_id, goal_id="bot_generation")
                     if index >= sent_count:
                         image = await upload_image_for_max(event.bot, urls[index])
                         sent = await event.bot.send_message(
@@ -865,6 +867,7 @@ def create_router(
                     package_offer_pending=not is_admin and user is not None and user["balance"] == 0,
                     song_upsell_sent=False,
                 )
+                await send_offline_conversion(credit_user_id, goal_id="bot_generation")
             else:
                 await _reply(event, "Отправляю готовый плакат…")
             for index in range(data.get("sent_count", 0), 1):
@@ -1258,6 +1261,7 @@ def create_router(
             await _reply(event, "Не удалось определить пользователя.")
             return
         await record_first_start(user_id, payload, timestamp_ms=timestamp_ms)
+        await save_yclid(user_id, extract_yclid(payload))
         trial_granted = await grant_free_trial(user_id)
         await context.clear()
         await context.set_state(PosterStates.waiting_for_mode)
@@ -1291,7 +1295,7 @@ def create_router(
         if not is_bot_message(event):
             body = event.message.body
             parts = ((body.text or "").split(maxsplit=1) if body else [])
-            await send_welcome_message(event, context, payload=parts[1].strip() if len(parts) > 1 else None)
+            await send_welcome_message(event, context, payload=parts[1].strip() if len(parts) > 1 else getattr(event, "payload", None))
 
     @router.message_callback(F.callback.payload.in_({"open_main_menu", "back_to_main"}))
     async def open_main_menu(event: MessageCallback, context: MemoryContext) -> None:

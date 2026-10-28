@@ -5646,3 +5646,71 @@ async def test_pending_video_none_delivery_confirmation_keeps_job_pending(credit
     await call_handler(create_router(admin_user_id=456), 'process_pending_videos', event)
     assert len(await credit_db.get_all_pending_videos()) == 1
     assert 'Успешно: 0, Ошибок: 1' in event.message.answer.await_args.args[0]
+
+
+@pytest.mark.parametrize('kind', ['card', 'cartoon'])
+async def test_video_result_delivers_merged_file_and_real_ttapi_song(credit_db, monkeypatch, piapi_animation, kind):
+    merger = AsyncMock(return_value='https://cdn.example/final-with-vocals.mp4')
+    monkeypatch.setattr(handlers, 'merge_video_and_audio', merger)
+    router = create_router(admin_user_id=456, avatar_generator=AsyncMock(return_value='https://cdn.example/avatar.png'))
+    context = await ready_context()
+    if kind == 'cartoon':
+        await start_cartoon(router, context)
+        await call_handler(router, 'collect_cartoon_photo', cartoon_photo(), context)
+        await dispatch_callback(router, callback_event('avatar_ok_1'), context)
+        event = callback_event('cartoon_song:audio_fun_ny')
+        image_url = 'https://cdn.example/avatar.png'
+    else:
+        await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png', card_text='С Новым годом, Аня!')
+        await dispatch_callback(router, callback_event('upsell_video'), context)
+        event = callback_event('video_song:audio_fun_ny')
+        image_url = 'https://cdn.example/card.png'
+    await dispatch_callback(router, event, context)
+    handlers.generate_song.assert_awaited_once()
+    assert 'Новогодняя' in handlers.generate_song.await_args.args[2]
+    piapi_animation.assert_awaited_once_with(image_url)
+    merger.assert_awaited_once_with('https://video.example/animated.mp4', 'https://audio.example/1.mp3')
+    assert 'https://cdn.example/final-with-vocals.mp4' in event.send.await_args.args[0]
+    assert event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0].url == 'https://cdn.example/final-with-vocals.mp4'
+    assert (await context.get_data())['video_song_url'] == 'https://audio.example/1.mp3'
+
+
+async def test_video_merge_retry_reuses_song_job_and_kling_output(credit_db, monkeypatch, piapi_animation):
+    merger = AsyncMock(side_effect=[RuntimeError('ffmpeg failed'), 'https://cdn.example/final.mp4'])
+    monkeypatch.setattr(handlers, 'merge_video_and_audio', merger)
+    router, context = create_router(admin_user_id=456), await ready_context()
+    await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png')
+    await dispatch_callback(router, callback_event('upsell_video'), context)
+    await dispatch_callback(router, callback_event('video_song:audio_fun_ny'), context)
+    assert await context.get_state() == PosterStates.waiting_for_video_song
+    await dispatch_callback(router, callback_event('video_song:audio_fun_ny'), context)
+    piapi_animation.assert_awaited_once()
+    handlers.generate_song.assert_awaited_once()
+    assert merger.await_count == 2
+    assert (await context.get_data())['video_result_url'] == 'https://cdn.example/final.mp4'
+
+
+async def test_pending_processor_delivers_merged_result(credit_db, monkeypatch, piapi_animation):
+    await credit_db.save_pending_video(123, 'https://images.example/avatar.png', 'https://audio.example/song.mp3')
+    merger = AsyncMock(return_value='https://cdn.example/pending-merged.mp4')
+    monkeypatch.setattr(handlers, 'merge_video_and_audio', merger)
+    event = message_event('/process_pending_videos')
+    await call_handler(create_router(admin_user_id=456), 'process_pending_videos', event)
+    merger.assert_awaited_once_with('https://video.example/animated.mp4', 'https://audio.example/song.mp3')
+    assert 'https://cdn.example/pending-merged.mp4' in event.bot.send_message.await_args.kwargs['text']
+    assert await credit_db.get_all_pending_videos() == []
+
+
+async def test_switching_video_song_cannot_reuse_old_job_after_submit_failure(credit_db, monkeypatch):
+    submit = AsyncMock(side_effect=['ny-job', RuntimeError('submit failed'), 'cat-job'])
+    waiter = AsyncMock(return_value='https://audio.example/generated.mp3')
+    router, context = create_router(admin_user_id=456, song_generator=submit, song_waiter=waiter), await ready_context()
+    await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png')
+    await dispatch_callback(router, callback_event('upsell_video'), context)
+    await dispatch_callback(router, callback_event('video_song:audio_fun_ny'), context)
+    await dispatch_callback(router, callback_event('upsell_video'), context)
+    await dispatch_callback(router, callback_event('video_song:audio_fun_cat'), context)
+    assert (await context.get_data())['video_song_job_id'] is None
+    await dispatch_callback(router, callback_event('video_song:audio_fun_cat'), context)
+    assert submit.await_count == 3
+    assert waiter.await_args_list == [call('ny-job'), call('cat-job')]

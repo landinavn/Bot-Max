@@ -172,6 +172,17 @@ async def write_song_lyrics(notes: str, tags: str, title: str, *, preserve_choru
 
 async def make_protected_preview(audio_url: str) -> str:
     """Публичным становится только 15-секундный MP3 со звуковой меткой."""
+    return await _create_audio_preview(audio_url, 15, protected=True)
+
+
+async def create_audio_preview(audio_url: str, duration: int = 15) -> str:
+    """Вокальный фрагмент для видео; полная песня остаётся для склейки."""
+    if isinstance(duration, bool) or not isinstance(duration, int) or not 1 <= duration <= 15:
+        raise AudioServiceError('Длительность превью должна быть от 1 до 15 секунд.')
+    return await _create_audio_preview(audio_url, duration, protected=False)
+
+
+async def _create_audio_preview(audio_url: str, clip_duration: int, *, protected: bool) -> str:
     parsed = urlsplit(audio_url)
     if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password:
         raise AudioServiceError('Некорректный URL аудио.')
@@ -194,15 +205,21 @@ async def make_protected_preview(audio_url: str) -> str:
                             if total > 32 * 1024 * 1024:
                                 raise AudioServiceError('Слишком большой аудиофайл.')
                             file.write(chunk)
-            duration = await audio_duration(source)
-            start = '00:00:20' if duration >= 35 else ('00:00:05' if duration > 5 else '00:00:00')
-            logger.info('Превью песни: длительность %.2f с, начало %s.', duration, start)
-            # Фильтр добавляет короткую звуковую метку каждые пять секунд.
-            process = await asyncio.create_subprocess_exec(binary, '-nostdin', '-v', 'error', '-protocol_whitelist', 'file,pipe',
-                '-ss', start, '-i', str(source), '-f', 'lavfi', '-i', 'sine=frequency=1100:duration=15',
-                '-filter_complex', "[0:a]atrim=0:15,asetpts=PTS-STARTPTS[a];[1:a]volume='if(lt(mod(t,5),0.7),0.5,0)':eval=frame[b];[a][b]amix=inputs=2:duration=first:normalize=0[out]",
-                '-map', '[out]', '-map_metadata', '-1', '-map_chapters', '-1', '-t', '00:00:15', '-codec:a', 'libmp3lame', '-b:a', '128k', '-y', str(target),
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            full_duration = await audio_duration(source)
+            start = '00:00:20' if full_duration >= 35 else ('00:00:05' if full_duration > 5 else '00:00:00')
+            logger.info('Превью песни: длительность %.2f с, начало %s, фрагмент %s с.', full_duration, start, clip_duration)
+            if protected:
+                # Фильтр добавляет короткую звуковую метку каждые пять секунд.
+                process = await asyncio.create_subprocess_exec(binary, '-nostdin', '-v', 'error', '-protocol_whitelist', 'file,pipe',
+                    '-ss', start, '-i', str(source), '-f', 'lavfi', '-i', 'sine=frequency=1100:duration=15',
+                    '-filter_complex', "[0:a]atrim=0:15,asetpts=PTS-STARTPTS[a];[1:a]volume='if(lt(mod(t,5),0.7),0.5,0)':eval=frame[b];[a][b]amix=inputs=2:duration=first:normalize=0[out]",
+                    '-map', '[out]', '-map_metadata', '-1', '-map_chapters', '-1', '-t', '00:00:15', '-codec:a', 'libmp3lame', '-b:a', '128k', '-y', str(target),
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            else:
+                process = await asyncio.create_subprocess_exec(binary, '-nostdin', '-v', 'error',
+                    '-protocol_whitelist', 'file,pipe', '-ss', start, '-t', str(clip_duration), '-i', str(source),
+                    '-map', '0:a:0', '-c', 'copy', '-map_metadata', '-1', '-map_chapters', '-1', '-y', str(target),
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
             try:
                 await asyncio.wait_for(process.communicate(), timeout=60)
             except BaseException:

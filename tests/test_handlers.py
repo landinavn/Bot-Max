@@ -3204,7 +3204,7 @@ async def test_audio_tariffs_show_fun_or_gift_screen_and_return_to_workshop(cred
         buttons = event.send.await_args.kwargs['attachments'][0].payload.buttons
         assert [row[0].payload for row in buttons] == [
             'audio_fun_boss', 'audio_fun_friend', 'audio_fun_cat', 'audio_fun_student',
-            'audio_fun_universal', 'audio_fun_meme', 'cat_audio',
+            'audio_fun_universal', 'audio_fun_meme', 'audio_fun_ny', 'cat_audio',
         ]
     else:
         assert event.send.await_args.args[0] == handlers.AUDIO_GIFT_TEXT
@@ -3288,7 +3288,7 @@ async def test_song_scenario_collects_details_without_generation_or_payment(cred
     assert answer.message.answer.await_args.args[0] == handlers.AUDIO_FUN_PAYMENT_TEXT
     assert await context.get_state() == PosterStates.waiting_for_audio_fun_payment
     assert await context.get_data() == {'song_scenario': scenario, 'song_details': 'Аня, любим вино и сериалы'}
-    assert await credit_db.get_all_counters() == {'audio_scen_' + scenario: 1}
+    assert await credit_db.get_all_counters() == {handlers.AUDIO_FUN_COUNTERS[payload]: 1}
     assert dict(await credit_db.get_user(456)) == before
     generator.assert_not_awaited()
     card.assert_not_awaited()
@@ -3345,7 +3345,7 @@ async def test_song_stats_count_scenarios_and_exclude_admin(credit_db):
     assert '🎵 Интерес к Аудиопесням (сценарии):' in text
     for payload, (label, _) in handlers.AUDIO_FUN_SCENARIOS.items():
         assert '- ' + label + ': 1' in text
-        assert (await credit_db.get_all_counters())['audio_scen_' + payload.removeprefix('audio_fun_')] == 2
+        assert (await credit_db.get_all_counters())[handlers.AUDIO_FUN_COUNTERS[payload]] == 2
 
 
 @pytest.mark.parametrize('general_first', [False, True])
@@ -3397,7 +3397,7 @@ async def test_gift_scenario_menu_keeps_order_and_clears_old_data(credit_db):
     buttons = event.send.await_args.kwargs['attachments'][0].payload.buttons
     assert [row[0].payload for row in buttons] == [
         'gift_scen_bday', 'gift_scen_anniv', 'gift_scen_parents', 'gift_scen_child',
-        'gift_scen_friend', 'gift_scen_custom', 'audio_tariff_gift',
+        'gift_scen_friend', 'gift_scen_custom', 'audio_gift_ny', 'audio_tariff_gift',
     ]
     assert await context.get_state() == PosterStates.waiting_for_mode
     assert await context.get_data() == {}
@@ -3416,7 +3416,7 @@ async def test_gift_collects_details_and_shows_test_payment_without_charging(cre
     selected = callback_event(payload)
     await dispatch_callback(router, selected, context)
     selected.ack.assert_awaited_once()
-    scenario = payload.removeprefix('gift_scen_')
+    scenario = handlers.gift_scenario_name(payload)
     assert selected.send.await_args.args[0] == handlers.AUDIO_GIFT_SCENARIOS[payload][1]
     assert await context.get_state() == handlers.GIFT_SCENARIO_STATES[payload]
     assert await context.get_data() == {'gift_scenario': scenario}
@@ -3434,7 +3434,7 @@ async def test_gift_collects_details_and_shows_test_payment_without_charging(cre
     assert 'Режим администратора' in payment.send.await_args.args[0]
     assert (await credit_db.get_audio_order(order_id))['free_access'] == 1
     assert (await context.get_data())['gift_details'] == 'Аня, любит горы и кофе'
-    assert await credit_db.get_all_counters() == {'audio_gift_' + scenario: 1}
+    assert await credit_db.get_all_counters() == {handlers.AUDIO_GIFT_COUNTERS[payload]: 1}
     assert dict(await credit_db.get_user(456)) == before
     generator.assert_not_awaited()
     card.assert_not_awaited()
@@ -3459,7 +3459,7 @@ async def test_deleted_gift_callbacks_are_acknowledged_without_state_or_counter_
 async def test_gift_empty_details_do_not_advance(payload, text):
     context = await ready_context()
     await context.set_state(handlers.GIFT_SCENARIO_STATES[payload])
-    await context.update_data(gift_scenario=payload.removeprefix('gift_scen_'))
+    await context.update_data(gift_scenario=handlers.gift_scenario_name(payload))
     event = message_event(text)
     await call_handler(create_router(), 'collect_gift_details', event, context)
     assert 'текстом' in event.message.answer.await_args.args[0]
@@ -3499,7 +3499,7 @@ async def test_gift_stats_count_scenarios_and_exclude_admin(credit_db):
     assert '🎁 Интерес к Аудиопесням (Подарочный формат):' in text
     for payload, (label, _) in handlers.AUDIO_GIFT_SCENARIOS.items():
         assert '- ' + label + ': 1' in text
-        assert (await credit_db.get_all_counters())['audio_gift_' + payload.removeprefix('gift_scen_')] == 2
+        assert (await credit_db.get_all_counters())[handlers.AUDIO_GIFT_COUNTERS[payload]] == 2
 
 
 @pytest.mark.parametrize('general_first', [False, True])
@@ -4455,17 +4455,22 @@ async def test_static_card_video_upsells_keep_source_and_do_not_generate(credit_
     event = callback_event(payload)
     await dispatch_callback(router, event, context)
     first_reply = event.send.await_args_list[0]
-    assert ('Генерация анимации скоро появится' if price == 199 else 'Генерация видео с песней скоро появится') == first_reply.args[0]
-    button = first_reply.kwargs['attachments'][0].payload.buttons[0][0]
-    assert str(price) in button.text and button.url == 'https://link.payform.ru/'
+    assert first_reply.args[0] == '🎵 Выберите сценарий песни для видео-поздравления:'
+    rows = first_reply.kwargs['attachments'][0].payload.buttons
+    assert [row[0].payload for row in rows[:-1]] == [
+        'video_song:audio_fun_boss', 'video_song:audio_fun_friend', 'video_song:audio_fun_cat',
+        'video_song:audio_fun_student', 'video_song:audio_fun_universal', 'video_song:audio_fun_meme', 'video_song:audio_fun_ny']
+    assert all(row[0].type == 'callback' for row in rows)
     data = await context.get_data()
     assert data['video_source_image'] == 'https://cdn.example/card.png'
     assert data['video_amount_kopecks'] == price * 100
-    if price == 249:
-        pay = callback_event('video_song:audio_fun_friend')
-        await dispatch_callback(router, pay, context)
-        assert (await context.get_data())['video_song_scenario'] == 'audio_fun_friend'
-        assert '249 ₽' in pay.send.await_args.args[0]
+    assert await context.get_state() == PosterStates.waiting_for_video_song
+    pay = callback_event('video_song:audio_fun_ny')
+    await dispatch_callback(router, pay, context)
+    assert (await context.get_data())['video_song_scenario'] == 'audio_fun_ny'
+    assert f'{price} ₽' in pay.send.await_args.args[0]
+    button = pay.send.await_args.kwargs['attachments'][0].payload.buttons[0][0]
+    assert str(price) in button.text and button.url == 'https://link.payform.ru/'
     assert await context.get_state() == PosterStates.waiting_for_video_payment
     cards.assert_not_awaited()
     songs.assert_not_awaited()
@@ -4597,3 +4602,102 @@ async def test_direct_gift_handler_waits_and_worker_cannot_claim_its_order(credi
     assert 'https://audio.example/full.mp3' not in event.bot.send_message.await_args.kwargs['text']
     assert 'https://preview.example/clip.mp3' in event.bot.send_message.await_args.kwargs['text']
     submit.assert_awaited_once()
+
+
+@pytest.mark.parametrize('payload,field,counter', [
+    ('audio_fun_ny', 'song_scenario', 'audio_scen_ny_fun'),
+    ('audio_gift_ny', 'gift_scenario', 'audio_scen_ny_gift'),
+])
+async def test_new_year_audio_scenarios_use_correct_fsm_prompt_and_stats(credit_db, payload, field, counter):
+    router = create_router(admin_user_id=999)
+    context = await ready_context()
+    await dispatch_callback(router, callback_event(payload), context)
+    assert (await context.get_data())[field] == 'ny'
+    event = message_event('Аня, встречаем Новый год всей семьёй')
+    await call_handler(router, 'echo', event, context)
+    assert (await credit_db.get_all_counters())[counter] == 1
+    data = await context.get_data()
+    if payload == 'audio_gift_ny':
+        saved = await credit_db.get_audio_order(data['audio_checkout_id'])
+        assert saved['scenario'] == 'ny' and saved['amount_kopecks'] == 49000
+        assert saved['preview_delivered'] == 1
+        assert '2-3 minutes' in saved['tags'] and 'семейные' in saved['prompt']
+        args = handlers.generate_song.await_args.args
+        assert 'С Новым годом' in args[0] and args[2].startswith('🎄 Новогодняя:')
+    else:
+        assert await context.get_state() == PosterStates.waiting_for_audio_fun_payment
+        handlers.generate_song.assert_not_awaited()  # Короткая песня ждёт оплаты.
+    admin = message_event('/stats')
+    admin.get_ids = lambda: (123, 999)
+    await call_handler(router, 'stats', admin)
+    assert '- 🎄 Новогодняя: 1' in admin.message.answer.await_args.args[0]
+
+
+@pytest.mark.parametrize('entry,price', [('cat_video', 299), ('upsell_video', 249), ('upsell_animate', 199)])
+@pytest.mark.parametrize('admin_id,actor,bypass', [(456, 456, True), (456, 789, False), (None, 456, False)])
+async def test_video_admin_bypass_only_after_data_and_song_and_never_for_regular_users(credit_db, entry, price, admin_id, actor, bypass):
+    stub = AsyncMock(return_value='Тестовый результат видео')
+    router = create_router(admin_user_id=admin_id, video_generator=stub)
+    context = await ready_context()
+    if entry != 'cat_video':
+        await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png', card_text='С Новым годом!')
+    event = callback_event(entry)
+    event.get_ids = lambda: (123, actor)
+    await dispatch_callback(router, event, context)
+    stub.assert_not_awaited()
+    if entry == 'cat_video':
+        await dispatch_callback(router, callback_event('video_style:mode_ny'), context)
+        await call_handler(router, 'collect_photo', photo_event(), context)
+        await call_handler(router, 'collect_card_text', message_event('С Новым годом, Аня!'), context)
+    song = callback_event('video_song:audio_fun_ny')
+    song.get_ids = lambda: (123, actor)
+    await dispatch_callback(router, song, context)
+    if bypass:
+        stub.assert_awaited_once()
+        saved = stub.await_args.args[0]
+        assert saved['video_song_scenario'] == 'audio_fun_ny' and saved['video_amount_kopecks'] == price * 100
+        assert song.send.await_args_list[0].args[0] == '👑 Режим администратора: Оплата пропущена. Запускаю генерацию...'
+        assert song.send.await_args_list[1].args[0] == 'Тестовый результат видео'
+        assert not any('payform' in str(call) for call in song.send.await_args_list)
+        assert await context.get_state() == PosterStates.waiting_for_mode
+        assert (await context.get_data())['video_test_complete'] is True
+    else:
+        stub.assert_not_awaited()
+        pay = song.send.await_args.kwargs['attachments'][0].payload.buttons[0][0]
+        assert f'{price} ₽' in pay.text and pay.url == 'https://link.payform.ru/'
+        assert await context.get_state() == PosterStates.waiting_for_video_payment
+    handlers.generate_song.assert_not_awaited()
+    handlers.send_offline_conversion.assert_not_awaited()
+
+
+async def test_video_admin_stub_failure_has_traceback_and_allows_song_retry(credit_db, caplog):
+    stub = AsyncMock(side_effect=RuntimeError('test video failed'))
+    router = create_router(admin_user_id=456, video_generator=stub)
+    context = await ready_context()
+    await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png')
+    await dispatch_callback(router, callback_event('upsell_animate'), context)
+    event = callback_event('video_song:audio_fun_ny')
+    await dispatch_callback(router, event, context)
+    assert any(r.exc_info and 'Ошибка тестовой генерации видео' in r.message for r in caplog.records)
+    assert await context.get_state() == PosterStates.waiting_for_video_song
+    assert 'payform' not in str(event.send.await_args_list)
+
+
+@pytest.mark.parametrize('payload,kind,price,duration', [
+    ('audio_fun_ny', 'fun', 19900, '30-40 seconds'),
+    ('audio_gift_ny', 'gift', 49000, '2-3 minutes'),
+])
+async def test_new_year_checkout_keeps_scenario_format_and_regular_price(credit_db, payload, kind, price, duration):
+    async def checkout(user_id, fmt, scenario, details, style, prompt, tags, title, *, order_id):
+        await credit_db.create_audio_order(order_id, user_id, fmt, scenario, details, style, prompt, tags, title)
+        return 'https://pay.example/personal-ny'
+    payments = SimpleNamespace(create_audio_payment_link=AsyncMock(side_effect=checkout))
+    router = create_router(payments=payments)
+    context = await ready_context()
+    await dispatch_callback(router, callback_event(payload), context)
+    await call_handler(router, 'echo', message_event('Аня, Новый год с семьёй'), context)
+    payments.create_audio_payment_link.assert_awaited_once()
+    saved = await credit_db.get_audio_order(payments.create_audio_payment_link.await_args.kwargs['order_id'])
+    assert saved['scenario'] == 'ny' and saved['audio_format'] == kind and saved['amount_kopecks'] == price
+    assert duration in saved['tags'] and 'С Новым годом' in saved['prompt']
+    assert saved['status'] == 'pending'

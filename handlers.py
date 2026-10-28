@@ -392,6 +392,7 @@ AUDIO_FUN_SCENARIOS = {
     "audio_fun_student": ("🎓 Вечный студент", "Напиши имя друга и его специальность или фразу (например: «Иван, сдаёт сессию»)"),
     "audio_fun_universal": ("⏰ Поздравление на бегу", "Напиши имя и повод (например: «Маша, с днём рождения»)"),
     "audio_fun_meme": ("🌀 Абсурдный мем", "Напиши имя (если нужно) и выбери тему: Ода холодильнику / Песня про забытые ключи / Гимн пятнице"),
+    "audio_fun_ny": ("🎄 Новогодняя", "Напиши имя и кому адресовать весёлую новогоднюю песню с пожеланиями счастья и подарков."),
 }
 
 AUDIO_FUN_MENU_TEXT = (
@@ -440,6 +441,7 @@ AUDIO_GIFT_SCENARIOS = {
     "gift_scen_child": ("🧸 Для ребёнка", "Как зовут ребёнка, сколько ему лет и какое у него увлечение или мечта? (например: Маша, 7 лет, любит рисовать)."),
     "gift_scen_friend": ("🤝 Для друга / подруги", "Как зовут друга/подругу? Напишите одну общую историю или шутку (например: всегда выручает, познакомились в универе)."),
     "gift_scen_custom": ("🎯 Свой вариант", "Напишите имя, повод (любой) и 1-2 факта о человеке."),
+    "audio_gift_ny": ("🎄 Новогодняя", "Напишите имена близких, одно тёплое семейное воспоминание и ваши новогодние пожелания."),
 }
 
 AUDIO_GIFT_SCENARIO_TEXT = (
@@ -449,9 +451,26 @@ AUDIO_GIFT_SCENARIO_TEXT = (
     "👵 Для родителей — воспоминания и благодарность.\n"
     "🧸 Для ребёнка — увлечения и мечты.\n"
     "🤝 Для друга / подруги — общие истории и шутки.\n"
-    "🎯 Свой вариант — любой человек и повод."
+    "🎯 Свой вариант — любой человек и повод.\n"
+    "🎄 Новогодняя — семейные воспоминания и тёплые пожелания."
 )
 
+
+
+def gift_scenario_name(payload):
+    return 'ny' if payload == 'audio_gift_ny' else payload.removeprefix('gift_scen_')
+
+
+def audio_scenario_key(scenario, audio_format):
+    if audio_format == 'gift' and scenario == 'ny':
+        return 'audio_gift_ny'
+    return ('audio_fun_' if audio_format == 'fun' else 'gift_scen_') + str(scenario)
+
+
+AUDIO_FUN_COUNTERS = {key: 'audio_scen_' + key.removeprefix('audio_fun_') for key in AUDIO_FUN_SCENARIOS}
+AUDIO_FUN_COUNTERS['audio_fun_ny'] = 'audio_scen_ny_fun'
+AUDIO_GIFT_COUNTERS = {key: 'audio_gift_' + gift_scenario_name(key) for key in AUDIO_GIFT_SCENARIOS}
+AUDIO_GIFT_COUNTERS['audio_gift_ny'] = 'audio_scen_ny_gift'
 
 VIDEO_SONG_SCENARIOS = {**AUDIO_FUN_SCENARIOS, **AUDIO_GIFT_SCENARIOS}
 VIDEO_CARD_SCREENS = {'cat_cards', 'sub_ny', 'sub_bday', 'sub_halloween', 'sub_goodmorning'}
@@ -627,6 +646,7 @@ class PosterStates(StatesGroup):
     waiting_for_gift_child = State()
     waiting_for_gift_friend = State()
     waiting_for_gift_custom = State()
+    waiting_for_gift_ny = State()
     waiting_for_gift_preview = State()
     # Принимать описание и из состояния, сохранённого прежней версией.
     waiting_for_sphere = State()
@@ -640,6 +660,7 @@ GIFT_SCENARIO_STATES = {
     "gift_scen_child": PosterStates.waiting_for_gift_child,
     "gift_scen_friend": PosterStates.waiting_for_gift_friend,
     "gift_scen_custom": PosterStates.waiting_for_gift_custom,
+    "audio_gift_ny": PosterStates.waiting_for_gift_ny,
 }
 
 
@@ -678,6 +699,12 @@ def result_keyboard(url: str):
     ).as_markup()
 
 
+async def generate_video_placeholder(data: dict) -> str:
+    kind = 'анимации' if data.get('video_product') == 'animate' else 'видео с песней'
+    scenario = VIDEO_SONG_SCENARIOS[data['video_song_scenario']][0]
+    return f'🎬 Тестовая генерация {kind} завершена. Сценарий: {scenario}. Это заглушка; видеосервис будет подключён позже.'
+
+
 def create_router(
     generator: PosterGenerator = generate_vision_boards,
     *, payments: ProdamusPayments | None = None,
@@ -688,7 +715,9 @@ def create_router(
     song_generator: Callable[[str, str, str], Awaitable[str]] | None = None,
     song_waiter: Callable[[str], Awaitable[dict | str]] | None = None,
     lyric_writer=None,
+    video_generator: Callable[[dict], Awaitable[str]] | None = None,
 ) -> Router:
+    video_generator = video_generator or generate_video_placeholder
     lyric_writer = lyric_writer or write_song_lyrics
     song_generator = song_generator or generate_song
     # Подарок возвращает URL; импульсный формат сохраняет оба варианта TTAPI.
@@ -1090,12 +1119,12 @@ def create_router(
             f"- Видео с песней за 249 ₽ (клики): {counters.get('click_video_full_249', 0)}\n\n"
             "🎵 Интерес к Аудиопесням (сценарии):\n"
             + "\n".join(
-                f"- {label}: {counters.get('audio_scen_' + payload.removeprefix('audio_fun_'), 0)}"
+                f"- {label}: {counters.get(AUDIO_FUN_COUNTERS[payload], 0)}"
                 for payload, (label, _) in AUDIO_FUN_SCENARIOS.items()
             ) + "\n\n"
             "🎁 Интерес к Аудиопесням (Подарочный формат):\n"
             + "\n".join(
-                f"- {label}: {counters.get('audio_gift_' + payload.removeprefix('gift_scen_'), 0)}"
+                f"- {label}: {counters.get(AUDIO_GIFT_COUNTERS[payload], 0)}"
                 for payload, (label, _) in AUDIO_GIFT_SCENARIOS.items()
             ) + "\n\n"
             "📸 Интерес к Фотосессиям (клики):\n"
@@ -1347,7 +1376,9 @@ def create_router(
 
     async def show_video_songs(event, context):
         await context.set_state(PosterStates.waiting_for_video_song)
-        buttons = [(label, 'video_song:' + key) for key, (label, _) in VIDEO_SONG_SCENARIOS.items()]
+        data = await context.get_data()
+        scenarios = AUDIO_FUN_SCENARIOS if data.get('video_product') in {'animate', 'upsell'} else VIDEO_SONG_SCENARIOS
+        buttons = [(label, 'video_song:' + key) for key, (label, _) in scenarios.items()]
         await _reply(event, '🎵 Выберите сценарий песни для видео-поздравления:',
                      attachments=[navigation_keyboard((*buttons, ('⬅️ Назад', 'cat_video')))])
 
@@ -1408,15 +1439,7 @@ def create_router(
         await context.update_data(video_flow=True, video_source_image=image_url,
                                   video_amount_kopecks=19900 if animate else 24900,
                                   video_product='animate' if animate else 'upsell')
-        if animate:
-            await context.set_state(PosterStates.waiting_for_video_payment)
-            await _reply(event, 'Генерация анимации скоро появится', attachments=[InlineKeyboardBuilder().row(
-                LinkButton(text='Оплатить 199 ₽', url=VIDEO_PAYMENT_PLACEHOLDER_URL)).row(
-                CallbackButton(text='⬅️ Назад', payload='back_to_main')).as_markup()])
-        else:
-            await _reply(event, 'Генерация видео с песней скоро появится', attachments=[InlineKeyboardBuilder().row(
-                LinkButton(text='Оплатить 249 ₽ и создать видео', url=VIDEO_PAYMENT_PLACEHOLDER_URL)).as_markup()])
-            await show_video_songs(event, context)
+        await show_video_songs(event, context)
 
     @router.message_callback(F.callback.payload.startswith('video_song:'))
     async def video_song(event: MessageCallback, context: MemoryContext):
@@ -1425,21 +1448,40 @@ def create_router(
             return
         data = await context.get_data()
         scenario = event.callback.payload.removeprefix('video_song:')
-        if (not data.get('video_flow') or scenario not in VIDEO_SONG_SCENARIOS
-                or data.get('video_amount_kopecks') not in (24900, 29900)
+        scenarios = AUDIO_FUN_SCENARIOS if data.get('video_product') in {'animate', 'upsell'} else VIDEO_SONG_SCENARIOS
+        expected_price = {'direct': 29900, 'upsell': 24900, 'animate': 19900}.get(data.get('video_product'))
+        if (not data.get('video_flow') or scenario not in scenarios or expected_price is None
+                or data.get('video_amount_kopecks') != expected_price
                 or await context.get_state() not in (PosterStates.waiting_for_video_song, PosterStates.waiting_for_video_payment)):
             await event.ack(notification='Выберите видео и заполните данные заново.')
             return
         await event.ack(notification='Показываю оплату…')
         await context.update_data(video_song_scenario=scenario)
         await context.set_state(PosterStates.waiting_for_video_payment)
+        if admin_user_id is not None and event.get_ids()[1] == admin_user_id:
+            await context.set_state(PosterStates.generating)
+            await _reply(event, '👑 Режим администратора: Оплата пропущена. Запускаю генерацию...')
+            try:
+                result = await video_generator(dict(await context.get_data()))
+                if not isinstance(result, str) or not result.strip():
+                    raise ValueError('Тестовая генерация видео не вернула результат.')
+                await _reply(event, result, attachments=[main_keyboard()])
+                await context.update_data(video_test_complete=True)
+                await context.set_state(PosterStates.waiting_for_mode)
+            except Exception:
+                logger.exception('Ошибка тестовой генерации видео:')
+                await context.set_state(PosterStates.waiting_for_video_song)
+                await _reply(event, 'Не удалось выполнить тестовую генерацию. Выберите песню ещё раз.')
+            return
         price = data['video_amount_kopecks'] // 100
         text = ('Отлично! Мы создадим статичную открытку, оживим её (добавим анимацию) и наложим песню.\n\n'
                 f'Стоимость видео-подарка — {price} ₽. Это волшебство займет около 5 минут, не закрывайте чат!')
-        if price == 249:
+        if price == 199:
+            text = 'Генерация анимации скоро появится\n\nСтоимость — 199 ₽. Выбран сценарий: ' + scenarios[scenario][0]
+        elif price == 249:
             text = 'Генерация видео с песней скоро появится\n\n' + text
         await _reply(event, text, attachments=[InlineKeyboardBuilder().row(
-            LinkButton(text=f'Оплатить {price} ₽ и создать видео', url=VIDEO_PAYMENT_PLACEHOLDER_URL)).row(
+            LinkButton(text=f'Оплатить {price} ₽' + (' и оживить открытку' if price == 199 else ' и создать видео'), url=VIDEO_PAYMENT_PLACEHOLDER_URL)).row(
             CallbackButton(text='⬅️ Назад', payload='back_to_main')).as_markup()])
 
     @router.message_callback(F.callback.payload.in_({*CATEGORY_MENUS, "back_to_cards"}))
@@ -1492,7 +1534,7 @@ def create_router(
         scenario = event.callback.payload.removeprefix("audio_fun_")
         user_id = event.get_ids()[1]
         if user_id is not None:
-            await increment_counter("audio_scen_" + scenario, user_id=user_id)
+            await increment_counter(AUDIO_FUN_COUNTERS[event.callback.payload], user_id=user_id)
         await context.clear()
         await context.update_data(song_scenario=scenario)
         await context.set_state(PosterStates.waiting_for_song_details)
@@ -1518,10 +1560,10 @@ def create_router(
             return
         await event.ack(notification="Жду детали песни…")
         payload = event.callback.payload
-        scenario = payload.removeprefix("gift_scen_")
+        scenario = gift_scenario_name(payload)
         user_id = event.get_ids()[1]
         if user_id is not None:
-            await increment_counter("audio_gift_" + scenario, user_id=user_id)
+            await increment_counter(AUDIO_GIFT_COUNTERS[payload], user_id=user_id)
         await context.clear()
         await context.update_data(gift_scenario=scenario)
         await context.set_state(GIFT_SCENARIO_STATES[payload])
@@ -1555,7 +1597,7 @@ def create_router(
             async with lock:
                 data = await context.get_data()
                 scenario, details = data.get('gift_scenario'), data.get('gift_details')
-                key = 'gift_scen_' + str(scenario)
+                key = audio_scenario_key(scenario, 'gift')
                 if key not in AUDIO_GIFT_SCENARIOS or not isinstance(details, str) or not details.strip():
                     raise InvalidSongArguments('Выберите сценарий и заполните детали песни заново.')
                 order = await find_gift_preview_order(user_id, scenario, details, data.get('song_style'))
@@ -1604,7 +1646,7 @@ def create_router(
         except Exception as exc:
             logger.exception('ОШИБКА ГЕНЕРАЦИИ ПЕСНИ: %s', exc)
             data = await context.get_data()
-            scenario_state = GIFT_SCENARIO_STATES.get('gift_scen_' + str(data.get('gift_scenario')))
+            scenario_state = GIFT_SCENARIO_STATES.get(audio_scenario_key(data.get('gift_scenario'), 'gift'))
             if scenario_state is not None:
                 await context.set_state(scenario_state)
             await _reply(event, f'❌ Ошибка: {exc}')
@@ -1637,7 +1679,7 @@ def create_router(
             scenario = data['song_scenario' if audio_format == 'fun' else 'gift_scenario']
             details = data['song_details' if audio_format == 'fun' else 'gift_details']
             scenarios = AUDIO_FUN_SCENARIOS if audio_format == 'fun' else AUDIO_GIFT_SCENARIOS
-            scenario_key = ('audio_fun_' if audio_format == 'fun' else 'gift_scen_') + scenario
+            scenario_key = audio_scenario_key(scenario, audio_format)
             prompt, tags, title = build_song_request(details, scenarios[scenario_key][0], audio_format, data.get('song_style'))
             link = await payments.create_audio_payment_link(user_id, audio_format, scenario, details, data.get('song_style'), prompt, tags, title, order_id=order_id)
             if not isinstance(link, str) or not link.startswith('https://'):
@@ -1704,7 +1746,7 @@ def create_router(
                 scenario = data.get('song_scenario' if audio_format == 'fun' else 'gift_scenario')
                 details = data.get('song_details' if audio_format == 'fun' else 'gift_details')
                 scenarios = AUDIO_FUN_SCENARIOS if audio_format == 'fun' else AUDIO_GIFT_SCENARIOS
-                scenario_key = ('audio_fun_' if audio_format == 'fun' else 'gift_scen_') + str(scenario)
+                scenario_key = audio_scenario_key(scenario, audio_format)
                 if await context.get_state() != expected or scenario_key not in scenarios or not isinstance(details, str) or not details.strip():
                     await _reply(event, 'Выберите сценарий и заполните детали песни заново.')
                     return
@@ -1747,8 +1789,8 @@ def create_router(
             scenario = data.get("song_scenario" if audio_format == "fun" else "gift_scenario")
             details = data.get("song_details" if audio_format == "fun" else "gift_details")
             scenarios = AUDIO_FUN_SCENARIOS if audio_format == "fun" else AUDIO_GIFT_SCENARIOS
-            prefix = "audio_fun_" if audio_format == "fun" else "gift_scen_"
-            if state != expected or prefix + str(scenario) not in scenarios or not isinstance(details, str) or not details.strip():
+            scenario_key = audio_scenario_key(scenario, audio_format)
+            if state != expected or scenario_key not in scenarios or not isinstance(details, str) or not details.strip():
                 await event.ack(notification="Выберите сценарий и заполните детали песни заново.")
                 return
             if data.get("audio_submit_started") and not data.get("audio_job_id"):
@@ -1774,7 +1816,7 @@ def create_router(
                     return
                 job_id = data.get("audio_job_id")
                 if not job_id:
-                    prompt, tags, title = build_song_request(details, scenarios[prefix + scenario][0], audio_format, data.get('song_style'))
+                    prompt, tags, title = build_song_request(details, scenarios[scenario_key][0], audio_format, data.get('song_style'))
                     logger.info('Начинаю подготовку текста песни для пользователя %s.', user_id)
                     prompt = data.get('audio_lyrics') or await lyric_writer(prompt, tags, title)
                     validate_song_arguments(prompt, tags, title)
@@ -2408,11 +2450,12 @@ def create_router(
     @router.message_created(PosterStates.waiting_for_gift_child)
     @router.message_created(PosterStates.waiting_for_gift_friend)
     @router.message_created(PosterStates.waiting_for_gift_custom)
+    @router.message_created(PosterStates.waiting_for_gift_ny)
     async def collect_gift_details(event: MessageCreated, context: MemoryContext) -> None:
         if is_bot_message(event):
             return
         data = await context.get_data()
-        payload = "gift_scen_" + str(data.get("gift_scenario", ""))
+        payload = audio_scenario_key(data.get("gift_scenario", ""), "gift")
         if payload not in GIFT_SCENARIO_STATES or await context.get_state() != GIFT_SCENARIO_STATES[payload]:
             await context.clear()
             await context.set_state(PosterStates.waiting_for_mode)

@@ -31,6 +31,19 @@ def build_song_request(details: str, scenario_title: str, audio_format: str, sty
               f"\n[Bridge]\nПусть впереди сияет новый день,\nИ счастье остаётся рядом с нами.\n[Chorus]\n{chorus}")
     tags = str(style or ('upbeat pop, playful, Russian vocals, short song, 30-40 seconds' if audio_format == 'fun'
                         else 'warm emotional pop, Russian vocals, heartfelt, 2-3 minutes'))
+    if scenario_title == '🎄 Новогодняя':
+        chorus = ('С Новым годом! Счастья, радости, подарков,\nПусть он будет добрым, весёлым и ярким!' if audio_format == 'fun' else
+                  'С Новым годом, родные, пусть в доме тепло,\nПусть исполнятся мечты и прибудет добро!')
+        opening = ('За окном снежинки, огоньки горят,\nИ улыбки дарит праздник всем подряд.' if audio_format == 'fun' else
+                   'За одним столом собралась семья,\nВ свете огоньков рядом ты и я.')
+        bridge = ('Пусть подарки ждут у ёлки, смех звучит повсюду!' if audio_format == 'fun' else
+                  'Вспомним наши тёплые семейные мгновения,\nПусть подарит Новый год надежды и свершения.')
+        prompt = (f'[Verse 1]\n{opening}\n[Chorus]\n{chorus}\n[Verse 2]\n{details.strip()}\n'
+                  f'Пусть сбываются добрые пожелания.\n[Chorus]\n{chorus}\n[Bridge]\n{bridge}\n[Chorus]\n{chorus}')
+        tags = str(style or ('cheerful festive pop' if audio_format == 'fun' else 'warm family acoustic pop'))
+        tags += ', New Year, Russian vocals, ' + ('playful, happiness and gifts, short song, 30-40 seconds' if audio_format == 'fun' else
+                                                'heartfelt family memories and wishes, 2-3 minutes')
+
     if len(prompt) > 5000 or len(tags) > 1000:
         raise ValueError('Слишком много деталей для TTAPI.')
     return prompt, tags, f"{scenario_title}: {details.split(',')[0]}"[:80]

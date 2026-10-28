@@ -301,3 +301,23 @@ async def test_request_timeout_is_clear_and_is_not_silently_retried():
         with pytest.raises(TimeoutError, match='30 секунд'):
             await service.generate_song('words', 'pop', 'title')
     assert len(next(iter(http.requests.values()))) == 1
+
+
+@pytest.mark.parametrize('kind,duration', [('fun', '30-40 seconds'), ('gift', '2-3 minutes')])
+def test_new_year_song_has_required_mood_wishes_and_duration(kind, duration):
+    prompt, tags, title = service.build_song_request('Аня, семья, вместе катались на лыжах', '🎄 Новогодняя', kind)
+    assert duration in tags and 'New Year' in tags
+    assert 'С Новым годом' in prompt and 'Аня' in prompt
+    assert title.startswith('🎄 Новогодняя:')
+    if kind == 'fun':
+        assert 'подарков' in prompt and 'Счастья' in prompt and 'playful' in tags
+    else:
+        assert 'семейные мгновения' in prompt and 'родные' in prompt and 'family' in tags
+    assert prompt.startswith('[Verse 1]')
+    # Название сценария остаётся только в title.
+    assert 'Новогодняя' not in prompt
+
+
+def test_new_year_custom_style_keeps_duration_and_festive_theme():
+    _, tags, _ = service.build_song_request('Сергей', '🎄 Новогодняя', 'fun', 'rock')
+    assert tags.startswith('rock,') and '30-40 seconds' in tags and 'New Year' in tags

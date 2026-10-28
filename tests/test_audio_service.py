@@ -331,7 +331,9 @@ def test_teacher_song_notes_are_formal_and_use_right_duration(kind, duration):
     assert 'Спасибо Вам' in prompt and 'терпение' in prompt and 'поддержку' in prompt
     choruses = re.findall(r'\[Chorus\]\n(.*?)(?=\n\[|$)', prompt, flags=re.S)
     assert len(choruses) == 3 and all(phrase in chorus for chorus in choruses)
-    assert 'elegant pop ballad' in tags and duration in tags
+    assert 'upbeat pop rock, energetic, stadium anthem, motivational' in tags and duration in tags
+    assert all(word in prompt.lower() for word in ('победа', 'сила', 'команда', 'вперед'))
+    assert 'ballad' not in tags
     assert not re.search(r'\b(ты|тебя|тобой)\b', prompt, flags=re.I)
     assert title.startswith(service.TEACHER_SCENARIO_TITLE + ':')
 
@@ -350,6 +352,8 @@ async def test_teacher_llm_system_prompt_demands_respectful_gratitude(monkeypatc
     system = body['messages'][0]['content']
     assert service.TEACHER_LYRICS_INSTRUCTION in system
     assert 'на «Вы»' in system and 'терпение, поддержку и знания' in system
+    assert 'энергичный поп-рок, стадионный гимн или динамичный рэп' in system
+    assert 'победа, сила, команда, вперед' in system
     assert ('Длина около 30 секунд' in system) == (kind == 'fun')
     assert 'Иван, лучший тренер по футболу' in body['messages'][1]['content']
     assert 'основой каждого припева [Chorus]' in system
@@ -463,5 +467,30 @@ async def test_llm_rewording_or_missing_literal_chorus_is_rejected_before_suno(m
     respx.post('https://api.openai.com/v1/chat/completions').respond(200, json={
         'id': 'chorus', 'object': 'chat.completion', 'created': 1, 'model': 'gpt-4o-mini',
         'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': changed}}]})
+    with pytest.raises(service.AudioServiceError, match='фразу припева'):
+        await service.write_song_lyrics(notes, tags, title)
+
+
+@pytest.mark.parametrize('scenario', ['🎄 Новогодняя', service.TEACHER_SCENARIO_TITLE])
+@respx.mock
+async def test_video_greeting_can_be_reworked_into_chorus_while_audio_keeps_literal_rule(monkeypatch, scenario):
+    monkeypatch.setattr(service.Config, 'from_env', lambda: Config(token='test', photo_path=Path('unused'), image_api_key='test-key'))
+    greeting = 'Ирина Петровна, спасибо за уроки математики! Желаем Вам счастья и вдохновения.'
+    notes, tags, title = service.build_song_request(greeting, scenario, 'fun')
+    lyrics = ('[Verse 1]\nВаш труд согреет наши дни\n[Chorus]\nИрина Петровна, пусть счастье Вас ждёт!\n'
+              '[Verse 2]\nЗа математику спасибо Вам\n[Chorus]\nИрина Петровна, пусть счастье Вас ждёт!\n'
+              '[Bridge]\nПусть вдохновение придёт\n[Chorus]\nИрина Петровна, пусть счастье Вас ждёт!')
+    route = respx.post('https://api.openai.com/v1/chat/completions').respond(200, json={
+        'id': 'video-greeting', 'object': 'chat.completion', 'created': 1, 'model': 'gpt-4o-mini',
+        'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': lyrics}}]})
+    assert await service.write_song_lyrics(notes, tags, title, preserve_chorus=False) == lyrics
+    body = json.loads(route.calls[0].request.content)
+    data = json.loads(body['messages'][1]['content'])
+    assert data['greeting_source'] == greeting and data['required_chorus_phrase'] is None
+    assert 'Сам сформулируй из него короткий, естественный припев' in body['messages'][0]['content']
+    assert 'CRITICAL REQUIREMENT' not in body['messages'][0]['content']
+    if scenario == service.TEACHER_SCENARIO_TITLE:
+        assert service.TEACHER_MUSIC_TAGS in tags
+        assert service.TEACHER_MUSIC_INSTRUCTION in body['messages'][0]['content']
     with pytest.raises(service.AudioServiceError, match='фразу припева'):
         await service.write_song_lyrics(notes, tags, title)

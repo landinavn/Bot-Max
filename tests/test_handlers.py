@@ -5056,6 +5056,17 @@ async def test_video_teacher_collects_details_creates_formal_text_and_keeps_card
     original = await context.get_data()
     chosen = callback_event('audio_video_teacher')
     await dispatch_callback(router, chosen, context)
+    if entry == 'cat_video':
+        data = await context.get_data()
+        writer.assert_awaited_once()
+        assert writer.await_args.kwargs == {'preserve_chorus': False}
+        assert original['card_text'] in writer.await_args.args[0]
+        assert data['photo'] == original['photo'] and data['card_text'] == original['card_text']
+        assert data['audio_url'] == 'https://audio.example/1.mp3'
+        assert not any('Напишите имя' in str(c) for c in chosen.send.await_args_list)
+        assert await context.get_state() == (PosterStates.waiting_for_mode if admin else PosterStates.waiting_for_video_payment)
+        return
+
     assert chosen.send.await_args.args[0] == 'Напишите имя тренера/учителя и фразу для припева (например: «Иван, лучший тренер по футболу»).'
     assert await context.get_state() == PosterStates.waiting_for_video_teacher_details
     assert 'payform' not in str(chosen.send.await_args_list)
@@ -5063,7 +5074,7 @@ async def test_video_teacher_collects_details_creates_formal_text_and_keeps_card
     await call_handler(router, 'echo', event, context)
     writer.assert_awaited_once()
     notes, tags, title = writer.await_args.args
-    assert 'Ирина Петровна' in notes and '30 seconds' in tags and 'elegant pop ballad' in tags
+    assert 'Ирина Петровна' in notes and '30 seconds' in tags and 'upbeat pop rock, energetic, stadium anthem, motivational' in tags
     data = await context.get_data()
     assert data['photo'] == original['photo'] and data['card_text'] == original['card_text']
     assert data['video_amount_kopecks'] == price * 100 and data['video_product'] == original['video_product']
@@ -5095,7 +5106,7 @@ async def test_gift_teacher_uses_formal_prompt_and_existing_paid_gift_preview(cr
     data = await context.get_data()
     saved = await credit_db.get_audio_order(data['audio_checkout_id'])
     assert saved['scenario'] == 'teacher' and saved['amount_kopecks'] == 49000 and saved['preview_delivered'] == 1
-    assert '2-3 minutes' in saved['tags'] and 'elegant pop ballad' in saved['tags']
+    assert '2-3 minutes' in saved['tags'] and 'upbeat pop rock, energetic, stadium anthem, motivational' in saved['tags']
     assert writer.await_args.args[2].startswith(handlers.TEACHER_SCENARIO_TITLE + ':')
     assert handlers.generate_song.await_args.args[0] == TEACHER_TEST_LYRICS
     assert (await credit_db.get_all_counters())['audio_scen_teacher_gift'] == 1
@@ -5283,25 +5294,25 @@ async def test_video_role_card_generates_marked_preview_before_music_without_spe
     router, context = create_router(postcard_generator=card), await ready_context()
     await dispatch_callback_and_phrase(router, callback_event('cat_video'), context)
     await dispatch_callback_and_phrase(router, callback_event('video_style:' + mode), context)
-    assert await context.get_state() == PosterStates.waiting_for_card_role_info
-    await call_handler(router, 'echo', message_event(info), context)
+    assert await context.get_state() == PosterStates.waiting_for_photo
     await call_handler(router, 'collect_photo', photo_event(), context)
-    text = message_event('Спасибо!')
+    greeting = info + ', спасибо за Ваш труд!'
+    text = message_event(greeting)
     await call_handler(router, 'echo', text, context)
-    card.assert_awaited_once_with('https://photos.example.com/source.png', mode, 'Спасибо!', theme_info=info, preview=True)
+    card.assert_awaited_once_with('https://photos.example.com/source.png', mode, greeting, theme_info=greeting, preview=True)
     replies = text.message.answer.await_args_list
     assert any(call.args and call.args[0] == 'Превью открытки для видео (PREVIEW):' for call in replies)
     assert replies[-1].args[0] == '🎵 Выберите сценарий песни для видео-поздравления:'
     assert await context.get_state() == PosterStates.waiting_for_video_song
     data = await context.get_data()
-    assert data[field] == info and data['video_preview_url'] == 'https://cdn.example/preview.png'
+    assert data[field] == greeting and data['video_preview_url'] == 'https://cdn.example/preview.png'
     assert data['video_amount_kopecks'] == 29900
     assert (await credit_db.get_user(456))['balance'] == 1
     assert (await credit_db.get_all_counters())[event_name] == 1
     handlers.send_offline_conversion.assert_awaited_once_with(456, goal_id='bot_generation')
     await dispatch_callback_and_phrase(router, callback_event('video_song:audio_fun_ny'), context)
     assert await context.get_state() == PosterStates.waiting_for_video_payment
-    assert (await context.get_data())[field] == info
+    assert (await context.get_data())[field] == greeting
     handlers.generate_song.assert_awaited_once()
     assert (await context.get_data())['audio_url'] == 'https://audio.example/1.mp3'
 
@@ -5311,7 +5322,6 @@ async def test_role_video_preview_retry_keeps_image_and_counts_once(credit_db, m
     router, context = create_router(postcard_generator=card), await ready_context()
     await dispatch_callback(router, callback_event('cat_video'), context)
     await dispatch_callback(router, callback_event('video_style:mode_teacher'), context)
-    await call_handler(router, 'echo', message_event('Ирина Петровна, математика'), context)
     await call_handler(router, 'collect_photo', photo_event(), context)
     max_image_upload.side_effect = [RuntimeError('MAX upload failed'), AttachmentUpload(type='image', payload={'token': 'retry'})]
     await call_handler(router, 'echo', message_event('Спасибо!'), context)
@@ -5333,7 +5343,7 @@ async def test_missing_or_oversized_role_info_never_generates(video, info):
         await dispatch_callback(router, callback_event('cat_video'), context)
     await dispatch_callback(router, callback_event('video_style:mode_coach' if video else 'mode_coach'), context)
     await call_handler(router, 'echo', message_event(info), context)
-    assert await context.get_state() == PosterStates.waiting_for_card_role_info
+    assert await context.get_state() == (PosterStates.waiting_for_photo if video else PosterStates.waiting_for_card_role_info)
     assert 'coach_info' not in await context.get_data()
     card.assert_not_awaited()
 
@@ -5343,11 +5353,10 @@ async def test_role_preview_generation_failure_does_not_increment_or_lose_contex
     router, context = create_router(postcard_generator=card), await ready_context()
     await dispatch_callback(router, callback_event('cat_video'), context)
     await dispatch_callback(router, callback_event('video_style:mode_coach'), context)
-    await call_handler(router, 'echo', message_event('Сергей, футбол'), context)
     await call_handler(router, 'collect_photo', photo_event(), context)
     await call_handler(router, 'echo', message_event('Спасибо!'), context)
     data = await context.get_data()
-    assert data['coach_info'] == 'Сергей, футбол' and data['photo']['url']
+    assert data['coach_info'] == 'Спасибо!' and data['photo']['url']
     assert await context.get_state() == PosterStates.waiting_for_card_text
     assert (await credit_db.get_all_counters()).get('gen_coach', 0) == 0
     handlers.send_offline_conversion.assert_not_awaited()
@@ -5365,7 +5374,6 @@ async def test_cancel_during_role_preview_drops_late_result(credit_db):
     router, context = create_router(postcard_generator=generate), await ready_context()
     await dispatch_callback(router, callback_event('cat_video'), context)
     await dispatch_callback(router, callback_event('video_style:mode_teacher'), context)
-    await call_handler(router, 'echo', message_event('Ирина, математика'), context)
     await call_handler(router, 'collect_photo', photo_event(), context)
     text = message_event('Спасибо!')
     task = asyncio.create_task(call_handler(router, 'echo', text, context))
@@ -5863,26 +5871,21 @@ async def test_cancel_during_cat_video_audio_wait_does_not_deliver_or_restore_st
 
 
 @pytest.mark.parametrize('scenario', list(handlers.VIDEO_SONG_SCENARIOS))
-async def test_video_scenario_collects_chorus_phrase_without_reusing_card_greeting(credit_db, scenario):
-    import re
-    writer = AsyncMock(side_effect=lambda notes, tags, title: notes)
+async def test_cat_video_scenario_uses_saved_greeting_without_new_song_input(credit_db, scenario):
+    writer = AsyncMock(side_effect=lambda notes, tags, title, **kwargs: notes)
     router, context = create_router(admin_user_id=999, lyric_writer=writer), await ready_context()
     await prepare_teacher_video(router, context, 'cat_video')
     original = await context.get_data()
     selected = callback_event(scenario if scenario == 'audio_video_teacher' else 'video_song:' + scenario)
     await dispatch_callback(router, selected, context)
-    assert selected.send.await_args.args[0] == handlers.VIDEO_SONG_SCENARIOS[scenario][1]
-    assert 'фразу для припева' in selected.send.await_args.args[0]
-    handlers.generate_song.assert_not_awaited()
-    phrase = 'Аня, ты моя сестра! ❤️'
-    await call_handler(router, 'echo', message_event(phrase), context)
     data = await context.get_data()
-    assert data['video_song_phrase'] == phrase
     assert data['photo'] == original['photo'] and data['card_text'] == original['card_text']
+    assert not data.get('video_song_phrase')
     assert await context.get_state() == PosterStates.waiting_for_video_payment
     writer.assert_awaited_once()
-    choruses = re.findall(r'\[Chorus\]\n(.*?)(?=\n\[|$)', writer.await_args.args[0], flags=re.S)
-    assert choruses == [phrase]*3
+    assert writer.await_args.kwargs == {'preserve_chorus': False}
+    assert original['card_text'] in writer.await_args.args[0]
+    assert not any('Напишите имя' in str(c) or 'фразу для припева' in str(c) for c in selected.send.await_args_list)
     assert data['audio_url'] == 'https://audio.example/1.mp3'
 
 
@@ -5902,3 +5905,65 @@ async def test_cartoon_song_requires_and_uses_user_chorus_phrase(credit_db, scen
     assert (await context.get_data())['video_song_phrase'] == phrase
     assert '[Chorus]\n' + phrase in handlers.generate_song.await_args.args[0]
     assert await context.get_state() == PosterStates.waiting_for_mode
+
+
+@pytest.mark.parametrize('mode', ['mode_teacher', 'mode_coach'])
+async def test_cat_video_role_real_dispatcher_asks_photo_then_greeting_and_derives_song(credit_db, monkeypatch, event_replies, mode):
+    from maxapi import Dispatcher
+    from maxapi.context.isolation import SimpleEventIsolation
+    from maxapi.types import MessageCreated, MessageCallback, User
+    monkeypatch.setattr(handlers, '_reply', event_replies)
+    writer = AsyncMock(side_effect=lambda notes, tags, title, **kwargs: notes)
+    router = create_router(admin_user_id=999, lyric_writer=writer,
+        postcard_generator=AsyncMock(return_value=['https://cdn.example/role-preview.png']))
+    dp = Dispatcher(storage=MemoryContext, event_isolation=SimpleEventIsolation())
+    dp.include_routers(router)
+    bot = SimpleNamespace(me=User(user_id=9999, first_name='Bot', is_bot=True),
+                          send_message=AsyncMock(return_value=object()), send_callback=AsyncMock())
+    user = {'user_id': 456, 'first_name': 'Test', 'is_bot': False}
+    def message(text=None, attachments=None, sender=None):
+        return {'sender': sender or user, 'recipient': {'chat_id': 123, 'chat_type': 'dialog'}, 'timestamp': 1,
+                'body': {'mid': 'role-flow', 'seq': 1, 'text': text, 'attachments': attachments}}
+    async def click(payload):
+        await dp.handle(MessageCallback(timestamp=1, bot=bot, message=message(sender=bot.me.model_dump()),
+            callback={'timestamp': 1, 'callback_id': payload, 'payload': payload, 'user': user}))
+    try:
+        await click('cat_video')
+        await click('video_style:' + mode)
+        context = dp.fsm.get_context(chat_id=123, user_id=456)
+        assert await context.get_state() == PosterStates.waiting_for_photo
+        assert 'Отправьте одно фото' in bot.send_message.await_args.kwargs['text']
+        await dp.handle(MessageCreated(timestamp=2, bot=bot, message=message(attachments=[{
+            'type': 'image', 'payload': {'photo_id': 1, 'token': 'source', 'url': 'https://photos.example.com/source.png'}}])))
+        assert await context.get_state() == PosterStates.waiting_for_card_text
+        greeting = 'Ирина Петровна, спасибо за Ваш труд! Желаем Вам счастья и вдохновения.'
+        await dp.handle(MessageCreated(timestamp=3, bot=bot, message=message(greeting)))
+        assert await context.get_state() == PosterStates.waiting_for_video_song
+        await click('audio_video_teacher')
+        assert await context.get_state() == PosterStates.waiting_for_video_payment
+        writer.assert_awaited_once()
+        assert greeting in writer.await_args.args[0]
+        assert writer.await_args.kwargs == {'preserve_chorus': False}
+        texts = [c.kwargs.get('text', '') for c in bot.send_message.await_args_list]
+        assert not any('фразу для припева' in text or text == handlers.ROLE_CARD_QUESTIONS[mode] for text in texts)
+        assert (await context.get_data())['audio_url'] == 'https://audio.example/1.mp3'
+    finally:
+        await dp.shutdown()
+
+
+async def test_coach_video_card_keeps_dynamic_music_style_even_for_newyear_song(credit_db):
+    writer = AsyncMock(side_effect=lambda notes, tags, title, **kwargs: notes)
+    router, context = create_router(admin_user_id=999, lyric_writer=writer,
+        postcard_generator=AsyncMock(return_value=['https://cdn.example/coach.png'])), await ready_context()
+    await dispatch_callback(router, callback_event('cat_video'), context)
+    await dispatch_callback(router, callback_event('video_style:mode_coach'), context)
+    assert await context.get_state() == PosterStates.waiting_for_photo
+    await call_handler(router, 'collect_photo', photo_event(), context)
+    greeting = 'Иван, с Новым годом! Спасибо за тренировки и веру в нашу команду!'
+    await call_handler(router, 'collect_card_text', message_event(greeting), context)
+    await dispatch_callback(router, callback_event('video_song:audio_fun_ny'), context)
+    notes, tags, title = writer.await_args.args
+    assert tags.startswith('upbeat pop rock, energetic, stadium anthem, motivational')
+    assert 'Новогодняя' in title and greeting in notes
+    assert all(word in notes.lower() for word in ('победа', 'сила', 'команда', 'вперед'))
+    assert writer.await_args.kwargs == {'preserve_chorus': False}

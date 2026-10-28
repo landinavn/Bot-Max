@@ -3426,7 +3426,7 @@ async def test_gift_collects_details_and_shows_test_payment_without_charging(cre
     assert await context.get_state() == PosterStates.waiting_for_gift_preview
     order_id = (await context.get_data())['audio_checkout_id']
     order = await credit_db.get_audio_order(order_id)
-    assert order['preview_requested'] == 1 and order['status'] == 'pending'
+    assert order['preview_requested'] == 0 and order['preview_delivered'] == 1 and order['status'] == 'pending'
     assert 'attachments' not in answer.message.answer.await_args.kwargs
     payment = callback_event('gift_payment_soon')
     await dispatch_callback(router, payment, context)
@@ -3531,7 +3531,7 @@ async def test_dispatcher_routes_all_gift_states_and_cancel(credit_db, monkeypat
             await dp.handle(MessageCreated(timestamp=2, bot=bot, message=message('Аня, любит кофе')))
             assert await context.get_state() == PosterStates.waiting_for_gift_preview
             assert (await context.get_data())['gift_details'] == 'Аня, любит кофе'
-            assert 'Создаю песню и фрагмент' in bot.send_message.await_args.kwargs['text']
+            assert any('Создаю песню и фрагмент' in c.kwargs.get('text', '') for c in bot.send_message.await_args_list)
             await dp.handle(MessageCreated(timestamp=3, bot=bot, message=message('/cancel')))
             assert await context.get_state() == PosterStates.waiting_for_mode
             assert await context.get_data() == {}
@@ -4047,7 +4047,7 @@ async def test_regular_audio_payment_screen_has_direct_url_button_before_payment
         await credit_db.create_audio_order(order_id, user_id, fmt, scenario, details, style, prompt, tags, title)
         return 'https://link.payform.ru/personal-checkout'
     payments = SimpleNamespace(create_audio_payment_link=AsyncMock(side_effect=create))
-    submit, wait = AsyncMock(), AsyncMock()
+    submit, wait = AsyncMock(return_value='gift-job'), AsyncMock(return_value=TT_RESULT)
     router = create_router(payments=payments, song_generator=submit, song_waiter=wait)
     context = await ready_context()
     scenario = 'audio_fun_boss' if kind == 'fun' else 'gift_scen_bday'
@@ -4055,10 +4055,10 @@ async def test_regular_audio_payment_screen_has_direct_url_button_before_payment
     event = message_event('Аня, любит горы')
     await call_handler(router, 'echo', event, context)
     if kind == 'gift':
-        assert 'Создаю песню и фрагмент' in event.message.answer.await_args.args[0]
-        assert 'attachments' not in event.message.answer.await_args.kwargs
-        payments.create_audio_payment_link.assert_not_awaited()
-        submit.assert_not_awaited()
+        submit.assert_awaited_once()
+        wait.assert_awaited_once_with('gift-job')
+        payments.create_audio_payment_link.assert_awaited_once()
+        assert 'Послушайте фрагмент' in event.bot.send_message.await_args.kwargs['text']
         return
     buttons = event.message.answer.await_args.kwargs['attachments'][0].payload.buttons
     pay = next(row[0] for row in buttons if row[0].text.startswith('Оплатить'))
@@ -4142,7 +4142,8 @@ async def test_same_unpaid_gift_details_reuse_preview_order_without_new_song(cre
             original=current
         else:
             assert current==original
-    assert await credit_db.pending_audio_orders()==[original]
+    assert await credit_db.pending_audio_orders()==[]
+    handlers.generate_song.assert_awaited_once()
 
 
 async def test_gift_checkout_from_preview_survives_lost_fsm(credit_db):
@@ -4169,50 +4170,47 @@ async def test_admin_can_unlock_preview_without_a_second_generation_or_purchase(
     assert (await credit_db.get_global_stats())['total_purchases']==0
 
 
-async def test_gift_preview_is_queued_while_another_admin_generation_is_running(credit_db):
+async def test_gift_preview_direct_await_is_not_blocked_by_another_admin_generation(credit_db):
     import asyncio
-    entered,release=asyncio.Event(),asyncio.Event()
+    entered, release = asyncio.Event(), asyncio.Event()
     async def wait(job):
-        entered.set()
-        await release.wait()
+        if job == 'blocked-job':
+            entered.set()
+            await release.wait()
         return TT_RESULT
-    router=create_router(admin_user_id=456,song_generator=AsyncMock(return_value='job'),song_waiter=wait)
-    first_context=await tt_context()
-    first=asyncio.create_task(dispatch_callback(router,callback_event('audio_fun_payment_soon'),first_context))
+    router = create_router(admin_user_id=456, song_generator=AsyncMock(side_effect=['blocked-job', 'gift-job']), song_waiter=wait)
+    first = asyncio.create_task(dispatch_callback(router, callback_event('audio_fun_payment_soon'), await tt_context()))
     try:
         await entered.wait()
-        gift_context=await ready_context()
-        await gift_context.clear()
-        await gift_context.update_data(gift_scenario='bday')
-        await gift_context.set_state(PosterStates.waiting_for_gift_bday)
-        await call_handler(router,'collect_gift_details',message_event('Аня, любит горы'),gift_context)
-        order_id=(await gift_context.get_data())['audio_checkout_id']
-        assert order_id in await credit_db.pending_audio_orders()
+        context = await tt_context('gift')
+        await context.set_state(PosterStates.waiting_for_gift_bday)
+        await call_handler(router, 'collect_gift_details', message_event('Аня, любит горы'), context)
+        saved = await credit_db.get_audio_order((await context.get_data())['audio_checkout_id'])
+        assert saved['preview_delivered'] == 1 and saved['job_id'] == 'gift-job'
+        assert saved['order_id'] not in await credit_db.pending_audio_orders()
     finally:
         release.set()
         await first
 
 
-async def test_admin_long_audio_notifies_then_delivers_without_second_submit(credit_db, monkeypatch):
+async def test_admin_direct_wait_finishes_in_the_callback_without_background_waiter(credit_db):
     import asyncio
-    from audio_service import wait_for_song_with_progress, LONG_WAIT_MESSAGE
-    ready = asyncio.Event()
-    async def short_progress(job, notify, **kwargs):
-        return await wait_for_song_with_progress(job, notify, notification_delay=0.001, **kwargs)
-    monkeypatch.setattr('handlers.wait_for_song_with_progress', short_progress)
+    entered, release = asyncio.Event(), asyncio.Event()
     async def wait(job):
-        await ready.wait()
-        return TT_RESULT
-    submit = AsyncMock(return_value='long-job')
+        entered.set()
+        await release.wait()
+        return 'https://audio.example/1.mp3'
+    submit = AsyncMock(return_value='direct-job')
     router = create_router(admin_user_id=456, song_generator=submit, song_waiter=wait)
-    event = callback_event('gift_payment_soon')
-    async def sent(text, **kwargs):
-        if text == LONG_WAIT_MESSAGE:
-            ready.set()
-    event.send.side_effect = sent
     context = await tt_context('gift')
-    await asyncio.wait_for(dispatch_callback(router, event, context), 2)
-    assert sum(call.args[0] == LONG_WAIT_MESSAGE for call in event.send.await_args_list) == 1
+    task = asyncio.create_task(dispatch_callback(router, callback_event('gift_payment_soon'), context))
+    try:
+        await entered.wait()
+        assert not task.done()
+        assert await context.get_state() == PosterStates.waiting_for_audio_generation
+    finally:
+        release.set()
+        await task
     assert await context.get_state() == PosterStates.waiting_for_audio_result
     submit.assert_awaited_once()
 
@@ -4363,14 +4361,14 @@ async def test_gift_queue_failure_logs_traceback_and_allows_details_retry(credit
     else:
         event.message.answer.side_effect = [RuntimeError('MAX progress failure'), object()]
     await call_handler(create_router(), 'collect_gift_details', event, context)
-    assert any(r.exc_info and r.message == 'Критическая ошибка при запуске генерации песни:' for r in caplog.records)
+    assert any(r.exc_info and 'ОШИБКА ГЕНЕРАЦИИ ПЕСНИ:' in r.message for r in caplog.records)
     assert await context.get_state() == PosterStates.waiting_for_gift_bday
-    assert 'Отправьте детали песни ещё раз' in event.message.answer.await_args.args[0]
+    assert event.message.answer.await_args.args[0].startswith('❌ Ошибка:')
     if failure == 'build':
         assert 'Стиль музыки не задан' in event.message.answer.await_args.args[0]
 
 
-async def test_gift_queue_then_worker_logs_actual_ttapi_start_and_all_arguments(credit_db, caplog):
+async def test_gift_handler_directly_calls_ttapi_with_all_arguments(credit_db, caplog):
     from audio_orders import PaidAudioWorker
     context = await tt_context('gift')
     await context.set_state(PosterStates.waiting_for_gift_bday)
@@ -4378,15 +4376,13 @@ async def test_gift_queue_then_worker_logs_actual_ttapi_start_and_all_arguments(
     submit = AsyncMock(return_value='diagnostic-job')
     wait = AsyncMock(return_value=TT_RESULT)
     with caplog.at_level('INFO'):
-        await call_handler(create_router(), 'collect_gift_details', event, context)
+        await call_handler(create_router(song_generator=submit, song_waiter=wait), 'collect_gift_details', event, context)
         order_id = (await context.get_data())['audio_checkout_id']
-        await PaidAudioWorker(event.bot, generator=submit, waiter=wait).process(order_id)
     saved = await credit_db.get_audio_order(order_id)
     submit.assert_awaited_once_with(saved['lyrics'], saved['tags'], saved['title'])
     assert all(isinstance(arg, str) and arg.strip() for arg in submit.await_args.args)
-    assert 'поставлен в очередь для пользователя 456' in caplog.text
     assert 'Запускаю audio_service.generate_song для пользователя 456' in caplog.text
-    assert 'job_id=diagnostic-job' in caplog.text
+    assert saved['job_id'] == 'diagnostic-job'
     assert saved['preview_delivered'] == 1
 
 
@@ -4529,3 +4525,75 @@ async def test_video_offer_not_repeated_when_sharing_fails_after_card_delivery(c
     assert not any(call.args and call.args[0] == handlers.VIDEO_UPSELL_TEXT for call in retry.send.await_args_list)
     cards.assert_awaited_once()
     assert (await credit_db.get_user(456))['balance'] == 1
+
+
+@pytest.mark.parametrize('stage', ['submit', 'wait', 'preview'])
+async def test_direct_gift_error_has_traceback_and_is_shown_to_user(credit_db, monkeypatch, caplog, stage):
+    from audio_service import AudioServiceError
+    await credit_db.grant_free_trial(456)
+    submit = AsyncMock(return_value='saved-direct-job')
+    wait = AsyncMock(return_value='https://audio.example/full.mp3')
+    if stage == 'submit':
+        submit.side_effect = AudioServiceError('TTAPI Error: 503 - unavailable')
+    elif stage == 'wait':
+        wait.side_effect = TimeoutError('Таймаут ожидания TTAPI (100 секунд)')
+    else:
+        monkeypatch.setattr(handlers, 'make_protected_preview', AsyncMock(side_effect=RuntimeError('ffmpeg unavailable')))
+    router = create_router(song_generator=submit, song_waiter=wait)
+    context = await tt_context('gift')
+    await context.set_state(PosterStates.waiting_for_gift_bday)
+    event = message_event('Аня, любит горы')
+    await call_handler(router, 'collect_gift_details', event, context)
+    assert any(r.exc_info and r.message.startswith('ОШИБКА ГЕНЕРАЦИИ ПЕСНИ:') for r in caplog.records)
+    assert event.message.answer.await_args.args[0].startswith('❌ Ошибка:')
+    assert await context.get_state() == PosterStates.waiting_for_gift_bday
+    order = await credit_db.get_audio_order((await context.get_data())['audio_checkout_id'])
+    assert order['running'] == 0 and order['status'] == 'pending'
+    assert await credit_db.pending_audio_orders() == []
+    assert (await credit_db.get_user(456))['balance'] == 1
+    if stage == 'wait':
+        assert order['job_id'] == 'saved-direct-job'
+        wait.side_effect = None
+        retry = message_event('Аня, любит горы')
+        await call_handler(router, 'collect_gift_details', retry, context)
+        submit.assert_awaited_once()
+        assert wait.await_count == 2
+        assert (await credit_db.get_audio_order(order['order_id']))['preview_delivered'] == 1
+    if stage == 'submit':
+        await call_handler(router, 'collect_gift_details', message_event('Аня, любит горы'), context)
+        submit.assert_awaited_once()  # Не повторяем POST с неизвестным исходом.
+
+
+async def test_direct_gift_handler_waits_and_worker_cannot_claim_its_order(credit_db):
+    import asyncio
+    from audio_orders import PaidAudioWorker
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def wait(job):
+        entered.set()
+        await release.wait()
+        return 'https://audio.example/full.mp3'
+    submit = AsyncMock(return_value='direct-job')
+    router = create_router(song_generator=submit, song_waiter=wait)
+    context = await tt_context('gift')
+    await context.set_state(PosterStates.waiting_for_gift_bday)
+    event = message_event('Аня, любит горы')
+    task = asyncio.create_task(call_handler(router, 'collect_gift_details', event, context))
+    try:
+        await entered.wait()
+        assert not task.done()
+        order_id = (await context.get_data())['audio_checkout_id']
+        saved = await credit_db.get_audio_order(order_id)
+        assert saved['job_id'] == 'direct-job' and saved['running'] == 1
+        assert saved['preview_requested'] == 0
+        assert order_id not in await credit_db.pending_audio_orders()
+        other_submit = AsyncMock()
+        await PaidAudioWorker(event.bot, generator=other_submit).process(order_id)
+        other_submit.assert_not_awaited()
+    finally:
+        release.set()
+        await task
+    saved = await credit_db.get_audio_order(order_id)
+    assert saved['running'] == 0 and saved['preview_delivered'] == 1
+    assert 'https://audio.example/full.mp3' not in event.bot.send_message.await_args.kwargs['text']
+    assert 'https://preview.example/clip.mp3' in event.bot.send_message.await_args.kwargs['text']
+    submit.assert_awaited_once()

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock
 import httpx
 import pytest
 import respx
+from aioresponses import aioresponses
 
 import audio_service as service
 from config import Config
@@ -17,62 +18,61 @@ def audio_config(monkeypatch):
         token='test-max', photo_path=Path('unused'), ttapi_key='secret-test-ttapi'))
 
 
-@respx.mock
 async def test_submit_exact_custom_music_request_and_fetch():
-    submit = respx.post(service.BASE_URL + '/suno/v1/music').mock(return_value=httpx.Response(
-        200, json={'status': 'SUCCESS', 'data': {'jobId': 'job-1'}}))
-    fetch = respx.get(service.BASE_URL + '/suno/v2/fetch', params={'jobId': 'job-1'}).mock(return_value=httpx.Response(
-        200, json={'status': 'SUCCESS', 'data': {'musics': [{'audioUrl': 'https://cdn.example/1.mp3'}]}}))
-    assert await service.generate_song('Текст песни', 'pop', 'Для Ани') == 'job-1'
-    payload = json.loads(submit.calls[0].request.content)
-    assert payload == {'custom': True, 'instrumental': False, 'mv': 'chirp-v6', 'prompt': 'Текст песни',
-                       'title': 'Для Ани', 'tags': 'pop', 'audio_format': 'mp3'}
-    assert submit.calls[0].request.headers['TT-API-KEY'] == 'secret-test-ttapi'
-    result = await service.fetch_song('job-1')
+    with aioresponses() as http:
+        http.post(service.BASE_URL + '/suno/v1/music', payload={'status': 'SUCCESS', 'data': {'jobId': 'job-1'}})
+        http.get(service.BASE_URL + '/suno/v2/fetch?jobId=job-1', payload={'status': 'SUCCESS', 'data': {'musics': [{'audioUrl': 'https://cdn.example/1.mp3'}]}})
+        assert await service.generate_song('Текст песни', 'pop', 'Для Ани') == 'job-1'
+        result = await service.fetch_song('job-1')
+    calls = list(http.requests.values())
+    assert calls[0][0].kwargs['json'] == {'custom': True, 'instrumental': False, 'mv': 'chirp-v6',
+        'prompt': 'Текст песни', 'title': 'Для Ани', 'tags': 'pop', 'audio_format': 'mp3'}
+    assert calls[0][0].kwargs['headers']['TT-API-KEY'] == 'secret-test-ttapi'
     assert result['status'] == 'SUCCESS'
-    assert fetch.calls[0].request.headers['TT-API-KEY'] == 'secret-test-ttapi'
 
 
 @pytest.mark.parametrize('status', [400, 401, 429, 500])
-@respx.mock
 async def test_http_failures_are_not_retried_or_exposed(status):
-    route = respx.post(service.BASE_URL + '/suno/v1/music').mock(return_value=httpx.Response(
-        status, json={'message': 'secret-test-ttapi'}))
-    with pytest.raises(service.AudioServiceError) as error:
-        await service.generate_song('words', 'pop', 'title')
+    with aioresponses() as http:
+        http.post(service.BASE_URL + '/suno/v1/music', status=status, body='provider rejected secret-test-ttapi')
+        with pytest.raises(service.AudioServiceError) as error:
+            await service.generate_song('words', 'pop', 'title')
+    assert f'TTAPI Error: {status}' in str(error.value)
+    assert 'provider rejected' in str(error.value)
     assert 'secret-test-ttapi' not in str(error.value)
-    assert route.call_count == 1
+    assert len(next(iter(http.requests.values()))) == 1
 
 
 @pytest.mark.parametrize('body', [{'status': 'FAILED'}, {'status': 'SUCCESS'}, [], 'invalid'])
-@respx.mock
 async def test_bad_submit_responses(body):
-    respx.post(service.BASE_URL + '/suno/v1/music').mock(return_value=httpx.Response(200, json=body))
-    with pytest.raises(service.AudioServiceError):
-        await service.generate_song('words', 'pop', 'title')
+    with aioresponses() as http:
+        http.post(service.BASE_URL + '/suno/v1/music', payload=body)
+        with pytest.raises(service.AudioServiceError):
+            await service.generate_song('words', 'pop', 'title')
 
 
-@respx.mock
 async def test_missing_key_makes_no_http_request(monkeypatch):
     monkeypatch.setattr(service.Config, 'from_env', lambda: Config(token='test-max', photo_path=Path('unused')))
-    with pytest.raises(service.AudioNotConfigured):
-        await service.generate_song('words', 'pop', 'title')
-    assert not respx.calls
+    with aioresponses() as http:
+        with pytest.raises(service.AudioNotConfigured):
+            await service.generate_song('words', 'pop', 'title')
+    assert not http.requests
 
 
 async def test_wait_polls_every_five_seconds_until_success(monkeypatch):
-    result = {'status': 'SUCCESS', 'data': {'musics': []}}
+    result = {'status': 'SUCCESS', 'data': [{'audio_url': 'https://cdn.example/1.mp3'}]}
     fetch = AsyncMock(side_effect=[{'status': 'ON_QUEUE'}, {'status': 'PROCESSING'}, result])
     sleep = AsyncMock()
     monkeypatch.setattr(service, 'fetch_song', fetch)
     monkeypatch.setattr(service.asyncio, 'sleep', sleep)
-    assert await service.wait_for_song('job') is result
+    assert await service.wait_for_song('job') == 'https://cdn.example/1.mp3'
     assert fetch.await_count == 3
-    assert [c.args for c in sleep.await_args_list] == [(5,), (5,)]
+    assert [c.args for c in sleep.await_args_list] == [(5,), (5,), (5,)]
 
 
-@pytest.mark.parametrize('status,error', [('FAILED', service.SongFailed), ('WRONG', service.AudioServiceError)])
+@pytest.mark.parametrize('status,error', [('FAILED', service.SongFailed), ('WRONG', TimeoutError)])
 async def test_failed_and_unknown_poll_status(monkeypatch, status, error):
+    monkeypatch.setattr(service.asyncio, 'sleep', AsyncMock())
     monkeypatch.setattr(service, 'fetch_song', AsyncMock(return_value={'status': status}))
     with pytest.raises(error):
         await service.wait_for_song('job')
@@ -170,25 +170,26 @@ async def test_preview_is_reencoded_short_mp3_and_only_clip_is_uploaded(monkeypa
     storage.close.assert_called_once()
 
 
-async def test_poll_default_timeout_is_six_minutes_and_logs_each_status(monkeypatch, caplog):
+async def test_poll_default_timeout_is_100_seconds_and_logs_each_attempt(monkeypatch, caplog):
     timeout = Mock(wraps=asyncio.timeout)
     monkeypatch.setattr(service.asyncio, 'timeout', timeout)
-    monkeypatch.setattr(service, 'fetch_song', AsyncMock(side_effect=[{'status': 'PENDING'}, {'status': 'SUCCESS'}]))
+    monkeypatch.setattr(service, 'fetch_song', AsyncMock(side_effect=[{'status': 'PENDING'}, {'status': 'SUCCESS', 'data': [{'audio_url': 'https://cdn.example/1.mp3'}]}]))
     monkeypatch.setattr(service.asyncio, 'sleep', AsyncMock())
     with caplog.at_level('INFO', logger='audio_service'):
         await service.wait_for_song('long-job')
-    timeout.assert_called_once_with(360)
-    assert 'TTAPI статус: PENDING (job_id=long-job)' in caplog.text
-    assert 'TTAPI статус: SUCCESS (job_id=long-job)' in caplog.text
+    timeout.assert_called_once_with(100)
+    assert 'Попытка 1: статус PENDING (job_id=long-job)' in caplog.text
+    assert 'Попытка 2: статус SUCCESS (job_id=long-job)' in caplog.text
 
 
 @pytest.mark.parametrize('status', ['FAILED', 'ERROR'])
 async def test_poll_failure_logs_complete_response(monkeypatch, caplog, status):
+    monkeypatch.setattr(service.asyncio, 'sleep', AsyncMock())
     response = {'status': status, 'data': {'reason': 'lyrics too long', 'code': 42}}
     monkeypatch.setattr(service, 'fetch_song', AsyncMock(return_value=response))
     with pytest.raises(service.SongFailed):
         await service.wait_for_song('failed-job')
-    assert repr(response) in caplog.text
+    assert json.dumps(response, ensure_ascii=False) in caplog.text
     assert 'failed-job' in caplog.text
 
 
@@ -259,3 +260,44 @@ async def test_song_arguments_fail_clearly_before_any_http(prompt, tags, title, 
     with pytest.raises(service.InvalidSongArguments, match=field):
         await service.generate_song(prompt, tags, title)
     assert not respx.calls
+
+
+@pytest.mark.parametrize('payload', [
+    {'status': 'SUCCESS', 'data': [{'audio_url': 'https://cdn.example/one.mp3'}, {'audio_url': 'https://cdn.example/two.mp3'}]},
+    {'status': 'SUCCESS', 'data': {'musics': [{'audioUrl': 'https://cdn.example/one.mp3'}, {'audioUrl': 'https://cdn.example/two.mp3'}]}},
+])
+async def test_public_wait_returns_first_url_and_full_wait_keeps_two_variants(monkeypatch, payload):
+    monkeypatch.setattr(service.asyncio, 'sleep', AsyncMock())
+    monkeypatch.setattr(service, 'fetch_song', AsyncMock(return_value=payload))
+    assert await service.wait_for_song('job') == 'https://cdn.example/one.mp3'
+    assert len(service.song_tracks(await service.wait_for_song_result('job'))) == 2
+
+
+async def test_twenty_pending_attempts_raise_clear_timeout_without_resubmission(monkeypatch, caplog):
+    monkeypatch.setattr(service.asyncio, 'sleep', AsyncMock())
+    fetch = AsyncMock(return_value={'status': 'PROCESSING'})
+    monkeypatch.setattr(service, 'fetch_song', fetch)
+    with caplog.at_level('INFO'), pytest.raises(TimeoutError, match='100 секунд'):
+        await service.wait_for_song('job')
+    assert fetch.await_count == 20
+    assert service.asyncio.sleep.await_args_list == [__import__('unittest.mock', fromlist=['call']).call(5)]*20
+    assert 'Попытка 20: статус PROCESSING' in caplog.text
+
+
+async def test_session_timeout_30_and_missing_job_response_body(monkeypatch):
+    session = Mock(wraps=service.aiohttp.ClientSession)
+    monkeypatch.setattr(service.aiohttp, 'ClientSession', session)
+    with aioresponses() as http:
+        http.post(service.BASE_URL + '/suno/v1/music', payload={'status': 'SUCCESS', 'reason': 'no task'})
+        with pytest.raises(service.AudioServiceError, match='Нет jobId в ответе:') as error:
+            await service.generate_song('words', 'pop', 'title')
+    assert 'no task' in str(error.value)
+    assert session.call_args.kwargs['timeout'].total == 30
+
+
+async def test_request_timeout_is_clear_and_is_not_silently_retried():
+    with aioresponses() as http:
+        http.post(service.BASE_URL + '/suno/v1/music', exception=TimeoutError())
+        with pytest.raises(TimeoutError, match='30 секунд'):
+            await service.generate_song('words', 'pop', 'title')
+    assert len(next(iter(http.requests.values()))) == 1

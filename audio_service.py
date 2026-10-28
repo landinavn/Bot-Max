@@ -10,6 +10,7 @@ from pathlib import Path
 from uuid import uuid4
 from urllib.parse import urlsplit, quote
 
+import aiohttp
 import httpx
 from openai import AsyncOpenAI
 
@@ -153,59 +154,83 @@ def _headers() -> dict[str, str]:
     return {"TT-API-KEY": key, "Content-Type": "application/json"}
 
 
+def _safe_response(value) -> str:
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    key = Config.from_env().ttapi_key
+    return text.replace(key, '[redacted]') if key else text
+
+
 async def _request(method: str, path: str, **kwargs) -> dict:
     headers = _headers()
     try:
-        async with httpx.AsyncClient(timeout=30.0, trust_env=False, follow_redirects=False) as client:
-            response = await client.request(method, BASE_URL + path, headers=headers, **kwargs)
-            response.raise_for_status()
-            result = response.json()
-    except (httpx.HTTPError, ValueError) as exc:
-        raise AudioServiceError("Не удалось получить корректный ответ TTAPI.") from exc
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            async with session.request(method, BASE_URL + path, headers=headers, allow_redirects=False, **kwargs) as response:
+                body = await response.text()
+                if response.status != 200:
+                    raise AudioServiceError(f'TTAPI Error: {response.status} - {_safe_response(body)}')
+                try:
+                    result = json.loads(body)
+                except ValueError as exc:
+                    raise AudioServiceError(f'Некорректный JSON TTAPI: {_safe_response(body)}') from exc
+    except TimeoutError as exc:
+        raise TimeoutError('Таймаут запроса TTAPI (30 секунд)') from exc
+    except aiohttp.ClientError as exc:
+        raise AudioServiceError(f'Ошибка соединения с TTAPI: {_safe_response(str(exc))}') from exc
     if not isinstance(result, dict):
-        raise AudioServiceError("TTAPI вернул неожиданный формат ответа.")
+        raise AudioServiceError(f'Неожиданный ответ TTAPI: {_safe_response(result)}')
     return result
 
 
 async def generate_song(prompt: str, tags: str, title: str) -> str:
     validate_song_arguments(prompt, tags, title)
-    result = await _request("POST", "/suno/v1/music", json={
-        "custom": True, "instrumental": False, "mv": "chirp-v6",
-        "prompt": prompt, "title": title, "tags": tags, "audio_format": "mp3",
+    result = await _request('POST', '/suno/v1/music', json={
+        'custom': True, 'instrumental': False, 'mv': 'chirp-v6',
+        'prompt': prompt, 'title': title, 'tags': tags, 'audio_format': 'mp3',
     })
-    if result.get("status") in {"FAILED", "ERROR"}:
-        logger.error("TTAPI отклонил запрос: %r", result)
-        raise SongFailed("TTAPI отклонил генерацию.")
-    data = result.get("data")
-    job_id = result.get("jobId") or (data.get("jobId") if isinstance(data, dict) else None)
+    if result.get('status') in {'FAILED', 'ERROR'}:
+        raise SongFailed(f'TTAPI отклонил генерацию: {_safe_response(result)}')
+    data = result.get('data')
+    job_id = result.get('jobId') or (data.get('jobId') if isinstance(data, dict) else None)
     if not isinstance(job_id, str) or not job_id.strip():
-        raise AudioServiceError("TTAPI не вернул jobId.")
+        raise AudioServiceError(f'Нет jobId в ответе: {_safe_response(result)}')
+    logger.info('Получен jobId: %s', job_id)
     return job_id
 
 
 async def fetch_song(job_id: str) -> dict:
     if not isinstance(job_id, str) or not job_id.strip():
-        raise ValueError("Не задан jobId.")
-    return await _request("GET", "/suno/v2/fetch", params={"jobId": job_id})
+        raise ValueError('Не задан jobId.')
+    return await _request('GET', '/suno/v2/fetch', params={'jobId': job_id})
 
 
-async def wait_for_song(job_id: str, timeout: int = 360) -> dict:
+async def wait_for_song_result(job_id: str, timeout: int = 100) -> dict:
+    """Полный ответ нужен оплаченному формату с двумя вариантами песни."""
     if timeout <= 0:
-        raise TimeoutError("Истекло время ожидания песни.")
-    async with asyncio.timeout(timeout):
-        while True:
-            result = await fetch_song(job_id)
-            status = result.get("status")
-            logger.info("TTAPI статус: %s (job_id=%s)", status, job_id)
-            if status == "SUCCESS":
-                return result
-            if status in {"FAILED", "ERROR"}:
-                logger.error("TTAPI ошибка генерации (job_id=%s): %r", job_id, result)
-                raise SongFailed("Генерация песни завершилась ошибкой.")
-            if status not in {"ON_QUEUE", "PROCESSING", "PENDING", "QUEUED", "IN_PROGRESS"}:
-                logger.error("TTAPI неизвестный статус (job_id=%s): %r", job_id, result)
-                raise AudioServiceError("TTAPI вернул неизвестный статус задачи.")
-            await asyncio.sleep(5)
+        raise TimeoutError('Таймаут ожидания TTAPI (100 секунд)')
+    budget = asyncio.timeout(timeout)
+    try:
+        async with budget:
+            for attempt in range(20):
+                await asyncio.sleep(5)
+                data = await fetch_song(job_id)
+                status = data.get('status')
+                logger.info('Попытка %s: статус %s (job_id=%s)', attempt + 1, status, job_id)
+                if status == 'SUCCESS':
+                    song_tracks(data)  # Пустой SUCCESS тоже должен дать понятную ошибку.
+                    return data
+                if status in {'FAILED', 'ERROR'}:
+                    logger.error('TTAPI вернул %s (job_id=%s): %s', status, job_id, _safe_response(data))
+                    raise SongFailed(f'TTAPI вернул {status}: {_safe_response(data)}')
+    except TimeoutError as exc:
+        if budget.expired():
+            raise TimeoutError('Таймаут ожидания TTAPI (100 секунд)') from exc
+        raise
+    raise TimeoutError('Таймаут ожидания TTAPI (100 секунд)')
+
+
+async def wait_for_song(job_id: str, timeout: int = 100) -> str:
+    data = await wait_for_song_result(job_id, timeout=timeout)
+    return song_tracks(data)[0]['audioUrl']
 
 
 async def wait_for_song_with_progress(job_id, notify, *, waiter=None, notification_delay=120):
@@ -225,17 +250,20 @@ async def wait_for_song_with_progress(job_id, notify, *, waiter=None, notificati
         await asyncio.gather(task, return_exceptions=True)
 
 
-def song_tracks(result: dict) -> list[dict[str, str]]:
+def song_tracks(result: dict | str) -> list[dict[str, str]]:
     """Только реальные HTTPS audioUrl, максимум два варианта, без дубликатов."""
-    data = result.get("data")
-    musics = data.get("musics") if isinstance(data, dict) else None
+    if isinstance(result, str):
+        musics = [{'audioUrl': result}]
+    else:
+        data = result.get('data')
+        musics = data if isinstance(data, list) else data.get('musics') if isinstance(data, dict) else None
     if not isinstance(musics, list):
         raise AudioServiceError("TTAPI не вернул список треков.")
     tracks = []
     for music in musics:
         if not isinstance(music, dict):
             continue
-        url = music.get("audioUrl")
+        url = music.get("audioUrl") or music.get("audio_url")
         try:
             parsed = urlsplit(url) if isinstance(url, str) else None
             valid = parsed and parsed.scheme == "https" and parsed.hostname and not parsed.username and not parsed.password

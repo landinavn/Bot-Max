@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from urllib.parse import unquote, urlencode
@@ -37,10 +38,10 @@ from database import (
     is_promo_active, PromoUnavailableError, get_users_by_activity, start_broadcast_promo,
     get_users_for_reminder, get_audio_order, create_audio_order, find_gift_preview_order,
     update_audio_order, grant_audio_admin_access, request_audio_regeneration,
-    set_song_promo, check_song_promo, song_checkout_order, latest_gift_preview,
+    set_song_promo, check_song_promo, song_checkout_order, latest_gift_preview, claim_audio_order,
 )
 from prodamus import PACKAGES, ProdamusPayments
-from audio_service import generate_song, wait_for_song, wait_for_song_with_progress, song_tracks, build_song_request, write_song_lyrics, validate_song_arguments, InvalidSongArguments, AudioNotConfigured, SongFailed
+from audio_service import generate_song, wait_for_song, wait_for_song_result, make_protected_preview, song_tracks, build_song_request, write_song_lyrics, validate_song_arguments, InvalidSongArguments, AudioNotConfigured, SongFailed
 from audio_orders import PaidAudioWorker, SUPPORT_URL
 from max_client import log_max_error
 from image_service import (
@@ -684,11 +685,15 @@ def create_router(
     postcard_generator: Callable[[str, str, str], Awaitable[list[str]]] = generate_postcards,
     bot_link: str = DEFAULT_BOT_LINK,
     photosession_generator: Callable[[str, str], Awaitable[str]] = generate_photosession_frame,
-    song_generator: Callable[[str, str, str], Awaitable[str]] = generate_song,
-    song_waiter: Callable[[str], Awaitable[dict]] = wait_for_song,
+    song_generator: Callable[[str, str, str], Awaitable[str]] | None = None,
+    song_waiter: Callable[[str], Awaitable[dict | str]] | None = None,
     lyric_writer=None,
 ) -> Router:
     lyric_writer = lyric_writer or write_song_lyrics
+    song_generator = song_generator or generate_song
+    # Подарок возвращает URL; импульсный формат сохраняет оба варианта TTAPI.
+    fun_song_waiter = song_waiter or wait_for_song_result
+    song_waiter = song_waiter or wait_for_song
     bot_link = validate_bot_link(bot_link)
     router = Router()
     router.register_outer_middleware(UserActivityMiddleware())
@@ -1539,42 +1544,77 @@ def create_router(
             keyboard.row(LinkButton(text=label, url=SUPPORT_URL) if payload == 'help_support' else CallbackButton(text=label, payload=payload))
         await _reply(event, text, attachments=[keyboard.as_markup()])
 
-    async def queue_gift_preview(event, context):
+    async def generate_gift_preview(event, context):
         user_id = event.get_ids()[1]
         if user_id is None:
             return
         lock = preview_locks.setdefault(user_id, asyncio.Lock())
+        claimed = False
+        order_id = None
         try:
             async with lock:
                 data = await context.get_data()
                 scenario, details = data.get('gift_scenario'), data.get('gift_details')
                 key = 'gift_scen_' + str(scenario)
                 if key not in AUDIO_GIFT_SCENARIOS or not isinstance(details, str) or not details.strip():
-                    await _reply(event, 'Выберите сценарий и заполните детали песни заново.')
-                    return
+                    raise InvalidSongArguments('Выберите сценарий и заполните детали песни заново.')
                 order = await find_gift_preview_order(user_id, scenario, details, data.get('song_style'))
                 if not order:
                     prompt, tags, title = build_song_request(details, AUDIO_GIFT_SCENARIOS[key][0], 'gift', data.get('song_style'))
                     validate_song_arguments(prompt, tags, title)
                     order_id = f'audio-{user_id}-{uuid4().hex}'
                     await create_audio_order(order_id, user_id, 'gift', scenario, details, data.get('song_style'), prompt, tags, title)
-                    await update_audio_order(order_id, preview_requested=1)
                     order = await get_audio_order(order_id)
-                await context.update_data(audio_checkout_id=order['order_id'])
+                order_id = order['order_id']
+                await context.update_data(audio_checkout_id=order_id)
                 if order['preview_url']:
                     await PaidAudioWorker(event.bot, payments=payments, admin_user_id=admin_user_id).deliver_preview(order)
-                    await update_audio_order(order['order_id'], preview_delivered=1)
-                else:
-                    await _reply(event, '🎵 Создаю песню и фрагмент для прослушивания. Пришлю превью, как только оно будет готово. Оплачивать пока ничего не нужно.')
-                    logger.info('Подарочный аудиозаказ %s поставлен в очередь для пользователя %s.', order['order_id'], user_id)
+                    return
+                # Превью не публикуется в фоновую очередь. Этот обработчик ждёт результат сам.
+                claimed = await claim_audio_order(order_id, inline_preview=True)
+                if not claimed:
+                    await _reply(event, 'Этот заказ уже обрабатывается. Дождитесь результата, повторно оплачивать не нужно.')
+                    return
+                await _reply(event, '🎵 Создаю песню и фрагмент для прослушивания. Пришлю превью, как только оно будет готово. Оплачивать пока ничего не нужно.')
+                tracks = json.loads(order['tracks_json']) if order['tracks_json'] else None
+                if not tracks:
+                    job_id = order['job_id']
+                    if not job_id:
+                        if order['submit_started']:
+                            raise AudioNotConfigured('Отправка в TTAPI не подтверждена. Обратитесь в поддержку; не создавайте повторный заказ.')
+                        prompt, tags, title = order['prompt'], order['tags'], order['title']
+                        validate_song_arguments(prompt, tags, title)
+                        logger.info('Готовлю текст песни для пользователя %s', user_id)
+                        prompt = order['lyrics'] or await lyric_writer(prompt, tags, title)
+                        validate_song_arguments(prompt, tags, title)
+                        await update_audio_order(order_id, lyrics=prompt, submit_started=1)
+                        logger.info('Запускаю audio_service.generate_song для пользователя %s', user_id)
+                        job_id = await song_generator(prompt, tags, title)
+                        await update_audio_order(order_id, job_id=job_id)
+                    audio_url = await song_waiter(job_id)
+                    tracks = song_tracks(audio_url)
+                    await update_audio_order(order_id, tracks_json=json.dumps(tracks, ensure_ascii=False))
+                preview_url = await make_protected_preview(tracks[0]['audioUrl'])
+                if preview_url in {track['audioUrl'] for track in tracks}:
+                    raise ValueError('Превью не должно быть полным треком.')
+                await update_audio_order(order_id, preview_url=preview_url, error=None)
+                order = await get_audio_order(order_id)
+                await PaidAudioWorker(event.bot, payments=payments, admin_user_id=admin_user_id).deliver_preview(order)
+                await update_audio_order(order_id, preview_delivered=1)
         except Exception as exc:
-            logger.exception("Критическая ошибка при запуске генерации песни:")
+            logger.exception('ОШИБКА ГЕНЕРАЦИИ ПЕСНИ: %s', exc)
             data = await context.get_data()
             scenario_state = GIFT_SCENARIO_STATES.get('gift_scen_' + str(data.get('gift_scenario')))
             if scenario_state is not None:
                 await context.set_state(scenario_state)
-            text = str(exc) if isinstance(exc, ValueError) else 'Не удалось подготовить заказ песни.'
-            await _reply(event, text + ' Отправьте детали песни ещё раз или обратитесь в поддержку.')
+            await _reply(event, f'❌ Ошибка: {exc}')
+        finally:
+            if claimed:
+                try:
+                    await update_audio_order(order_id, running=0)
+                except Exception as exc:
+                    logger.exception('ОШИБКА ГЕНЕРАЦИИ ПЕСНИ: %s', exc)
+                    await _reply(event, f'❌ Ошибка сохранения заказа: {exc}')
 
     async def prepare_audio_checkout(context, user_id, audio_format, data):
         order_id = data.get('audio_checkout_id') or f'audio-{user_id}-{uuid4().hex}'
@@ -1651,7 +1691,7 @@ def create_router(
                     return
                 if not order or not order['preview_url']:
                     await event.ack(notification='Сначала создаю превью…')
-                    await queue_gift_preview(event, context)
+                    await generate_gift_preview(event, context)
                     return
             checkout_lock = generation_locks.setdefault(user_id, asyncio.Lock())
             if checkout_lock.locked():
@@ -1745,11 +1785,7 @@ def create_router(
                     if not await session_current():
                         return
                     await context.update_data(audio_job_id=job_id)
-                async def notify_long_wait(text):
-                    if await session_current():
-                        await _reply(event, text)
-
-                result = await wait_for_song_with_progress(job_id, notify_long_wait, waiter=song_waiter)
+                result = await (fun_song_waiter if audio_format == 'fun' else song_waiter)(job_id)
                 if not await session_current():
                     return
                 tracks = song_tracks(result)
@@ -1757,7 +1793,7 @@ def create_router(
                 await context.set_state(PosterStates.waiting_for_audio_result)
                 await send_song_result(event, tracks, audio_format, can_regenerate=not data.get('audio_regeneration_used'))
             except InvalidSongArguments as exc:
-                logger.exception("Критическая ошибка при запуске генерации песни:")
+                logger.exception("ОШИБКА ГЕНЕРАЦИИ ПЕСНИ: %s", exc)
                 if await session_current():
                     await context.update_data(audio_submit_started=False)
                     await _reply(event, str(exc))
@@ -1774,9 +1810,9 @@ def create_router(
                 if await session_current():
                     await _reply(event, "Песня ещё не готова. Нажмите ту же кнопку ещё раз: проверю уже созданную задачу без новой генерации.")
             except Exception as exc:
-                logger.exception("Критическая ошибка при запуске генерации песни:")
+                logger.exception("ОШИБКА ГЕНЕРАЦИИ ПЕСНИ: %s", exc)
                 if await session_current():
-                    await _reply(event, "Не удалось получить или отправить песню. Повторите проверку той же кнопкой. Если задача не была подтверждена, обратитесь в поддержку.")
+                    await _reply(event, f"❌ Ошибка: {exc}")
             finally:
                 if await session_current() and await context.get_state() == PosterStates.waiting_for_audio_generation:
                     await context.set_state(expected)
@@ -2390,7 +2426,7 @@ def create_router(
             return
         await context.update_data(gift_details=details)
         await context.set_state(PosterStates.waiting_for_gift_preview)
-        await queue_gift_preview(event, context)
+        await generate_gift_preview(event, context)
 
     @router.message_created(PosterStates.waiting_for_gift_preview)
     async def gift_preview_message(event: MessageCreated, context: MemoryContext) -> None:

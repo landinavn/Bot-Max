@@ -1042,3 +1042,25 @@ def test_preview_watermark_uses_fallback_if_card_font_is_unavailable(monkeypatch
     result = service.add_preview_watermark(source.getvalue())
     with Image.open(BytesIO(result)) as image:
         assert image.size == (300, 200)
+
+
+@pytest.mark.parametrize('mode', ['mode_ny_family', 'mode_modern_card', 'mode_halloween'])
+async def test_cartoon_avatar_uses_one_image_shared_openai_pipeline_and_identity_prompt(monkeypatch, mode):
+    generate = AsyncMock(return_value=['https://cdn.example/avatar.png'])
+    monkeypatch.setattr(service, '_generate_and_store', generate)
+    assert await service.generate_cartoon_avatar(PHOTO_URL, mode) == 'https://cdn.example/avatar.png'
+    args, kwargs = generate.await_args
+    assert args == (PHOTO_URL, 'Мульт-аватар') and kwargs['count'] == 1
+    prompt = kwargs['prompt_override']
+    assert '3D Pixar/Disney style avatar' in prompt
+    assert 'Preserve the exact face' in prompt and 'soft blurred Christmas tree background' in prompt
+    assert service.CARTOON_AVATAR_THEMES[mode] in prompt
+    assert 'postcard_text' not in kwargs
+
+
+async def test_cartoon_avatar_invalid_style_never_calls_openai(monkeypatch):
+    generate = AsyncMock()
+    monkeypatch.setattr(service, '_generate_and_store', generate)
+    with pytest.raises(ValueError, match='Неизвестный стиль'):
+        await service.generate_cartoon_avatar(PHOTO_URL, 'mode_invalid')
+    generate.assert_not_awaited()

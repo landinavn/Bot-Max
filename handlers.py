@@ -51,7 +51,7 @@ from image_service import (
     UnsupportedPhotoFormatError,
     generate_vision_boards,
     generate_postcards,
-    generate_photosession_frame, NY_FAMILY_THREE_PROMPTS, NY_FAMILY_PHOTOSESSION_PROMPTS,
+    generate_cartoon_avatar, generate_photosession_frame, NY_FAMILY_THREE_PROMPTS, NY_FAMILY_PHOTOSESSION_PROMPTS,
     fix_text_with_ai,
     POSTCARD_PROMPTS,
     MAX_CARD_TEXT_LENGTH,
@@ -235,11 +235,13 @@ SONG_PROMO_EXPIRED_TEXT = 'К сожалению, 48 часов уже прош�
 
 CATEGORY_BUTTONS = (
     ("🎬 Ожившая открытка (Видео) — Новинка 🔥", "cat_video"),
-    ("📸 Фотосессия", "cat_photo"),
+    ("🎬 Мульт-открытка (10-15 сек) — Новинка 🔥", "cat_cartoon"),
+    ("🎬 Мульт-поздравление (30 сек) — Новинка 🔥", "cat_cartoon_long"),
+    ("📸 Нейрофотосессия", "cat_photo"),
     ("🎵 Аудиопесни", "cat_audio"),
     ("🎁 Открытки", "cat_cards"),
-    ("🖼 Карта Желаний", "cat_vision"),
-    ("🧘 Медитации на исполнение желаний", "cat_meditation"),
+    ("🔮 Карта Желаний", "cat_vision"),
+    ("🧘 Медитации", "cat_meditation"),
 )
 
 # Файлы, текст и кнопки каждого экрана. mode_* остаются текущими входами в FSM.
@@ -482,6 +484,14 @@ VIDEO_UPSELL_TEXT = (
 
 
 
+CARTOON_PRODUCTS = {
+    'cat_cartoon': ('short', 89000, '🎬 Создаем короткий мультфильм с вашим лицом! Выберите стиль:', '5-10'),
+    'cat_cartoon_long': ('long', 169000, '🎬 Создаем полноценное мульт-поздравление с сюжетом! Выберите стиль:', '15-20'),
+}
+CARTOON_AVATAR_EVENTS = {'avatar_ok_1': 'avatar_ok_first', 'avatar_bad_1': 'avatar_bad_first',
+                       'avatar_ok_2': 'avatar_ok_second', 'avatar_bad_2': 'avatar_bad_second'}
+CARTOON_TEST_SONG_URL = 'https://example.com/cartoon-test-song.mp3'  # TODO: Подключить выбранную песню.
+
 
 PHOTO_STYLES = {
     "photo_style_studio": "Студия",
@@ -631,6 +641,13 @@ class PosterStates(StatesGroup):
     waiting_for_mode = State()
     waiting_for_photo = State()
     waiting_for_photosession_photo = State()
+    waiting_for_cartoon_style = State()
+    waiting_for_avatar_photo = State()
+    waiting_for_avatar_review = State()
+    waiting_for_cartoon_song = State()
+    waiting_for_cartoon_payment = State()
+    cartoon_generating = State()
+    cartoon_manual_review = State()
     waiting_for_prompt = State()
     waiting_for_card_text = State()
     waiting_for_video_song = State()
@@ -705,6 +722,13 @@ async def generate_video_placeholder(data: dict) -> str:
     return f'🎬 Тестовая генерация {kind} завершена. Сценарий: {scenario}. Это заглушка; видеосервис будет подключён позже.'
 
 
+async def generate_video(avatar_url: str, song_url: str) -> str:
+    """Этап 1: никаких запросов в видео-API, возвращается только тестовая ссылка."""
+    if not avatar_url.startswith('https://') or not song_url.startswith('https://'):
+        raise ValueError('Для тестового видео нужны HTTPS-ссылки аватара и песни.')
+    return 'https://example.com/cartoon-test-video.mp4'  # TODO: Подключить реальный видео-API.
+
+
 def create_router(
     generator: PosterGenerator = generate_vision_boards,
     *, payments: ProdamusPayments | None = None,
@@ -716,7 +740,11 @@ def create_router(
     song_waiter: Callable[[str], Awaitable[dict | str]] | None = None,
     lyric_writer=None,
     video_generator: Callable[[dict], Awaitable[str]] | None = None,
+    avatar_generator: Callable[[str, str], Awaitable[str]] | None = None,
+    cartoon_video_generator: Callable[[str, str], Awaitable[str]] | None = None,
 ) -> Router:
+    avatar_generator = avatar_generator or generate_cartoon_avatar
+    cartoon_video_generator = cartoon_video_generator or generate_video
     video_generator = video_generator or generate_video_placeholder
     lyric_writer = lyric_writer or write_song_lyrics
     song_generator = song_generator or generate_song
@@ -730,6 +758,7 @@ def create_router(
     # FSM изолирован по чату, а баланс общий для всех чатов пользователя.
     generation_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
     preview_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
+    cartoon_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
 
     def family_photosession_selected(data):
         return (data.get("photo_style") == "photo_style_ny"
@@ -1127,6 +1156,13 @@ def create_router(
                 f"- {label}: {counters.get(AUDIO_GIFT_COUNTERS[payload], 0)}"
                 for payload, (label, _) in AUDIO_GIFT_SCENARIOS.items()
             ) + "\n\n"
+            "🎬 Интерес к Мульт-услугам:\n"
+            f"- Мульт-открытка (клики): {counters.get('click_cartoon_short', 0)}\n"
+            f"- Мульт-поздравление (клики): {counters.get('click_cartoon_long', 0)}\n"
+            f"- Первый аватар — подошёл: {counters.get('avatar_ok_first', 0)}\n"
+            f"- Первый аватар — не похож: {counters.get('avatar_bad_first', 0)}\n"
+            f"- Второй аватар — подошёл: {counters.get('avatar_ok_second', 0)}\n"
+            f"- Второй аватар — не подошёл: {counters.get('avatar_bad_second', 0)}\n\n"
             "📸 Интерес к Фотосессиям (клики):\n"
             f"- Стиль: Студия: {counters.get('click_photo_studio', 0)}\n"
             f"- Стиль: Прогулка: {counters.get('click_photo_walk', 0)}\n"
@@ -1365,6 +1401,229 @@ def create_router(
             return
         await event.ack(notification="Открываю меню…")
         await send_welcome_message(event, context)
+
+    def cartoon_style_keyboard(screen='cat_cards'):
+        buttons = []
+        for label, payload in CATEGORY_MENUS[screen][2]:
+            target = ('back_to_main' if payload == 'back_to_main' else
+                      'cartoon_style:cat_cards' if payload == 'back_to_cards' else 'cartoon_style:' + payload)
+            buttons.append((label, target))
+        return navigation_keyboard(buttons)
+
+    def cartoon_product(data):
+        return next((value for value in CARTOON_PRODUCTS.values() if value[0] == data.get('cartoon_flow')), None)
+
+    def avatar_keyboard(attempt):
+        labels = ('✅ Да, отлично!', '❌ Не похоже, попробуем еще') if attempt == 1 else ('✅ Да, этот подходит!', '❌ Нет, совсем не то')
+        return navigation_keyboard(((labels[0], f'avatar_ok_{attempt}'), (labels[1], f'avatar_bad_{attempt}')))
+
+    async def show_cartoon_songs(event, context):
+        await context.set_state(PosterStates.waiting_for_cartoon_song)
+        buttons = [(label, 'cartoon_song:' + key) for key, (label, _) in AUDIO_FUN_SCENARIOS.items()]
+        await _reply(event, 'Теперь выберите песню для вашего мультфильма:',
+                     attachments=[navigation_keyboard((*buttons, ('⬅️ Назад', 'back_to_main')))])
+
+    @router.message_callback(F.callback.payload.in_(set(CARTOON_PRODUCTS)))
+    async def cartoon_menu(event: MessageCallback, context: MemoryContext):
+        user_id = event.get_ids()[1]
+        if event.message is None or user_id is None:
+            await event.ack(notification='Отправьте /start, чтобы открыть меню.')
+            return
+        await event.ack(notification='Выберите стиль…')
+        flow, price, text, _ = CARTOON_PRODUCTS[event.callback.payload]
+        await increment_counter('click_cartoon_short' if flow == 'short' else 'click_cartoon_long', user_id=user_id)
+        await context.clear()
+        await context.update_data(cartoon_flow=flow, cartoon_amount_kopecks=price, cartoon_session_id=uuid4().hex)
+        await context.set_state(PosterStates.waiting_for_cartoon_style)
+        await _reply(event, text, attachments=[cartoon_style_keyboard()])
+
+    @router.message_callback(F.callback.payload.startswith('cartoon_style:'))
+    async def cartoon_style(event: MessageCallback, context: MemoryContext):
+        data = await context.get_data()
+        target = event.callback.payload.removeprefix('cartoon_style:')
+        product = cartoon_product(data)
+        if event.message is None or product is None or target not in VIDEO_CARD_SCREENS | set(POSTCARD_PROMPTS):
+            await event.ack(notification='Откройте раздел мульт-открыток заново.')
+            return
+        if await context.get_state() == PosterStates.cartoon_generating:
+            await event.ack(notification='Аватар уже создаётся, пожалуйста, подождите.')
+            return
+        await event.ack(notification='Выбираю стиль…')
+        await context.clear()
+        await context.update_data(cartoon_flow=product[0], cartoon_amount_kopecks=product[1], cartoon_session_id=uuid4().hex)
+        if target in POSTCARD_PROMPTS:
+            await context.update_data(cartoon_mode=target, avatar_attempt=1, avatar_urls={})
+            await context.set_state(PosterStates.waiting_for_avatar_photo)
+            await _reply(event, photo_request('Отправьте фото для первого мульт-аватара. /cancel — отмена.'))
+        else:
+            await context.set_state(PosterStates.waiting_for_cartoon_style)
+            filenames, text, _ = CATEGORY_MENUS[target]
+            if target == 'cat_cards':
+                text = product[2]
+            await send_menu_examples(event, filenames)
+            await _reply(event, text, attachments=[cartoon_style_keyboard(target)])
+
+    async def collect_cartoon_photo(event: MessageCreated, context: MemoryContext):
+        user_id = event.get_ids()[1]
+        if is_bot_message(event) or user_id is None:
+            return
+        lock = cartoon_locks.setdefault(user_id, asyncio.Lock())
+        if lock.locked():
+            await _reply(event, 'Аватар уже создаётся. Пожалуйста, подождите.')
+            return
+        async with lock:
+            data = await context.get_data()
+            if (await context.get_state() != PosterStates.waiting_for_avatar_photo or not cartoon_product(data)
+                    or data.get('cartoon_mode') not in POSTCARD_PROMPTS or data.get('avatar_attempt') not in (1, 2)):
+                await _reply(event, 'Выберите мульт-открытку заново.', attachments=[main_keyboard()])
+                return
+            body = event.message.body
+            photos = [item for item in (getattr(body, 'attachments', None) or [])
+                      if item.type == 'image' and isinstance(item.payload, PhotoAttachmentPayload) and item.payload.url]
+            if len(photos) != 1:
+                await _reply(event, photo_request('Нужно одно фото, отправленное как изображение.'))
+                return
+            photo_url = photos[0].payload.url
+            attempt = data['avatar_attempt']
+            if attempt == 2 and photo_url == data.get('avatar_first_photo_url'):
+                await _reply(event, 'Пожалуйста, отправьте другое фото для второго аватара.')
+                return
+            session = data['cartoon_session_id']
+            await context.set_state(PosterStates.cartoon_generating)
+            try:
+                urls = dict(data.get('avatar_urls', {}))
+                url = urls.get(str(attempt))
+                if not url:
+                    await _reply(event, f'🎨 Создаю мульт-аватар {attempt} из 2... Пожалуйста, подождите.')
+                    url = await avatar_generator(photo_url, data['cartoon_mode'])
+                    if not isinstance(url, str) or not url.startswith('https://'):
+                        raise ValueError('Генератор не вернул HTTPS-ссылку аватара.')
+                    if (await context.get_data()).get('cartoon_session_id') != session:
+                        return
+                    urls[str(attempt)] = url
+                    await context.update_data(avatar_urls=urls, **({'avatar_first_photo_url': photo_url} if attempt == 1 else {}))
+                    await send_offline_conversion(user_id, goal_id='bot_generation')
+                image = await upload_image_for_max(event.bot, url)
+                if (await context.get_data()).get('cartoon_session_id') != session:
+                    return
+                sent = await _reply(event, 'Ваш мульт-аватар готов! Подходит?', attachments=[image, avatar_keyboard(attempt)])
+                if sent is None:
+                    raise RuntimeError('MAX не подтвердил отправку аватара.')
+                if (await context.get_data()).get('cartoon_session_id') == session:
+                    await context.set_state(PosterStates.waiting_for_avatar_review)
+            except Exception:
+                logger.exception('Ошибка генерации или отправки мульт-аватара:')
+                if (await context.get_data()).get('cartoon_session_id') == session:
+                    await context.set_state(PosterStates.waiting_for_avatar_photo)
+                    await _reply(event, 'Не удалось создать или отправить аватар. Отправьте фото ещё раз; готовый аватар будет отправлен повторно.')
+
+    async def handoff_cartoon(event, context, user_id):
+        data = await context.get_data()
+        if not data.get('cartoon_handoff_sent'):
+            try:
+                if admin_user_id is None:
+                    raise RuntimeError('Не задан ADMIN_USER_ID для передачи художнику.')
+                sent = await event.bot.send_message(user_id=admin_user_id,
+                    text=f'🎨 Нужен художник для мульт-открытки. ID клиента: {user_id}. Формат: {data["cartoon_flow"]}. Второй аватар не подошёл.')
+                if sent is None:
+                    raise RuntimeError('MAX не подтвердил уведомление художника.')
+                await context.update_data(cartoon_handoff_sent=True)
+            except Exception:
+                logger.exception('Не удалось передать мульт-открытку художнику:')
+                await _reply(event, 'Не удалось отправить заявку художнику. Повторите передачу или обратитесь в поддержку.',
+                             attachments=[navigation_keyboard((('Повторить передачу', 'cartoon_retry_handoff'), ('🆘 Помощь', 'show_help')))])
+                return
+        await _reply(event, 'Понимаем вас. Передаем заказ нашему художнику, он свяжется с вами в течение часа.')
+
+    @router.message_callback(F.callback.payload.in_(set(CARTOON_AVATAR_EVENTS)))
+    async def cartoon_avatar_review(event: MessageCallback, context: MemoryContext):
+        user_id = event.get_ids()[1]
+        if event.message is None or user_id is None:
+            await event.ack(notification='Откройте раздел мульт-открыток заново.')
+            return
+        lock = cartoon_locks.setdefault(user_id, asyncio.Lock())
+        async with lock:
+            data = await context.get_data()
+            attempt = int(event.callback.payload[-1])
+            url = data.get('avatar_urls', {}).get(str(attempt))
+            if not cartoon_product(data) or data.get('avatar_attempt') != attempt or not url or await context.get_state() != PosterStates.waiting_for_avatar_review:
+                await event.ack(notification='Эта кнопка уже недоступна. Используйте кнопки под текущим аватаром.')
+                return
+            await event.ack(notification='Выбор сохранён.')
+            await increment_counter(CARTOON_AVATAR_EVENTS[event.callback.payload], user_id=user_id)
+            if event.callback.payload.startswith('avatar_ok_'):
+                await context.update_data(chosen_avatar=url)
+                await show_cartoon_songs(event, context)
+            elif attempt == 1:
+                await context.update_data(avatar_attempt=2)
+                await context.set_state(PosterStates.waiting_for_avatar_photo)
+                await _reply(event, photo_request('Пришлите другое фото — попробуем создать второй мульт-аватар.'))
+            else:
+                await context.set_state(PosterStates.cartoon_manual_review)
+                await handoff_cartoon(event, context, user_id)
+
+    @router.message_callback(F.callback.payload == 'cartoon_retry_handoff')
+    async def cartoon_retry_handoff(event: MessageCallback, context: MemoryContext):
+        user_id = event.get_ids()[1]
+        if event.message is None or user_id is None:
+            await event.ack(notification='Заявка недоступна.')
+            return
+        async with cartoon_locks.setdefault(user_id, asyncio.Lock()):
+            data = await context.get_data()
+            if not cartoon_product(data) or await context.get_state() != PosterStates.cartoon_manual_review:
+                await event.ack(notification='Заявка недоступна.')
+                return
+            await event.ack(notification='Отправляю заявку…')
+            await handoff_cartoon(event, context, user_id)
+
+    @router.message_callback(F.callback.payload.startswith('cartoon_song:'))
+    async def cartoon_song(event: MessageCallback, context: MemoryContext):
+        user_id = event.get_ids()[1]
+        if user_id is None:
+            await event.ack(notification='Откройте раздел мульт-открыток заново.')
+            return
+        lock = cartoon_locks.setdefault(user_id, asyncio.Lock())
+        if lock.locked():
+            await event.ack(notification='Заказ уже обрабатывается. Подождите.')
+            return
+        async with lock:
+            await select_cartoon_song(event, context)
+
+    async def select_cartoon_song(event, context):
+        data = await context.get_data()
+        product = cartoon_product(data)
+        song = event.callback.payload.removeprefix('cartoon_song:')
+        if (event.message is None or not product or song not in AUDIO_FUN_SCENARIOS or not data.get('chosen_avatar')
+                or await context.get_state() not in (PosterStates.waiting_for_cartoon_song, PosterStates.waiting_for_cartoon_payment)):
+            await event.ack(notification='Сначала выберите и одобрите аватар.')
+            return
+        await event.ack(notification='Песня выбрана.')
+        song_url = CARTOON_TEST_SONG_URL + '?' + urlencode({'scenario': song})
+        await context.update_data(chosen_song=song, chosen_song_url=song_url)
+        if admin_user_id is not None and event.get_ids()[1] == admin_user_id:
+            await context.set_state(PosterStates.cartoon_generating)
+            await _reply(event, '👑 Режим администратора: Оплата пропущена...')
+            try:
+                result = await cartoon_video_generator(data['chosen_avatar'], song_url)
+                if (await context.get_data()).get('cartoon_session_id') != data.get('cartoon_session_id'):
+                    return
+                if not isinstance(result, str) or not result.startswith('https://'):
+                    raise ValueError('Видео-заглушка не вернула тестовую HTTPS-ссылку.')
+                await _reply(event, '🧪 Тестовая ссылка (заглушка видео-API): ' + result, attachments=[main_keyboard()])
+                await context.set_state(PosterStates.waiting_for_mode)
+            except Exception:
+                logger.exception('Ошибка тестовой генерации мульт-видео:')
+                if (await context.get_data()).get('cartoon_session_id') != data.get('cartoon_session_id'):
+                    return
+                await context.set_state(PosterStates.waiting_for_cartoon_song)
+                await _reply(event, 'Не удалось выполнить тестовую генерацию. Выберите песню ещё раз.')
+            return
+        await context.set_state(PosterStates.waiting_for_cartoon_payment)
+        price = product[1] // 100
+        text = f'Отлично! Стоимость — {price} ₽. Это займет около {product[3]} минут.'
+        await _reply(event, text, attachments=[InlineKeyboardBuilder().row(
+            LinkButton(text=f'Оплатить {price} ₽', url=VIDEO_PAYMENT_PLACEHOLDER_URL)).row(
+            CallbackButton(text='⬅️ Назад', payload='back_to_main')).as_markup()])
 
     def video_style_keyboard(screen):
         buttons = []
@@ -2305,6 +2564,9 @@ def create_router(
         await context.set_state(PosterStates.waiting_for_mode)
         await _reply(event, "Сбор данных отменён.", attachments=[main_keyboard()])
 
+    # Команды /start, /buy и /cancel должны обрабатываться раньше ожидания фото.
+    router.message_created(PosterStates.waiting_for_avatar_photo)(collect_cartoon_photo)
+
     @router.message_callback(F.callback.payload.in_({"create_poster", "mode_bday", "mode_8march", *(payload for _, payload in MODE_BUTTONS)}))
     async def begin_poster(event: MessageCallback, context: MemoryContext) -> None:
         if event.message is None:
@@ -2611,6 +2873,16 @@ def create_router(
         if is_bot_message(event):
             return
         state = await context.get_state()
+        if state == PosterStates.waiting_for_avatar_photo:
+            await collect_cartoon_photo(event, context)
+            return
+        if state == PosterStates.cartoon_generating:
+            await _reply(event, 'Мульт-аватар или тестовое видео создаётся. Пожалуйста, подождите.')
+            return
+        if state in (PosterStates.waiting_for_cartoon_style, PosterStates.waiting_for_avatar_review,
+                     PosterStates.waiting_for_cartoon_song, PosterStates.waiting_for_cartoon_payment):
+            await _reply(event, 'Пожалуйста, выберите действие кнопкой под последним сообщением. /cancel — отмена.')
+            return
         if state in GIFT_SCENARIO_STATES.values():
             await collect_gift_details(event, context)
             return

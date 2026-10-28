@@ -810,6 +810,39 @@ NY_FAMILY_PHOTOSESSION_PROMPTS = {
 }
 
 
+CARTOON_AVATAR_PROMPT = (
+    'Create a single high-quality 3D Pixar/Disney style avatar from the reference photo. '
+    'Preserve the exact face, recognizable facial features, hairstyle, age and skin tone of each reference person. '
+    'Keep the same people, without adding or removing anyone. Expressive eyes, warm friendly expression, '
+    'soft cinematic lighting. Use a soft blurred Christmas tree background. '
+    'No text, captions or watermarks.'
+)
+CARTOON_AVATAR_THEMES = {
+    'mode_ny': 'Classic festive New Year styling.',
+    'mode_ny_family': 'Cozy family New Year styling.',
+    'mode_ny_cozy': 'Cozy knitwear and warm festive lights.',
+    'mode_ny_fairytale': 'Magical winter fairy-tale styling.',
+    'mode_ny_elegant': 'Elegant festive evening styling.',
+    'mode_bday_young': 'Bright cheerful birthday styling.',
+    'mode_bday_old': 'Warm mature birthday styling, preserve natural age.',
+    'mode_bday_old_elegant': 'Understated elegant birthday styling, preserve natural age.',
+    'mode_modern_card': 'Soft pastel scrapbook decorative accents.',
+    'mode_halloween': 'Cute cozy autumn pumpkin accents, not scary.',
+    'mode_goodmorning': 'Warm gentle morning lighting and soft colors.',
+    'mode_8march': 'Soft spring floral accents.',
+}
+
+
+async def generate_cartoon_avatar(photo_url: str, mode: str) -> str:
+    if mode not in CARTOON_AVATAR_THEMES:
+        raise ValueError('Неизвестный стиль мульт-аватара.')
+    urls = await _generate_and_store(photo_url, 'Мульт-аватар', count=1,
+        prompt_override=CARTOON_AVATAR_PROMPT + ' ' + CARTOON_AVATAR_THEMES[mode])
+    if len(urls) != 1:
+        raise ImageGenerationError('Ожидался один мульт-аватар.')
+    return urls[0]
+
+
 async def generate_photosession_frame(photo_url: str, prompt: str) -> str:
     """Один /images/edits через общий клиент с OPENAI_PROXY_URL и таймаутом 300 с.
 

@@ -1012,3 +1012,33 @@ async def test_photosession_public_path_passes_proxy_and_300_second_timeout(
     assert fields["model"].get_content() == settings.image_model
     assert fields["quality"].get_content() == settings.image_quality
     assert fields["prompt"].get_content() == prompt
+
+
+@pytest.mark.parametrize('mode', ['RGB', 'RGBA'])
+def test_preview_watermark_is_centered_translucent_and_preserves_image_size(mode):
+    from PIL import ImageChops
+    original = Image.new(mode, (640, 960), (30, 60, 90, 255) if mode == 'RGBA' else (30, 60, 90))
+    source = BytesIO()
+    original.save(source, format='PNG')
+    data = source.getvalue()
+    output = service.add_preview_watermark(data)
+    assert source.getvalue() == data
+    with Image.open(BytesIO(output)) as result:
+        assert result.size == original.size and result.format == 'PNG'
+        assert result.getpixel((0, 0)) == (30, 60, 90, 255)
+        bounds = ImageChops.difference(result.convert('RGB'), original.convert('RGB')).getbbox()
+        assert bounds is not None
+        left, top, right, bottom = bounds
+        assert 0 < left < 320 < right < 640 and 320 < top < 480 < bottom < 640
+        assert abs((left + right) / 2 - 320) < 5
+        assert abs((top + bottom) / 2 - 480) < 5
+        assert result.convert('RGB').getchannel('R').getextrema()[1] < 255
+
+
+def test_preview_watermark_uses_fallback_if_card_font_is_unavailable(monkeypatch, tmp_path):
+    monkeypatch.setattr(service, 'FONT_PATH', tmp_path / 'missing.ttf')
+    source = BytesIO()
+    Image.new('RGB', (300, 200), 'navy').save(source, format='PNG')
+    result = service.add_preview_watermark(source.getvalue())
+    with Image.open(BytesIO(result)) as image:
+        assert image.size == (300, 200)

@@ -233,6 +233,7 @@ SONG_UPSELL_TEXT = (
 SONG_PROMO_EXPIRED_TEXT = 'К сожалению, 48 часов уже прошли. Вы можете приобрести песню по обычной цене 490 ₽.'
 
 CATEGORY_BUTTONS = (
+    ("🎬 Ожившая открытка (Видео) — Новинка 🔥", "cat_video"),
     ("📸 Фотосессия", "cat_photo"),
     ("🎵 Аудиопесни", "cat_audio"),
     ("🎁 Открытки", "cat_cards"),
@@ -451,6 +452,15 @@ AUDIO_GIFT_SCENARIO_TEXT = (
 )
 
 
+VIDEO_SONG_SCENARIOS = {**AUDIO_FUN_SCENARIOS, **AUDIO_GIFT_SCENARIOS}
+VIDEO_CARD_SCREENS = {'cat_cards', 'sub_ny', 'sub_bday', 'sub_halloween', 'sub_goodmorning'}
+VIDEO_PAYMENT_PLACEHOLDER_URL = 'https://link.payform.ru/'  # TODO: Заменить на реальную ссылку
+VIDEO_UPSELL_TEXT = (
+    'Ваша открытка готова! 🎄\n\n'
+    '✨ А хотите сделать её настоящим сюрпризом? Мы можем добавить анимацию или создать полноценное видео с песней!'
+)
+
+
 
 
 PHOTO_STYLES = {
@@ -603,6 +613,8 @@ class PosterStates(StatesGroup):
     waiting_for_photosession_photo = State()
     waiting_for_prompt = State()
     waiting_for_card_text = State()
+    waiting_for_video_song = State()
+    waiting_for_video_payment = State()
     waiting_for_song_details = State()
     waiting_for_audio_fun_payment = State()
     waiting_for_audio_test_result = State()
@@ -801,6 +813,10 @@ def create_router(
         is_postcard = data.get("mode") in POSTCARD_PROMPTS
         retry_state = PosterStates.waiting_for_card_text if is_postcard else PosterStates.waiting_for_prompt
 
+        if data.get('video_flow'):
+            await _reply(event, 'Создание видео будет доступно после подключения оплаты. Выберите действие в меню.', attachments=[main_keyboard()])
+            return
+
         async def problem(text):
             if is_postcard:
                 await _reply(event, "Не удалось завершить создание или отправку открытки. "
@@ -865,7 +881,7 @@ def create_router(
                     variants=urls, batch_id=uuid4().hex[:12], sent_count=0,
                     new_batch_requested=False, share_prompt_sent=False, channel_invite_sent=False,
                     package_offer_pending=not is_admin and user is not None and user["balance"] == 0,
-                    song_upsell_sent=False,
+                    song_upsell_sent=False, video_upsell_sent=False,
                 )
                 await send_offline_conversion(credit_user_id, goal_id="bot_generation")
             else:
@@ -890,6 +906,14 @@ def create_router(
                     last_image_batch_id=data["batch_id"],
                 )
             data = await context.get_data()
+            if is_postcard and not data.get('video_upsell_sent'):
+                keyboard = InlineKeyboardBuilder().row(
+                    CallbackButton(text='✨ Оживить картинку (снег, огни) — 199 ₽', payload='upsell_animate')
+                ).row(
+                    CallbackButton(text='🎬 Полное видео с песней — 249 ₽', payload='upsell_video')
+                ).row(LinkButton(text='⬇️ Нет, просто скачать картинку', url=urls[0])).as_markup()
+                await _reply(event, VIDEO_UPSELL_TEXT, attachments=[keyboard])
+                await context.update_data(video_upsell_sent=True)
             if is_postcard and not data.get('song_upsell_sent'):
                 await set_song_promo(credit_user_id)
                 if await check_song_promo(credit_user_id):
@@ -1055,7 +1079,10 @@ def create_router(
             f"- Аудиопесни (клики): {counters.get('click_audio', 0)}\n"
             f"- Песня по фану (199 ₽): {counters.get('click_audio_fun', 0)}\n"
             f"- Песня в подарок (490 ₽): {counters.get('click_audio_gift', 0)}\n"
-            f"- Медитации (клики): {counters.get('click_meditation', 0)}\n\n"
+            f"- Медитации (клики): {counters.get('click_meditation', 0)}\n"
+            f"- Видео — вход в меню: {counters.get('click_video_menu', 0)}\n"
+            f"- Анимация за 199 ₽ (клики): {counters.get('click_video_animate_199', 0)}\n"
+            f"- Видео с песней за 249 ₽ (клики): {counters.get('click_video_full_249', 0)}\n\n"
             "🎵 Интерес к Аудиопесням (сценарии):\n"
             + "\n".join(
                 f"- {label}: {counters.get('audio_scen_' + payload.removeprefix('audio_fun_'), 0)}"
@@ -1304,6 +1331,111 @@ def create_router(
             return
         await event.ack(notification="Открываю меню…")
         await send_welcome_message(event, context)
+
+    def video_style_keyboard(screen):
+        buttons = []
+        for label, payload in CATEGORY_MENUS[screen][2]:
+            target = ('back_to_main' if payload == 'back_to_main' else
+                      'video_style:cat_cards' if payload == 'back_to_cards' else 'video_style:' + payload)
+            buttons.append((label, target))
+        return navigation_keyboard(buttons)
+
+    async def show_video_songs(event, context):
+        await context.set_state(PosterStates.waiting_for_video_song)
+        buttons = [(label, 'video_song:' + key) for key, (label, _) in VIDEO_SONG_SCENARIOS.items()]
+        await _reply(event, '🎵 Выберите сценарий песни для видео-поздравления:',
+                     attachments=[navigation_keyboard((*buttons, ('⬅️ Назад', 'cat_video')))])
+
+    @router.message_callback(F.callback.payload == 'cat_video')
+    async def video_menu(event: MessageCallback, context: MemoryContext):
+        if event.message is None:
+            await event.ack(notification='Отправьте /start, чтобы открыть меню.')
+            return
+        await event.ack(notification='Выберите стиль…')
+        user_id = event.get_ids()[1]
+        if user_id is not None:
+            await increment_counter('click_video_menu', user_id=user_id)
+        await context.clear()
+        await context.update_data(video_flow=True, video_amount_kopecks=29900, video_product='direct')
+        await context.set_state(PosterStates.waiting_for_mode)
+        await _reply(event, '🎬 Создаем настоящее видео-поздравление! Выберите стиль открытки:',
+                     attachments=[video_style_keyboard('cat_cards')])
+
+    @router.message_callback(F.callback.payload.startswith('video_style:'))
+    async def video_style(event: MessageCallback, context: MemoryContext):
+        if event.message is None:
+            await event.ack(notification='Отправьте /start, чтобы открыть меню.')
+            return
+        data = await context.get_data()
+        target = event.callback.payload.removeprefix('video_style:')
+        if not data.get('video_flow') or target not in VIDEO_CARD_SCREENS | set(POSTCARD_PROMPTS):
+            await event.ack(notification='Выберите видео заново.')
+            await _reply(event, 'Откройте раздел видео заново.', attachments=[main_keyboard()])
+            return
+        await event.ack(notification='Выбираю стиль…')
+        if target in POSTCARD_PROMPTS:
+            await start_mode_photo(event, context, target, video=True)
+        else:
+            await context.clear()
+            await context.update_data(video_flow=True, video_amount_kopecks=29900, video_product='direct')
+            await context.set_state(PosterStates.waiting_for_mode)
+            filenames, text, _ = CATEGORY_MENUS[target]
+            if target == 'cat_cards':
+                text = '🎬 Создаем настоящее видео-поздравление! Выберите стиль открытки:'
+            await send_menu_examples(event, filenames)
+            await _reply(event, text, attachments=[video_style_keyboard(target)])
+
+    @router.message_callback(F.callback.payload.in_({'upsell_animate', 'upsell_video'}))
+    async def video_upsell(event: MessageCallback, context: MemoryContext):
+        if event.message is None:
+            await event.ack(notification='Отправьте /start, чтобы открыть меню.')
+            return
+        await event.ack(notification='Открываю…')
+        user_id = event.get_ids()[1]
+        animate = event.callback.payload == 'upsell_animate'
+        if user_id is not None:
+            await increment_counter('click_video_animate_199' if animate else 'click_video_full_249', user_id=user_id)
+        data = await context.get_data()
+        image_url = data.get('last_image_url')
+        if data.get('mode') not in POSTCARD_PROMPTS or not isinstance(image_url, str) or not image_url.startswith('https://'):
+            await _reply(event, 'Сначала создайте открытку, затем выберите её анимацию или видео.', attachments=[main_keyboard()])
+            return
+        await context.update_data(video_flow=True, video_source_image=image_url,
+                                  video_amount_kopecks=19900 if animate else 24900,
+                                  video_product='animate' if animate else 'upsell')
+        if animate:
+            await context.set_state(PosterStates.waiting_for_video_payment)
+            await _reply(event, 'Генерация анимации скоро появится', attachments=[InlineKeyboardBuilder().row(
+                LinkButton(text='Оплатить 199 ₽', url=VIDEO_PAYMENT_PLACEHOLDER_URL)).row(
+                CallbackButton(text='⬅️ Назад', payload='back_to_main')).as_markup()])
+        else:
+            await _reply(event, 'Генерация видео с песней скоро появится', attachments=[InlineKeyboardBuilder().row(
+                LinkButton(text='Оплатить 249 ₽ и создать видео', url=VIDEO_PAYMENT_PLACEHOLDER_URL)).as_markup()])
+            await show_video_songs(event, context)
+
+    @router.message_callback(F.callback.payload.startswith('video_song:'))
+    async def video_song(event: MessageCallback, context: MemoryContext):
+        if event.message is None:
+            await event.ack(notification='Отправьте /start, чтобы открыть меню.')
+            return
+        data = await context.get_data()
+        scenario = event.callback.payload.removeprefix('video_song:')
+        if (not data.get('video_flow') or scenario not in VIDEO_SONG_SCENARIOS
+                or data.get('video_amount_kopecks') not in (24900, 29900)
+                or await context.get_state() not in (PosterStates.waiting_for_video_song, PosterStates.waiting_for_video_payment)):
+            await event.ack(notification='Выберите видео и заполните данные заново.')
+            return
+        await event.ack(notification='Показываю оплату…')
+        await context.update_data(video_song_scenario=scenario)
+        await context.set_state(PosterStates.waiting_for_video_payment)
+        price = data['video_amount_kopecks'] // 100
+        text = ('Отлично! Мы создадим статичную открытку, оживим её (добавим анимацию) и наложим песню.\n\n'
+                f'Стоимость видео-подарка — {price} ₽. Это волшебство займет около 5 минут, не закрывайте чат!')
+        if price == 249:
+            text = 'Генерация видео с песней скоро появится\n\n' + text
+        await _reply(event, text, attachments=[InlineKeyboardBuilder().row(
+            LinkButton(text=f'Оплатить {price} ₽ и создать видео', url=VIDEO_PAYMENT_PLACEHOLDER_URL)).row(
+            CallbackButton(text='⬅️ Назад', payload='back_to_main')).as_markup()])
 
     @router.message_callback(F.callback.payload.in_({*CATEGORY_MENUS, "back_to_cards"}))
     async def category_menu(event: MessageCallback, context: MemoryContext) -> None:
@@ -2104,11 +2236,16 @@ def create_router(
             await event.ack(notification="Плакат уже создаётся. Пожалуйста, подождите.")
             return
         await event.ack(notification="Загружаю…")
-        await context.clear()
         mode = "mode_vision" if event.callback.payload == "create_poster" else event.callback.payload
-        if mode == "mode_bday":  # Кнопки из меню предыдущей версии.
+        if mode == "mode_bday":
             mode = "mode_bday_young"
+        await start_mode_photo(event, context, mode)
+
+    async def start_mode_photo(event, context, mode, *, video=False):
+        await context.clear()
         await context.update_data(mode=mode)
+        if video:
+            await context.update_data(video_flow=True, video_amount_kopecks=29900, video_product='direct')
         await context.set_state(PosterStates.waiting_for_photo)
         if mode == "mode_ny_family":
             text = "Отправьте одно общее фото семьи, где видны лица всех участников. Затем напишите поздравление для открытки. /cancel — отмена."
@@ -2314,6 +2451,9 @@ def create_router(
                 fixed_card_text=None, fixed_card_text_source=None,
             )
         await context.update_data(card_text=text, sphere=data["mode"])
+        if data.get('video_flow'):
+            await show_video_songs(event, context)
+            return
         logger.info("Начинаю генерацию открытки с текстом: %s", text)
         await generate_and_send(event, context)
 

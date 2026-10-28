@@ -104,6 +104,35 @@ def _postcard_font(size: int):
         raise GenerationNotConfigured("Не удалось загрузить шрифт font.ttf для открытки.") from exc
 
 
+def add_preview_watermark(image_bytes: bytes) -> bytes:
+    """Полупрозрачный PREVIEW по центру; исходные байты не меняются."""
+    with Image.open(BytesIO(image_bytes)) as source:
+        image = source.convert('RGBA')
+    overlay = Image.new('RGBA', image.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    size = max(1, int(min(image.width * 0.15, image.height * 0.25)))
+    try:
+        font = _postcard_font(size)
+    except GenerationNotConfigured:
+        font = ImageFont.load_default(size=size)
+    bbox = draw.textbbox((0, 0), 'PREVIEW', font=font)
+    width, height = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    if width > image.width * 0.9:
+        size = max(1, int(size * image.width * 0.9 / width))
+        try:
+            font = _postcard_font(size)
+        except GenerationNotConfigured:
+            font = ImageFont.load_default(size=size)
+        bbox = draw.textbbox((0, 0), 'PREVIEW', font=font)
+        width, height = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    position = ((image.width - width) / 2 - bbox[0], (image.height - height) / 2 - bbox[1])
+    draw.text(position, 'PREVIEW', font=font, fill=(255, 255, 255, 110),
+              stroke_width=max(1, size // 30), stroke_fill=(0, 0, 0, 65))
+    output = BytesIO()
+    Image.alpha_composite(image, overlay).save(output, format='PNG')
+    return output.getvalue()
+
+
 def validate_card_text(text: str) -> None:
     if not isinstance(text, str) or not text.strip() or len(text) > MAX_CARD_TEXT_LENGTH:
         raise ValueError(f"Текст открытки должен содержать от 1 до {MAX_CARD_TEXT_LENGTH} символов.")

@@ -355,3 +355,62 @@ async def test_background_gift_preview_offers_discount_without_charging_or_regen
     assert (await credit_db.get_user(123))['total_purchases'] == 0
     submit.assert_awaited_once()
     wait.assert_awaited_once_with('preview-job')
+
+
+async def test_worker_startup_failure_logs_traceback_and_retries(monkeypatch, caplog):
+    import audio_orders
+    reset = AsyncMock(side_effect=[RuntimeError('startup database failure'), None])
+    pending = AsyncMock(side_effect=asyncio.CancelledError())
+    monkeypatch.setattr(audio_orders, 'reset_audio_workers', reset)
+    monkeypatch.setattr(audio_orders, 'pending_audio_orders', pending)
+    worker = PaidAudioWorker(SimpleNamespace(send_message=AsyncMock()), poll_interval=0)
+    with pytest.raises(asyncio.CancelledError):
+        await worker.run()
+    assert reset.await_count == 2
+    pending.assert_awaited_once()
+    record = next(r for r in caplog.records if 'Критическая ошибка очереди' in r.message)
+    assert record.exc_info and 'startup database failure' in caplog.text
+
+
+@pytest.mark.parametrize('error', [RuntimeError('loading failed'), TimeoutError('loading failed')])
+async def test_claimed_order_is_released_if_loading_it_fails(credit_db, monkeypatch, caplog, error):
+    import audio_orders
+    name = await order(credit_db)
+    await credit_db.mark_audio_paid(name, 'provider')
+    monkeypatch.setattr(audio_orders, 'get_audio_order', AsyncMock(side_effect=error))
+    with pytest.raises(type(error), match='loading failed'):
+        await PaidAudioWorker(SimpleNamespace(send_message=AsyncMock())).process(name)
+    assert (await credit_db.get_audio_order(name))['running'] == 0
+    assert any(r.exc_info for r in caplog.records)
+
+
+@pytest.mark.parametrize('missing', ['tags', 'title'])
+async def test_missing_song_argument_notifies_without_post_or_uncertain_submit(credit_db, caplog, missing):
+    await credit_db.create_audio_order('bad-arguments', 123, 'gift', 'bday', 'Аня', None, 'lyrics',
+                                      '' if missing == 'tags' else 'pop', '' if missing == 'title' else 'title')
+    await credit_db.update_audio_order('bad-arguments', preview_requested=1)
+    bot = SimpleNamespace(send_message=AsyncMock())
+    submit, writer = AsyncMock(), AsyncMock()
+    await PaidAudioWorker(bot, generator=submit, lyric_writer=writer).process('bad-arguments')
+    submit.assert_not_awaited()
+    writer.assert_not_awaited()
+    saved = await credit_db.get_audio_order('bad-arguments')
+    assert saved['failed'] == 1 and saved['submit_started'] == saved['running'] == 0
+    assert ('Стиль музыки' if missing == 'tags' else 'Название песни') in bot.send_message.await_args.kwargs['text']
+    assert any(r.exc_info for r in caplog.records)
+
+
+async def test_lyrics_failure_is_visible_before_ttapi_and_user_is_not_left_without_error(credit_db, caplog):
+    name = await order(credit_db, kind='gift')
+    await credit_db.update_audio_order(name, preview_requested=1)
+    bot = SimpleNamespace(send_message=AsyncMock())
+    submit = AsyncMock()
+    writer = AsyncMock(side_effect=RuntimeError('lyrics model failed'))
+    with caplog.at_level('INFO', logger='audio_orders'):
+        await PaidAudioWorker(bot, generator=submit, lyric_writer=writer).process(name)
+    submit.assert_not_awaited()
+    assert 'Начинаю подготовку текста песни для пользователя 123' in caplog.text
+    assert 'lyrics model failed' in caplog.text
+    assert any(r.exc_info for r in caplog.records)
+    assert bot.send_message.await_args.kwargs['text']
+    assert (await credit_db.get_audio_order(name))['running'] == 0

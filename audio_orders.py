@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from maxapi.types import CallbackButton, LinkButton
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
-from audio_service import generate_song, wait_for_song, wait_for_song_with_progress, song_tracks, write_song_lyrics, make_protected_preview, AudioNotConfigured, SongFailed
+from audio_service import generate_song, wait_for_song, wait_for_song_with_progress, song_tracks, write_song_lyrics, make_protected_preview, validate_song_arguments, InvalidSongArguments, AudioNotConfigured, SongFailed
 from database import (get_audio_order, update_audio_order, pending_audio_orders,
                       claim_audio_order, reset_audio_workers, song_checkout_order)
 
@@ -63,26 +63,34 @@ class PaidAudioWorker:
         return keyboard
 
     async def run(self):
-        await reset_audio_workers()
+        initialized = False
         while True:
             try:
+                if not initialized:
+                    await reset_audio_workers()
+                    initialized = True
+                    logger.info('Очередь генерации аудиопесен запущена.')
                 orders = await pending_audio_orders()
                 if orders:
                     await asyncio.gather(*(self.process(order_id) for order_id in orders))
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
-                logger.error('Ошибка очереди аудиозаказов (%s).', type(exc).__name__)
+            except Exception:
+                logger.exception('Критическая ошибка очереди аудиозаказов:')
             await asyncio.sleep(self.poll_interval)
 
     async def notify(self, user_id, text, **kwargs):
         await self.bot.send_message(user_id=user_id, text=text, **kwargs)
 
     async def process(self, order_id):
-        if not await claim_audio_order(order_id):
-            return
-        order = await get_audio_order(order_id)
+        claimed = False
+        order = None
         try:
+            claimed = await claim_audio_order(order_id)
+            if not claimed:
+                return
+            order = await get_audio_order(order_id)
+            logger.info('Начинаю обработку аудиозаказа %s для пользователя %s.', order_id, order['user_id'])
             tracks = json.loads(order['tracks_json']) if order['tracks_json'] else None
             if not tracks:
                 job_id = order['job_id']
@@ -90,7 +98,10 @@ class PaidAudioWorker:
                     if order['submit_started']:
                         await self.fail(order, 'Не удалось подтвердить отправку песни в студию. Обратитесь в поддержку и укажите заказ ' + order_id)
                         return
+                    validate_song_arguments(order['prompt'], order['tags'], order['title'])
+                    logger.info('Начинаю подготовку текста песни для пользователя %s (заказ %s).', order['user_id'], order_id)
                     lyrics = order['lyrics'] or await self.lyric_writer(order['prompt'], order['tags'], order['title'])
+                    validate_song_arguments(lyrics, order['tags'], order['title'])
                     await update_audio_order(order_id, lyrics=lyrics)
                     if not order['error']:
                         try:
@@ -98,7 +109,9 @@ class PaidAudioWorker:
                         except Exception:
                             logger.warning('Не удалось отправить прогресс аудиозаказа %s.', order_id)
                     await update_audio_order(order_id, submit_started=1)
+                    logger.info('Запускаю audio_service.generate_song для пользователя %s', order['user_id'])
                     job_id = await self.generator(lyrics, order['tags'], order['title'])
+                    logger.info('TTAPI принял аудиозаказ %s: job_id=%s.', order_id, job_id)
                     await asyncio.shield(update_audio_order(order_id, job_id=job_id))
                 result = await wait_for_song_with_progress(
                     job_id, lambda text: self.notify(order['user_id'], text), waiter=self.waiter)
@@ -128,18 +141,28 @@ class PaidAudioWorker:
             await update_audio_order(order_id, delivered=1, error=None)
         except asyncio.CancelledError:
             raise
+        except InvalidSongArguments as exc:
+            logger.exception("Критическая ошибка при запуске генерации песни:")
+            await self.fail(order, str(exc) + ' Обратитесь в поддержку и укажите заказ ' + order_id)
         except AudioNotConfigured:
+            logger.exception('Не настроена генерация песни (заказ %s):', order_id)
             await update_audio_order(order_id, submit_started=0, error='not_configured', next_attempt_at=self.later())
             if order['error'] != 'not_configured':
                 await self.safe_notify(order, 'Музыкальная студия временно недоступна; заказ сохранён. Не создавайте повторный заказ.')
         except SongFailed:
+            logger.exception('TTAPI сообщил об ошибке генерации (заказ %s):', order_id)
             await self.fail(order, 'Генерация песни завершилась ошибкой. Заказ сохранён. Обратитесь в поддержку и укажите заказ ' + order_id)
         except TimeoutError:
+            logger.exception('Истекло время ожидания аудиозаказа %s:', order_id)
+            if order is None:
+                raise
             await update_audio_order(order_id, error='timeout', next_attempt_at=self.later())
             if order['error'] != 'timeout':
                 await self.safe_notify(order, 'Песня ещё создаётся. Продолжу проверять тот же заказ.')
-        except Exception as exc:
-            logger.error('Ошибка оплаченного аудиозаказа %s (%s).', order_id, type(exc).__name__)
+        except Exception:
+            logger.exception('Критическая ошибка при запуске генерации песни: заказ %s', order_id)
+            if order is None:
+                raise
             current = await get_audio_order(order_id)
             if current['submit_started'] and not current['job_id']:
                 await self.fail(order, 'Не удалось подтвердить отправку песни в студию. Обратитесь в поддержку и укажите заказ ' + order_id)
@@ -148,7 +171,12 @@ class PaidAudioWorker:
                 if not current['tracks_json'] and order['error'] != 'retry':
                     await self.safe_notify(order, 'Музыкальная студия пока не ответила. Заказ сохранён; продолжу проверять задачу.')
         finally:
-            await asyncio.shield(update_audio_order(order_id, running=0))
+            if claimed:
+                try:
+                    await asyncio.shield(update_audio_order(order_id, running=0))
+                except Exception:
+                    logger.exception('Не удалось освободить аудиозаказ %s:', order_id)
+                    raise
 
     @staticmethod
     def later():
@@ -159,7 +187,7 @@ class PaidAudioWorker:
             keyboard = InlineKeyboardBuilder().row(CallbackButton(text='Написать в поддержку', payload='help_support')).as_markup()
             await self.notify(order['user_id'], text, attachments=[keyboard])
         except Exception:
-            logger.warning('Не удалось уведомить пользователя об аудиозаказе %s.', order['order_id'])
+            logger.exception('Не удалось уведомить пользователя об аудиозаказе %s:', order['order_id'])
 
     async def fail(self, order, text):
         await update_audio_order(order['order_id'], failed=1, error='generation_failed')

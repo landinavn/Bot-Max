@@ -245,3 +245,17 @@ async def test_cancel_wait_cleans_up_polling_task():
         await task
     assert cancelled.is_set()
     notify.assert_not_awaited()
+
+
+@pytest.mark.parametrize('prompt,tags,title,field', [
+    (None, 'pop', 'title', 'Текст песни'), (' ', 'pop', 'title', 'Текст песни'),
+    ('words', None, 'title', 'Стиль музыки'), ('words', '', 'title', 'Стиль музыки'),
+    ('words', 'pop', None, 'Название песни'), ('words', 'pop', ' ', 'Название песни'),
+    ('x'*5001, 'pop', 'title', 'Текст песни'), ('words', 'x'*1001, 'title', 'Стиль музыки'),
+    ('words', 'pop', 'x'*81, 'Название песни'),
+])
+@respx.mock
+async def test_song_arguments_fail_clearly_before_any_http(prompt, tags, title, field):
+    with pytest.raises(service.InvalidSongArguments, match=field):
+        await service.generate_song(prompt, tags, title)
+    assert not respx.calls

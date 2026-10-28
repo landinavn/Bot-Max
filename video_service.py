@@ -71,10 +71,11 @@ async def create_video_task(image_url: str, prompt: str) -> str:
     key = _api_key()
     payload = {
         "model": "kling", "task_type": "video_generation",
-        "input": {"image_url": image_url, "prompt": prompt, "version": "3.0-turbo", "mode": "std", "duration": 5},
+        "input": {"image_url": image_url, "prompt": prompt, "version": "3.0-turbo", "mode": "std", "duration": 5,
+                  "enable_audio": False},
         "config": {"service_mode": "public"},
     }
-    logger.info("PiAPI: создаю задачу Kling (5 секунд, std, 3.0-turbo).")
+    logger.info("PiAPI: создаю задачу Kling (5 секунд, std, 3.0-turbo, enable_audio=false).")
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT, trust_env=False) as client:
         result = await _request(client, "POST", TASK_URL, key, json=payload)
     data = result.get("data")

@@ -4696,7 +4696,7 @@ async def test_video_admin_bypass_only_after_data_and_song_and_never_for_regular
         saved = stub.await_args.args[0]
         assert saved['video_song_scenario'] == 'audio_fun_ny' and saved['video_amount_kopecks'] == price * 100
         assert song.send.await_args_list[0].args[0] == '👑 Режим администратора: Оплата пропущена. Запускаю генерацию...'
-        assert song.send.await_args_list[1].args[0] == '🎬 Ваша анимация готова (5 секунд): https://video.example/result.mp4'
+        assert song.send.await_args_list[1].args[0] == '🎬 Ваше видео с песней готово: https://video.example/result.mp4'
         assert not any('payform' in str(call) for call in song.send.await_args_list)
         assert await context.get_state() == PosterStates.waiting_for_mode
         assert (await context.get_data())['video_complete'] is True
@@ -5388,7 +5388,7 @@ async def test_default_cartoon_generator_uses_real_piapi_chain(credit_db, monkey
         assert post.call_count == get.call_count == 1
         payload = json.loads(post.calls[0].request.content)
         assert payload['input'] == {'image_url': 'https://cdn.example/avatar.png',
-            'prompt': 'The character is smiling and blinking naturally', 'version': '3.0-turbo', 'mode': 'std', 'duration': 5}
+            'prompt': 'The character is smiling and blinking naturally', 'version': '3.0-turbo', 'mode': 'std', 'duration': 5, 'enable_audio': False}
         assert post.calls[0].request.headers['X-API-Key'] == get.calls[0].request.headers['X-API-Key'] == 'piapi-test-key'
     assert 'https://video.example/kling.mp4' in event.send.await_args.args[0]
     button = event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0]
@@ -5714,3 +5714,22 @@ async def test_switching_video_song_cannot_reuse_old_job_after_submit_failure(cr
     await dispatch_callback(router, callback_event('video_song:audio_fun_cat'), context)
     assert submit.await_count == 3
     assert waiter.await_args_list == [call('ny-job'), call('cat-job')]
+
+
+async def test_old_short_merge_cache_is_rebuilt_without_new_kling_or_ttapi_request(credit_db, monkeypatch, piapi_animation):
+    merger = AsyncMock(side_effect=['https://cdn.example/first.mp4', 'https://cdn.example/full-song.mp4'])
+    monkeypatch.setattr(handlers, 'merge_video_and_audio', merger)
+    router, context = create_router(admin_user_id=456), await ready_context()
+    await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png')
+    await dispatch_callback(router, callback_event('upsell_video'), context)
+    await dispatch_callback(router, callback_event('video_song:audio_fun_ny'), context)
+    data = await context.get_data()
+    await context.update_data(video_merged_source=[data['video_raw_url'], data['video_song_url']],
+                              video_merged_url='https://cdn.example/old-five-seconds.mp4')
+    await dispatch_callback(router, callback_event('upsell_video'), context)
+    event = callback_event('video_song:audio_fun_ny')
+    await dispatch_callback(router, event, context)
+    assert merger.await_count == 2
+    piapi_animation.assert_awaited_once()
+    handlers.generate_song.assert_awaited_once()
+    assert 'https://cdn.example/full-song.mp4' in event.send.await_args.args[0]

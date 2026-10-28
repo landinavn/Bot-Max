@@ -58,7 +58,8 @@ async def test_merge_replaces_original_audio_copies_video_uploads_and_cleans_tem
     assert [s['codec_type'] for s in probe['streams']] == ['video', 'audio']
     assert probe['streams'][0]['codec_name'] == 'mpeg4'  # Видео скопировано, не перекодировано.
     assert probe['streams'][1]['codec_name'] == 'aac'
-    assert 1.9 <= float(probe['format']['duration']) <= 2.2
+    assert 3.4 <= float(probe['format']['duration']) <= 3.7
+    assert int(probe['streams'][0]['nb_frames']) >= 34  # Исходный ролик имел только 20 кадров.
     pcm = array.array('h', subprocess.check_output(['ffmpeg', '-v', 'error', '-i', str(result), '-map', '0:a:0', '-ac', '1', '-ar', '8000', '-f', 's16le', '-']))
     crossings = sum(1 for a, b in zip(pcm, pcm[1:]) if a < 0 <= b)
     frequency = crossings / (len(pcm)/8000)
@@ -113,3 +114,39 @@ async def test_merge_upload_error_still_cleans_temp_and_closes_storage(storage, 
         await media.merge_video_and_audio('https://input.example/video.mp4', 'https://input.example/song.mp3')
     assert paths and not paths[0].parent.exists()
     storage.close.assert_called_once()
+
+
+@pytest.mark.parametrize('duration', [1.25, 67.25])
+@respx.mock
+async def test_looped_video_matches_full_song_even_when_shorter_or_much_longer(storage, sample_media, tmp_path, duration):
+    audio = tmp_path/'duration.wav'
+    subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i',f'sine=frequency=660:duration={duration}',str(audio)], check=True)
+    respx.get('https://input.example/video.mp4').respond(200, content=sample_media[0])
+    respx.get('https://input.example/song.mp3').respond(200, content=audio.read_bytes())
+    await media.merge_video_and_audio('https://input.example/video.mp4', 'https://input.example/song.mp3')
+    target = tmp_path/'looped.mp4'
+    target.write_bytes(storage.objects[0]['Body'])
+    result = json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams','-show_format','-of','json',str(target)]))
+    video, sound = result['streams']
+    assert abs(float(sound['duration'])-duration) < 0.1
+    # Поток копируется без перекодирования: длительность кратна кадру (здесь 0.1 с).
+    assert duration-0.11 <= float(video['duration']) <= duration+0.2
+    assert abs(float(result['format']['duration'])-duration) < 0.2
+    assert video['codec_name'] == 'mpeg4' and sound['codec_name'] == 'aac'
+    if duration > 2:
+        assert int(video['nb_frames']) > 600  # Больше минуты видео из исходных двух секунд.
+
+
+@respx.mock
+async def test_looped_video_accepts_kling_result_without_any_audio(storage, sample_media, tmp_path):
+    original, silent = tmp_path/'original.mp4', tmp_path/'silent.mp4'
+    original.write_bytes(sample_media[0])
+    subprocess.run(['ffmpeg','-v','error','-i',str(original),'-map','0:v:0','-c:v','copy','-an',str(silent)], check=True)
+    respx.get('https://input.example/video.mp4').respond(200, content=silent.read_bytes())
+    respx.get('https://input.example/song.mp3').respond(200, content=sample_media[1])
+    await media.merge_video_and_audio('https://input.example/video.mp4', 'https://input.example/song.mp3')
+    target = tmp_path/'merged-silent-input.mp4'
+    target.write_bytes(storage.objects[0]['Body'])
+    result = json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams','-of','json',str(target)]))
+    assert [s['codec_type'] for s in result['streams']] == ['video','audio']
+    assert float(result['streams'][1]['duration']) >= 3.4

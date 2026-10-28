@@ -34,7 +34,7 @@ async def test_create_exact_kling_task_and_log(caplog):
     assert json.loads(request.content) == {
         'model': 'kling', 'task_type': 'video_generation',
         'input': {'image_url': 'https://images.example/avatar.png', 'prompt': 'Snow and glowing lights',
-                  'version': '3.0-turbo', 'mode': 'std', 'duration': 5},
+                  'version': '3.0-turbo', 'mode': 'std', 'duration': 5, 'enable_audio': False},
         'config': {'service_mode': 'public'},
     }
     assert route.call_count == 1

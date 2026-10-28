@@ -16,6 +16,7 @@ from config import Config
 from image_service import _storage_client
 
 logger = logging.getLogger(__name__)
+VIDEO_MERGE_POLICY = 'loop-full-song-v1'
 
 
 class MediaServiceError(RuntimeError):
@@ -79,7 +80,7 @@ def _upload_video(client, settings, path: Path) -> str:
 
 
 async def merge_video_and_audio(video_url: str, audio_url: str) -> str:
-    """Заменить исходный звук видео песней; длина — по кратчайшей дорожке."""
+    """Повторять видеоряд до конца песни, заменяя исходную звуковую дорожку."""
     binary = shutil.which('ffmpeg')
     if not binary:
         raise MediaServiceError('Для склейки видео и аудио установите ffmpeg.')
@@ -92,9 +93,11 @@ async def merge_video_and_audio(video_url: str, audio_url: str) -> str:
             async with httpx.AsyncClient(timeout=120, trust_env=False, follow_redirects=False) as http:
                 await _download(http, video_url, source_video, 128 * 1024 * 1024)
                 await _download(http, audio_url, source_audio, 32 * 1024 * 1024)
+            duration = await audio_duration(source_audio)
+            logger.info('Повторяю видеоряд на всю песню: %.2f секунд.', duration)
             await run_media_process(binary, '-nostdin', '-v', 'error', '-protocol_whitelist', 'file,pipe',
-                '-i', str(source_video), '-i', str(source_audio), '-map', '0:v:0', '-map', '1:a:0',
-                '-c:v', 'copy', '-c:a', 'aac', '-shortest', '-movflags', '+faststart', '-y', str(target))
+                '-stream_loop', '-1', '-i', str(source_video), '-i', str(source_audio), '-map', '0:v:0', '-map', '1:a:0',
+                '-c:v', 'copy', '-c:a', 'aac', '-t', f'{duration:.6f}', '-shortest', '-movflags', '+faststart', '-y', str(target))
             if not target.is_file() or not target.stat().st_size:
                 raise MediaServiceError('ffmpeg не создал готовое видео.')
             logger.info('Загружаю склеенное видео в Yandex Object Storage.')

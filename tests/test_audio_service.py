@@ -494,3 +494,73 @@ async def test_video_greeting_can_be_reworked_into_chorus_while_audio_keeps_lite
         assert service.TEACHER_MUSIC_INSTRUCTION in body['messages'][0]['content']
     with pytest.raises(service.AudioServiceError, match='фразу припева'):
         await service.write_song_lyrics(notes, tags, title)
+
+
+@pytest.mark.parametrize('length,seconds,start', [(51, 15, 20), (35, 15, 20), (34, 15, 5), (20, 10, 5), (10, 15, 5), (4, 15, 0)])
+@respx.mock
+async def test_video_preview_copies_only_requested_vocal_clip_and_cleans_temp_files(monkeypatch, tmp_path, length, seconds, start):
+    import array
+    import subprocess
+    import image_service
+    if not service.shutil.which('ffmpeg') or not service.shutil.which('ffprobe'):
+        pytest.skip('ffmpeg/ffprobe not installed')
+    source = tmp_path / 'full.mp3'
+    subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i',
+        f"aevalsrc=if(lt(t\\,{start})\\,0\\,0.2*sin(2*PI*440*t)):s=8000:d={length}",
+        '-codec:a', 'libmp3lame', '-y', str(source)], check=True)
+    full = source.read_bytes()
+    respx.get('https://cdn.example/full.mp3').respond(200, content=full)
+    storage = Mock()
+    monkeypatch.setattr(image_service, '_storage_client', lambda config: storage)
+    monkeypatch.setattr(service.Config, 'from_env', lambda: Config(token='test', photo_path=tmp_path,
+        storage_bucket='clips', storage_public_base_url='https://media.example'))
+    original = service.asyncio.create_subprocess_exec
+    commands = []
+    async def record(*args, **kwargs):
+        commands.append(args)
+        return await original(*args, **kwargs)
+    monkeypatch.setattr(service.asyncio, 'create_subprocess_exec', record)
+    url = await service.create_audio_preview('https://cdn.example/full.mp3', seconds)
+    assert url.startswith('https://media.example/audio-previews/')
+    command = next(args for args in commands if '-ss' in args)
+    assert command[command.index('-ss') + 1] == f'00:00:{start:02}'
+    assert command[command.index('-t') + 1] == str(seconds)
+    assert command[command.index('-c') + 1] == 'copy'
+    assert not Path(command[command.index('-i') + 1]).exists()
+    assert not Path(command[-1]).exists()
+    upload = storage.put_object.call_args.kwargs
+    assert upload['Bucket'] == 'clips' and upload['ContentType'] == 'audio/mpeg'
+    assert upload['Body'] != full
+    result = tmp_path / 'clip.mp3'
+    result.write_bytes(upload['Body'])
+    duration = float(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries',
+        'format=duration', '-of', 'default=nw=1:nk=1', str(result)]))
+    assert abs(duration - min(seconds, length-start)) < 0.6
+    pcm = array.array('h', subprocess.check_output(['ffmpeg', '-v', 'error', '-i', str(result),
+        '-ss', '1', '-t', '1', '-f', 's16le', '-ac', '1', '-ar', '8000', '-']))
+    assert max(abs(value) for value in pcm) > 2000
+    storage.close.assert_called_once()
+
+
+@pytest.mark.parametrize('duration', [0, -1, 16, 1.5, True])
+async def test_video_preview_rejects_invalid_duration(duration):
+    with pytest.raises(service.AudioServiceError):
+        await service.create_audio_preview('https://cdn.example/full.mp3', duration)
+
+
+@respx.mock
+async def test_video_preview_ffmpeg_failure_does_not_upload_full_song(monkeypatch, tmp_path):
+    import image_service
+    storage = Mock()
+    monkeypatch.setattr(image_service, '_storage_client', lambda config: storage)
+    monkeypatch.setattr(service.shutil, 'which', lambda name: '/fake/ffmpeg')
+    monkeypatch.setattr(service, 'audio_duration', AsyncMock(return_value=51))
+    process = Mock(returncode=1, communicate=AsyncMock(return_value=(b'', b'broken mp3')))
+    runner = AsyncMock(return_value=process)
+    monkeypatch.setattr(service.asyncio, 'create_subprocess_exec', runner)
+    respx.get('https://cdn.example/full.mp3').respond(200, content=b'not-a-valid-mp3')
+    with pytest.raises(service.AudioServiceError, match='фрагмент'):
+        await service.create_audio_preview('https://cdn.example/full.mp3')
+    storage.put_object.assert_not_called()
+    storage.close.assert_called_once()
+    assert not Path(runner.await_args.args[-1]).parent.exists()

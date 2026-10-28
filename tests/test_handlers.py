@@ -5773,7 +5773,7 @@ async def test_old_short_merge_cache_is_rebuilt_without_new_kling_or_ttapi_reque
 
 @pytest.mark.parametrize('admin', [False, True])
 @pytest.mark.parametrize('audio_key', ['audioUrl', 'audio_url'])
-async def test_cat_video_sends_saved_mp3_before_next_step_and_never_lyrics(credit_db, monkeypatch, admin, audio_key):
+async def test_cat_video_sends_only_preview_but_merges_full_song(credit_db, monkeypatch, admin, audio_key):
     url, lyrics = 'https://cdn.example/selected-song.mp3', 'PRIVATE LYRICS DO NOT SEND'
     submit = AsyncMock(return_value='selected-song-job')
     waiter = AsyncMock(return_value={'status': 'SUCCESS', 'data': [{audio_key: url, 'lyrics': lyrics}]})
@@ -5792,7 +5792,7 @@ async def test_cat_video_sends_saved_mp3_before_next_step_and_never_lyrics(credi
     assert await context.get_state() == PosterStates.waiting_for_video_song
     event = callback_event('video_song:audio_fun_ny')
     async def reply(text=None, **kwargs):
-        if text and text.startswith('🎧 Ваша песня готова!'):
+        if text and text.startswith('🎧 Вот короткий фрагмент'):
             assert (await context.get_data())['audio_url'] == url  # Сохранено до отправки MAX.
         return object()
     event.send.side_effect = reply
@@ -5802,9 +5802,11 @@ async def test_cat_video_sends_saved_mp3_before_next_step_and_never_lyrics(credi
     assert data['photo']['url'] == 'https://photos.example.com/source.png'
     assert data['card_text'] == 'С Новым годом, Аня!' and data['video_song_scenario'] == 'audio_fun_ny'
     sent = event.send.await_args_list
-    audio = next(c for c in sent if c.args and c.args[0].startswith('🎧 Ваша песня готова!'))
-    assert audio.args[0] == '🎧 Ваша песня готова! Прослушайте фрагмент и переходите к созданию видео.'
-    assert audio.kwargs['attachments'][0].payload.buttons[0][0].url == url
+    audio = next(c for c in sent if c.args and c.args[0].startswith('🎧 Вот короткий фрагмент'))
+    assert audio.args[0] == '🎧 Вот короткий фрагмент вашей песни. Если всё нравится, переходите к созданию видео!'
+    handlers.create_audio_preview.assert_awaited_once_with(url)
+    assert url not in str(sent)
+    assert audio.kwargs['attachments'][0].payload.buttons[0][0].url == 'https://preview.example/video-clip.mp3'
     assert lyrics not in str(sent)
     submit.assert_awaited_once()
     waiter.assert_awaited_once_with('selected-song-job')
@@ -5850,7 +5852,7 @@ async def test_cat_video_failed_audio_delivery_keeps_link_and_retries_without_tt
     handlers.generate_song.assert_awaited_once()
     handlers.wait_for_song.assert_awaited_once()
     assert await context.get_state() == PosterStates.waiting_for_video_payment
-    assert any(c.args and c.args[0].startswith('🎧 Ваша песня готова!') for c in retry.send.await_args_list)
+    assert any(c.args and c.args[0].startswith('🎧 Вот короткий фрагмент') for c in retry.send.await_args_list)
 
 
 async def test_cancel_during_cat_video_audio_wait_does_not_deliver_or_restore_state(credit_db):
@@ -6073,3 +6075,58 @@ async def test_cat_video_cancel_while_waiting_for_song_phrase_skips_music(credit
     await call_handler(router, 'echo', message_event('Иван, лучший тренер!'), context)
     handlers.generate_song.assert_not_awaited()
     assert await context.get_state() == PosterStates.waiting_for_mode
+
+
+async def test_cat_video_preview_failure_retains_full_song_for_retry_without_new_music(credit_db, monkeypatch):
+    preview = AsyncMock(side_effect=[RuntimeError('ffmpeg unavailable'), 'https://cdn.example/short.mp3'])
+    monkeypatch.setattr(handlers, 'create_audio_preview', preview)
+    router, context = create_router(admin_user_id=999), await ready_context()
+    await prepare_teacher_video(router, context, 'cat_video')
+    event = callback_event('video_song:audio_fun_ny')
+    await dispatch_callback_and_phrase(router, event, context)
+    assert await context.get_state() == PosterStates.waiting_for_video_song
+    assert (await context.get_data())['audio_url'] == 'https://audio.example/1.mp3'
+    assert 'https://audio.example/1.mp3' not in str(event.send.await_args_list)
+    retry = callback_event('retry_video_song_audio')
+    await dispatch_callback(router, retry, context)
+    assert await context.get_state() == PosterStates.waiting_for_video_payment
+    assert preview.await_count == 2
+    handlers.generate_song.assert_awaited_once()
+    handlers.wait_for_song.assert_awaited_once()
+    assert 'https://cdn.example/short.mp3' in str(retry.send.await_args_list)
+    assert 'https://audio.example/1.mp3' not in str(retry.send.await_args_list)
+
+
+async def test_cat_video_preview_is_reused_when_max_delivery_fails(credit_db):
+    router, context = create_router(admin_user_id=999), await ready_context()
+    await prepare_teacher_video(router, context, 'cat_video')
+    event = callback_event('video_song:audio_fun_ny')
+    event.send.return_value = None
+    await dispatch_callback_and_phrase(router, event, context)
+    assert await context.get_state() == PosterStates.waiting_for_video_song
+    await dispatch_callback(router, callback_event('retry_video_song_audio'), context)
+    handlers.create_audio_preview.assert_awaited_once_with('https://audio.example/1.mp3')
+    handlers.generate_song.assert_awaited_once()
+
+
+async def test_cat_video_cancel_during_clipping_does_not_deliver_preview_or_restore_fsm(credit_db, monkeypatch):
+    import asyncio
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def clip(url):
+        entered.set()
+        await release.wait()
+        return 'https://preview.example/late.mp3'
+    monkeypatch.setattr(handlers, 'create_audio_preview', clip)
+    router, context = create_router(admin_user_id=999), await ready_context()
+    await prepare_teacher_video(router, context, 'cat_video')
+    event = callback_event('video_song:audio_fun_ny')
+    task = asyncio.create_task(dispatch_callback_and_phrase(router, event, context))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        await call_handler(router, 'cancel', message_event('/cancel'), context)
+    finally:
+        release.set()
+        await task
+    assert await context.get_state() == PosterStates.waiting_for_mode
+    assert await context.get_data() == {}
+    assert 'https://preview.example/late.mp3' not in str(event.send.await_args_list)

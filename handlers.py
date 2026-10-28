@@ -30,7 +30,7 @@ from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 from config import DEFAULT_BOT_LINK, validate_bot_link
 from video_service import build_video_prompt, generate_video_from_avatar
 from media_service import VIDEO_MERGE_POLICY, merge_video_and_audio
-from audio_service import song_audio_url, TEACHER_MUSIC_TAGS
+from audio_service import create_audio_preview, song_audio_url, TEACHER_MUSIC_TAGS
 from metrika_service import extract_yclid, send_offline_conversion
 
 from database import (
@@ -780,7 +780,8 @@ PENDING_VIDEO_MESSAGE = (
 def video_cache(data):
     keys = ('video_raw_source', 'video_raw_url', 'video_song_source', 'video_song_url',
             'video_song_job_source', 'video_song_job_id', 'video_song_lyrics',
-            'video_merged_source', 'video_merged_url', 'audio_url', 'video_people_source', 'video_people_count')
+            'video_merged_source', 'video_merged_url', 'audio_url', 'video_people_source', 'video_people_count',
+            'video_song_preview_source', 'video_song_preview_url')
     return {key: data[key] for key in keys if key in data}
 
 
@@ -2124,14 +2125,27 @@ def create_router(
             data['audio_url'] = audio_url
             # Сохранить ссылку до ответа MAX и перехода к склейке/оплате.
             await context.update_data(**video_cache(data))
-            if data.get('video_song_delivered_url') != audio_url:
-                sent = await _reply(event, '🎧 Ваша песня готова! Прослушайте фрагмент и переходите к созданию видео.',
-                    attachments=[InlineKeyboardBuilder().row(LinkButton(text='🎵 Прослушать песню (MP3)', url=audio_url)).as_markup()])
+            listen_url = audio_url
+            direct = data.get('video_product') == 'direct'
+            if direct:
+                if data.get('video_song_preview_source') != audio_url or not data.get('video_song_preview_url'):
+                    preview_url = await create_audio_preview(audio_url)
+                    if (await context.get_data()).get('video_audio_delivery_session') != token:
+                        return False
+                    data.update(video_song_preview_source=audio_url, video_song_preview_url=preview_url)
+                    await context.update_data(**video_cache(data))
+                listen_url = data['video_song_preview_url']
+            if data.get('video_song_delivered_url') != listen_url:
+                text = ('🎧 Вот короткий фрагмент вашей песни. Если всё нравится, переходите к созданию видео!' if direct else
+                        '🎧 Ваша песня готова! Прослушайте фрагмент и переходите к созданию видео.')
+                sent = await _reply(event, text,
+                    attachments=[InlineKeyboardBuilder().row(LinkButton(
+                        text='🎵 Прослушать фрагмент (MP3)' if direct else '🎵 Прослушать песню (MP3)', url=listen_url)).as_markup()])
                 if sent is None:
                     raise RuntimeError('MAX не подтвердил отправку аудиоссылки.')
                 if (await context.get_data()).get('video_audio_delivery_session') != token:
                     return False
-                await context.update_data(video_song_delivered_url=audio_url)
+                await context.update_data(video_song_delivered_url=listen_url)
             return True
         except Exception:
             logger.exception('Ошибка получения или отправки аудио для видео:')

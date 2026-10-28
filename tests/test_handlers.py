@@ -4170,3 +4170,27 @@ async def test_gift_preview_is_queued_while_another_admin_generation_is_running(
     finally:
         release.set()
         await first
+
+
+async def test_admin_long_audio_notifies_then_delivers_without_second_submit(credit_db, monkeypatch):
+    import asyncio
+    from audio_service import wait_for_song_with_progress, LONG_WAIT_MESSAGE
+    ready = asyncio.Event()
+    async def short_progress(job, notify, **kwargs):
+        return await wait_for_song_with_progress(job, notify, notification_delay=0.001, **kwargs)
+    monkeypatch.setattr('handlers.wait_for_song_with_progress', short_progress)
+    async def wait(job):
+        await ready.wait()
+        return TT_RESULT
+    submit = AsyncMock(return_value='long-job')
+    router = create_router(admin_user_id=456, song_generator=submit, song_waiter=wait)
+    event = callback_event('gift_payment_soon')
+    async def sent(text, **kwargs):
+        if text == LONG_WAIT_MESSAGE:
+            ready.set()
+    event.send.side_effect = sent
+    context = await tt_context('gift')
+    await asyncio.wait_for(dispatch_callback(router, event, context), 2)
+    assert sum(call.args[0] == LONG_WAIT_MESSAGE for call in event.send.await_args_list) == 1
+    assert await context.get_state() == PosterStates.waiting_for_audio_result
+    submit.assert_awaited_once()

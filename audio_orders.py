@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from maxapi.types import CallbackButton, LinkButton
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
-from audio_service import generate_song, wait_for_song, song_tracks, write_song_lyrics, make_protected_preview, AudioNotConfigured, SongFailed
+from audio_service import generate_song, wait_for_song, wait_for_song_with_progress, song_tracks, write_song_lyrics, make_protected_preview, AudioNotConfigured, SongFailed
 from database import (get_audio_order, update_audio_order, pending_audio_orders,
                       claim_audio_order, reset_audio_workers)
 
@@ -98,7 +98,8 @@ class PaidAudioWorker:
                     await update_audio_order(order_id, submit_started=1)
                     job_id = await self.generator(lyrics, order['tags'], order['title'])
                     await asyncio.shield(update_audio_order(order_id, job_id=job_id))
-                result = await self.waiter(job_id)
+                result = await wait_for_song_with_progress(
+                    job_id, lambda text: self.notify(order['user_id'], text), waiter=self.waiter)
                 tracks = song_tracks(result)
                 await update_audio_order(order_id, tracks_json=json.dumps(tracks, ensure_ascii=False), error=None)
             order = await get_audio_order(order_id)

@@ -29,7 +29,7 @@ from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
 from config import DEFAULT_BOT_LINK, validate_bot_link
 from video_service import build_video_prompt, generate_video_from_avatar
-from media_service import VIDEO_MERGE_POLICY, MUSICAL_VIDEO_POLICY, merge_video_and_audio, create_musical_video, upload_video_for_max
+from media_service import VIDEO_MERGE_POLICY, MUSICAL_VIDEO_POLICY, MUSICAL_VIDEO_WAIT_MESSAGE, merge_video_and_audio, create_musical_video, upload_video_for_max
 from audio_service import create_audio_preview, song_audio_url, TEACHER_MUSIC_TAGS
 from metrika_service import extract_yclid, send_offline_conversion
 
@@ -42,7 +42,7 @@ from database import (
     is_promo_active, PromoUnavailableError, get_users_by_activity, start_broadcast_promo,
     get_users_for_reminder, get_audio_order, create_audio_order, find_gift_preview_order,
     update_audio_order, grant_audio_admin_access, request_audio_regeneration,
-    set_song_promo, check_song_promo, song_checkout_order, latest_gift_preview, claim_audio_order,
+    check_song_promo, song_checkout_order, latest_gift_preview, claim_audio_order,
     save_pending_video, get_all_pending_videos, mark_video_completed, save_pending_video_result,
 )
 from prodamus import PACKAGES, ProdamusPayments
@@ -250,11 +250,6 @@ PHOTO_FAMILY_EXAMPLE_FILES = (
     r"photo_fam_1.webp", r"photo_fam_2.webp", r"photo_fam_3.webp",
 )
 
-SONG_UPSELL_TEXT = (
-    'Красиво получилось? 😍 Кстати, эта открытка будет шикарно в паре с аудиопоздравлением!\n\n'
-    'Сейчас «Песня в подарок» стоит 490 ₽, но мы дарим вам скидку 20% на первый заказ по промокоду FIRST.\n\n'
-    'Забрать со скидкой? Скидка действует 48 часов!'
-)
 SONG_PROMO_EXPIRED_TEXT = 'К сожалению, 48 часов уже прошли. Вы можете приобрести песню по обычной цене 490 ₽.'
 
 CATEGORY_BUTTONS = (
@@ -511,7 +506,7 @@ VIDEO_CARD_SCREENS = {'cat_cards', 'sub_ny', 'sub_bday', 'sub_halloween', 'sub_g
 VIDEO_PAYMENT_PLACEHOLDER_URL = 'https://link.payform.ru/'  # TODO: Заменить на реальную ссылку
 VIDEO_UPSELL_TEXT = (
     'Ваша открытка готова! 🎄\n\n'
-    '✨ А хотите сделать её настоящим музыкальным подарком? Мы можем наложить на вашу открытку короткую персональную песню (30-40 секунд) и сделать красивый видеоролик, который можно отправить в мессенджере.'
+    '✨ А хотите сделать её настоящим музыкальным подарком? Мы можем наложить на вашу открытку короткую персональную песню (30-40 секунд) и получится красивая музыкальная открытка, которую можно отправить в мессенджере.'
 )
 
 
@@ -813,6 +808,7 @@ def create_router(
     avatar_generator: Callable[[str, str], Awaitable[str]] | None = None,
     cartoon_video_generator: Callable[[str, str], Awaitable[str]] | None = None,
 ) -> Router:
+    default_card_video = video_generator is None
     avatar_generator = avatar_generator or generate_cartoon_avatar
     default_cartoon_video = cartoon_video_generator is None
     cartoon_video_generator = cartoon_video_generator or generate_video
@@ -886,11 +882,13 @@ def create_router(
             data['video_source_image'] = image_url
         return image_url
 
-    async def generate_card_video(data: dict) -> str:
+    async def generate_card_video(data: dict, *, progress=None) -> str:
         image_url = await prepare_card_video_image(data)
         audio_url = await prepare_video_song(data, data['video_song_scenario'])
         key = [MUSICAL_VIDEO_POLICY, image_url, audio_url]
         if data.get('video_merged_source') != key or not data.get('video_merged_url'):
+            if progress is not None:
+                await progress()
             data['video_merged_url'] = await create_musical_video(image_url, audio_url)
             data['video_merged_source'] = key
         return data['video_merged_url']
@@ -1100,7 +1098,7 @@ def create_router(
                     variants=urls, batch_id=uuid4().hex[:12], sent_count=0,
                     new_batch_requested=False, share_prompt_sent=False, channel_invite_sent=False,
                     package_offer_pending=not is_admin and user is not None and user["balance"] == 0,
-                    song_upsell_sent=False, video_upsell_sent=False,
+                    video_upsell_sent=False,
                 )
                 await send_offline_conversion(credit_user_id, goal_id="bot_generation")
             else:
@@ -1128,17 +1126,9 @@ def create_router(
             if is_postcard and not data.get('video_upsell_sent'):
                 keyboard = InlineKeyboardBuilder().row(
                     CallbackButton(text='🎵 Наложить песню на открытку — 149 ₽', payload='upsell_music')
-                ).row(LinkButton(text='⬇️ Нет, просто скачать картинку', url=urls[0])).as_markup()
+                ).as_markup()
                 await _reply(event, VIDEO_UPSELL_TEXT, attachments=[keyboard])
                 await context.update_data(video_upsell_sent=True)
-            if is_postcard and not data.get('song_upsell_sent'):
-                await set_song_promo(credit_user_id)
-                if await check_song_promo(credit_user_id):
-                    await _reply(event, SONG_UPSELL_TEXT, attachments=[navigation_keyboard((
-                        ('🎁 Да, хочу песню со скидкой', 'upsell_song_discount'),
-                        ('Пока только открытки', 'dismiss_upsell'),
-                    ))])
-                await context.update_data(song_upsell_sent=True)
             if mode == "mode_vision" and not data.get("channel_invite_sent"):
                 keyboard = InlineKeyboardBuilder().row(
                     LinkButton(text="Перейти в канал", url="https://max.ru/se14596751_biz")
@@ -1233,6 +1223,7 @@ def create_router(
                     result = job.get('result_url')
                     if not result:
                         if job.get('render_kind') == 'musical':
+                            await event.bot.send_message(user_id=job['user_id'], text=MUSICAL_VIDEO_WAIT_MESSAGE)
                             result = await create_musical_video(job['avatar_url'], job['song_url'])
                         else:
                             # Старые и мульт-задачи сохраняют исходный адаптер Kling.
@@ -2201,10 +2192,13 @@ def create_router(
             await context.set_state(PosterStates.generating)
             generation_id = uuid4().hex
             await context.update_data(video_generation_id=generation_id)
-            await _reply(event, '🎵 Создаю музыкальную открытку с вашей картинкой и персональной песней. ⏳ Пожалуйста, подождите.')
             video_data = dict(await context.get_data())
             try:
-                result = await video_generator(video_data)
+                if default_card_video:
+                    result = await generate_card_video(video_data, progress=lambda: _reply(event, MUSICAL_VIDEO_WAIT_MESSAGE))
+                else:
+                    await _reply(event, MUSICAL_VIDEO_WAIT_MESSAGE)
+                    result = await video_generator(video_data)
                 if (await context.get_data()).get('video_generation_id') != generation_id:
                     return
                 if is_video_placeholder(result):

@@ -963,18 +963,15 @@ async def test_postcard_requires_custom_text_and_uses_shared_balance(credit_db, 
         postcard.assert_awaited_once_with("https://photos.example.com/source.png", mode, "Аня, будь счастлива!")
         assert (await credit_db.get_user(456))["balance"] == (balance if admin else balance - 1)
         assert await context.get_state() is None
-        offers = [call for call in event.message.answer.await_args_list if call.args and call.args[0] == handlers.SONG_UPSELL_TEXT]
-        assert len(offers) == 1
+        offers = [call for call in event.message.answer.await_args_list if 'upsell_song_discount' in str(call) or 'скидку 20%' in str(call)]
+        assert not offers
         video_offers = [call for call in event.message.answer.await_args_list if call.args and call.args[0] == handlers.VIDEO_UPSELL_TEXT]
         assert len(video_offers) == 1
         video_buttons = video_offers[0].kwargs['attachments'][0].payload.buttons
         assert video_buttons[0][0].payload == 'upsell_music'
         assert video_buttons[0][0].text == '🎵 Наложить песню на открытку — 149 ₽'
-        assert video_buttons[1][0].text == '⬇️ Нет, просто скачать картинку'
-        assert video_buttons[1][0].url == 'https://cdn.example/card.png'
-        assert await credit_db.check_song_promo(456)
-        buttons = offers[0].kwargs['attachments'][0].payload.buttons
-        assert [row[0].payload for row in buttons] == ['upsell_song_discount', 'dismiss_upsell']
+        assert len(video_buttons) == 1 and len(video_buttons[0]) == 1
+        assert not await credit_db.check_song_promo(456)
     else:
         assert not any(call.args and call.args[0] == handlers.VIDEO_UPSELL_TEXT for call in event.message.answer.await_args_list)
         assert not await credit_db.check_song_promo(456)
@@ -4329,7 +4326,7 @@ async def test_failed_card_delivery_does_not_start_song_promotion(credit_db):
     event.bot.send_message.side_effect = RuntimeError('MAX unavailable')
     await call_handler(router, 'collect_card_text', event, context)
     assert not await credit_db.check_song_promo(456)
-    assert not any(call.args and call.args[0] == handlers.SONG_UPSELL_TEXT for call in event.message.answer.await_args_list)
+    assert not any('upsell_song_discount' in str(call) or 'скидку 20%' in str(call) for call in event.message.answer.await_args_list)
 
 
 @pytest.mark.parametrize('entry', ['start', 'bot_started'])
@@ -4709,7 +4706,7 @@ async def test_video_admin_bypass_only_after_data_and_song_and_never_for_regular
         stub.assert_awaited_once()
         saved = stub.await_args.args[0]
         assert saved['video_song_scenario'] == 'audio_fun_ny' and saved['video_amount_kopecks'] == price * 100
-        assert song.send.await_args_list[-2].args[0].startswith('🎵 Создаю музыкальную открытку')
+        assert song.send.await_args_list[-2].args[0] == handlers.MUSICAL_VIDEO_WAIT_MESSAGE
         assert song.send.await_args_list[-1].args[0] == '🎵 Ваша музыкальная открытка готова: https://video.example/result.mp4'
         assert not any('payform' in str(call) for call in song.send.await_args_list)
         assert await context.get_state() == PosterStates.waiting_for_mode
@@ -6187,3 +6184,19 @@ async def test_retry_paid_music_checkout_never_creates_second_bill(credit_db):
     payments.create_musical_payment_link.assert_awaited_once()
     assert (await context.get_data())['music_checkout_id']==order_id
     assert 'уже оплачен' in event.send.await_args.args[0]
+
+
+@pytest.mark.parametrize('entry',['cat_video','upsell_music'])
+async def test_musical_card_wait_notice_is_sent_before_ffmpeg(credit_db,monkeypatch,entry):
+    router,context=create_router(admin_user_id=456,
+        postcard_generator=AsyncMock(return_value=['https://cdn.example/clean.jpg'])),await ready_context()
+    await prepare_teacher_video(router,context,entry)
+    event=callback_event('video_song:audio_fun_ny')
+    async def render(image_url,audio_url):
+        assert event.send.await_args.args[0] == handlers.MUSICAL_VIDEO_WAIT_MESSAGE
+        assert '1-2 минут' in event.send.await_args.args[0]
+        return 'https://cdn.example/ready.mp4'
+    monkeypatch.setattr(handlers,'create_musical_video',AsyncMock(side_effect=render))
+    await dispatch_callback_and_phrase(router,event,context)
+    assert sum(c.args and c.args[0]==handlers.MUSICAL_VIDEO_WAIT_MESSAGE for c in event.send.await_args_list)==1
+    assert await context.get_state()==PosterStates.waiting_for_mode

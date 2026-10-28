@@ -6,6 +6,7 @@ import pytest
 from maxapi.types import AttachmentUpload
 
 from musical_orders import PaidMusicalWorker
+from media_service import MUSICAL_VIDEO_WAIT_MESSAGE
 
 
 async def paid(credit_db):
@@ -22,7 +23,8 @@ async def test_paid_music_survives_lost_fsm_and_delivers_only_once(credit_db):
     worker=PaidMusicalWorker(bot,renderer=render,uploader=upload)
     await asyncio.gather(worker.process('music_paid'),worker.process('music_paid'))
     render.assert_awaited_once_with('https://cdn.example/card.jpg','https://cdn.example/full.mp3')
-    bot.send_message.assert_awaited_once()
+    assert bot.send_message.await_count == 2
+    assert bot.send_message.await_args_list[0].kwargs['text'] == MUSICAL_VIDEO_WAIT_MESSAGE
     assert bot.send_message.await_args.kwargs['user_id'] == 456
     assert bot.send_message.await_args.kwargs['attachments'][0].type.value == 'video'
     assert (await credit_db.get_musical_order('music_paid'))['delivered'] == 1
@@ -33,7 +35,7 @@ async def test_music_delivery_retry_uses_cached_file_without_rendering_again(cre
     await paid(credit_db)
     render=AsyncMock(return_value='https://cdn.example/final.mp4')
     upload=AsyncMock(return_value=object())
-    bot=SimpleNamespace(send_message=AsyncMock(side_effect=[RuntimeError('MAX unavailable'),object()]))
+    bot=SimpleNamespace(send_message=AsyncMock(side_effect=[object(),RuntimeError('MAX unavailable'),object()]))
     worker=PaidMusicalWorker(bot,renderer=render,uploader=upload)
     await worker.process('music_paid')
     order=await credit_db.get_musical_order('music_paid')
@@ -60,3 +62,19 @@ async def test_music_render_failure_is_retryable_and_does_not_block_other_orders
     order=await credit_db.get_musical_order('music_paid')
     assert order['running'] == 0 and order['status'] == 'paid'
     assert order['failed'] == 0 and order['next_attempt_at'] > 0
+
+
+async def test_paid_music_wait_notice_precedes_render_and_is_not_repeated_on_delivery_retry(credit_db):
+    await paid(credit_db)
+    bot=SimpleNamespace(send_message=AsyncMock(return_value=object()))
+    async def render(image_url,audio_url):
+        assert bot.send_message.await_args.kwargs['text']==MUSICAL_VIDEO_WAIT_MESSAGE
+        assert bot.send_message.await_args.kwargs['user_id']==456
+        return 'https://cdn.example/final.mp4'
+    worker=PaidMusicalWorker(bot,renderer=AsyncMock(side_effect=render),uploader=AsyncMock(side_effect=[RuntimeError('MAX upload failed'),object()]))
+    await worker.process('music_paid')
+    await credit_db.update_musical_order('music_paid',next_attempt_at=0)
+    await worker.process('music_paid')
+    worker.renderer.assert_awaited_once()
+    assert sum(c.kwargs['text']==MUSICAL_VIDEO_WAIT_MESSAGE for c in bot.send_message.await_args_list)==1
+    assert (await credit_db.get_musical_order('music_paid'))['delivered']==1

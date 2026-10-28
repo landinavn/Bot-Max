@@ -8,7 +8,7 @@ from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
 from database import (get_musical_order, update_musical_order, claim_musical_order,
                       pending_musical_orders, reset_musical_workers)
-from media_service import create_musical_video, upload_video_for_max
+from media_service import create_musical_video, upload_video_for_max, MUSICAL_VIDEO_WAIT_MESSAGE
 from audio_orders import SUPPORT_URL
 
 logger = logging.getLogger(__name__)
@@ -44,6 +44,10 @@ class PaidMusicalWorker:
             order = await get_musical_order(order_id)
             result = order['result_url']
             if not result:
+                try:
+                    await self.bot.send_message(user_id=order['user_id'], text=MUSICAL_VIDEO_WAIT_MESSAGE)
+                except Exception:
+                    logger.warning('Не удалось отправить уведомление о сборке заказа %s.', order_id)
                 result = await self.renderer(order['image_url'], order['audio_url'])
                 if not isinstance(result, str) or not result.startswith('https://'):
                     raise ValueError('Не получена HTTPS-ссылка на музыкальную открытку.')

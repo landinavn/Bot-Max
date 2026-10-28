@@ -30,38 +30,38 @@ TEACHER_LYRICS_INSTRUCTION = (
     'Введённая пользователем фраза должна стать смысловой основой каждого припева [Chorus]. '
     'Сохрани имя, вид спорта или предмет и именно ту оценку, которую ввёл пользователь. '
     'Например, «Иван, лучший тренер по футболу» должно звучать в припеве как признание Ивана лучшим тренером по футболу, '
-    'а не заменяться общей благодарностью. Не выдумывай другой спорт и не меняй смысл; допускается грамматическое согласование. '
-    'Во всех обращениях к получателю используй Вы/Вас/Ваш, не переходи на ты.'
+    'а не заменяться общей благодарностью. Не выдумывай другой спорт и не меняй смысл. '
+    'В авторских строках обращайся на Вы/Вас/Ваш; пользовательскую фразу в припеве сохраняй дословно.'
 )
 
 
 def build_song_request(details: str, scenario_title: str, audio_format: str, style: str | None = None) -> tuple[str, str, str]:
+    """Ответ целиком, включая имя и запятые, становится обязательной фразой припева."""
     if audio_format not in {'fun', 'gift'} or not details.strip():
         raise ValueError('Некорректные детали песни.')
-    chorus = "Эта песня для тебя, улыбайся, пой со мной!\nПусть удача каждый день будет рядом с тобой!"
+    chorus = details.strip()
     prompt = (f"[Verse 1]\nС тобою мир становится светлей,\nИ каждый день наполнен добротою.\n[Chorus]\n{chorus}"
               f"\n[Verse 2]\n{details.strip()}\nИз этих встреч слагается история твоя.\n[Chorus]\n{chorus}"
               f"\n[Bridge]\nПусть впереди сияет новый день,\nИ счастье остаётся рядом с нами.\n[Chorus]\n{chorus}")
     tags = str(style or ('upbeat pop, playful, Russian vocals, short song, 30-40 seconds' if audio_format == 'fun'
                         else 'warm emotional pop, Russian vocals, heartfelt, 2-3 minutes'))
     if scenario_title == '🎄 Новогодняя':
-        chorus = ('С Новым годом! Счастья, радости, подарков,\nПусть он будет добрым, весёлым и ярким!' if audio_format == 'fun' else
-                  'С Новым годом, родные, пусть в доме тепло,\nПусть исполнятся мечты и прибудет добро!')
         opening = ('За окном снежинки, огоньки горят,\nИ улыбки дарит праздник всем подряд.' if audio_format == 'fun' else
                    'За одним столом собралась семья,\nВ свете огоньков рядом ты и я.')
         bridge = ('Пусть подарки ждут у ёлки, смех звучит повсюду!' if audio_format == 'fun' else
                   'Вспомним наши тёплые семейные мгновения,\nПусть подарит Новый год надежды и свершения.')
+        wishes = ('С Новым годом! Счастья, радости, подарков!' if audio_format == 'fun' else
+                  'С Новым годом, родные, пусть в доме тепло!')
         prompt = (f'[Verse 1]\n{opening}\n[Chorus]\n{chorus}\n[Verse 2]\n{details.strip()}\n'
-                  f'Пусть сбываются добрые пожелания.\n[Chorus]\n{chorus}\n[Bridge]\n{bridge}\n[Chorus]\n{chorus}')
+                  f'{wishes}\nПусть сбываются добрые пожелания.\n[Chorus]\n{chorus}\n[Bridge]\n{bridge}\n[Chorus]\n{chorus}')
         tags = str(style or ('cheerful festive pop' if audio_format == 'fun' else 'warm family acoustic pop'))
         tags += ', New Year, Russian vocals, ' + ('playful, happiness and gifts, short song, 30-40 seconds' if audio_format == 'fun' else
                                                 'heartfelt family memories and wishes, 2-3 minutes')
 
     if scenario_title == TEACHER_SCENARIO_TITLE:
-        chorus = f'{details.strip()}\nСпасибо Вам за знания и труд,\nЗа веру в нас, терпение, поддержку.'
         prompt = (f'[Verse 1]\nВаш труд оставит в сердце добрый свет,\nИ благодарность бережно хранится.\n'
                   f'[Chorus]\n{chorus}\n[Verse 2]\n{details.strip()}\nВаш пример поможет нам стремиться.\n'
-                  f'[Chorus]\n{chorus}\n[Bridge]\nПусть к Вам вернётся радость добрых дел.\n[Chorus]\n{chorus}')
+                  f'[Chorus]\n{chorus}\n[Bridge]\nСпасибо Вам за знания и труд, за веру в нас, терпение, поддержку.\n[Chorus]\n{chorus}')
         tags = str(style or 'elegant pop ballad') + ', formal respectful Russian vocals, gratitude, '
         tags += 'short song, 30 seconds' if audio_format == 'fun' else 'touching ballad, 2-3 minutes'
     if len(prompt) > 5000 or len(tags) > 1000:
@@ -100,8 +100,11 @@ LYRICS_SYSTEM_PROMPT = (
     'Соблюдай классическую структуру: [Куплет 1] -> [Припев] -> [Куплет 2] -> [Припев] -> [Бридж] -> [Припев]. '
     'Для Suno записывай эти шесть секций как [Verse 1], [Chorus], [Verse 2], [Chorus], [Bridge], [Chorus]. '
     'Верни ТОЛЬКО текст песни. Не пиши название песни, название сценария или заголовок. Начинай сразу с [Verse 1]. '
-    'Сохрани имена и смысл деталей, не вставляй перечень из анкеты дословно. Не добавляй пояснения или кодовые блоки. '
+    'Сохрани имена и смысл деталей; кроме обязательной фразы припева, не вставляй перечень из анкеты дословно. Не добавляй пояснения или кодовые блоки. '
     'Если нужен короткий формат 30–40 секунд, используй 1–2 строки на секцию, иначе 2–4 строки. До 5000 символов.'
+    ' CRITICAL REQUIREMENT: В припеве обязательно должна прозвучать фраза, которую ввел пользователь. Используй её дословно. '
+    'Поле required_chorus_phrase содержит эту фразу целиком, включая имя. Включи её в каждый [Chorus] без изменения слов, '
+    'пунктуации и регистра. Не исправляй и не склоняй её, не заменяй синонимами. Остальные строки можно сочинять свободно.'
 )
 
 
@@ -109,6 +112,8 @@ async def write_song_lyrics(notes: str, tags: str, title: str) -> str:
     settings = Config.from_env()
     if not settings.image_api_key:
         raise AudioNotConfigured('Не настроена текстовая модель для стихов.')
+    chorus = re.search(r'\[Chorus\]\s*\n(.*?)(?=\n\[|$)', notes, flags=re.S)
+    required_phrase = chorus.group(1).strip() if chorus else None
     instruction = LYRICS_SYSTEM_PROMPT
     if title.startswith(TEACHER_SCENARIO_TITLE + ':'):
         instruction += ' ' + TEACHER_LYRICS_INSTRUCTION
@@ -120,7 +125,8 @@ async def write_song_lyrics(notes: str, tags: str, title: str) -> str:
                                    http_client=http_client, max_retries=0) as client:
                 result = await client.chat.completions.create(model='gpt-4o-mini', temperature=0.7,
                     messages=[{'role': 'system', 'content': instruction},
-                              {'role': 'user', 'content': json.dumps({'details': notes, 'style': tags, 'title_for_context_only': title}, ensure_ascii=False)}])
+                              {'role': 'user', 'content': json.dumps({'details': notes, 'style': tags, 'title_for_context_only': title,
+                                  'required_chorus_phrase': required_phrase}, ensure_ascii=False)}])
     except Exception as exc:
         raise AudioServiceError('Не удалось написать стихи.') from exc
     if not result.choices or result.choices[0].finish_reason != 'stop':
@@ -134,6 +140,10 @@ async def write_song_lyrics(notes: str, tags: str, title: str) -> str:
         raise AudioServiceError('Не соблюдена структура песни.')
     if any(not part.strip() for part in re.split(r'\[[^\]]+\]', text)[1:]):
         raise AudioServiceError('В песне есть пустые секции.')
+    if required_phrase:
+        choruses = re.findall(r'\[Chorus\]\s*\n(.*?)(?=\n\[|$)', text, flags=re.S)
+        if len(choruses) != 3 or not all(required_phrase in part for part in choruses):
+            raise AudioServiceError('Модель изменила фразу припева. Повторите генерацию.')
     return text
 
 

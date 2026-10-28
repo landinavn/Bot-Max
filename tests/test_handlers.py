@@ -107,6 +107,20 @@ async def dispatch_callback(router, event, context):
     await func(event, **kwargs)
 
 
+async def dispatch_callback_and_phrase(router, event, context, phrase=None):
+    """Drive a complete legacy video test through the new required user response."""
+    await dispatch_callback(router, event, context)
+    if await context.get_state() not in (PosterStates.waiting_for_video_song_phrase, PosterStates.waiting_for_cartoon_song_phrase):
+        return
+    assert 'фразу для припева' in event.send.await_args.args[0]
+    event.send.reset_mock()
+    details = message_event(phrase or (await context.get_data()).get('chosen_song_phrase') or 'С Новым годом, друзья!')
+    details.get_ids = event.get_ids
+    details.bot = event.bot
+    details.send = event.send
+    await call_handler(router, 'collect_video_song_phrase', details, context)
+
+
 async def test_create_poster_acknowledges_and_requests_photo():
     context = MemoryContext(chat_id=123, user_id=456)
     await context.update_data(photo={"url": "old"}, sphere="old")
@@ -3326,7 +3340,7 @@ async def test_song_scenario_collects_details_without_generation_or_payment(cred
     await call_handler(router, 'echo', answer, context)
     assert answer.message.answer.await_args.args[0] == handlers.AUDIO_FUN_PAYMENT_TEXT
     assert await context.get_state() == PosterStates.waiting_for_audio_fun_payment
-    assert await context.get_data() == {'song_scenario': scenario, 'song_details': 'Аня, любим вино и сериалы'}
+    assert await context.get_data() == {'song_scenario': scenario, 'song_details': 'Аня, любим вино и сериалы', 'song_chorus_phrase': 'Аня, любим вино и сериалы'}
     assert await credit_db.get_all_counters() == {handlers.AUDIO_FUN_COUNTERS[payload]: 1}
     assert dict(await credit_db.get_user(456)) == before
     generator.assert_not_awaited()
@@ -3353,7 +3367,7 @@ async def test_song_empty_details_keep_waiting(text):
     await context.update_data(song_scenario='cat')
     event = message_event(text)
     await call_handler(create_router(), 'collect_song_details', event, context)
-    assert 'текстом' in event.message.answer.await_args.args[0]
+    assert 'фразу для припева' in event.message.answer.await_args.args[0]
     assert await context.get_state() == PosterStates.waiting_for_song_details
 
 
@@ -3501,7 +3515,7 @@ async def test_gift_empty_details_do_not_advance(payload, text):
     await context.update_data(gift_scenario=handlers.gift_scenario_name(payload))
     event = message_event(text)
     await call_handler(create_router(), 'collect_gift_details', event, context)
-    assert 'текстом' in event.message.answer.await_args.args[0]
+    assert 'фразу для припева' in event.message.answer.await_args.args[0]
     assert await context.get_state() == handlers.GIFT_SCENARIO_STATES[payload]
     assert 'gift_details' not in await context.get_data()
 
@@ -3821,7 +3835,7 @@ async def test_ttapi_generation_returns_two_links_and_reuses_completed_task(cred
     assert scenario_name not in tags
     assert scenario_name in title
     assert prompt.startswith('[Verse 1]\n')
-    assert prompt.index('Сергей, любит кофе' if kind == 'fun' else 'Аня, любит горы') > prompt.index('[Verse 2]')
+    assert '[Chorus]\n' + ('Сергей, любит кофе' if kind == 'fun' else 'Аня, любит горы') in prompt
     assert ('rock' if kind == 'fun' else 'warm emotional pop') in tags
     assert len(title) <= 80
     assert 'https://audio.example/1.mp3' in event.send.await_args.args[0]
@@ -3907,7 +3921,7 @@ async def test_ttapi_navigation_during_polling_does_not_restore_old_session():
     router = create_router(admin_user_id=456, song_generator=AsyncMock(return_value='job'), song_waiter=wait)
     context = await tt_context()
     event = callback_event('audio_fun_payment_soon')
-    task = asyncio.create_task(dispatch_callback(router, event, context))
+    task = asyncio.create_task(dispatch_callback_and_phrase(router, event, context))
     try:
         await entered.wait()
         await dispatch_callback(router, callback_event('cat_audio'), context)
@@ -4432,8 +4446,8 @@ async def test_video_299_keeps_photo_text_steps_and_delivers_song_before_payment
     cards, visions, songs = AsyncMock(), AsyncMock(), AsyncMock()
     router = create_router(visions, postcard_generator=cards, song_generator=songs)
     context = await ready_context()
-    await dispatch_callback(router, callback_event('cat_video'), context)
-    await dispatch_callback(router, callback_event('video_style:' + mode), context)
+    await dispatch_callback_and_phrase(router, callback_event('cat_video'), context)
+    await dispatch_callback_and_phrase(router, callback_event('video_style:' + mode), context)
     assert await context.get_state() == PosterStates.waiting_for_photo
     assert (await context.get_data())['mode'] == mode
     await call_handler(router, 'collect_photo', photo_event(), context)
@@ -4445,7 +4459,7 @@ async def test_video_299_keeps_photo_text_steps_and_delivers_song_before_payment
     assert any(row[0].text == '🎤 Начальник года' for row in scenario_buttons)
     assert any(row[0].text == '🎂 День рождения' for row in scenario_buttons)
     pay = callback_event('video_song:gift_scen_bday')
-    await dispatch_callback(router, pay, context)
+    await dispatch_callback_and_phrase(router, pay, context)
     data = await context.get_data()
     assert data['mode'] == mode and data['photo']['url'] and data['card_text'] == 'Аня, с праздником!'
     assert data['video_song_scenario'] == 'gift_scen_bday' and data['video_amount_kopecks'] == 29900
@@ -4493,7 +4507,7 @@ async def test_static_card_video_upsells_keep_source_and_do_not_generate(credit_
     cards, songs = AsyncMock(), AsyncMock()
     router = create_router(postcard_generator=cards, song_generator=songs)
     event = callback_event(payload)
-    await dispatch_callback(router, event, context)
+    await dispatch_callback_and_phrase(router, event, context)
     first_reply = event.send.await_args_list[0]
     assert first_reply.args[0] == '🎵 Выберите сценарий песни для видео-поздравления:'
     rows = first_reply.kwargs['attachments'][0].payload.buttons
@@ -4506,7 +4520,7 @@ async def test_static_card_video_upsells_keep_source_and_do_not_generate(credit_
     assert data['video_amount_kopecks'] == price * 100
     assert await context.get_state() == PosterStates.waiting_for_video_song
     pay = callback_event('video_song:audio_fun_ny')
-    await dispatch_callback(router, pay, context)
+    await dispatch_callback_and_phrase(router, pay, context)
     assert (await context.get_data())['video_song_scenario'] == 'audio_fun_ny'
     assert f'{price} ₽' in pay.send.await_args.args[0]
     button = pay.send.await_args.kwargs['attachments'][0].payload.buttons[0][0]
@@ -4683,20 +4697,20 @@ async def test_video_admin_bypass_only_after_data_and_song_and_never_for_regular
         await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png', card_text='С Новым годом!')
     event = callback_event(entry)
     event.get_ids = lambda: (123, actor)
-    await dispatch_callback(router, event, context)
+    await dispatch_callback_and_phrase(router, event, context)
     stub.assert_not_awaited()
     if entry == 'cat_video':
-        await dispatch_callback(router, callback_event('video_style:mode_ny'), context)
+        await dispatch_callback_and_phrase(router, callback_event('video_style:mode_ny'), context)
         await call_handler(router, 'collect_photo', photo_event(), context)
         await call_handler(router, 'collect_card_text', message_event('С Новым годом, Аня!'), context)
     song = callback_event('video_song:audio_fun_ny')
     song.get_ids = lambda: (123, actor)
-    await dispatch_callback(router, song, context)
+    await dispatch_callback_and_phrase(router, song, context)
     if bypass:
         stub.assert_awaited_once()
         saved = stub.await_args.args[0]
         assert saved['video_song_scenario'] == 'audio_fun_ny' and saved['video_amount_kopecks'] == price * 100
-        assert song.send.await_args_list[-2].args[0] == '👑 Режим администратора: Оплата пропущена. Запускаю генерацию...'
+        assert song.send.await_args_list[-2].args[0] == handlers.VIDEO_GENERATION_MESSAGE
         assert song.send.await_args_list[-1].args[0] == '🎬 Ваше видео с песней готово: https://video.example/result.mp4'
         assert not any('payform' in str(call) for call in song.send.await_args_list)
         assert await context.get_state() == PosterStates.waiting_for_mode
@@ -4718,9 +4732,9 @@ async def test_video_admin_stub_failure_has_traceback_and_allows_song_retry(cred
     router = create_router(admin_user_id=456, video_generator=stub)
     context = await ready_context()
     await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png')
-    await dispatch_callback(router, callback_event('upsell_animate'), context)
+    await dispatch_callback_and_phrase(router, callback_event('upsell_animate'), context)
     event = callback_event('video_song:audio_fun_ny')
-    await dispatch_callback(router, event, context)
+    await dispatch_callback_and_phrase(router, event, context)
     assert any(r.exc_info and 'Ошибка генерации видео PiAPI' in r.message for r in caplog.records)
     assert await context.get_state() == PosterStates.waiting_for_video_song
     assert 'payform' not in str(event.send.await_args_list)
@@ -4785,7 +4799,7 @@ async def test_cartoon_avatars_approval_short_songs_and_regular_payment(credit_d
     assert [row[0].payload for row in markup[1].payload.buttons] == ['avatar_ok_1', 'avatar_bad_1']
     attempt = 1
     if approve_second:
-        await dispatch_callback(router, callback_event('avatar_bad_1'), context)
+        await dispatch_callback_and_phrase(router, callback_event('avatar_bad_1'), context)
         assert await context.get_state() == PosterStates.waiting_for_avatar_photo
         await call_handler(router, 'echo', cartoon_photo(), context)
         assert avatar.await_count == 1  # то же фото просим заменить
@@ -4794,7 +4808,7 @@ async def test_cartoon_avatars_approval_short_songs_and_regular_payment(credit_d
         assert [row[0].payload for row in second.message.answer.await_args.kwargs['attachments'][1].payload.buttons] == ['avatar_ok_2', 'avatar_bad_2']
         attempt = 2
     accepted = callback_event(f'avatar_ok_{attempt}')
-    await dispatch_callback(router, accepted, context)
+    await dispatch_callback_and_phrase(router, accepted, context)
     data = await context.get_data()
     assert data['chosen_avatar'] == f'https://cdn.example/avatar{attempt}.png'
     assert data['cartoon_mode'] == 'mode_modern_card'
@@ -4802,7 +4816,7 @@ async def test_cartoon_avatars_approval_short_songs_and_regular_payment(credit_d
     song_buttons = accepted.send.await_args.kwargs['attachments'][0].payload.buttons
     assert [row[0].payload for row in song_buttons[:-1]] == ['cartoon_song:' + key for key in handlers.AUDIO_FUN_SCENARIOS]
     pay = callback_event('cartoon_song:audio_fun_ny')
-    await dispatch_callback(router, pay, context)
+    await dispatch_callback_and_phrase(router, pay, context)
     assert pay.send.await_args.args[0] == f'Отлично! Стоимость — {price} ₽. Это займет около {minutes} минут.'
     button = pay.send.await_args.kwargs['attachments'][0].payload.buttons[0][0]
     assert button.text == f'Оплатить {price} ₽' and button.url == 'https://link.payform.ru/'
@@ -4848,12 +4862,12 @@ async def test_cartoon_admin_bypass_calls_video_stub_with_approved_avatar_and_so
     context = await ready_context()
     await start_cartoon(router, context, entry)
     await call_handler(router, 'collect_cartoon_photo', cartoon_photo(), context)
-    await dispatch_callback(router, callback_event('avatar_ok_1'), context)
+    await dispatch_callback_and_phrase(router, callback_event('avatar_ok_1'), context)
     result = callback_event('cartoon_song:audio_fun_friend')
-    await dispatch_callback(router, result, context)
+    await dispatch_callback_and_phrase(router, result, context)
     if admin_id == 456:
         video.assert_awaited_once_with('https://cdn.example/avatar.png', handlers.CARTOON_TEST_SONG_URL + '?scenario=audio_fun_friend')
-        assert result.send.await_args_list[0].args[0] == '👑 Режим администратора: Оплата пропущена...'
+        assert result.send.await_args_list[0].args[0] == handlers.VIDEO_GENERATION_MESSAGE
         assert 'https://video.example/test-result.mp4' in result.send.await_args_list[1].args[0]
         assert not any('payform.ru' in str(call) for call in result.send.await_args_list)
         assert await context.get_state() == PosterStates.waiting_for_mode
@@ -4983,6 +4997,8 @@ async def test_cartoon_real_dispatcher_routes_photos_and_cancel_before_state_han
         await click('avatar_ok_1')
         assert (await context.get_data())['chosen_avatar'] == 'https://cdn.example/avatar.png'
         await click('cartoon_song:audio_fun_ny')
+        assert await context.get_state() == PosterStates.waiting_for_cartoon_song_phrase
+        await dp.handle(MessageCreated(timestamp=4, bot=bot, message=message('С Новым годом, друзья!')))
         assert await context.get_state() == PosterStates.waiting_for_cartoon_payment
         assert '1690 ₽' in bot.send_message.await_args.kwargs['text']
         await dp.handle(MessageCreated(timestamp=4, bot=bot, message=message('/cancel')))
@@ -5040,7 +5056,7 @@ async def test_video_teacher_collects_details_creates_formal_text_and_keeps_card
     original = await context.get_data()
     chosen = callback_event('audio_video_teacher')
     await dispatch_callback(router, chosen, context)
-    assert chosen.send.await_args.args[0] == 'Напишите имя тренера, лучший тренер по .... (например: «Иван, лучший тренер по футболу»).'
+    assert chosen.send.await_args.args[0] == 'Напишите имя тренера/учителя и фразу для припева (например: «Иван, лучший тренер по футболу»).'
     assert await context.get_state() == PosterStates.waiting_for_video_teacher_details
     assert 'payform' not in str(chosen.send.await_args_list)
     event = message_event('Ирина Петровна, математика, строгая но справедливая')
@@ -5129,7 +5145,7 @@ async def test_teacher_and_newyear_video_interest_counters_exclude_admin(credit_
         async def click(payload):
             event = callback_event(payload)
             event.get_ids = lambda: (123, actor)
-            await dispatch_callback(router, event, context)
+            await dispatch_callback_and_phrase(router, event, context)
         await click('audio_gift_teacher')
         await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png')
         await click('upsell_video')
@@ -5154,10 +5170,10 @@ async def test_switching_video_teacher_to_newyear_clears_teacher_lyrics():
     router = create_router(lyric_writer=AsyncMock(return_value=TEACHER_TEST_LYRICS))
     context = await ready_context()
     await prepare_teacher_video(router, context, 'upsell_video')
-    await dispatch_callback(router, callback_event('audio_video_teacher'), context)
+    await dispatch_callback_and_phrase(router, callback_event('audio_video_teacher'), context)
     await call_handler(router, 'echo', message_event('Ирина Петровна, математика'), context)
     assert (await context.get_data())['video_song_lyrics']
-    await dispatch_callback(router, callback_event('video_song:audio_fun_ny'), context)
+    await dispatch_callback_and_phrase(router, callback_event('video_song:audio_fun_ny'), context)
     data = await context.get_data()
     assert data['video_song_scenario'] == 'audio_fun_ny'
     assert data['video_song_lyrics'] is None and data['video_teacher_details'] is None
@@ -5265,8 +5281,8 @@ async def test_video_role_card_generates_marked_preview_before_music_without_spe
     await credit_db.grant_free_trial(456)
     card = AsyncMock(return_value=['https://cdn.example/preview.png'])
     router, context = create_router(postcard_generator=card), await ready_context()
-    await dispatch_callback(router, callback_event('cat_video'), context)
-    await dispatch_callback(router, callback_event('video_style:' + mode), context)
+    await dispatch_callback_and_phrase(router, callback_event('cat_video'), context)
+    await dispatch_callback_and_phrase(router, callback_event('video_style:' + mode), context)
     assert await context.get_state() == PosterStates.waiting_for_card_role_info
     await call_handler(router, 'echo', message_event(info), context)
     await call_handler(router, 'collect_photo', photo_event(), context)
@@ -5283,7 +5299,7 @@ async def test_video_role_card_generates_marked_preview_before_music_without_spe
     assert (await credit_db.get_user(456))['balance'] == 1
     assert (await credit_db.get_all_counters())[event_name] == 1
     handlers.send_offline_conversion.assert_awaited_once_with(456, goal_id='bot_generation')
-    await dispatch_callback(router, callback_event('video_song:audio_fun_ny'), context)
+    await dispatch_callback_and_phrase(router, callback_event('video_song:audio_fun_ny'), context)
     assert await context.get_state() == PosterStates.waiting_for_video_payment
     assert (await context.get_data())[field] == info
     handlers.generate_song.assert_awaited_once()
@@ -5386,12 +5402,12 @@ async def test_default_cartoon_generator_uses_real_piapi_chain(credit_db, monkey
     context = await ready_context()
     await start_cartoon(router, context, entry)
     await call_handler(router, 'collect_cartoon_photo', cartoon_photo(), context)
-    await dispatch_callback(router, callback_event('avatar_ok_1'), context)
+    await dispatch_callback_and_phrase(router, callback_event('avatar_ok_1'), context)
     event = callback_event('cartoon_song:audio_fun_ny')
     with respx.mock:
         post = respx.post(video_service.TASK_URL).respond(200, json={'data': {'task_id': 'cartoon-real'}})
         get = respx.get(video_service.TASK_URL + '/cartoon-real').respond(200, json={'data': {'status': 'completed', 'output': {'video': 'https://video.example/kling.mp4'}}})
-        await dispatch_callback(router, event, context)
+        await dispatch_callback_and_phrase(router, event, context)
         assert post.call_count == get.call_count == 1
         payload = json.loads(post.calls[0].request.content)
         assert payload['input'] == {'image_url': 'https://cdn.example/avatar.png',
@@ -5415,12 +5431,12 @@ async def test_default_card_upsell_uses_real_piapi_chain(credit_db, monkeypatch,
     card = AsyncMock()
     router, context = create_router(admin_user_id=456, postcard_generator=card), await ready_context()
     await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/ready-card.png')
-    await dispatch_callback(router, callback_event(entry), context)
+    await dispatch_callback_and_phrase(router, callback_event(entry), context)
     event = callback_event('video_song:audio_fun_ny')
     with respx.mock:
         post = respx.post(video_service.TASK_URL).respond(200, json={'data': {'task_id': 'card-real'}})
         respx.get(video_service.TASK_URL + '/card-real').respond(200, json={'data': {'status': 'completed', 'output': {'video': 'https://video.example/card.mp4'}}})
-        await dispatch_callback(router, event, context)
+        await dispatch_callback_and_phrase(router, event, context)
         assert json.loads(post.calls[0].request.content)['input']['image_url'] == 'https://cdn.example/ready-card.png'
     card.assert_not_awaited()
     assert 'https://video.example/card.mp4' in event.send.await_args.args[0]
@@ -5435,7 +5451,7 @@ async def test_direct_video_generates_clean_postcard_before_piapi(credit_db, pia
         video_preview_url='https://cdn.example/watermarked.png', video_product='direct', video_flow=True,
         teacher_info='Ирина Петровна, математика', video_amount_kopecks=29900)
     await context.set_state(PosterStates.waiting_for_video_song)
-    await dispatch_callback(router, callback_event('video_song:audio_fun_ny'), context)
+    await dispatch_callback_and_phrase(router, callback_event('video_song:audio_fun_ny'), context)
     kwargs = {'theme_info': 'Ирина Петровна, математика'} if mode == 'mode_teacher' else {}
     card.assert_awaited_once_with('https://cdn.example/source.png', mode, 'Спасибо!', **kwargs)
     piapi_animation.assert_awaited_once_with('https://cdn.example/clean-card.png')
@@ -5449,10 +5465,10 @@ async def test_card_piapi_failure_logs_traceback_and_reuses_clean_image(credit_d
     await context.update_data(mode='mode_ny', photo={'url': 'https://cdn.example/source.png'}, card_text='Спасибо!',
         video_product='direct', video_flow=True, video_amount_kopecks=29900)
     await context.set_state(PosterStates.waiting_for_video_song)
-    await dispatch_callback(router, callback_event('video_song:audio_fun_ny'), context)
+    await dispatch_callback_and_phrase(router, callback_event('video_song:audio_fun_ny'), context)
     assert await context.get_state() == PosterStates.waiting_for_video_song
     assert any(r.exc_info and 'Ошибка генерации видео PiAPI' in r.message for r in caplog.records)
-    await dispatch_callback(router, callback_event('video_song:audio_fun_ny'), context)
+    await dispatch_callback_and_phrase(router, callback_event('video_song:audio_fun_ny'), context)
     card.assert_awaited_once()
     assert (await context.get_data())['video_result_url'] == 'https://video.example/retry.mp4'
 
@@ -5460,8 +5476,8 @@ async def test_card_piapi_failure_logs_traceback_and_reuses_clean_image(credit_d
 async def test_regular_user_does_not_start_real_piapi_without_payment(credit_db, piapi_animation):
     router, context = create_router(admin_user_id=999), await ready_context()
     await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png')
-    await dispatch_callback(router, callback_event('upsell_animate'), context)
-    await dispatch_callback(router, callback_event('video_song:audio_fun_ny'), context)
+    await dispatch_callback_and_phrase(router, callback_event('upsell_animate'), context)
+    await dispatch_callback_and_phrase(router, callback_event('video_song:audio_fun_ny'), context)
     piapi_animation.assert_not_awaited()
     assert await context.get_state() == PosterStates.waiting_for_video_payment
 
@@ -5472,9 +5488,9 @@ async def test_piapi_failure_is_not_replaced_with_test_link(credit_db, piapi_ani
     context = await ready_context()
     await start_cartoon(router, context)
     await call_handler(router, 'collect_cartoon_photo', cartoon_photo(), context)
-    await dispatch_callback(router, callback_event('avatar_ok_1'), context)
+    await dispatch_callback_and_phrase(router, callback_event('avatar_ok_1'), context)
     event = callback_event('cartoon_song:audio_fun_ny')
-    await dispatch_callback(router, event, context)
+    await dispatch_callback_and_phrase(router, event, context)
     assert await context.get_state() == PosterStates.waiting_for_cartoon_song
     assert 'Не удалось создать видео' in event.send.await_args.args[0]
     assert 'example.com/cartoon-test-video.mp4' not in str(event.send.await_args_list)
@@ -5490,9 +5506,9 @@ async def test_cancel_during_piapi_does_not_restore_old_card_flow(credit_db, pia
     piapi_animation.side_effect = animate
     router, context = create_router(admin_user_id=456), await ready_context()
     await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png')
-    await dispatch_callback(router, callback_event('upsell_animate'), context)
+    await dispatch_callback_and_phrase(router, callback_event('upsell_animate'), context)
     event = callback_event('video_song:audio_fun_ny')
-    task = asyncio.create_task(dispatch_callback(router, event, context))
+    task = asyncio.create_task(dispatch_callback_and_phrase(router, event, context))
     try:
         await asyncio.wait_for(entered.wait(), timeout=5)
         await call_handler(router, 'cancel', message_event('/cancel'), context)
@@ -5511,9 +5527,9 @@ async def test_cartoon_placeholder_is_persisted_before_promising_later_delivery(
     context = await ready_context()
     await start_cartoon(router, context)
     await call_handler(router, 'collect_cartoon_photo', cartoon_photo(), context)
-    await dispatch_callback(router, callback_event('avatar_ok_1'), context)
+    await dispatch_callback_and_phrase(router, callback_event('avatar_ok_1'), context)
     event = callback_event('cartoon_song:audio_fun_ny')
-    await dispatch_callback(router, event, context)
+    await dispatch_callback_and_phrase(router, event, context)
     jobs = await credit_db.get_all_pending_videos()
     assert len(jobs) == 1
     assert jobs[0]['avatar_url'] == 'https://cdn.example/avatar.png' and jobs[0]['user_id'] == 456
@@ -5527,9 +5543,9 @@ async def test_card_placeholder_preserves_image_and_song_in_queue(credit_db):
     router = create_router(admin_user_id=456, video_generator=AsyncMock(return_value='https://example.com/test-video.mp4'))
     context = await ready_context()
     await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png', chosen_song_url='https://audio.example/song.mp3')
-    await dispatch_callback(router, callback_event('upsell_animate'), context)
+    await dispatch_callback_and_phrase(router, callback_event('upsell_animate'), context)
     event = callback_event('video_song:audio_fun_ny')
-    await dispatch_callback(router, event, context)
+    await dispatch_callback_and_phrase(router, event, context)
     jobs = await credit_db.get_all_pending_videos()
     assert len(jobs) == 1 and jobs[0]['avatar_url'] == 'https://cdn.example/card.png'
     assert jobs[0]['song_url'] == 'https://audio.example/song.mp3'
@@ -5628,9 +5644,9 @@ async def test_cartoon_queue_preserves_existing_song_url(credit_db):
     context = await ready_context()
     await start_cartoon(router, context)
     await call_handler(router, 'collect_cartoon_photo', cartoon_photo(), context)
-    await dispatch_callback(router, callback_event('avatar_ok_1'), context)
-    await context.update_data(chosen_song='audio_fun_ny', chosen_song_url='https://audio.example/real-track.mp3')
-    await dispatch_callback(router, callback_event('cartoon_song:audio_fun_ny'), context)
+    await dispatch_callback_and_phrase(router, callback_event('avatar_ok_1'), context)
+    await context.update_data(chosen_song='audio_fun_ny', chosen_song_url='https://audio.example/real-track.mp3', chosen_song_phrase='С Новым годом, друзья!')
+    await dispatch_callback_and_phrase(router, callback_event('cartoon_song:audio_fun_ny'), context)
     assert (await credit_db.get_all_pending_videos())[0]['song_url'] == 'https://audio.example/real-track.mp3'
 
 
@@ -5639,9 +5655,9 @@ async def test_failed_queue_save_never_promises_delivery(credit_db, monkeypatch)
     router = create_router(admin_user_id=456, video_generator=AsyncMock(return_value='Это заглушка'))
     context = await ready_context()
     await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png')
-    await dispatch_callback(router, callback_event('upsell_animate'), context)
+    await dispatch_callback_and_phrase(router, callback_event('upsell_animate'), context)
     event = callback_event('video_song:audio_fun_ny')
-    await dispatch_callback(router, event, context)
+    await dispatch_callback_and_phrase(router, event, context)
     assert handlers.PENDING_VIDEO_MESSAGE not in str(event.send.await_args_list)
     assert await context.get_state() == PosterStates.waiting_for_video_song
 
@@ -5664,15 +5680,15 @@ async def test_video_result_delivers_merged_file_and_real_ttapi_song(credit_db, 
     if kind == 'cartoon':
         await start_cartoon(router, context)
         await call_handler(router, 'collect_cartoon_photo', cartoon_photo(), context)
-        await dispatch_callback(router, callback_event('avatar_ok_1'), context)
+        await dispatch_callback_and_phrase(router, callback_event('avatar_ok_1'), context)
         event = callback_event('cartoon_song:audio_fun_ny')
         image_url = 'https://cdn.example/avatar.png'
     else:
         await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png', card_text='С Новым годом, Аня!')
-        await dispatch_callback(router, callback_event('upsell_video'), context)
+        await dispatch_callback_and_phrase(router, callback_event('upsell_video'), context)
         event = callback_event('video_song:audio_fun_ny')
         image_url = 'https://cdn.example/card.png'
-    await dispatch_callback(router, event, context)
+    await dispatch_callback_and_phrase(router, event, context)
     handlers.generate_song.assert_awaited_once()
     assert 'Новогодняя' in handlers.generate_song.await_args.args[2]
     piapi_animation.assert_awaited_once_with(image_url)
@@ -5687,10 +5703,10 @@ async def test_video_merge_retry_reuses_song_job_and_kling_output(credit_db, mon
     monkeypatch.setattr(handlers, 'merge_video_and_audio', merger)
     router, context = create_router(admin_user_id=456), await ready_context()
     await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png')
-    await dispatch_callback(router, callback_event('upsell_video'), context)
-    await dispatch_callback(router, callback_event('video_song:audio_fun_ny'), context)
+    await dispatch_callback_and_phrase(router, callback_event('upsell_video'), context)
+    await dispatch_callback_and_phrase(router, callback_event('video_song:audio_fun_ny'), context)
     assert await context.get_state() == PosterStates.waiting_for_video_song
-    await dispatch_callback(router, callback_event('video_song:audio_fun_ny'), context)
+    await dispatch_callback_and_phrase(router, callback_event('video_song:audio_fun_ny'), context)
     piapi_animation.assert_awaited_once()
     handlers.generate_song.assert_awaited_once()
     assert merger.await_count == 2
@@ -5713,12 +5729,12 @@ async def test_switching_video_song_cannot_reuse_old_job_after_submit_failure(cr
     waiter = AsyncMock(return_value='https://audio.example/generated.mp3')
     router, context = create_router(admin_user_id=456, song_generator=submit, song_waiter=waiter), await ready_context()
     await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png')
-    await dispatch_callback(router, callback_event('upsell_video'), context)
-    await dispatch_callback(router, callback_event('video_song:audio_fun_ny'), context)
-    await dispatch_callback(router, callback_event('upsell_video'), context)
-    await dispatch_callback(router, callback_event('video_song:audio_fun_cat'), context)
+    await dispatch_callback_and_phrase(router, callback_event('upsell_video'), context)
+    await dispatch_callback_and_phrase(router, callback_event('video_song:audio_fun_ny'), context)
+    await dispatch_callback_and_phrase(router, callback_event('upsell_video'), context)
+    await dispatch_callback_and_phrase(router, callback_event('video_song:audio_fun_cat'), context)
     assert (await context.get_data())['video_song_job_id'] is None
-    await dispatch_callback(router, callback_event('video_song:audio_fun_cat'), context)
+    await dispatch_callback_and_phrase(router, callback_event('video_song:audio_fun_cat'), context)
     assert submit.await_count == 3
     assert waiter.await_args_list == [call('ny-job'), call('cat-job')]
 
@@ -5728,14 +5744,14 @@ async def test_old_short_merge_cache_is_rebuilt_without_new_kling_or_ttapi_reque
     monkeypatch.setattr(handlers, 'merge_video_and_audio', merger)
     router, context = create_router(admin_user_id=456), await ready_context()
     await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png')
-    await dispatch_callback(router, callback_event('upsell_video'), context)
-    await dispatch_callback(router, callback_event('video_song:audio_fun_ny'), context)
+    await dispatch_callback_and_phrase(router, callback_event('upsell_video'), context)
+    await dispatch_callback_and_phrase(router, callback_event('video_song:audio_fun_ny'), context)
     data = await context.get_data()
     await context.update_data(video_merged_source=[data['video_raw_url'], data['video_song_url']],
                               video_merged_url='https://cdn.example/old-five-seconds.mp4')
-    await dispatch_callback(router, callback_event('upsell_video'), context)
+    await dispatch_callback_and_phrase(router, callback_event('upsell_video'), context)
     event = callback_event('video_song:audio_fun_ny')
-    await dispatch_callback(router, event, context)
+    await dispatch_callback_and_phrase(router, event, context)
     assert merger.await_count == 2
     piapi_animation.assert_awaited_once()
     handlers.generate_song.assert_awaited_once()
@@ -5754,8 +5770,8 @@ async def test_cat_video_sends_saved_mp3_before_next_step_and_never_lyrics(credi
     router = create_router(admin_user_id=456 if admin else 999, song_generator=submit, song_waiter=waiter,
         lyric_writer=writer, postcard_generator=AsyncMock(return_value=['https://cdn.example/card.png']))
     context = await ready_context()
-    await dispatch_callback(router, callback_event('cat_video'), context)
-    await dispatch_callback(router, callback_event('video_style:mode_ny'), context)
+    await dispatch_callback_and_phrase(router, callback_event('cat_video'), context)
+    await dispatch_callback_and_phrase(router, callback_event('video_style:mode_ny'), context)
     assert await context.get_state() == PosterStates.waiting_for_photo
     await call_handler(router, 'collect_photo', photo_event(), context)
     assert await context.get_state() == PosterStates.waiting_for_card_text
@@ -5767,7 +5783,7 @@ async def test_cat_video_sends_saved_mp3_before_next_step_and_never_lyrics(credi
             assert (await context.get_data())['audio_url'] == url  # Сохранено до отправки MAX.
         return object()
     event.send.side_effect = reply
-    await dispatch_callback(router, event, context)
+    await dispatch_callback_and_phrase(router, event, context)
     data = await context.get_data()
     assert data['audio_url'] == data['video_song_url'] == url
     assert data['photo']['url'] == 'https://photos.example.com/source.png'
@@ -5796,12 +5812,12 @@ async def test_cat_video_lyrics_only_response_is_not_delivered_and_retry_reuses_
     router, context = create_router(admin_user_id=999, song_generator=submit, song_waiter=waiter, video_generator=render), await ready_context()
     await prepare_teacher_video(router, context, 'cat_video')
     event = callback_event('video_song:audio_fun_ny')
-    await dispatch_callback(router, event, context)
+    await dispatch_callback_and_phrase(router, event, context)
     assert await context.get_state() == PosterStates.waiting_for_video_song
     assert 'PRIVATE LYRICS' not in str(event.send.await_args_list)
     assert 'audio_url' not in await context.get_data()
     render.assert_not_awaited()
-    await dispatch_callback(router, callback_event('retry_video_song_audio'), context)
+    await dispatch_callback_and_phrase(router, callback_event('retry_video_song_audio'), context)
     submit.assert_awaited_once()
     assert waiter.await_args_list == [call('recoverable-job'), call('recoverable-job')]
     assert (await context.get_data())['audio_url'] == 'https://cdn.example/recovered.mp3'
@@ -5813,11 +5829,11 @@ async def test_cat_video_failed_audio_delivery_keeps_link_and_retries_without_tt
     await prepare_teacher_video(router, context, 'cat_video')
     event = callback_event('video_song:audio_fun_ny')
     event.send.return_value = None
-    await dispatch_callback(router, event, context)
+    await dispatch_callback_and_phrase(router, event, context)
     assert await context.get_state() == PosterStates.waiting_for_video_song
     assert (await context.get_data())['audio_url'] == 'https://audio.example/1.mp3'
     retry = callback_event('retry_video_song_audio')
-    await dispatch_callback(router, retry, context)
+    await dispatch_callback_and_phrase(router, retry, context)
     handlers.generate_song.assert_awaited_once()
     handlers.wait_for_song.assert_awaited_once()
     assert await context.get_state() == PosterStates.waiting_for_video_payment
@@ -5834,7 +5850,7 @@ async def test_cancel_during_cat_video_audio_wait_does_not_deliver_or_restore_st
     router, context = create_router(admin_user_id=456, song_waiter=waiter), await ready_context()
     await prepare_teacher_video(router, context, 'cat_video')
     event = callback_event('video_song:audio_fun_ny')
-    task = asyncio.create_task(dispatch_callback(router, event, context))
+    task = asyncio.create_task(dispatch_callback_and_phrase(router, event, context))
     try:
         await asyncio.wait_for(entered.wait(), timeout=5)
         await call_handler(router, 'cancel', message_event('/cancel'), context)
@@ -5844,3 +5860,45 @@ async def test_cancel_during_cat_video_audio_wait_does_not_deliver_or_restore_st
     assert await context.get_state() == PosterStates.waiting_for_mode
     assert await context.get_data() == {}
     assert 'https://cdn.example/late-song.mp3' not in str(event.send.await_args_list)
+
+
+@pytest.mark.parametrize('scenario', list(handlers.VIDEO_SONG_SCENARIOS))
+async def test_video_scenario_collects_chorus_phrase_without_reusing_card_greeting(credit_db, scenario):
+    import re
+    writer = AsyncMock(side_effect=lambda notes, tags, title: notes)
+    router, context = create_router(admin_user_id=999, lyric_writer=writer), await ready_context()
+    await prepare_teacher_video(router, context, 'cat_video')
+    original = await context.get_data()
+    selected = callback_event(scenario if scenario == 'audio_video_teacher' else 'video_song:' + scenario)
+    await dispatch_callback(router, selected, context)
+    assert selected.send.await_args.args[0] == handlers.VIDEO_SONG_SCENARIOS[scenario][1]
+    assert 'фразу для припева' in selected.send.await_args.args[0]
+    handlers.generate_song.assert_not_awaited()
+    phrase = 'Аня, ты моя сестра! ❤️'
+    await call_handler(router, 'echo', message_event(phrase), context)
+    data = await context.get_data()
+    assert data['video_song_phrase'] == phrase
+    assert data['photo'] == original['photo'] and data['card_text'] == original['card_text']
+    assert await context.get_state() == PosterStates.waiting_for_video_payment
+    writer.assert_awaited_once()
+    choruses = re.findall(r'\[Chorus\]\n(.*?)(?=\n\[|$)', writer.await_args.args[0], flags=re.S)
+    assert choruses == [phrase]*3
+    assert data['audio_url'] == 'https://audio.example/1.mp3'
+
+
+@pytest.mark.parametrize('scenario', list(handlers.AUDIO_FUN_SCENARIOS))
+async def test_cartoon_song_requires_and_uses_user_chorus_phrase(credit_db, scenario):
+    router, context = create_router(admin_user_id=456, avatar_generator=AsyncMock(return_value='https://cdn.example/avatar.png')), await ready_context()
+    await start_cartoon(router, context)
+    await call_handler(router, 'collect_cartoon_photo', cartoon_photo(), context)
+    await dispatch_callback(router, callback_event('avatar_ok_1'), context)
+    event = callback_event('cartoon_song:' + scenario)
+    await dispatch_callback(router, event, context)
+    assert await context.get_state() == PosterStates.waiting_for_cartoon_song_phrase
+    assert event.send.await_args.args[0] == handlers.AUDIO_FUN_SCENARIOS[scenario][1]
+    handlers.generate_song.assert_not_awaited()
+    phrase = 'Барсик, самый крутой кот!'
+    await call_handler(router, 'echo', message_event(phrase), context)
+    assert (await context.get_data())['video_song_phrase'] == phrase
+    assert '[Chorus]\n' + phrase in handlers.generate_song.await_args.args[0]
+    assert await context.get_state() == PosterStates.waiting_for_mode

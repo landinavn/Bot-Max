@@ -270,7 +270,7 @@ async def wait_for_song_result(job_id: str, timeout: int = 100) -> dict:
 
 async def wait_for_song(job_id: str, timeout: int = 100) -> str:
     data = await wait_for_song_result(job_id, timeout=timeout)
-    return song_tracks(data)[0]['audioUrl']
+    return song_audio_url(data)
 
 
 async def wait_for_song_with_progress(job_id, notify, *, waiter=None, notification_delay=120):
@@ -314,3 +314,8 @@ def song_tracks(result: dict | str) -> list[dict[str, str]]:
     if not tracks:
         raise AudioServiceError("В результате TTAPI нет доступного аудио.")
     return tracks[:2]
+
+
+def song_audio_url(result: dict | str) -> str:
+    """Ссылка на готовое аудио; lyrics/prompt никогда не заменяют отсутствующий MP3."""
+    return song_tracks(result)[0]['audioUrl']

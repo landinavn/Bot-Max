@@ -30,6 +30,7 @@ from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 from config import DEFAULT_BOT_LINK, validate_bot_link
 from video_service import generate_video_from_avatar
 from media_service import VIDEO_MERGE_POLICY, merge_video_and_audio
+from audio_service import song_audio_url
 from metrika_service import extract_yclid, send_offline_conversion
 
 from database import (
@@ -762,7 +763,7 @@ PENDING_VIDEO_MESSAGE = (
 def video_cache(data):
     keys = ('video_raw_source', 'video_raw_url', 'video_song_source', 'video_song_url',
             'video_song_job_source', 'video_song_job_id', 'video_song_lyrics',
-            'video_merged_source', 'video_merged_url')
+            'video_merged_source', 'video_merged_url', 'audio_url')
     return {key: data[key] for key in keys if key in data}
 
 
@@ -816,7 +817,7 @@ def create_router(
             data.update(video_song_job_source=source, video_song_lyrics=lyrics, video_song_job_id=None)
             data['video_song_job_id'] = await song_generator(lyrics, tags, title)
         result = await song_waiter(data['video_song_job_id'])
-        audio_url = song_tracks(result)[0]['audioUrl']
+        audio_url = song_audio_url(result)
         if is_video_placeholder(audio_url):
             raise ValueError('TTAPI вернул тестовую ссылку вместо песни.')
         data.update(video_song_source=source, video_song_url=audio_url)
@@ -1866,7 +1867,7 @@ def create_router(
         return navigation_keyboard(buttons)
 
     async def show_video_songs(event, context):
-        await context.update_data(video_teacher_session_id=None)
+        await context.update_data(video_teacher_session_id=None, video_audio_delivery_session=None)
         await context.set_state(PosterStates.waiting_for_video_song)
         data = await context.get_data()
         scenarios = VIDEO_SHORT_SCENARIOS if data.get('video_product') in {'animate', 'upsell'} else VIDEO_SONG_SCENARIOS
@@ -1988,7 +1989,7 @@ def create_router(
             try:
                 prompt, tags, title = build_song_request(details, TEACHER_SCENARIO_TITLE, 'fun')
                 await context.set_state(PosterStates.generating_video_teacher)
-                await _reply(event, '✍️ Готовлю короткий текст песни-благодарности на «Вы» для видео...')
+                await _reply(event, '🎵 Создаю песню-благодарность на «Вы» для видео...')
                 lyrics = data.get('video_song_lyrics') if data.get('video_teacher_lyrics_source') == details else None
                 lyrics = lyrics or await lyric_writer(prompt, tags, title)
                 validate_song_arguments(lyrics, tags, title)
@@ -1996,7 +1997,6 @@ def create_router(
                     return
                 await context.update_data(video_teacher_details=details, video_teacher_lyrics_source=details,
                                           video_song_lyrics=lyrics, video_song_tags=tags, video_song_title=title)
-                await _reply(event, '✍️ Текст песни для видео:\n\n' + lyrics)
                 await finish_video_selection(event, context)
             except Exception:
                 logger.exception('Ошибка генерации текста благодарности для видео:')
@@ -2013,7 +2013,54 @@ def create_router(
             await _reply(event, 'Видео уже создаётся. Пожалуйста, подождите.')
             return
         async with lock:
+            data = await context.get_data()
+            if data.get('video_product') == 'direct' or data.get('video_song_scenario') == 'audio_video_teacher':
+                if not await deliver_video_song_audio(event, context):
+                    return
             await run_selected_video(event, context)
+
+    async def deliver_video_song_audio(event, context):
+        token = uuid4().hex
+        await context.update_data(video_audio_delivery_session=token)
+        await context.set_state(PosterStates.generating)
+        data = dict(await context.get_data())
+        scenario = data['video_song_scenario']
+        try:
+            audio_url = await prepare_video_song(data, scenario)
+            if (await context.get_data()).get('video_audio_delivery_session') != token:
+                return False
+            data['audio_url'] = audio_url
+            # Сохранить ссылку до ответа MAX и перехода к склейке/оплате.
+            await context.update_data(**video_cache(data))
+            if data.get('video_song_delivered_url') != audio_url:
+                sent = await _reply(event, '🎧 Ваша песня готова! Прослушайте фрагмент и переходите к созданию видео.',
+                    attachments=[InlineKeyboardBuilder().row(LinkButton(text='🎵 Прослушать песню (MP3)', url=audio_url)).as_markup()])
+                if sent is None:
+                    raise RuntimeError('MAX не подтвердил отправку аудиоссылки.')
+                if (await context.get_data()).get('video_audio_delivery_session') != token:
+                    return False
+                await context.update_data(video_song_delivered_url=audio_url)
+            return True
+        except Exception:
+            logger.exception('Ошибка получения или отправки аудио для видео:')
+            if (await context.get_data()).get('video_audio_delivery_session') == token:
+                await context.set_state(PosterStates.waiting_for_video_song)
+                await _reply(event, 'Не удалось получить или отправить аудио. Данные сохранены. Повторите отправку песни или /cancel.',
+                    attachments=[navigation_keyboard((('Повторить отправку песни', 'retry_video_song_audio'),))])
+            return False
+        finally:
+            if (await context.get_data()).get('video_audio_delivery_session') == token:
+                await context.update_data(**video_cache(data))
+
+    @router.message_callback(F.callback.payload == 'retry_video_song_audio')
+    async def retry_video_song_audio(event: MessageCallback, context: MemoryContext):
+        data = await context.get_data()
+        if (event.message is None or not data.get('video_flow') or data.get('video_song_scenario') not in VIDEO_SONG_SCENARIOS
+                or await context.get_state() != PosterStates.waiting_for_video_song):
+            await event.ack(notification='Откройте раздел видео заново.')
+            return
+        await event.ack(notification='Повторяю отправку аудио…')
+        await finish_video_selection(event, context)
 
     async def run_selected_video(event, context):
         data = await context.get_data()

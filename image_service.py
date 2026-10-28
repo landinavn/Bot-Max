@@ -38,7 +38,18 @@ OPENAI_BASE_URL = "https://api.openai.com/v1"
 logger = logging.getLogger(__name__)
 
 FONT_PATH = Path(__file__).resolve().parent / "font.ttf"
+MAX_THEME_INFO_LENGTH = 500
 POSTCARD_PROMPTS = {
+    "mode_teacher": (
+        "Create a beautiful, elegant greeting card for a teacher. The background and thematic elements "
+        "must be directly related to the following subject: {teacher_info}. Preserve the person's face "
+        "exactly as in the reference photo. Add elegant typography elements. DO NOT ADD text unless specified."
+    ),
+    "mode_coach": (
+        "Create a beautiful, dynamic greeting card for a sports coach. The background and thematic elements "
+        "must be directly related to the following sport: {coach_info}. Preserve the person's face "
+        "exactly as in the reference photo. Add elegant typography elements. DO NOT ADD text unless specified."
+    ),
     "mode_ny": (
         "Beautiful New Year greeting card. Place the person from the reference photo in a cozy winter outfit. "
         "Add festive elements: Christmas tree, snow, garlands, gifts. Leave a large empty space at the bottom. "
@@ -604,7 +615,7 @@ def _store_image(client, config: Config, image_path: Path) -> str:
 
 async def _generate_and_store(
     photo_url: str, sphere: str, count: int = 1, *, prompt_override: str | None = None,
-    postcard_text: str | None = None, postcard_mode: str | None = None
+    postcard_text: str | None = None, postcard_mode: str | None = None, preview_watermark: bool = False
 ) -> list[str]:
     _validate_inputs(photo_url, sphere if prompt_override is None else "Открытка")
     config = Config.from_env()
@@ -623,6 +634,8 @@ async def _generate_and_store(
         for image_bytes in images:
             if postcard_text is not None:
                 image_bytes = await asyncio.to_thread(add_text_to_image, image_bytes, postcard_text, mode=postcard_mode)
+            if preview_watermark:
+                image_bytes = await asyncio.to_thread(add_preview_watermark, image_bytes)
             with TemporaryDirectory(prefix="botmax-images-") as directory:
                 image_path = Path(directory) / "generated.png"
                 await asyncio.to_thread(image_path.write_bytes, image_bytes)
@@ -672,11 +685,16 @@ async def generate_vision_boards(photo_url: str, sphere: str) -> list[str]:
     return await _generate_and_store(photo_url, sphere, count=1)
 
 
-async def generate_postcards(photo_url: str, mode: str, card_text: str) -> list[str]:
+async def generate_postcards(photo_url: str, mode: str, card_text: str, *, theme_info: str | None = None, preview: bool = False) -> list[str]:
     """Создать открытку по режиму, наложить поздравление и сохранить в S3."""
     if mode not in POSTCARD_PROMPTS:
         raise ValueError(f"Неизвестный режим открытки: {mode}")
     validate_card_text(card_text)
+    base_prompt = POSTCARD_PROMPTS[mode]
+    if mode in {'mode_teacher', 'mode_coach'}:
+        if not isinstance(theme_info, str) or not theme_info.strip() or len(theme_info) > MAX_THEME_INFO_LENGTH:
+            raise ValueError(f'Напишите имя и предмет или спорт — от 1 до {MAX_THEME_INFO_LENGTH} символов.')
+        base_prompt = base_prompt.format(teacher_info=theme_info.strip(), coach_info=theme_info.strip())
     modern = mode == "mode_modern_card"
     layout = (
         "Keep the left 42% of the image light, uncluttered and free of people or decoration, "
@@ -687,11 +705,12 @@ async def generate_postcards(photo_url: str, mode: str, card_text: str) -> list[
         "Keep the bottom 22% empty for a greeting added later by software; keep faces outside this area. "
     )
     prompt = (
-        POSTCARD_PROMPTS[mode] + "\n\nPreserve every reference person's identity, facial features, "
+        base_prompt + "\n\nPreserve every reference person's identity, facial features, "
         "hairstyle, age and skin tone. Do not remove or add people. "
         + layout + "Do not add any text or watermarks."
     )
-    return await _generate_and_store(photo_url, "Открытка", prompt_override=prompt, postcard_text=card_text, postcard_mode=mode)
+    kwargs = {'preview_watermark': True} if preview else {}
+    return await _generate_and_store(photo_url, "Открытка", prompt_override=prompt, postcard_text=card_text, postcard_mode=mode, **kwargs)
 
 
 PHOTOSESSION_BODY_ANATOMY_REQUIREMENT = (

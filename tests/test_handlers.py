@@ -4675,7 +4675,7 @@ async def test_new_year_audio_scenarios_use_correct_fsm_prompt_and_stats(credit_
 @pytest.mark.parametrize('entry,price', [('cat_video', 299), ('upsell_video', 249), ('upsell_animate', 199)])
 @pytest.mark.parametrize('admin_id,actor,bypass', [(456, 456, True), (456, 789, False), (None, 456, False)])
 async def test_video_admin_bypass_only_after_data_and_song_and_never_for_regular_users(credit_db, entry, price, admin_id, actor, bypass):
-    stub = AsyncMock(return_value='Тестовый результат видео')
+    stub = AsyncMock(return_value='https://video.example/result.mp4')
     router = create_router(admin_user_id=admin_id, video_generator=stub)
     context = await ready_context()
     if entry != 'cat_video':
@@ -4696,10 +4696,10 @@ async def test_video_admin_bypass_only_after_data_and_song_and_never_for_regular
         saved = stub.await_args.args[0]
         assert saved['video_song_scenario'] == 'audio_fun_ny' and saved['video_amount_kopecks'] == price * 100
         assert song.send.await_args_list[0].args[0] == '👑 Режим администратора: Оплата пропущена. Запускаю генерацию...'
-        assert song.send.await_args_list[1].args[0] == 'Тестовый результат видео'
+        assert song.send.await_args_list[1].args[0] == '🎬 Ваша анимация готова (5 секунд): https://video.example/result.mp4'
         assert not any('payform' in str(call) for call in song.send.await_args_list)
         assert await context.get_state() == PosterStates.waiting_for_mode
-        assert (await context.get_data())['video_test_complete'] is True
+        assert (await context.get_data())['video_complete'] is True
     else:
         stub.assert_not_awaited()
         pay = song.send.await_args.kwargs['attachments'][0].payload.buttons[0][0]
@@ -4717,7 +4717,7 @@ async def test_video_admin_stub_failure_has_traceback_and_allows_song_retry(cred
     await dispatch_callback(router, callback_event('upsell_animate'), context)
     event = callback_event('video_song:audio_fun_ny')
     await dispatch_callback(router, event, context)
-    assert any(r.exc_info and 'Ошибка тестовой генерации видео' in r.message for r in caplog.records)
+    assert any(r.exc_info and 'Ошибка генерации видео PiAPI' in r.message for r in caplog.records)
     assert await context.get_state() == PosterStates.waiting_for_video_song
     assert 'payform' not in str(event.send.await_args_list)
 
@@ -5029,7 +5029,7 @@ async def prepare_teacher_video(router, context, entry):
 @pytest.mark.parametrize('admin', [False, True])
 async def test_video_teacher_collects_details_creates_formal_text_and_keeps_card_price(credit_db, entry, price, admin):
     writer = AsyncMock(return_value=TEACHER_TEST_LYRICS)
-    video = AsyncMock(return_value='Тестовое видео готово')
+    video = AsyncMock(return_value='https://video.example/result.mp4')
     router = create_router(admin_user_id=456 if admin else 999, lyric_writer=writer, video_generator=video)
     context = await ready_context()
     await prepare_teacher_video(router, context, entry)
@@ -5357,3 +5357,141 @@ async def test_cancel_during_role_preview_drops_late_result(credit_db):
     assert (await credit_db.get_all_counters()).get('gen_teacher', 0) == 0
     handlers.send_offline_conversion.assert_not_awaited()
     assert not any(call.args and 'PREVIEW' in call.args[0] for call in text.message.answer.await_args_list)
+
+
+@pytest.fixture(autouse=True)
+def piapi_animation(monkeypatch):
+    animator = AsyncMock(return_value='https://video.example/animated.mp4')
+    monkeypatch.setattr(handlers, 'generate_video_from_avatar', animator)
+    return animator
+
+
+@pytest.mark.parametrize('entry', ['cat_cartoon', 'cat_cartoon_long'])
+async def test_default_cartoon_generator_uses_real_piapi_chain(credit_db, monkeypatch, entry):
+    import json
+    import httpx
+    import respx
+    import video_service
+    monkeypatch.setattr(handlers, 'generate_video_from_avatar', video_service.generate_video_from_avatar)
+    monkeypatch.setattr(video_service.Config, 'from_env', lambda: SimpleNamespace(piapi_key='piapi-test-key'))
+    monkeypatch.setattr(video_service.asyncio, 'sleep', AsyncMock())
+    router = create_router(admin_user_id=456, avatar_generator=AsyncMock(return_value='https://cdn.example/avatar.png'))
+    context = await ready_context()
+    await start_cartoon(router, context, entry)
+    await call_handler(router, 'collect_cartoon_photo', cartoon_photo(), context)
+    await dispatch_callback(router, callback_event('avatar_ok_1'), context)
+    event = callback_event('cartoon_song:audio_fun_ny')
+    with respx.mock:
+        post = respx.post(video_service.TASK_URL).respond(200, json={'data': {'task_id': 'cartoon-real'}})
+        get = respx.get(video_service.TASK_URL + '/cartoon-real').respond(200, json={'data': {'status': 'completed', 'output': {'video': 'https://video.example/kling.mp4'}}})
+        await dispatch_callback(router, event, context)
+        assert post.call_count == get.call_count == 1
+        payload = json.loads(post.calls[0].request.content)
+        assert payload['input'] == {'image_url': 'https://cdn.example/avatar.png',
+            'prompt': 'The character is smiling and blinking naturally', 'version': '3.0-turbo', 'mode': 'std', 'duration': 5}
+        assert post.calls[0].request.headers['X-API-Key'] == get.calls[0].request.headers['X-API-Key'] == 'piapi-test-key'
+    assert 'https://video.example/kling.mp4' in event.send.await_args.args[0]
+    button = event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0]
+    assert button.url == 'https://video.example/kling.mp4'
+    assert 'Тестовая' not in event.send.await_args.args[0]
+    assert await context.get_state() == PosterStates.waiting_for_mode
+
+
+@pytest.mark.parametrize('entry', ['upsell_animate', 'upsell_video'])
+async def test_default_card_upsell_uses_real_piapi_chain(credit_db, monkeypatch, entry):
+    import json
+    import respx
+    import video_service
+    monkeypatch.setattr(handlers, 'generate_video_from_avatar', video_service.generate_video_from_avatar)
+    monkeypatch.setattr(video_service.Config, 'from_env', lambda: SimpleNamespace(piapi_key='piapi-test-key'))
+    monkeypatch.setattr(video_service.asyncio, 'sleep', AsyncMock())
+    card = AsyncMock()
+    router, context = create_router(admin_user_id=456, postcard_generator=card), await ready_context()
+    await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/ready-card.png')
+    await dispatch_callback(router, callback_event(entry), context)
+    event = callback_event('video_song:audio_fun_ny')
+    with respx.mock:
+        post = respx.post(video_service.TASK_URL).respond(200, json={'data': {'task_id': 'card-real'}})
+        respx.get(video_service.TASK_URL + '/card-real').respond(200, json={'data': {'status': 'completed', 'output': {'video': 'https://video.example/card.mp4'}}})
+        await dispatch_callback(router, event, context)
+        assert json.loads(post.calls[0].request.content)['input']['image_url'] == 'https://cdn.example/ready-card.png'
+    card.assert_not_awaited()
+    assert 'https://video.example/card.mp4' in event.send.await_args.args[0]
+    assert (await context.get_data())['video_complete']
+
+
+@pytest.mark.parametrize('mode', ['mode_ny', 'mode_teacher'])
+async def test_direct_video_generates_clean_postcard_before_piapi(credit_db, piapi_animation, mode):
+    card = AsyncMock(return_value=['https://cdn.example/clean-card.png'])
+    router, context = create_router(admin_user_id=456, postcard_generator=card), await ready_context()
+    await context.update_data(mode=mode, photo={'url': 'https://cdn.example/source.png'}, card_text='Спасибо!',
+        video_preview_url='https://cdn.example/watermarked.png', video_product='direct', video_flow=True,
+        teacher_info='Ирина Петровна, математика', video_amount_kopecks=29900)
+    await context.set_state(PosterStates.waiting_for_video_song)
+    await dispatch_callback(router, callback_event('video_song:audio_fun_ny'), context)
+    kwargs = {'theme_info': 'Ирина Петровна, математика'} if mode == 'mode_teacher' else {}
+    card.assert_awaited_once_with('https://cdn.example/source.png', mode, 'Спасибо!', **kwargs)
+    piapi_animation.assert_awaited_once_with('https://cdn.example/clean-card.png')
+    assert (await context.get_data())['video_source_image'] == 'https://cdn.example/clean-card.png'
+
+
+async def test_card_piapi_failure_logs_traceback_and_reuses_clean_image(credit_db, piapi_animation, caplog):
+    piapi_animation.side_effect = [RuntimeError('PiAPI unavailable'), 'https://video.example/retry.mp4']
+    card = AsyncMock(return_value=['https://cdn.example/clean-card.png'])
+    router, context = create_router(admin_user_id=456, postcard_generator=card), await ready_context()
+    await context.update_data(mode='mode_ny', photo={'url': 'https://cdn.example/source.png'}, card_text='Спасибо!',
+        video_product='direct', video_flow=True, video_amount_kopecks=29900)
+    await context.set_state(PosterStates.waiting_for_video_song)
+    await dispatch_callback(router, callback_event('video_song:audio_fun_ny'), context)
+    assert await context.get_state() == PosterStates.waiting_for_video_song
+    assert any(r.exc_info and 'Ошибка генерации видео PiAPI' in r.message for r in caplog.records)
+    await dispatch_callback(router, callback_event('video_song:audio_fun_ny'), context)
+    card.assert_awaited_once()
+    assert (await context.get_data())['video_result_url'] == 'https://video.example/retry.mp4'
+
+
+async def test_regular_user_does_not_start_real_piapi_without_payment(credit_db, piapi_animation):
+    router, context = create_router(admin_user_id=999), await ready_context()
+    await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png')
+    await dispatch_callback(router, callback_event('upsell_animate'), context)
+    await dispatch_callback(router, callback_event('video_song:audio_fun_ny'), context)
+    piapi_animation.assert_not_awaited()
+    assert await context.get_state() == PosterStates.waiting_for_video_payment
+
+
+async def test_piapi_failure_is_not_replaced_with_test_link(credit_db, piapi_animation):
+    piapi_animation.side_effect = RuntimeError('provider failed')
+    router = create_router(admin_user_id=456, avatar_generator=AsyncMock(return_value='https://cdn.example/avatar.png'))
+    context = await ready_context()
+    await start_cartoon(router, context)
+    await call_handler(router, 'collect_cartoon_photo', cartoon_photo(), context)
+    await dispatch_callback(router, callback_event('avatar_ok_1'), context)
+    event = callback_event('cartoon_song:audio_fun_ny')
+    await dispatch_callback(router, event, context)
+    assert await context.get_state() == PosterStates.waiting_for_cartoon_song
+    assert 'Не удалось создать видео' in event.send.await_args.args[0]
+    assert 'example.com/cartoon-test-video.mp4' not in str(event.send.await_args_list)
+
+
+async def test_cancel_during_piapi_does_not_restore_old_card_flow(credit_db, piapi_animation):
+    import asyncio
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def animate(*args):
+        entered.set()
+        await release.wait()
+        return 'https://video.example/late.mp4'
+    piapi_animation.side_effect = animate
+    router, context = create_router(admin_user_id=456), await ready_context()
+    await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png')
+    await dispatch_callback(router, callback_event('upsell_animate'), context)
+    event = callback_event('video_song:audio_fun_ny')
+    task = asyncio.create_task(dispatch_callback(router, event, context))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        await call_handler(router, 'cancel', message_event('/cancel'), context)
+    finally:
+        release.set()
+        await task
+    assert await context.get_state() == PosterStates.waiting_for_mode
+    assert not (await context.get_data()).get('video_source_image')
+    assert 'https://video.example/late.mp4' not in str(event.send.await_args_list)

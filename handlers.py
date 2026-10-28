@@ -28,6 +28,7 @@ from maxapi.types import (
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
 from config import DEFAULT_BOT_LINK, validate_bot_link
+from video_service import generate_video_from_avatar
 from metrika_service import extract_yclid, send_offline_conversion
 
 from database import (
@@ -739,17 +740,9 @@ def result_keyboard(url: str):
     ).as_markup()
 
 
-async def generate_video_placeholder(data: dict) -> str:
-    kind = 'анимации' if data.get('video_product') == 'animate' else 'видео с песней'
-    scenario = VIDEO_SONG_SCENARIOS[data['video_song_scenario']][0]
-    return f'🎬 Тестовая генерация {kind} завершена. Сценарий: {scenario}. Это заглушка; видеосервис будет подключён позже.'
-
-
 async def generate_video(avatar_url: str, song_url: str) -> str:
-    """Этап 1: никаких запросов в видео-API, возвращается только тестовая ссылка."""
-    if not avatar_url.startswith('https://') or not song_url.startswith('https://'):
-        raise ValueError('Для тестового видео нужны HTTPS-ссылки аватара и песни.')
-    return 'https://example.com/cartoon-test-video.mp4'  # TODO: Подключить реальный видео-API.
+    """Оживить одобренный аватар. Наложение выбранной песни подключается отдельно."""
+    return await generate_video_from_avatar(avatar_url)
 
 
 def create_router(
@@ -768,7 +761,26 @@ def create_router(
 ) -> Router:
     avatar_generator = avatar_generator or generate_cartoon_avatar
     cartoon_video_generator = cartoon_video_generator or generate_video
-    video_generator = video_generator or generate_video_placeholder
+    async def generate_card_video(data: dict) -> str:
+        image_url = data.get('video_source_image')
+        if not image_url:
+            mode = data.get('mode')
+            photo = data.get('photo') or {}
+            if mode not in POSTCARD_PROMPTS or not photo.get('url') or not data.get('card_text'):
+                raise ValueError('Не сохранены фото, шаблон или поздравление для видео.')
+            fixed_text = data.get('fixed_card_text')
+            if data.get('fixed_card_text_source') != data['card_text'] or not fixed_text:
+                fixed_text = await fix_text_with_ai(data['card_text'])
+            kwargs = {'theme_info': data[ROLE_CARD_FIELDS[mode]]} if mode in ROLE_CARD_FIELDS else {}
+            # Превью содержит PREVIEW: для готового видео создаём чистую открытку.
+            urls = await postcard_generator(photo['url'], mode, fixed_text, **kwargs)
+            if len(urls) != 1 or not isinstance(urls[0], str) or not urls[0].startswith('https://'):
+                raise ValueError('Генератор открытки не вернул HTTPS-ссылку.')
+            image_url = urls[0]
+            data['video_source_image'] = image_url
+        return await generate_video_from_avatar(image_url)
+
+    video_generator = video_generator or generate_card_video
     lyric_writer = lyric_writer or write_song_lyrics
     song_generator = song_generator or generate_song
     # Подарок возвращает URL; импульсный формат сохраняет оба варианта TTAPI.
@@ -783,6 +795,7 @@ def create_router(
     preview_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
     cartoon_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
     video_text_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
+    video_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
 
     def family_photosession_selected(data):
         return (data.get("photo_style") == "photo_style_ny"
@@ -1642,15 +1655,17 @@ def create_router(
                 if (await context.get_data()).get('cartoon_session_id') != data.get('cartoon_session_id'):
                     return
                 if not isinstance(result, str) or not result.startswith('https://'):
-                    raise ValueError('Видео-заглушка не вернула тестовую HTTPS-ссылку.')
-                await _reply(event, '🧪 Тестовая ссылка (заглушка видео-API): ' + result, attachments=[main_keyboard()])
+                    raise ValueError('PiAPI не вернул HTTPS-ссылку на видео.')
+                await _reply(event, '🎬 Ваша анимация готова (5 секунд): ' + result,
+                             attachments=[InlineKeyboardBuilder().row(LinkButton(text='⬇️ Скачать видео', url=result)).row(
+                                 CallbackButton(text='⬅️ Главное меню', payload='back_to_main')).as_markup()])
                 await context.set_state(PosterStates.waiting_for_mode)
             except Exception:
-                logger.exception('Ошибка тестовой генерации мульт-видео:')
+                logger.exception('Ошибка генерации мульт-видео PiAPI:')
                 if (await context.get_data()).get('cartoon_session_id') != data.get('cartoon_session_id'):
                     return
                 await context.set_state(PosterStates.waiting_for_cartoon_song)
-                await _reply(event, 'Не удалось выполнить тестовую генерацию. Выберите песню ещё раз.')
+                await _reply(event, 'Не удалось создать видео. Подробности записаны в журнал. Выберите песню ещё раз.')
             return
         await context.set_state(PosterStates.waiting_for_cartoon_payment)
         price = product[1] // 100
@@ -1873,24 +1888,47 @@ def create_router(
                     await _reply(event, 'Не удалось создать текст песни. Отправьте данные ещё раз или /cancel для отмены.')
 
     async def finish_video_selection(event, context):
+        user_id = event.get_ids()[1]
+        if user_id is None:
+            return
+        lock = video_locks.setdefault(user_id, asyncio.Lock())
+        if lock.locked():
+            await _reply(event, 'Видео уже создаётся. Пожалуйста, подождите.')
+            return
+        async with lock:
+            await run_selected_video(event, context)
+
+    async def run_selected_video(event, context):
         data = await context.get_data()
         scenario = data['video_song_scenario']
         scenarios = VIDEO_SHORT_SCENARIOS if data.get('video_product') in {'animate', 'upsell'} else VIDEO_SONG_SCENARIOS
         await context.set_state(PosterStates.waiting_for_video_payment)
         if admin_user_id is not None and event.get_ids()[1] == admin_user_id:
             await context.set_state(PosterStates.generating)
+            generation_id = uuid4().hex
+            await context.update_data(video_generation_id=generation_id)
             await _reply(event, '👑 Режим администратора: Оплата пропущена. Запускаю генерацию...')
+            video_data = dict(await context.get_data())
             try:
-                result = await video_generator(dict(await context.get_data()))
-                if not isinstance(result, str) or not result.strip():
-                    raise ValueError('Тестовая генерация видео не вернула результат.')
-                await _reply(event, result, attachments=[main_keyboard()])
-                await context.update_data(video_test_complete=True)
+                result = await video_generator(video_data)
+                if (await context.get_data()).get('video_generation_id') != generation_id:
+                    return
+                if not isinstance(result, str) or not result.startswith('https://'):
+                    raise ValueError('Генератор видео не вернул HTTPS-ссылку.')
+                await _reply(event, '🎬 Ваша анимация готова (5 секунд): ' + result, attachments=[
+                    InlineKeyboardBuilder().row(LinkButton(text='⬇️ Скачать видео', url=result)).row(
+                        CallbackButton(text='⬅️ Главное меню', payload='back_to_main')).as_markup()])
+                await context.update_data(video_complete=True, video_result_url=result)
                 await context.set_state(PosterStates.waiting_for_mode)
             except Exception:
-                logger.exception('Ошибка тестовой генерации видео:')
+                logger.exception('Ошибка генерации видео PiAPI:')
+                if (await context.get_data()).get('video_generation_id') != generation_id:
+                    return
                 await context.set_state(PosterStates.waiting_for_video_song)
-                await _reply(event, 'Не удалось выполнить тестовую генерацию. Выберите песню ещё раз.')
+                await _reply(event, 'Не удалось создать видео. Подробности записаны в журнал. Выберите песню ещё раз.')
+            finally:
+                if video_data.get('video_source_image') and (await context.get_data()).get('video_generation_id') == generation_id:
+                    await context.update_data(video_source_image=video_data['video_source_image'])
             return
         price = data['video_amount_kopecks'] // 100
         text = ('Отлично! Мы создадим статичную открытку, оживим её (добавим анимацию) и наложим песню.\n\n'

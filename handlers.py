@@ -41,7 +41,7 @@ from database import (
     set_song_promo, check_song_promo, song_checkout_order, latest_gift_preview, claim_audio_order,
 )
 from prodamus import PACKAGES, ProdamusPayments
-from audio_service import generate_song, wait_for_song, wait_for_song_result, make_protected_preview, song_tracks, build_song_request, write_song_lyrics, validate_song_arguments, InvalidSongArguments, AudioNotConfigured, SongFailed
+from audio_service import generate_song, wait_for_song, wait_for_song_result, make_protected_preview, TEACHER_SCENARIO_TITLE, song_tracks, build_song_request, write_song_lyrics, validate_song_arguments, InvalidSongArguments, AudioNotConfigured, SongFailed
 from audio_orders import PaidAudioWorker, SUPPORT_URL
 from max_client import log_max_error
 from image_service import (
@@ -436,6 +436,8 @@ AUDIO_GIFT_TEXT = (
     "Если что-то пойдёт не так — бесплатно перегенерируем."
 )
 
+TEACHER_DETAILS_PROMPT = 'Напишите имя тренера/учителя, вид спорта или предмет, и одно качество или воспоминание (например: «Ирина Петровна, математика, строгая но справедливая»).'
+
 AUDIO_GIFT_SCENARIOS = {
     "gift_scen_bday": ("🎂 День рождения", "Как зовут виновника торжества? Напишите 2-3 факта или привычки через запятую (например: любит горы, всегда поддерживает, обожает кофе)."),
     "gift_scen_anniv": ("💍 Годовщина / Свадьба", "Напишите ваши имена, сколько лет вместе и одну историю или деталь (например: Аня и Ваня, 5 лет, познакомились в универе)."),
@@ -444,6 +446,7 @@ AUDIO_GIFT_SCENARIOS = {
     "gift_scen_friend": ("🤝 Для друга / подруги", "Как зовут друга/подругу? Напишите одну общую историю или шутку (например: всегда выручает, познакомились в универе)."),
     "gift_scen_custom": ("🎯 Свой вариант", "Напишите имя, повод (любой) и 1-2 факта о человеке."),
     "audio_gift_ny": ("🎄 Новогодняя", "Напишите имена близких, одно тёплое семейное воспоминание и ваши новогодние пожелания."),
+    "audio_gift_teacher": (TEACHER_SCENARIO_TITLE, TEACHER_DETAILS_PROMPT),
 }
 
 AUDIO_GIFT_SCENARIO_TEXT = (
@@ -454,18 +457,19 @@ AUDIO_GIFT_SCENARIO_TEXT = (
     "🧸 Для ребёнка — увлечения и мечты.\n"
     "🤝 Для друга / подруги — общие истории и шутки.\n"
     "🎯 Свой вариант — любой человек и повод.\n"
-    "🎄 Новогодняя — семейные воспоминания и тёплые пожелания."
+    "🎄 Новогодняя — семейные воспоминания и тёплые пожелания.\n"
+    "👨‍🏫 Для тренера / учителя — официальная и трогательная благодарность."
 )
 
 
 
 def gift_scenario_name(payload):
-    return 'ny' if payload == 'audio_gift_ny' else payload.removeprefix('gift_scen_')
+    return {'audio_gift_ny': 'ny', 'audio_gift_teacher': 'teacher'}.get(payload, payload.removeprefix('gift_scen_'))
 
 
 def audio_scenario_key(scenario, audio_format):
-    if audio_format == 'gift' and scenario == 'ny':
-        return 'audio_gift_ny'
+    if audio_format == 'gift' and scenario in {'ny', 'teacher'}:
+        return 'audio_gift_' + scenario
     return ('audio_fun_' if audio_format == 'fun' else 'gift_scen_') + str(scenario)
 
 
@@ -473,8 +477,10 @@ AUDIO_FUN_COUNTERS = {key: 'audio_scen_' + key.removeprefix('audio_fun_') for ke
 AUDIO_FUN_COUNTERS['audio_fun_ny'] = 'audio_scen_ny_fun'
 AUDIO_GIFT_COUNTERS = {key: 'audio_gift_' + gift_scenario_name(key) for key in AUDIO_GIFT_SCENARIOS}
 AUDIO_GIFT_COUNTERS['audio_gift_ny'] = 'audio_scen_ny_gift'
+AUDIO_GIFT_COUNTERS['audio_gift_teacher'] = 'audio_scen_teacher_gift'
 
-VIDEO_SONG_SCENARIOS = {**AUDIO_FUN_SCENARIOS, **AUDIO_GIFT_SCENARIOS}
+VIDEO_SHORT_SCENARIOS = {**AUDIO_FUN_SCENARIOS, 'audio_video_teacher': (TEACHER_SCENARIO_TITLE, TEACHER_DETAILS_PROMPT)}
+VIDEO_SONG_SCENARIOS = {**VIDEO_SHORT_SCENARIOS, **{key: value for key, value in AUDIO_GIFT_SCENARIOS.items() if key != 'audio_gift_teacher'}}
 VIDEO_CARD_SCREENS = {'cat_cards', 'sub_ny', 'sub_bday', 'sub_halloween', 'sub_goodmorning'}
 VIDEO_PAYMENT_PLACEHOLDER_URL = 'https://link.payform.ru/'  # TODO: Заменить на реальную ссылку
 VIDEO_UPSELL_TEXT = (
@@ -652,6 +658,8 @@ class PosterStates(StatesGroup):
     waiting_for_card_text = State()
     waiting_for_video_song = State()
     waiting_for_video_payment = State()
+    waiting_for_video_teacher_details = State()
+    generating_video_teacher = State()
     waiting_for_song_details = State()
     waiting_for_audio_fun_payment = State()
     waiting_for_audio_test_result = State()
@@ -664,6 +672,7 @@ class PosterStates(StatesGroup):
     waiting_for_gift_friend = State()
     waiting_for_gift_custom = State()
     waiting_for_gift_ny = State()
+    waiting_for_gift_teacher = State()
     waiting_for_gift_preview = State()
     # Принимать описание и из состояния, сохранённого прежней версией.
     waiting_for_sphere = State()
@@ -678,6 +687,7 @@ GIFT_SCENARIO_STATES = {
     "gift_scen_friend": PosterStates.waiting_for_gift_friend,
     "gift_scen_custom": PosterStates.waiting_for_gift_custom,
     "audio_gift_ny": PosterStates.waiting_for_gift_ny,
+    "audio_gift_teacher": PosterStates.waiting_for_gift_teacher,
 }
 
 
@@ -759,6 +769,7 @@ def create_router(
     generation_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
     preview_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
     cartoon_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
+    video_text_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
 
     def family_photosession_selected(data):
         return (data.get("photo_style") == "photo_style_ny"
@@ -1156,6 +1167,9 @@ def create_router(
                 f"- {label}: {counters.get(AUDIO_GIFT_COUNTERS[payload], 0)}"
                 for payload, (label, _) in AUDIO_GIFT_SCENARIOS.items()
             ) + "\n\n"
+            "🎵 Интерес к Аудиопесням (для видео):\n"
+            f"- 👨‍🏫 Для тренера / учителя: {counters.get('audio_scen_teacher_video', 0)}\n"
+            f"- 🎄 Новогодняя: {counters.get('audio_scen_ny_video', 0)}\n\n"
             "🎬 Интерес к Мульт-услугам:\n"
             f"- Мульт-открытка (клики): {counters.get('click_cartoon_short', 0)}\n"
             f"- Мульт-поздравление (клики): {counters.get('click_cartoon_long', 0)}\n"
@@ -1634,10 +1648,11 @@ def create_router(
         return navigation_keyboard(buttons)
 
     async def show_video_songs(event, context):
+        await context.update_data(video_teacher_session_id=None)
         await context.set_state(PosterStates.waiting_for_video_song)
         data = await context.get_data()
-        scenarios = AUDIO_FUN_SCENARIOS if data.get('video_product') in {'animate', 'upsell'} else VIDEO_SONG_SCENARIOS
-        buttons = [(label, 'video_song:' + key) for key, (label, _) in scenarios.items()]
+        scenarios = VIDEO_SHORT_SCENARIOS if data.get('video_product') in {'animate', 'upsell'} else VIDEO_SONG_SCENARIOS
+        buttons = [(label, key if key == 'audio_video_teacher' else 'video_song:' + key) for key, (label, _) in scenarios.items()]
         await _reply(event, '🎵 Выберите сценарий песни для видео-поздравления:',
                      attachments=[navigation_keyboard((*buttons, ('⬅️ Назад', 'cat_video')))])
 
@@ -1700,22 +1715,81 @@ def create_router(
                                   video_product='animate' if animate else 'upsell')
         await show_video_songs(event, context)
 
-    @router.message_callback(F.callback.payload.startswith('video_song:'))
+    @router.message_callback(F.callback.payload.startswith('video_song:') | (F.callback.payload == 'audio_video_teacher'))
     async def video_song(event: MessageCallback, context: MemoryContext):
         if event.message is None:
             await event.ack(notification='Отправьте /start, чтобы открыть меню.')
             return
         data = await context.get_data()
         scenario = event.callback.payload.removeprefix('video_song:')
-        scenarios = AUDIO_FUN_SCENARIOS if data.get('video_product') in {'animate', 'upsell'} else VIDEO_SONG_SCENARIOS
+        scenarios = VIDEO_SHORT_SCENARIOS if data.get('video_product') in {'animate', 'upsell'} else VIDEO_SONG_SCENARIOS
         expected_price = {'direct': 29900, 'upsell': 24900, 'animate': 19900}.get(data.get('video_product'))
         if (not data.get('video_flow') or scenario not in scenarios or expected_price is None
                 or data.get('video_amount_kopecks') != expected_price
                 or await context.get_state() not in (PosterStates.waiting_for_video_song, PosterStates.waiting_for_video_payment)):
             await event.ack(notification='Выберите видео и заполните данные заново.')
             return
+        user_id = event.get_ids()[1]
+        if scenario == 'audio_video_teacher':
+            await event.ack(notification='Жду данные учителя или тренера…')
+            if user_id is not None:
+                await increment_counter('audio_scen_teacher_video', user_id=user_id)
+            await context.update_data(video_song_scenario=scenario, video_teacher_session_id=uuid4().hex,
+                                      video_teacher_details=None, video_song_lyrics=None, video_teacher_lyrics_source=None,
+                                      video_song_tags=None, video_song_title=None)
+            await context.set_state(PosterStates.waiting_for_video_teacher_details)
+            await _reply(event, TEACHER_DETAILS_PROMPT)
+            return
         await event.ack(notification='Показываю оплату…')
-        await context.update_data(video_song_scenario=scenario)
+        if scenario in {'audio_fun_ny', 'audio_gift_ny'} and user_id is not None:
+            await increment_counter('audio_scen_ny_video', user_id=user_id)
+        await context.update_data(video_song_scenario=scenario, video_song_lyrics=None, video_song_tags=None,
+                                  video_song_title=None, video_teacher_details=None, video_teacher_lyrics_source=None,
+                                  video_teacher_session_id=None)
+        await finish_video_selection(event, context)
+
+    async def collect_video_teacher_details(event: MessageCreated, context: MemoryContext):
+        user_id = event.get_ids()[1]
+        if is_bot_message(event) or user_id is None:
+            return
+        lock = video_text_locks.setdefault(user_id, asyncio.Lock())
+        if lock.locked():
+            await _reply(event, 'Текст песни уже создаётся. Пожалуйста, подождите.')
+            return
+        async with lock:
+            data = await context.get_data()
+            session = data.get('video_teacher_session_id')
+            if not session or data.get('video_song_scenario') != 'audio_video_teacher' or await context.get_state() != PosterStates.waiting_for_video_teacher_details:
+                await _reply(event, 'Выберите сценарий для видео заново.', attachments=[main_keyboard()])
+                return
+            body = event.message.body
+            details = (body.text or '').strip() if body else ''
+            if not details:
+                await _reply(event, 'Напишите данные тренера или учителя текстом. /cancel — отмена.')
+                return
+            try:
+                prompt, tags, title = build_song_request(details, TEACHER_SCENARIO_TITLE, 'fun')
+                await context.set_state(PosterStates.generating_video_teacher)
+                await _reply(event, '✍️ Готовлю короткий текст песни-благодарности на «Вы» для видео...')
+                lyrics = data.get('video_song_lyrics') if data.get('video_teacher_lyrics_source') == details else None
+                lyrics = lyrics or await lyric_writer(prompt, tags, title)
+                validate_song_arguments(lyrics, tags, title)
+                if (await context.get_data()).get('video_teacher_session_id') != session:
+                    return
+                await context.update_data(video_teacher_details=details, video_teacher_lyrics_source=details,
+                                          video_song_lyrics=lyrics, video_song_tags=tags, video_song_title=title)
+                await _reply(event, '✍️ Текст песни для видео:\n\n' + lyrics)
+                await finish_video_selection(event, context)
+            except Exception:
+                logger.exception('Ошибка генерации текста благодарности для видео:')
+                if (await context.get_data()).get('video_teacher_session_id') == session:
+                    await context.set_state(PosterStates.waiting_for_video_teacher_details)
+                    await _reply(event, 'Не удалось создать текст песни. Отправьте данные ещё раз или /cancel для отмены.')
+
+    async def finish_video_selection(event, context):
+        data = await context.get_data()
+        scenario = data['video_song_scenario']
+        scenarios = VIDEO_SHORT_SCENARIOS if data.get('video_product') in {'animate', 'upsell'} else VIDEO_SONG_SCENARIOS
         await context.set_state(PosterStates.waiting_for_video_payment)
         if admin_user_id is not None and event.get_ids()[1] == admin_user_id:
             await context.set_state(PosterStates.generating)
@@ -2566,6 +2640,7 @@ def create_router(
 
     # Команды /start, /buy и /cancel должны обрабатываться раньше ожидания фото.
     router.message_created(PosterStates.waiting_for_avatar_photo)(collect_cartoon_photo)
+    router.message_created(PosterStates.waiting_for_video_teacher_details)(collect_video_teacher_details)
 
     @router.message_callback(F.callback.payload.in_({"create_poster", "mode_bday", "mode_8march", *(payload for _, payload in MODE_BUTTONS)}))
     async def begin_poster(event: MessageCallback, context: MemoryContext) -> None:
@@ -2713,6 +2788,7 @@ def create_router(
     @router.message_created(PosterStates.waiting_for_gift_friend)
     @router.message_created(PosterStates.waiting_for_gift_custom)
     @router.message_created(PosterStates.waiting_for_gift_ny)
+    @router.message_created(PosterStates.waiting_for_gift_teacher)
     async def collect_gift_details(event: MessageCreated, context: MemoryContext) -> None:
         if is_bot_message(event):
             return
@@ -2873,6 +2949,12 @@ def create_router(
         if is_bot_message(event):
             return
         state = await context.get_state()
+        if state == PosterStates.waiting_for_video_teacher_details:
+            await collect_video_teacher_details(event, context)
+            return
+        if state == PosterStates.generating_video_teacher:
+            await _reply(event, 'Текст песни создаётся. Пожалуйста, подождите.')
+            return
         if state == PosterStates.waiting_for_avatar_photo:
             await collect_cartoon_photo(event, context)
             return

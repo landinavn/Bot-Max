@@ -21,6 +21,14 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://api.ttapi.io"
 LONG_WAIT_MESSAGE = "⏳ Трек все еще создается, это занимает больше времени, чем обычно. Пожалуйста, подождите, я пришлю его, как только он будет готов."
 
+TEACHER_SCENARIO_TITLE = '👨‍🏫 Для тренера / учителя'
+TEACHER_LYRICS_INSTRUCTION = (
+    'Напиши текст официальной и трогательной песни-благодарности на «Вы» для тренера или учителя. '
+    'Включи слова благодарности за вложенные усилия, терпение, поддержку и знания. '
+    'Используй имя и детали, которые ввел пользователь. Стиль: элегантный поп или баллада. '
+    'Во всех обращениях к получателю используй Вы/Вас/Ваш, не переходи на ты.'
+)
+
 
 def build_song_request(details: str, scenario_title: str, audio_format: str, style: str | None = None) -> tuple[str, str, str]:
     if audio_format not in {'fun', 'gift'} or not details.strip():
@@ -44,6 +52,13 @@ def build_song_request(details: str, scenario_title: str, audio_format: str, sty
         tags += ', New Year, Russian vocals, ' + ('playful, happiness and gifts, short song, 30-40 seconds' if audio_format == 'fun' else
                                                 'heartfelt family memories and wishes, 2-3 minutes')
 
+    if scenario_title == TEACHER_SCENARIO_TITLE:
+        chorus = 'Спасибо Вам за знания и труд,\nЗа веру в нас, терпение, поддержку.'
+        prompt = (f'[Verse 1]\nВаш труд оставит в сердце добрый свет,\nИ благодарность бережно хранится.\n'
+                  f'[Chorus]\n{chorus}\n[Verse 2]\n{details.strip()}\nВаш пример поможет нам стремиться.\n'
+                  f'[Chorus]\n{chorus}\n[Bridge]\nПусть к Вам вернётся радость добрых дел.\n[Chorus]\n{chorus}')
+        tags = str(style or 'elegant pop ballad') + ', formal respectful Russian vocals, gratitude, '
+        tags += 'short song, 30 seconds' if audio_format == 'fun' else 'touching ballad, 2-3 minutes'
     if len(prompt) > 5000 or len(tags) > 1000:
         raise ValueError('Слишком много деталей для TTAPI.')
     return prompt, tags, f"{scenario_title}: {details.split(',')[0]}"[:80]
@@ -89,12 +104,17 @@ async def write_song_lyrics(notes: str, tags: str, title: str) -> str:
     settings = Config.from_env()
     if not settings.image_api_key:
         raise AudioNotConfigured('Не настроена текстовая модель для стихов.')
+    instruction = LYRICS_SYSTEM_PROMPT
+    if title.startswith(TEACHER_SCENARIO_TITLE + ':'):
+        instruction += ' ' + TEACHER_LYRICS_INSTRUCTION
+        if '30 seconds' in tags:
+            instruction += ' Длина около 30 секунд: по 1–2 короткие строки в секции.'
     try:
         async with httpx.AsyncClient(proxy=settings.openai_proxy_url, timeout=60, trust_env=False) as http_client:
             async with AsyncOpenAI(api_key=settings.image_api_key, base_url='https://api.openai.com/v1',
                                    http_client=http_client, max_retries=0) as client:
                 result = await client.chat.completions.create(model='gpt-4o-mini', temperature=0.7,
-                    messages=[{'role': 'system', 'content': LYRICS_SYSTEM_PROMPT},
+                    messages=[{'role': 'system', 'content': instruction},
                               {'role': 'user', 'content': json.dumps({'details': notes, 'style': tags, 'title_for_context_only': title}, ensure_ascii=False)}])
     except Exception as exc:
         raise AudioServiceError('Не удалось написать стихи.') from exc

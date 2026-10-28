@@ -3397,7 +3397,7 @@ async def test_gift_scenario_menu_keeps_order_and_clears_old_data(credit_db):
     buttons = event.send.await_args.kwargs['attachments'][0].payload.buttons
     assert [row[0].payload for row in buttons] == [
         'gift_scen_bday', 'gift_scen_anniv', 'gift_scen_parents', 'gift_scen_child',
-        'gift_scen_friend', 'gift_scen_custom', 'audio_gift_ny', 'audio_tariff_gift',
+        'gift_scen_friend', 'gift_scen_custom', 'audio_gift_ny', 'audio_gift_teacher', 'audio_tariff_gift',
     ]
     assert await context.get_state() == PosterStates.waiting_for_mode
     assert await context.get_data() == {}
@@ -4459,7 +4459,7 @@ async def test_static_card_video_upsells_keep_source_and_do_not_generate(credit_
     rows = first_reply.kwargs['attachments'][0].payload.buttons
     assert [row[0].payload for row in rows[:-1]] == [
         'video_song:audio_fun_boss', 'video_song:audio_fun_friend', 'video_song:audio_fun_cat',
-        'video_song:audio_fun_student', 'video_song:audio_fun_universal', 'video_song:audio_fun_meme', 'video_song:audio_fun_ny']
+        'video_song:audio_fun_student', 'video_song:audio_fun_universal', 'video_song:audio_fun_meme', 'video_song:audio_fun_ny', 'audio_video_teacher']
     assert all(row[0].type == 'callback' for row in rows)
     data = await context.get_data()
     assert data['video_source_image'] == 'https://cdn.example/card.png'
@@ -4969,3 +4969,214 @@ async def test_cartoon_cancel_during_avatar_generation_does_not_restore_cleared_
     assert await context.get_state() == PosterStates.waiting_for_mode
     assert await context.get_data() == {}
     assert not any(call.args and call.args[0] == 'Ваш мульт-аватар готов! Подходит?' for call in event.message.answer.await_args_list)
+
+
+TEACHER_TEST_LYRICS = '[Verse 1]\nВаш труд согревает сердца\n[Chorus]\nСпасибо Вам\n[Verse 2]\nИрина Петровна, Вы дарите знания\n[Chorus]\nСпасибо Вам\n[Bridge]\nЗа терпение и поддержку\n[Chorus]\nСпасибо Вам'
+
+
+async def prepare_teacher_video(router, context, entry):
+    if entry == 'cat_video':
+        await dispatch_callback(router, callback_event(entry), context)
+        await dispatch_callback(router, callback_event('video_style:mode_ny'), context)
+        await call_handler(router, 'collect_photo', photo_event(), context)
+        await call_handler(router, 'collect_card_text', message_event('С праздником, Ирина Петровна!'), context)
+    else:
+        await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png',
+                                  photo={'url': 'https://photos.example.com/source.png'}, card_text='С праздником, Ирина Петровна!')
+        await dispatch_callback(router, callback_event(entry), context)
+
+
+@pytest.mark.parametrize('entry,price', [('cat_video', 299), ('upsell_animate', 199), ('upsell_video', 249)])
+@pytest.mark.parametrize('admin', [False, True])
+async def test_video_teacher_collects_details_creates_formal_text_and_keeps_card_price(credit_db, entry, price, admin):
+    writer = AsyncMock(return_value=TEACHER_TEST_LYRICS)
+    video = AsyncMock(return_value='Тестовое видео готово')
+    router = create_router(admin_user_id=456 if admin else 999, lyric_writer=writer, video_generator=video)
+    context = await ready_context()
+    await prepare_teacher_video(router, context, entry)
+    original = await context.get_data()
+    chosen = callback_event('audio_video_teacher')
+    await dispatch_callback(router, chosen, context)
+    assert chosen.send.await_args.args[0] == 'Напишите имя тренера/учителя, вид спорта или предмет, и одно качество или воспоминание (например: «Ирина Петровна, математика, строгая но справедливая»).'
+    assert await context.get_state() == PosterStates.waiting_for_video_teacher_details
+    assert 'payform' not in str(chosen.send.await_args_list)
+    event = message_event('Ирина Петровна, математика, строгая но справедливая')
+    await call_handler(router, 'echo', event, context)
+    writer.assert_awaited_once()
+    notes, tags, title = writer.await_args.args
+    assert 'Ирина Петровна' in notes and '30 seconds' in tags and 'elegant pop ballad' in tags
+    data = await context.get_data()
+    assert data['photo'] == original['photo'] and data['card_text'] == original['card_text']
+    assert data['video_amount_kopecks'] == price * 100 and data['video_product'] == original['video_product']
+    assert data['video_song_lyrics'] == TEACHER_TEST_LYRICS and data['video_song_scenario'] == 'audio_video_teacher'
+    assert any(call.args and TEACHER_TEST_LYRICS in call.args[0] for call in event.message.answer.await_args_list)
+    if admin:
+        video.assert_awaited_once()
+        assert video.await_args.args[0]['video_song_lyrics'] == TEACHER_TEST_LYRICS
+        assert 'payform' not in str(event.message.answer.await_args_list)
+    else:
+        video.assert_not_awaited()
+        pay = event.message.answer.await_args.kwargs['attachments'][0].payload.buttons[0][0]
+        assert f'{price} ₽' in pay.text and pay.url == 'https://link.payform.ru/'
+    handlers.generate_song.assert_not_awaited()
+
+
+async def test_gift_teacher_uses_formal_prompt_and_existing_paid_gift_preview(credit_db):
+    writer = AsyncMock(return_value=TEACHER_TEST_LYRICS)
+    router = create_router(lyric_writer=writer)
+    context = await ready_context()
+    selected = callback_event('audio_gift_teacher')
+    await dispatch_callback(router, selected, context)
+    assert selected.send.await_args.args[0] == handlers.TEACHER_DETAILS_PROMPT
+    assert await context.get_state() == PosterStates.waiting_for_gift_teacher
+    assert (await context.get_data())['gift_scenario'] == 'teacher'
+    await call_handler(router, 'echo', message_event('Ирина Петровна, математика, поддерживает учеников'), context)
+    data = await context.get_data()
+    saved = await credit_db.get_audio_order(data['audio_checkout_id'])
+    assert saved['scenario'] == 'teacher' and saved['amount_kopecks'] == 49000 and saved['preview_delivered'] == 1
+    assert '2-3 minutes' in saved['tags'] and 'elegant pop ballad' in saved['tags']
+    assert writer.await_args.args[2].startswith(handlers.TEACHER_SCENARIO_TITLE + ':')
+    assert handlers.generate_song.await_args.args[0] == TEACHER_TEST_LYRICS
+    assert (await credit_db.get_all_counters())['audio_scen_teacher_gift'] == 1
+
+
+@pytest.mark.parametrize('entry', ['cat_video', 'upsell_animate', 'upsell_video'])
+async def test_video_menus_include_all_eight_required_scenarios(entry):
+    router, context = create_router(), await ready_context()
+    await prepare_teacher_video(router, context, entry)
+    # Повторяем показ без очистки выбранного шаблона.
+    if entry == 'cat_video':
+        event = message_event('С праздником, Ирина!')
+        await context.set_state(PosterStates.waiting_for_card_text)
+        await call_handler(router, 'collect_card_text', event, context)
+        markup = event.message.answer.await_args.kwargs['attachments'][0]
+    else:
+        event = callback_event(entry)
+        await dispatch_callback(router, event, context)
+        markup = event.send.await_args.kwargs['attachments'][0]
+    buttons = [row[0] for row in markup.payload.buttons]
+    expected = ['🎤 Начальник года', '💖 Лучшая подруга', '🐱 Гимн кота', '🎓 Вечный студент',
+                '⏰ Поздравление на бегу', '🌀 Абсурдный мем', '🎄 Новогодняя', '👨‍🏫 Для тренера / учителя']
+    assert all(label in [button.text for button in buttons] for label in expected)
+    assert next(button for button in buttons if button.text == expected[-1]).payload == 'audio_video_teacher'
+
+
+async def test_teacher_video_failure_is_visible_and_preserves_inputs_for_retry(credit_db, caplog):
+    writer = AsyncMock(side_effect=RuntimeError('LLM unavailable'))
+    router = create_router(lyric_writer=writer)
+    context = await ready_context()
+    await prepare_teacher_video(router, context, 'upsell_video')
+    await dispatch_callback(router, callback_event('audio_video_teacher'), context)
+    event = message_event('Ирина Петровна, математика')
+    await call_handler(router, 'echo', event, context)
+    assert await context.get_state() == PosterStates.waiting_for_video_teacher_details
+    assert (await context.get_data())['video_amount_kopecks'] == 24900
+    assert (await context.get_data())['last_image_url'] == 'https://cdn.example/card.png'
+    assert any(record.exc_info for record in caplog.records)
+    assert 'Не удалось создать текст песни' in event.message.answer.await_args.args[0]
+    assert 'payform' not in str(event.message.answer.await_args_list)
+
+
+async def test_teacher_and_newyear_video_interest_counters_exclude_admin(credit_db):
+    router = create_router(admin_user_id=999)
+    for actor in (456, 999):
+        context = await ready_context()
+        async def click(payload):
+            event = callback_event(payload)
+            event.get_ids = lambda: (123, actor)
+            await dispatch_callback(router, event, context)
+        await click('audio_gift_teacher')
+        await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png')
+        await click('upsell_video')
+        await click('audio_video_teacher')
+        await click('upsell_video')
+        await click('video_song:audio_fun_ny')
+    counters = await credit_db.get_all_counters()
+    for name in ('audio_scen_teacher_gift', 'audio_scen_teacher_video', 'audio_scen_ny_video'):
+        assert counters[name] == 2
+        assert (await credit_db.get_all_counters(admin_id=999))[name] == 1
+    event = message_event('/stats')
+    event.get_ids = lambda: (123, 999)
+    await call_handler(router, 'stats', event)
+    text = event.message.answer.await_args.args[0]
+    gift = text.split('Подарочный формат):\n', 1)[1].split('Интерес к Аудиопесням (для видео)', 1)[0]
+    video = text.split('Интерес к Аудиопесням (для видео):\n', 1)[1].split('Интерес к Мульт-услугам', 1)[0]
+    assert '- 👨‍🏫 Для тренера / учителя: 1' in gift
+    assert '- 👨‍🏫 Для тренера / учителя: 1' in video and '- 🎄 Новогодняя: 1' in video
+
+
+async def test_switching_video_teacher_to_newyear_clears_teacher_lyrics():
+    router = create_router(lyric_writer=AsyncMock(return_value=TEACHER_TEST_LYRICS))
+    context = await ready_context()
+    await prepare_teacher_video(router, context, 'upsell_video')
+    await dispatch_callback(router, callback_event('audio_video_teacher'), context)
+    await call_handler(router, 'echo', message_event('Ирина Петровна, математика'), context)
+    assert (await context.get_data())['video_song_lyrics']
+    await dispatch_callback(router, callback_event('video_song:audio_fun_ny'), context)
+    data = await context.get_data()
+    assert data['video_song_scenario'] == 'audio_fun_ny'
+    assert data['video_song_lyrics'] is None and data['video_teacher_details'] is None
+    assert data['video_amount_kopecks'] == 24900 and data['last_image_url'] == 'https://cdn.example/card.png'
+
+
+async def test_video_teacher_real_dispatcher_routes_details_and_cancel_before_state_handler(credit_db, monkeypatch, event_replies):
+    from maxapi import Dispatcher
+    from maxapi.context.isolation import SimpleEventIsolation
+    from maxapi.types import MessageCallback, MessageCreated, User
+    monkeypatch.setattr(handlers, '_reply', event_replies)
+    writer = AsyncMock(return_value=TEACHER_TEST_LYRICS)
+    router = create_router(lyric_writer=writer)
+    dp = Dispatcher(storage=MemoryContext, event_isolation=SimpleEventIsolation())
+    dp.include_routers(router)
+    bot = SimpleNamespace(me=User(user_id=999, first_name='Bot', is_bot=True),
+                          send_message=AsyncMock(return_value=object()), send_callback=AsyncMock())
+    user = {'user_id': 456, 'first_name': 'Test', 'is_bot': False}
+    def message(text=None, sender=None):
+        return {'sender': sender or user, 'recipient': {'chat_id': 123, 'chat_type': 'dialog'},
+                'timestamp': 1, 'body': {'mid': 'teacher-test', 'seq': 1, 'text': text}}
+    async def click(payload):
+        await dp.handle(MessageCallback(timestamp=1, bot=bot, message=message(sender=bot.me.model_dump()),
+            callback={'timestamp': 1, 'callback_id': 'teacher', 'payload': payload, 'user': user}))
+    try:
+        context = dp.fsm.get_context(chat_id=123, user_id=456)
+        for text in ('/cancel', 'Ирина Петровна, математика'):
+            await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png')
+            await click('upsell_animate')
+            await click('audio_video_teacher')
+            assert await context.get_state() == PosterStates.waiting_for_video_teacher_details
+            await dp.handle(MessageCreated(timestamp=2, bot=bot, message=message(text)))
+            if text == '/cancel':
+                assert await context.get_data() == {}
+                writer.assert_not_awaited()
+            else:
+                assert await context.get_state() == PosterStates.waiting_for_video_payment
+                assert (await context.get_data())['video_song_lyrics'] == TEACHER_TEST_LYRICS
+                assert '199 ₽' in bot.send_message.await_args.kwargs['text']
+    finally:
+        await dp.shutdown()
+
+
+@pytest.mark.parametrize('action', ['cancel', 'reopen'])
+async def test_late_teacher_lyrics_do_not_overwrite_cancelled_or_reopened_menu(action):
+    import asyncio
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def writer(notes, tags, title):
+        entered.set()
+        await release.wait()
+        return TEACHER_TEST_LYRICS
+    router, context = create_router(lyric_writer=writer), await ready_context()
+    await prepare_teacher_video(router, context, 'upsell_video')
+    await dispatch_callback(router, callback_event('audio_video_teacher'), context)
+    event = message_event('Ирина Петровна, математика')
+    task = asyncio.create_task(call_handler(router, 'echo', event, context))
+    try:
+        await entered.wait()
+        if action == 'cancel':
+            await call_handler(router, 'cancel', message_event('/cancel'), context)
+        else:
+            await dispatch_callback(router, callback_event('upsell_video'), context)
+    finally:
+        release.set()
+        await task
+    assert not any(call.args and TEACHER_TEST_LYRICS in call.args[0] for call in event.message.answer.await_args_list)
+    assert await context.get_state() == (PosterStates.waiting_for_mode if action == 'cancel' else PosterStates.waiting_for_video_song)

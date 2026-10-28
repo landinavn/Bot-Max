@@ -737,3 +737,13 @@ async def test_pending_video_adds_delivery_cache_to_requested_legacy_schema(cred
     await credit_db.init_db()
     jobs = await credit_db.get_all_pending_videos()
     assert jobs[0]['user_id'] == 123 and jobs[0]['result_url'] is None
+
+
+async def test_pending_video_style_survives_restart_and_participates_in_deduplication(credit_db):
+    avatar, song = 'https://images.example/a.png', 'https://audio.example/a.mp3'
+    ny = await credit_db.save_pending_video(123, avatar, song, mode='mode_ny')
+    birthday = await credit_db.save_pending_video(123, avatar, song, mode='mode_bday_young')
+    assert ny != birthday
+    assert await credit_db.save_pending_video(123, avatar, song, mode='mode_ny') == ny
+    await credit_db.init_db()
+    assert [(job['id'], job['mode']) for job in await credit_db.get_all_pending_videos()] == [(ny, 'mode_ny'), (birthday, 'mode_bday_young')]

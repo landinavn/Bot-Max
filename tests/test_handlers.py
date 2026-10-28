@@ -5419,7 +5419,7 @@ async def test_default_cartoon_generator_uses_real_piapi_chain(credit_db, monkey
         assert post.call_count == get.call_count == 1
         payload = json.loads(post.calls[0].request.content)
         assert payload['input'] == {'image_url': 'https://cdn.example/avatar.png',
-            'prompt': 'The character is smiling and blinking naturally', 'version': '3.0-turbo', 'mode': 'std', 'duration': 5, 'enable_audio': False}
+            'prompt': video_service.build_video_prompt('mode_ny'), 'version': '3.0-turbo', 'mode': 'std', 'duration': 5, 'enable_audio': False}
         assert post.calls[0].request.headers['X-API-Key'] == get.calls[0].request.headers['X-API-Key'] == 'piapi-test-key'
     assert 'https://video.example/kling.mp4' in event.send.await_args.args[0]
     button = event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0]
@@ -5462,7 +5462,7 @@ async def test_direct_video_generates_clean_postcard_before_piapi(credit_db, pia
     await dispatch_callback_and_phrase(router, callback_event('video_song:audio_fun_ny'), context)
     kwargs = {'theme_info': 'Ирина Петровна, математика'} if mode == 'mode_teacher' else {}
     card.assert_awaited_once_with('https://cdn.example/source.png', mode, 'Спасибо!', **kwargs)
-    piapi_animation.assert_awaited_once_with('https://cdn.example/clean-card.png')
+    piapi_animation.assert_awaited_once_with('https://cdn.example/clean-card.png', mode=mode, people_count=1)
     assert (await context.get_data())['video_source_image'] == 'https://cdn.example/clean-card.png'
 
 
@@ -5507,7 +5507,7 @@ async def test_piapi_failure_is_not_replaced_with_test_link(credit_db, piapi_ani
 async def test_cancel_during_piapi_does_not_restore_old_card_flow(credit_db, piapi_animation):
     import asyncio
     entered, release = asyncio.Event(), asyncio.Event()
-    async def animate(*args):
+    async def animate(*args, **kwargs):
         entered.set()
         await release.wait()
         return 'https://video.example/late.mp4'
@@ -5620,7 +5620,7 @@ async def test_process_pending_video_uses_real_piapi_adapter_without_song_as_pro
     await credit_db.save_pending_video(123, 'https://images.example/a.png', 'https://audio.example/a.mp3')
     event = message_event('/process_pending_videos')
     await call_handler(create_router(admin_user_id=456), 'process_pending_videos', event)
-    piapi_animation.assert_awaited_once_with('https://images.example/a.png')
+    piapi_animation.assert_awaited_once_with('https://images.example/a.png', mode='')
     assert await credit_db.get_all_pending_videos() == []
 
 
@@ -5699,7 +5699,7 @@ async def test_video_result_delivers_merged_file_and_real_ttapi_song(credit_db, 
     await dispatch_callback_and_phrase(router, event, context)
     handlers.generate_song.assert_awaited_once()
     assert 'Новогодняя' in handlers.generate_song.await_args.args[2]
-    piapi_animation.assert_awaited_once_with(image_url)
+    piapi_animation.assert_awaited_once_with(image_url, mode='mode_ny', people_count=1)
     merger.assert_awaited_once_with('https://video.example/animated.mp4', 'https://audio.example/1.mp3')
     assert 'https://cdn.example/final-with-vocals.mp4' in event.send.await_args.args[0]
     assert event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0].url == 'https://cdn.example/final-with-vocals.mp4'
@@ -5967,3 +5967,47 @@ async def test_coach_video_card_keeps_dynamic_music_style_even_for_newyear_song(
     assert 'Новогодняя' in title and greeting in notes
     assert all(word in notes.lower() for word in ('победа', 'сила', 'команда', 'вперед'))
     assert writer.await_args.kwargs == {'preserve_chorus': False}
+
+
+@pytest.mark.parametrize('count', [5, 6])
+async def test_final_card_count_and_mode_reach_real_kling_request(credit_db, monkeypatch, count):
+    import json
+    import respx
+    import video_service
+    counter = AsyncMock(return_value=count)
+    monkeypatch.setattr(handlers, 'count_people_in_photo', counter)
+    monkeypatch.setattr(handlers, 'generate_video_from_avatar', video_service.generate_video_from_avatar)
+    monkeypatch.setattr(video_service.Config, 'from_env', lambda: SimpleNamespace(piapi_key='test-key'))
+    monkeypatch.setattr(video_service.asyncio, 'sleep', AsyncMock())
+    router, context = create_router(admin_user_id=456), await ready_context()
+    await context.update_data(mode='mode_bday_old', last_image_url='https://cdn.example/final-card.png')
+    await dispatch_callback(router, callback_event('upsell_video'), context)
+    with respx.mock:
+        post = respx.post(video_service.TASK_URL).respond(200, json={'data':{'task_id':'final-card'}})
+        respx.get(video_service.TASK_URL + '/final-card').respond(200, json={'data':{'status':'completed','output':{'video':'https://video.example/final-card.mp4'}}})
+        await dispatch_callback_and_phrase(router, callback_event('video_song:audio_fun_ny'), context)
+        prompt = json.loads(post.calls[0].request.content)['input']['prompt']
+    counter.assert_awaited_once_with('https://cdn.example/final-card.png')
+    assert prompt == video_service.build_video_prompt('mode_bday_old', count)
+    data = await context.get_data()
+    assert data['video_people_count'] == count and data['video_people_source'] == 'https://cdn.example/final-card.png'
+
+
+async def test_people_count_is_reused_after_failed_merge(credit_db, monkeypatch, piapi_animation):
+    counter = AsyncMock(return_value=9)
+    monkeypatch.setattr(handlers, 'count_people_in_photo', counter)
+    monkeypatch.setattr(handlers, 'merge_video_and_audio', AsyncMock(side_effect=[RuntimeError('ffmpeg failed'), 'https://cdn.example/final.mp4']))
+    router, context = create_router(admin_user_id=456), await ready_context()
+    await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/group.png')
+    await dispatch_callback(router, callback_event('upsell_video'), context)
+    await dispatch_callback_and_phrase(router, callback_event('video_song:audio_fun_ny'), context)
+    await dispatch_callback_and_phrase(router, callback_event('video_song:audio_fun_ny'), context)
+    counter.assert_awaited_once_with('https://cdn.example/group.png')
+    piapi_animation.assert_awaited_once_with('https://cdn.example/group.png', mode='mode_ny', people_count=9)
+
+
+async def test_pending_video_processor_uses_persisted_style(credit_db, piapi_animation):
+    await credit_db.save_pending_video(123, 'https://images.example/a.png', 'https://audio.example/a.mp3', mode='mode_goodmorning')
+    await call_handler(create_router(admin_user_id=456), 'process_pending_videos', message_event('/process_pending_videos'))
+    piapi_animation.assert_awaited_once_with('https://images.example/a.png', mode='mode_goodmorning')
+    assert await credit_db.get_all_pending_videos() == []

@@ -9,12 +9,39 @@ from urllib.parse import quote, urlsplit
 import httpx
 
 from config import Config
+from image_service import count_people_in_photo
 
 logger = logging.getLogger(__name__)
 TASK_URL = "https://api.piapi.ai/api/v1/task"
 POLL_INTERVAL = 15
 REQUEST_TIMEOUT = 30
-DEFAULT_ANIMATION_PROMPT = "The character is smiling and blinking naturally"
+DEFAULT_ANIMATION_PROMPT = (
+    "Subtle cinematic animation. The people in the photo are smiling warmly and blinking naturally. "
+    "Any string lights or garlands in the background are glowing softly. High quality, photorealistic."
+)
+
+
+CROWD_VIDEO_PROMPT = (
+    'Cinematic background animation only. The glowing lights shimmer, and there is a subtle camera zoom. '
+    'The people remain completely still like in a photograph. DO NOT animate faces or bodies.'
+)
+
+
+def build_video_prompt(mode: str, people_count: int = 0) -> str:
+    """Добавить только подходящие стилю эффекты; неизвестный стиль получает нейтральную анимацию."""
+    if people_count > 5:
+        return CROWD_VIDEO_PROMPT
+    normalized = (mode or '').lower()
+    prompt = DEFAULT_ANIMATION_PROMPT
+    scrapbook = 'scrapbook' in normalized or 'modern_card' in normalized
+    winter_scrapbook = scrapbook and any(season in normalized for season in ('winter', 'christmas', 'snow'))
+    if 'ny' in normalized or winter_scrapbook:
+        prompt += ' Snow is gently falling in the background.'
+    if 'bday' in normalized:
+        prompt += ' If there is a birthday cake, the candles are flickering gently.'
+    if normalized == 'mode_goodmorning':
+        prompt += ' If there is a coffee cup, warm steam is rising from it.'
+    return prompt
 
 
 class VideoServiceError(RuntimeError):
@@ -125,7 +152,14 @@ async def poll_video_task(task_id: str, timeout: int = 1200) -> str:
         raise TimeoutError(f"Таймаут ожидания PiAPI ({timeout} секунд), task_id={task_id}") from None
 
 
-async def generate_video_from_avatar(avatar_url: str, prompt: str = DEFAULT_ANIMATION_PROMPT) -> str:
+async def generate_video_from_avatar(avatar_url: str, prompt: str | None = None, *, mode: str = '', people_count: int | None = None) -> str:
     """Создать задачу по аватару и вернуть ссылку на готовое видео."""
-    task_id = await create_video_task(avatar_url, prompt)
+    if people_count is None:
+        people_count = await count_people_in_photo(avatar_url)
+    if not isinstance(people_count, int) or isinstance(people_count, bool) or people_count < 0:
+        raise ValueError('Некорректное количество людей на фото.')
+    video_prompt = build_video_prompt(mode, people_count) if prompt is None or people_count > 5 else prompt
+    logger.info('На фото найдено %s человек. Промпт для Kling: %s', people_count, video_prompt)
+    logger.info('Промпт для Kling (%s): %s', mode, video_prompt)
+    task_id = await create_video_task(avatar_url, video_prompt)
     return await poll_video_task(task_id)

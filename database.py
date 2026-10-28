@@ -76,13 +76,16 @@ async def init_db() -> None:
                 song_url TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'completed')),
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                result_url TEXT
+                result_url TEXT,
+                mode TEXT NOT NULL DEFAULT ''
             )"""
         )
         async with db.execute('PRAGMA table_info(pending_videos)') as cursor:
             pending_columns = {row[1] for row in await cursor.fetchall()}
         if 'result_url' not in pending_columns:
             await db.execute('ALTER TABLE pending_videos ADD COLUMN result_url TEXT')
+        if 'mode' not in pending_columns:
+            await db.execute("ALTER TABLE pending_videos ADD COLUMN mode TEXT NOT NULL DEFAULT ''")
         await db.execute(
             """CREATE TABLE IF NOT EXISTS audio_orders (
                 order_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL,
@@ -219,7 +222,7 @@ async def init_db() -> None:
         await db.commit()
 
 
-async def save_pending_video(user_id: int, avatar_url: str, song_url: str) -> int:
+async def save_pending_video(user_id: int, avatar_url: str, song_url: str, *, mode: str = '') -> int:
     """Сохранить данные до ответа клиенту; повторное нажатие не дублирует pending-заказ."""
     if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
         raise ValueError('Некорректный user_id видео.')
@@ -227,17 +230,19 @@ async def save_pending_video(user_id: int, avatar_url: str, song_url: str) -> in
         raise ValueError('Не задана HTTPS-ссылка на аватар.')
     if not isinstance(song_url, str):
         raise ValueError('Некорректная ссылка на песню.')
+    if not isinstance(mode, str):
+        raise ValueError('Некорректный стиль видео.')
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         await db.execute('BEGIN IMMEDIATE')
         async with db.execute(
-            "SELECT id FROM pending_videos WHERE user_id=? AND avatar_url=? AND song_url=? AND status='pending' ORDER BY id LIMIT 1",
-            (user_id, avatar_url, song_url),
+            "SELECT id FROM pending_videos WHERE user_id=? AND avatar_url=? AND song_url=? AND mode=? AND status='pending' ORDER BY id LIMIT 1",
+            (user_id, avatar_url, song_url, mode),
         ) as cursor:
             existing = await cursor.fetchone()
         if existing:
             return existing[0]
-        cursor = await db.execute('INSERT INTO pending_videos(user_id, avatar_url, song_url) VALUES (?, ?, ?)',
-                                  (user_id, avatar_url, song_url))
+        cursor = await db.execute('INSERT INTO pending_videos(user_id, avatar_url, song_url, mode) VALUES (?, ?, ?, ?)',
+                                  (user_id, avatar_url, song_url, mode))
         await db.commit()
         return cursor.lastrowid
 

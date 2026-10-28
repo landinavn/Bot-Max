@@ -1098,3 +1098,49 @@ async def test_role_card_requires_background_details_before_paid_image_request(m
     with pytest.raises(ValueError, match='имя и предмет или спорт'):
         await service.generate_postcards(PHOTO_URL, mode, 'Спасибо!', theme_info=info)
     generate.assert_not_awaited()
+
+
+@pytest.mark.parametrize('answer,expected', [('0',0), ('1',1), ('5',5), (' 6\n',6), ('100000',100000),
+    ('-1',0), ('5.5',0), ('6 people',0), ('I cannot count',0), ('',0), (None,0)])
+async def test_people_counter_returns_integer_or_zero(config, api, answer, expected):
+    import json
+    api.post('https://api.openai.com/v1/chat/completions', payload=correction_response(answer))
+    assert await service.count_people_in_photo(PHOTO_URL) == expected
+    request = post_requests(api)[0]
+    body = json.loads(request.content)
+    assert body['model'] == 'gpt-4o-mini'
+    assert body['messages'] == [{'role':'user','content':[
+        {'type':'text','text':"Count the number of people in this image. Return ONLY the number, nothing else. If you can't count, return 0."},
+        {'type':'image_url','image_url':{'url':PHOTO_URL,'detail':'auto'}},
+    ]}]
+    assert request.headers['Authorization'] == 'Bearer test-openai-key'
+    assert len(post_requests(api)) == 1
+
+
+async def test_people_counter_uses_configured_proxy_and_closes_client(config, api, monkeypatch):
+    settings = replace(config, openai_proxy_url='http://proxy.example:8888')
+    monkeypatch.setattr(service.Config, 'from_env', lambda: settings)
+    clients = []
+    original = httpx.AsyncClient.__init__
+    def init(client, *args, **kwargs):
+        clients.append((client, kwargs))
+        original(client, *args, **kwargs)
+    monkeypatch.setattr(httpx.AsyncClient, '__init__', init)
+    api.post('https://api.openai.com/v1/chat/completions', payload=correction_response('7'))
+    assert await service.count_people_in_photo(PHOTO_URL) == 7
+    client, kwargs = clients[0]
+    assert kwargs['proxy'] == settings.openai_proxy_url
+    assert kwargs['timeout'] == 60 and kwargs['trust_env'] is False
+    assert client.is_closed
+
+
+@pytest.mark.parametrize('failure', ['http', 'timeout', 'incomplete'])
+async def test_people_counter_failure_returns_zero_without_retry(config, api, failure):
+    if failure == 'http':
+        api.post('https://api.openai.com/v1/chat/completions', status=503, payload={'error':{'message':'unavailable'}})
+    elif failure == 'timeout':
+        api.post('https://api.openai.com/v1/chat/completions', exception=httpx.ReadTimeout('timeout'))
+    else:
+        api.post('https://api.openai.com/v1/chat/completions', payload=correction_response('6','length'))
+    assert await service.count_people_in_photo(PHOTO_URL) == 0
+    assert len(post_requests(api)) == 1

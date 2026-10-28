@@ -157,7 +157,8 @@ async def init_db() -> None:
             )"""
         )
         # Существующие сроки сохраняем; TIMESTAMP в SQLite также хранит Unix-секунды.
-        for column, definition in (("promo_expires_at", "TIMESTAMP"), ("promo_redeemed_at", "INTEGER")):
+        for column, definition in (("promo_expires_at", "TIMESTAMP"), ("promo_redeemed_at", "INTEGER"),
+                                   ("song_promo_expires_at", "TIMESTAMP")):
             if column not in columns:
                 await db.execute(f"ALTER TABLE users ADD COLUMN {column} {definition}")
         if "promo_campaign_id" not in columns:
@@ -659,13 +660,88 @@ async def get_shared_image(key: str) -> str | None:
             return row[0] if row else None
 
 
+SONG_PROMO_PRODUCT = 'Песня в подарок (Скидка 20%)'
+
+
+async def set_song_promo(user_id: int, hours=48) -> None:
+    if hours <= 0:
+        raise ValueError('Срок акции должен быть положительным.')
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        await db.execute('INSERT INTO users(user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING', (user_id,))
+        await db.execute('UPDATE users SET song_promo_expires_at = ? WHERE user_id = ?',
+                         (_now_ts() + int(hours * 3600), user_id))
+        await db.commit()
+
+
+async def check_song_promo(user_id: int) -> bool:
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        async with db.execute("""SELECT 1 FROM users WHERE user_id = ? AND song_promo_expires_at > ?
+            AND NOT EXISTS (SELECT 1 FROM audio_orders WHERE user_id = ? AND audio_format = 'gift' AND status = 'paid')""",
+                              (user_id, _now_ts(), user_id)) as cursor:
+            return await cursor.fetchone() is not None
+
+
+async def latest_gift_preview(user_id: int) -> dict | None:
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        async with db.execute("""SELECT order_id FROM audio_orders
+            WHERE user_id = ? AND audio_format = 'gift' AND status = 'pending' AND free_access = 0
+              AND preview_url IS NOT NULL AND failed = 0
+            ORDER BY created_at DESC, rowid DESC LIMIT 1""", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+    return await get_audio_order(row[0]) if row else None
+
+
+async def song_checkout_order(order_id: str) -> dict:
+    """Проверить FIRST заново; выданные счета неизменны, для новой цены отдельный заказ.
+
+    Готовые треки/превью переносятся без повторного обращения к TTAPI.
+    """
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        await db.execute('BEGIN IMMEDIATE')
+        db.row_factory = aiosqlite.Row
+        async with db.execute('SELECT * FROM audio_orders WHERE order_id = ?', (order_id,)) as cursor:
+            row = await cursor.fetchone()
+        if not row or row['audio_format'] != 'gift':
+            raise ValueError('Подарочный заказ не найден.')
+        order = dict(row)
+        target_id = order_id
+        if order['status'] != 'paid' and not order['free_access']:
+            async with db.execute("""SELECT 1 FROM users WHERE user_id = ? AND song_promo_expires_at > ?
+                AND NOT EXISTS (SELECT 1 FROM audio_orders WHERE user_id = ? AND audio_format = 'gift' AND status = 'paid')""",
+                                  (order['user_id'], _now_ts(), order['user_id'])) as cursor:
+                discount = await cursor.fetchone() is not None
+            amount = 39200 if discount else 49000
+            if order['amount_kopecks'] != amount:
+                if not order['preview_url'] or not order['tracks_json']:
+                    raise ValueError('Сначала необходимо создать превью.')
+                target_id = order_id.split('-songprice-')[0] + '-songprice-' + str(amount)
+                await db.execute("""INSERT INTO audio_orders
+                    (order_id,user_id,audio_format,scenario,details,style,prompt,tags,title,amount_kopecks,product_name,
+                     lyrics,tracks_json,preview_url,job_id,submit_started,preview_delivered)
+                    SELECT ?,user_id,audio_format,scenario,details,style,prompt,tags,title,?,?,
+                           lyrics,tracks_json,preview_url,job_id,submit_started,1
+                    FROM audio_orders WHERE order_id = ?
+                    ON CONFLICT(order_id) DO NOTHING""",
+                    (target_id, amount, SONG_PROMO_PRODUCT if discount else 'Песня в подарок', order_id))
+        await db.commit()
+    return await get_audio_order(target_id)
+
+
 async def create_audio_order(order_id: str, user_id: int, audio_format: str, scenario: str,
-                             details: str, style: str | None, prompt: str, tags: str, title: str) -> str:
+                             details: str, style: str | None, prompt: str, tags: str, title: str,
+                             *, song_discount: bool = False) -> str:
     if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0 or audio_format not in {'fun', 'gift'}:
         raise ValueError('Некорректный пользователь или аудиоформат.')
     if not scenario or not details.strip() or not prompt or len(prompt) > 5000 or len(tags) > 1000 or len(title) > 80:
         raise ValueError('Некорректные детали песни.')
     amount, product = (19900, 'Песня по фану') if audio_format == 'fun' else (49000, 'Песня в подарок')
+    if song_discount:
+        if audio_format != 'gift':
+            raise ValueError('FIRST действует только на подарочную песню.')
+        existing = await get_audio_order(order_id)
+        if existing is None and not await check_song_promo(user_id):
+            raise PromoUnavailableError('Скидка FIRST недоступна.')
+        amount, product = 39200, SONG_PROMO_PRODUCT
     values = (order_id, user_id, audio_format, scenario, details, style, prompt, tags, title, amount, product)
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         await db.execute('''INSERT INTO audio_orders
@@ -687,7 +763,7 @@ async def get_audio_order(order_id: str) -> dict | None:
     if row is None:
         return None
     order = dict(row)
-    order.update(credits=0, package_id='audio_' + order['audio_format'], order_type='audio')
+    order.update(credits=0, package_id=('audio_gift_first' if order['amount_kopecks'] == 39200 else 'audio_' + order['audio_format']), order_type='audio')
     return order
 
 

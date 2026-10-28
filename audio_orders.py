@@ -10,7 +10,7 @@ from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
 from audio_service import generate_song, wait_for_song, wait_for_song_with_progress, song_tracks, write_song_lyrics, make_protected_preview, AudioNotConfigured, SongFailed
 from database import (get_audio_order, update_audio_order, pending_audio_orders,
-                      claim_audio_order, reset_audio_workers)
+                      claim_audio_order, reset_audio_workers, song_checkout_order)
 
 logger = logging.getLogger(__name__)
 SUPPORT_URL = 'https://max.ru/u/f9LHodD0cOL0i7XGM4uyyUo-bFy4nt4Hqc-XMNmvGygT83X2wUkr6O7DRXo'
@@ -26,6 +26,7 @@ class PaidAudioWorker:
         self.payments, self.admin_user_id = payments, admin_user_id
 
     async def deliver_preview(self, order):
+        order = await song_checkout_order(order['order_id'])
         keyboard = InlineKeyboardBuilder().row(LinkButton(text='▶️ Послушать превью', url=order['preview_url']))
         unlocked = order['status'] == 'paid' or order['free_access']
         if unlocked:
@@ -41,8 +42,9 @@ class PaidAudioWorker:
                         order['prompt'], order['tags'], order['title'], order_id=order['order_id'])
                 except Exception:
                     logger.warning('Не удалось подготовить оплату превью %s.', order['order_id'])
-            keyboard.row(LinkButton(text='Оплатить 490 ₽ и получить полный трек', url=link) if link else
-                         CallbackButton(text='Оплатить 490 ₽ и получить полный трек', payload='audio_gift_checkout:' + order['order_id']))
+            label = f"Оплатить {order['amount_kopecks'] // 100} ₽ и получить полный трек"
+            keyboard.row(LinkButton(text=label, url=link) if link else
+                         CallbackButton(text=label, payload='audio_gift_checkout:' + order['order_id']))
         keyboard.row(CallbackButton(text='Главное меню', payload='back_to_main'))
         text = ('🎧 Полная песня уже доступна. Ниже — фрагмент и кнопка скачивания MP3.' if unlocked else
                 '🎧 Ваша песня готова! Послушайте фрагмент. Если всё нравится, оплатите доступ к полному MP3 без защиты, минусовке и тексту.')

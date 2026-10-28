@@ -306,3 +306,52 @@ async def test_worker_notifies_during_long_song_and_delivers_same_job(credit_db,
     assert saved['preview_delivered' if kind == 'gift' else 'delivered'] == 1
     assert saved['job_id'] == 'long-job'
     submit.assert_awaited_once()
+
+
+async def test_song_checkout_reprices_atomically_and_keeps_issued_invoices(credit_db, monkeypatch):
+    now = 1800000000
+    monkeypatch.setattr(credit_db, '_now_ts', lambda: now)
+    name = await order(credit_db, kind='gift')
+    tracks = json.dumps(RESULT['data']['musics'])
+    await credit_db.update_audio_order(name, tracks_json=tracks, lyrics='saved lyrics',
+                                      preview_url='https://preview.example/song.mp3', preview_delivered=1,
+                                      payment_link='https://pay.example/490')
+    await credit_db.set_song_promo(123)
+    candidates = await asyncio.gather(*(credit_db.song_checkout_order(name) for _ in range(5)))
+    discounted = candidates[0]
+    assert len({item['order_id'] for item in candidates}) == 1
+    assert discounted['amount_kopecks'] == 39200 and discounted['package_id'] == 'audio_gift_first'
+    assert discounted['tracks_json'] == tracks and discounted['lyrics'] == 'saved lyrics'
+    assert discounted['payment_link'] is None
+    assert (await credit_db.get_audio_order(name))['payment_link'] == 'https://pay.example/490'
+    now += 48 * 3600
+    full = await credit_db.song_checkout_order(discounted['order_id'])
+    assert full['amount_kopecks'] == 49000 and full['tracks_json'] == tracks
+    # Оплаченный ранее выданный счёт на 392 обрабатывается даже после окончания окна.
+    await credit_db.mark_audio_paid(discounted['order_id'], 'discount-payment')
+    submit = AsyncMock()
+    bot = SimpleNamespace(send_message=AsyncMock())
+    await PaidAudioWorker(bot, generator=submit).process(discounted['order_id'])
+    submit.assert_not_awaited()
+    assert (await credit_db.get_audio_order(discounted['order_id']))['delivered'] == 1
+    assert (await credit_db.get_user(123))['balance'] == 0
+
+
+async def test_background_gift_preview_offers_discount_without_charging_or_regenerating(credit_db):
+    await credit_db.set_song_promo(123)
+    name = await order(credit_db, kind='gift')
+    await credit_db.update_audio_order(name, preview_requested=1)
+    submit = AsyncMock(return_value='preview-job')
+    wait = AsyncMock(return_value=RESULT)
+    bot = SimpleNamespace(send_message=AsyncMock())
+    await PaidAudioWorker(bot, generator=submit, waiter=wait).process(name)
+    buttons = bot.send_message.await_args.kwargs['attachments'][0].payload.buttons
+    pay = buttons[1][0]
+    assert pay.text == 'Оплатить 392 ₽ и получить полный трек'
+    assert pay.payload.startswith('audio_gift_checkout:')
+    saved = await credit_db.get_audio_order(pay.payload.split(':', 1)[1])
+    assert saved['amount_kopecks'] == 39200 and saved['tracks_json']
+    assert 'https://audio.example/one.mp3' not in bot.send_message.await_args.kwargs['text']
+    assert (await credit_db.get_user(123))['total_purchases'] == 0
+    submit.assert_awaited_once()
+    wait.assert_awaited_once_with('preview-job')

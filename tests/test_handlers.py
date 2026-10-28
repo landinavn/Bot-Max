@@ -929,7 +929,13 @@ async def test_postcard_requires_custom_text_and_uses_shared_balance(credit_db, 
         postcard.assert_awaited_once_with("https://photos.example.com/source.png", mode, "Аня, будь счастлива!")
         assert (await credit_db.get_user(456))["balance"] == (balance if admin else balance - 1)
         assert await context.get_state() is None
+        offers = [call for call in event.message.answer.await_args_list if call.args and call.args[0] == handlers.SONG_UPSELL_TEXT]
+        assert len(offers) == 1
+        assert await credit_db.check_song_promo(456)
+        buttons = offers[0].kwargs['attachments'][0].payload.buttons
+        assert [row[0].payload for row in buttons] == ['upsell_song_discount', 'dismiss_upsell']
     else:
+        assert not await credit_db.check_song_promo(456)
         postcard.assert_not_awaited()
         assert event.message.answer.await_args.args == (NO_CREDITS_TEXT,)
         assert await context.get_state() == PosterStates.waiting_for_card_text
@@ -4198,3 +4204,66 @@ async def test_admin_long_audio_notifies_then_delivers_without_second_submit(cre
     assert sum(call.args[0] == LONG_WAIT_MESSAGE for call in event.send.await_args_list) == 1
     assert await context.get_state() == PosterStates.waiting_for_audio_result
     submit.assert_awaited_once()
+
+
+@pytest.mark.parametrize('active,price', [(True, 392), (False, 490)])
+async def test_song_upsell_checkout_uses_personal_order_and_current_promo(credit_db, active, price):
+    import json
+    await credit_db.create_audio_order('upsell-ready', 456, 'gift', 'bday', 'Аня', None, 'lyrics', 'pop', 'Для Ани')
+    await credit_db.update_audio_order('upsell-ready', preview_url='https://preview.example/song.mp3',
+                                     tracks_json=json.dumps(TT_RESULT['data']['musics']), preview_delivered=1)
+    if active:
+        await credit_db.set_song_promo(456)
+    payments = Mock(create_audio_payment_link=AsyncMock(return_value='https://pay.example/personal'))
+    event = callback_event('upsell_song_discount')
+    await dispatch_callback(create_router(payments=payments), event, await ready_context())
+    call = payments.create_audio_payment_link.await_args
+    saved = await credit_db.get_audio_order(call.kwargs['order_id'])
+    assert saved['user_id'] == 456 and saved['amount_kopecks'] == price * 100
+    assert saved['product_name'] == (credit_db.SONG_PROMO_PRODUCT if active else 'Песня в подарок')
+    assert event.send.await_args.args[0] == ('Отличный выбор! Переходите по ссылке для оплаты со скидкой:' if active else handlers.SONG_PROMO_EXPIRED_TEXT)
+    button = event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0]
+    assert button.type == 'link' and button.url == 'https://pay.example/personal'
+    assert str(price) in button.text
+
+
+@pytest.mark.parametrize('active', [True, False])
+async def test_song_upsell_without_song_collects_details_before_payment(credit_db, active):
+    if active:
+        await credit_db.set_song_promo(456)
+    context = await ready_context()
+    await context.update_data(photo='old photo', card_text='old text')
+    payments = Mock(create_audio_payment_link=AsyncMock())
+    event = callback_event('upsell_song_discount')
+    await dispatch_callback(create_router(payments=payments), event, context)
+    assert await context.get_data() == {}
+    assert await context.get_state() == PosterStates.waiting_for_mode
+    buttons = event.send.await_args.kwargs['attachments'][0].payload.buttons
+    assert buttons[0][0].payload == 'gift_scen_bday'
+    assert ('392' if active else '490') in event.send.await_args.args[0]
+    payments.create_audio_payment_link.assert_not_awaited()
+
+
+async def test_dismiss_song_upsell_preserves_current_fsm(credit_db):
+    context = await ready_context()
+    await context.update_data(photo='saved')
+    before_state = await context.get_state()
+    event = callback_event('dismiss_upsell')
+    await dispatch_callback(create_router(), event, context)
+    assert event.send.await_args.args[0] == 'Хорошо! Если надумаете, мы всегда здесь 😊'
+    assert await context.get_state() == before_state
+    assert await context.get_data() == {'photo': 'saved'}
+    assert not await credit_db.check_song_promo(456)
+
+
+async def test_failed_card_delivery_does_not_start_song_promotion(credit_db):
+    await credit_db.add_credits(456, 2)
+    context = await ready_context()
+    await context.update_data(mode='mode_ny')
+    router = create_router(postcard_generator=AsyncMock(return_value=['https://cdn.example/card.png']))
+    await call_handler(router, 'collect_photo', photo_event(), context)
+    event = message_event('С праздником!')
+    event.bot.send_message.side_effect = RuntimeError('MAX unavailable')
+    await call_handler(router, 'collect_card_text', event, context)
+    assert not await credit_db.check_song_promo(456)
+    assert not any(call.args and call.args[0] == handlers.SONG_UPSELL_TEXT for call in event.message.answer.await_args_list)

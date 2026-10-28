@@ -36,6 +36,7 @@ from database import (
     is_promo_active, PromoUnavailableError, get_users_by_activity, start_broadcast_promo,
     get_users_for_reminder, get_audio_order, create_audio_order, find_gift_preview_order,
     update_audio_order, grant_audio_admin_access, request_audio_regeneration,
+    set_song_promo, check_song_promo, song_checkout_order, latest_gift_preview,
 )
 from prodamus import PACKAGES, ProdamusPayments
 from audio_service import generate_song, wait_for_song, wait_for_song_with_progress, song_tracks, build_song_request, write_song_lyrics, AudioNotConfigured, SongFailed
@@ -222,6 +223,13 @@ PHOTO_MAIN_EXAMPLE_FILES = (
 PHOTO_FAMILY_EXAMPLE_FILES = (
     r"photo_fam_1.webp", r"photo_fam_2.webp", r"photo_fam_3.webp",
 )
+
+SONG_UPSELL_TEXT = (
+    'Красиво получилось? 😍 Кстати, эта открытка будет шикарно в паре с аудиопоздравлением!\n\n'
+    'Сейчас «Песня в подарок» стоит 490 ₽, но мы дарим вам скидку 20% на первый заказ по промокоду FIRST.\n\n'
+    'Забрать со скидкой? Скидка действует 48 часов!'
+)
+SONG_PROMO_EXPIRED_TEXT = 'К сожалению, 48 часов уже прошли. Вы можете приобрести песню по обычной цене 490 ₽.'
 
 CATEGORY_BUTTONS = (
     ("📸 Фотосессия", "cat_photo"),
@@ -855,6 +863,7 @@ def create_router(
                     variants=urls, batch_id=uuid4().hex[:12], sent_count=0,
                     new_batch_requested=False, share_prompt_sent=False, channel_invite_sent=False,
                     package_offer_pending=not is_admin and user is not None and user["balance"] == 0,
+                    song_upsell_sent=False,
                 )
             else:
                 await _reply(event, "Отправляю готовый плакат…")
@@ -878,6 +887,14 @@ def create_router(
                     last_image_batch_id=data["batch_id"],
                 )
             data = await context.get_data()
+            if is_postcard and not data.get('song_upsell_sent'):
+                await set_song_promo(credit_user_id)
+                if await check_song_promo(credit_user_id):
+                    await _reply(event, SONG_UPSELL_TEXT, attachments=[navigation_keyboard((
+                        ('🎁 Да, хочу песню со скидкой', 'upsell_song_discount'),
+                        ('Пока только открытки', 'dismiss_upsell'),
+                    ))])
+                await context.update_data(song_upsell_sent=True)
             if mode == "mode_vision" and not data.get("channel_invite_sent"):
                 keyboard = InlineKeyboardBuilder().row(
                     LinkButton(text="Перейти в канал", url="https://max.ru/se14596751_biz")
@@ -1418,8 +1435,16 @@ def create_router(
         existing_order = await get_audio_order(order_id)
         if existing_order and existing_order['status'] == 'paid':
             return order_id, None
-        if audio_format == 'gift' and (not existing_order or not existing_order['preview_url']):
-            raise ValueError('Сначала необходимо создать превью.')
+        if audio_format == 'gift':
+            if not existing_order or not existing_order['preview_url']:
+                raise ValueError('Сначала необходимо создать превью.')
+            existing_order = await song_checkout_order(order_id)
+            if existing_order['order_id'] != order_id:
+                order_id = existing_order['order_id']
+                await context.update_data(audio_checkout_id=order_id, audio_checkout_link=None)
+                data = await context.get_data()
+            if existing_order['status'] == 'paid' or existing_order['free_access']:
+                return order_id, None
         link = data.get('audio_checkout_link') or (existing_order['payment_link'] if existing_order else None)
         if not link:
             scenario = data['song_scenario' if audio_format == 'fun' else 'gift_scenario']
@@ -1503,7 +1528,8 @@ def create_router(
                         return
                     if (await context.get_data()).get('audio_checkout_id') != order_id:
                         return
-                    label = 'Оплатить 199 ₽ и получить 2 варианта' if audio_format == 'fun' else 'Оплатить 490 ₽ и получить полный трек'
+                    order = await get_audio_order(order_id)
+                    label = 'Оплатить 199 ₽ и получить 2 варианта' if audio_format == 'fun' else f"Оплатить {order['amount_kopecks'] // 100} ₽ и получить полный трек"
                     keyboard = InlineKeyboardBuilder().row(LinkButton(text=label, url=link)).row(
                         CallbackButton(text='⬅️ Назад', payload='audio_tariff_fun' if audio_format == 'fun' else 'gift_choose_scenario')).as_markup()
                     await _reply(event, f'💳 Для оплаты перейдите по ссылке ниже. После оплаты я автоматически пришлю песню.\nЗаказ: {order_id}', attachments=[keyboard])
@@ -1631,6 +1657,51 @@ def create_router(
         PaidAudioWorker.result_actions(keyboard, order)
         await _reply(event, url, attachments=[keyboard.as_markup()])
 
+    @router.message_callback(F.callback.payload == 'dismiss_upsell')
+    async def dismiss_song_upsell(event: MessageCallback):
+        await event.ack(notification='Хорошо!')
+        await _reply(event, 'Хорошо! Если надумаете, мы всегда здесь 😊')
+
+    async def send_gift_checkout_link(event, order, *, introductory_text=None):
+        order = await song_checkout_order(order['order_id'])
+        if order['status'] == 'paid' or order['free_access']:
+            await _reply(event, 'Доступ к полной песне уже открыт. Повторно платить не нужно.')
+            return
+        if payments is None:
+            await _reply(event, 'Оплата временно недоступна. Попробуйте позже.')
+            return
+        link = order['payment_link'] or await payments.create_audio_payment_link(
+            order['user_id'], 'gift', order['scenario'], order['details'], order['style'],
+            order['prompt'], order['tags'], order['title'], order_id=order['order_id'])
+        label = f"Оплатить {order['amount_kopecks'] // 100} ₽ и получить полный трек"
+        await _reply(event, introductory_text or 'Оплатите доступ к полной песне по ссылке ниже.',
+                     attachments=[InlineKeyboardBuilder().row(LinkButton(text=label, url=link)).as_markup()])
+
+    @router.message_callback(F.callback.payload == 'upsell_song_discount')
+    async def upsell_song_discount(event: MessageCallback, context: MemoryContext):
+        user_id = event.get_ids()[1]
+        if event.message is None or user_id is None:
+            await event.ack(notification='Отправьте /start, чтобы открыть меню.')
+            return
+        await event.ack(notification='Открываю подарок…')
+        active = await check_song_promo(user_id)
+        text = ('Отличный выбор! Переходите по ссылке для оплаты со скидкой:' if active else SONG_PROMO_EXPIRED_TEXT)
+        order = await latest_gift_preview(user_id)
+        if order:
+            try:
+                await send_gift_checkout_link(event, order, introductory_text=text)
+            except Exception:
+                logger.error('Не удалось подготовить оплату подарочной песни для %s.', user_id)
+                await _reply(event, 'Не удалось подготовить оплату. Попробуйте эту кнопку позже.')
+            return
+        # Без сценария и деталей оплачивать нечего: сохраняем обычный путь с превью.
+        await context.clear()
+        await context.set_state(PosterStates.waiting_for_mode)
+        buttons = [(label, payload) for payload, (label, _) in AUDIO_GIFT_SCENARIOS.items()]
+        await _reply(event, ('Скидка FIRST: песня за 392 ₽! ' if active else text + '\n\n') +
+                     'Сначала выберите сценарий и напишите детали песни. После превью я пришлю ссылку на оплату по действующей цене.',
+                     attachments=[navigation_keyboard((*buttons, ('⬅️ Назад', 'cat_audio')))])
+
     @router.message_callback(F.callback.payload.startswith('audio_gift_checkout:'))
     async def gift_preview_checkout(event: MessageCallback):
         order = await get_audio_order(event.callback.payload.removeprefix('audio_gift_checkout:'))
@@ -1645,11 +1716,7 @@ def create_router(
             return
         await event.ack(notification='Готовлю ссылку на оплату…')
         try:
-            link = order['payment_link'] or await payments.create_audio_payment_link(
-                order['user_id'],'gift',order['scenario'],order['details'],order['style'],
-                order['prompt'],order['tags'],order['title'],order_id=order['order_id'])
-            await _reply(event,'Оплатите доступ к полной песне по ссылке ниже.',
-                         attachments=[InlineKeyboardBuilder().row(LinkButton(text='Оплатить 490 ₽ и получить полный трек',url=link)).as_markup()])
+            await send_gift_checkout_link(event, order)
         except Exception:
             await _reply(event,'Не удалось подготовить оплату. Попробуйте эту кнопку позже.')
 

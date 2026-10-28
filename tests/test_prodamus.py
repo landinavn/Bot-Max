@@ -610,3 +610,26 @@ async def test_preview_worker_runs_without_payment_configuration_and_stops_clean
     assert started.is_set() and stopped.is_set()
     client.close_session.assert_awaited_once()
     dispatcher.shutdown.assert_awaited_once()
+
+
+async def test_discounted_gift_payment_validated_and_accounted_once_even_after_expiry(client, payments, credit_db, monkeypatch):
+    now = 1800000000
+    monkeypatch.setattr(credit_db, '_now_ts', lambda: now)
+    await credit_db.set_song_promo(456)
+    await credit_db.record_first_start(456, 'yandex_newyear')
+    await credit_db.create_audio_order('audio-test-gift-456', 456, 'gift', 'bday', 'Аня, любит горы',
+        'pop', '[Verse]\nАня', 'pop', 'Для Ани', song_discount=True)
+    data = await audio_notification(payments, 'gift')
+    assert data['sum'] == '392.00'
+    assert data['products'][0]['name'] == 'Песня в подарок (Скидка 20%)'
+    assert data['_param_package_id'] == 'audio_gift_first'
+    wrong = dict(data, sum='490.00')
+    assert (await post_notification(client, wrong)).status == 400
+    now += 49 * 3600
+    assert not await credit_db.check_song_promo(456)
+    for _ in range(2):
+        assert (await post_notification(client, data)).status == 200
+    user = await credit_db.get_user(456)
+    assert user['total_purchases'] == 1 and user['balance'] == 0
+    assert (await credit_db.get_all_counters())['buy_audio_gift'] == 1
+    assert (await credit_db.get_stats_by_source('yandex_newyear'))['total_revenue'] == 392

@@ -14,6 +14,7 @@ async def test_trial_is_atomic_under_concurrent_starts(credit_db):
         "first_start_source": None, "first_started_at": None,
         "is_active": 1, "days_active": 1, "last_active_at": None,
         "promo_expires_at": None, "promo_redeemed_at": None, "promo_campaign_id": None,
+        "song_promo_expires_at": None,
     }
 
 
@@ -643,3 +644,31 @@ async def test_empty_campaign_stats_are_zero(credit_db):
     assert await credit_db.get_stats_by_source('yandex_newyear') == {
         'total_users': 0, 'total_generated': 0, 'total_buyers': 0, 'total_revenue': 0,
     }
+
+
+async def test_song_promo_migration_expiration_and_first_gift_purchase(credit_db, monkeypatch):
+    now = 1800000000
+    monkeypatch.setattr(credit_db, '_now_ts', lambda: now)
+    assert not await credit_db.check_song_promo(456)
+    await credit_db.set_song_promo(456)
+    assert (await credit_db.get_user(456))['song_promo_expires_at'] == now + 48 * 3600
+    await credit_db.init_db()
+    assert await credit_db.check_song_promo(456)
+    now += 48 * 3600
+    assert not await credit_db.check_song_promo(456)
+    await credit_db.set_song_promo(456, hours=1)
+    assert await credit_db.check_song_promo(456)
+    await credit_db.create_audio_order('first-gift', 456, 'gift', 'bday', 'Аня', None, 'lyrics', 'pop', 'title', song_discount=True)
+    assert (await credit_db.get_audio_order('first-gift'))['amount_kopecks'] == 39200
+    await credit_db.mark_audio_paid('first-gift', 'provider-first')
+    await credit_db.set_song_promo(456)
+    assert not await credit_db.check_song_promo(456)
+    with pytest.raises(credit_db.PromoUnavailableError):
+        await credit_db.create_audio_order('second-gift', 456, 'gift', 'bday', 'Аня', None, 'lyrics', 'pop', 'title', song_discount=True)
+
+
+async def test_song_promo_cannot_discount_fun_or_unqualified_user(credit_db):
+    for kind, error in [('gift', credit_db.PromoUnavailableError), ('fun', ValueError)]:
+        with pytest.raises(error):
+            await credit_db.create_audio_order('invalid', 456, kind, 'bday', 'Аня', None, 'lyrics', 'pop', 'title', song_discount=True)
+    assert await credit_db.get_audio_order('invalid') is None

@@ -17,7 +17,7 @@ import aiohttp
 from yarl import URL
 
 from config import Config
-from database import create_payment_order, get_payment_order, create_audio_order, get_audio_order, update_audio_order
+from database import create_payment_order, get_payment_order, create_audio_order, get_audio_order, update_audio_order, SONG_PROMO_PRODUCT
 
 PACKAGES = {
     1: (9900, "1 генерация (Открытка)"),
@@ -198,7 +198,9 @@ class ProdamusPayments:
         self, user_id: int, audio_format: str, scenario: str, details: str, style: str | None,
         prompt: str, tags: str, title: str, *, order_id: str,
     ) -> str:
-        await create_audio_order(order_id, user_id, audio_format, scenario, details, style, prompt, tags, title)
+        existing = await get_audio_order(order_id)
+        await create_audio_order(order_id, user_id, audio_format, scenario, details, style, prompt, tags, title,
+                                 song_discount=bool(existing and existing['amount_kopecks'] == 39200))
         order = await get_audio_order(order_id)
         if order['status'] != 'pending':
             raise ValueError('Аудиозаказ уже оплачен.')
@@ -261,7 +263,8 @@ class ProdamusPayments:
         # Сумма уже сверена с сохранённым заказом выше: смена прайса не должна
         # блокировать оплату ссылки, выданной до изменения цены.
         if order.get('order_type') == 'audio':
-            expected = {'audio_fun': (19900, 'Песня по фану'), 'audio_gift': (49000, 'Песня в подарок')}
+            expected = {'audio_fun': (19900, 'Песня по фану'), 'audio_gift': (49000, 'Песня в подарок'),
+                        'audio_gift_first': (39200, SONG_PROMO_PRODUCT)}
             if expected.get(order['package_id']) != (order['amount_kopecks'], order['product_name']):
                 raise ValueError('Неизвестный аудиотариф.')
         elif order["credits"] not in PACKAGES or PACKAGES[order["credits"]][1] != order["product_name"]:

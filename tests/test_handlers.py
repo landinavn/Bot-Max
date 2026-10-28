@@ -4342,3 +4342,42 @@ async def test_metrika_http_failure_does_not_break_postcard_delivery(credit_db, 
     assert (await credit_db.get_user(456))['balance'] == 1
     assert 'Ошибка Метрики: HTTP 500' in caplog.text
     assert await context.get_state() is None
+
+
+@pytest.mark.parametrize('failure', ['build', 'database', 'notify'])
+async def test_gift_queue_failure_logs_traceback_and_allows_details_retry(credit_db, monkeypatch, caplog, failure):
+    context = await tt_context('gift')
+    await context.set_state(PosterStates.waiting_for_gift_bday)
+    event = message_event('Аня, любит горы')
+    if failure == 'build':
+        monkeypatch.setattr(handlers, 'build_song_request', Mock(return_value=('lyrics', None, 'title')))
+    elif failure == 'database':
+        monkeypatch.setattr(handlers, 'find_gift_preview_order', AsyncMock(side_effect=RuntimeError('queue database failure')))
+    else:
+        event.message.answer.side_effect = [RuntimeError('MAX progress failure'), object()]
+    await call_handler(create_router(), 'collect_gift_details', event, context)
+    assert any(r.exc_info and r.message == 'Критическая ошибка при запуске генерации песни:' for r in caplog.records)
+    assert await context.get_state() == PosterStates.waiting_for_gift_bday
+    assert 'Отправьте детали песни ещё раз' in event.message.answer.await_args.args[0]
+    if failure == 'build':
+        assert 'Стиль музыки не задан' in event.message.answer.await_args.args[0]
+
+
+async def test_gift_queue_then_worker_logs_actual_ttapi_start_and_all_arguments(credit_db, caplog):
+    from audio_orders import PaidAudioWorker
+    context = await tt_context('gift')
+    await context.set_state(PosterStates.waiting_for_gift_bday)
+    event = message_event('Аня, любит горы')
+    submit = AsyncMock(return_value='diagnostic-job')
+    wait = AsyncMock(return_value=TT_RESULT)
+    with caplog.at_level('INFO'):
+        await call_handler(create_router(), 'collect_gift_details', event, context)
+        order_id = (await context.get_data())['audio_checkout_id']
+        await PaidAudioWorker(event.bot, generator=submit, waiter=wait).process(order_id)
+    saved = await credit_db.get_audio_order(order_id)
+    submit.assert_awaited_once_with(saved['lyrics'], saved['tags'], saved['title'])
+    assert all(isinstance(arg, str) and arg.strip() for arg in submit.await_args.args)
+    assert 'поставлен в очередь для пользователя 456' in caplog.text
+    assert 'Запускаю audio_service.generate_song для пользователя 456' in caplog.text
+    assert 'job_id=diagnostic-job' in caplog.text
+    assert saved['preview_delivered'] == 1

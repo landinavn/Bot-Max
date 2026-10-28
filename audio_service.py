@@ -47,6 +47,18 @@ class SongFailed(AudioServiceError):
     pass
 
 
+class InvalidSongArguments(ValueError):
+    """Ошибка входных данных до отправки платного POST в TTAPI."""
+
+
+def validate_song_arguments(prompt, tags, title) -> None:
+    for value, name, limit in ((prompt, 'Текст песни', 5000), (tags, 'Стиль музыки', 1000), (title, 'Название песни', 80)):
+        if not isinstance(value, str) or not value.strip():
+            raise InvalidSongArguments(f'{name} не задан. Заполните данные песни заново.')
+        if len(value) > limit:
+            raise InvalidSongArguments(f'{name}: не более {limit} символов.')
+
+
 LYRICS_SYSTEM_PROMPT = (
     'Ты профессиональный автор персональных песен на русском языке. '
     'НЕ перечисляй факты и привычки в первом куплете. Начни песню с эмоционального или поэтического вступления '
@@ -156,10 +168,7 @@ async def _request(method: str, path: str, **kwargs) -> dict:
 
 
 async def generate_song(prompt: str, tags: str, title: str) -> str:
-    if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 5000:
-        raise ValueError("Текст песни должен содержать от 1 до 5000 символов.")
-    if not isinstance(tags, str) or len(tags) > 1000 or not isinstance(title, str) or len(title) > 80:
-        raise ValueError("Слишком длинные или некорректные tags/title.")
+    validate_song_arguments(prompt, tags, title)
     result = await _request("POST", "/suno/v1/music", json={
         "custom": True, "instrumental": False, "mv": "chirp-v6",
         "prompt": prompt, "title": title, "tags": tags, "audio_format": "mp3",

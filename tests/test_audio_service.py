@@ -326,9 +326,11 @@ def test_new_year_custom_style_keeps_duration_and_festive_theme():
 
 @pytest.mark.parametrize('kind,duration', [('fun', '30 seconds'), ('gift', '2-3 minutes')])
 def test_teacher_song_notes_are_formal_and_use_right_duration(kind, duration):
-    prompt, tags, title = service.build_song_request('Ирина Петровна, математика, строгая но справедливая', service.TEACHER_SCENARIO_TITLE, kind)
+    phrase = 'Иван, лучший тренер по футболу'
+    prompt, tags, title = service.build_song_request(phrase, service.TEACHER_SCENARIO_TITLE, kind)
     assert 'Спасибо Вам' in prompt and 'терпение' in prompt and 'поддержку' in prompt
-    assert 'Ирина Петровна' in prompt and 'математика' in prompt
+    choruses = re.findall(r'\[Chorus\]\n(.*?)(?=\n\[|$)', prompt, flags=re.S)
+    assert len(choruses) == 3 and all(phrase in chorus for chorus in choruses)
     assert 'elegant pop ballad' in tags and duration in tags
     assert not re.search(r'\b(ты|тебя|тобой)\b', prompt, flags=re.I)
     assert title.startswith(service.TEACHER_SCENARIO_TITLE + ':')
@@ -342,14 +344,16 @@ async def test_teacher_llm_system_prompt_demands_respectful_gratitude(monkeypatc
     api = respx.post('https://api.openai.com/v1/chat/completions').mock(return_value=httpx.Response(200, json={
         'id': 'teacher', 'object': 'chat.completion', 'created': 1, 'model': 'gpt-4o-mini',
         'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': text}}]}))
-    prompt, tags, title = service.build_song_request('Ирина Петровна, математика', service.TEACHER_SCENARIO_TITLE, kind)
+    prompt, tags, title = service.build_song_request('Иван, лучший тренер по футболу', service.TEACHER_SCENARIO_TITLE, kind)
     assert await service.write_song_lyrics(prompt, tags, title) == text
     body = json.loads(api.calls[0].request.content)
     system = body['messages'][0]['content']
     assert service.TEACHER_LYRICS_INSTRUCTION in system
     assert 'на «Вы»' in system and 'терпение, поддержку и знания' in system
     assert ('Длина около 30 секунд' in system) == (kind == 'fun')
-    assert 'Ирина Петровна' in body['messages'][1]['content']
+    assert 'Иван, лучший тренер по футболу' in body['messages'][1]['content']
+    assert 'основой каждого припева [Chorus]' in system
+    assert 'не заменяться общей благодарностью' in system
 
 
 @pytest.mark.parametrize('duration,expected_start', [(40, '00:00:20'), (25, '00:00:05')])

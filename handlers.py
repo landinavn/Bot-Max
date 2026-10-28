@@ -105,10 +105,11 @@ GENERATION_EVENTS = {
     "mode_coach": "gen_coach",
 }
 
+COACH_DETAILS_PROMPT = 'Напишите имя тренера, лучший тренер по .... (например: «Иван, лучший тренер по футболу»).'
 ROLE_CARD_FIELDS = {'mode_teacher': 'teacher_info', 'mode_coach': 'coach_info'}
 ROLE_CARD_QUESTIONS = {
     'mode_teacher': 'Напишите имя учителя и его предмет (например: «Ирина Петровна, математика»).',
-    'mode_coach': 'Напишите имя тренера и вид спорта (например: «Сергей Иванович, футбол»).',
+    'mode_coach': COACH_DETAILS_PROMPT,
 }
 
 
@@ -452,7 +453,7 @@ AUDIO_GIFT_TEXT = (
     "Если что-то пойдёт не так — бесплатно перегенерируем."
 )
 
-TEACHER_DETAILS_PROMPT = 'Напишите имя тренера/учителя, вид спорта или предмет, и одно качество или воспоминание (например: «Ирина Петровна, математика, строгая но справедливая»).'
+TEACHER_DETAILS_PROMPT = COACH_DETAILS_PROMPT
 
 AUDIO_GIFT_SCENARIOS = {
     "gift_scen_bday": ("🎂 День рождения", "Как зовут виновника торжества? Напишите 2-3 факта или привычки через запятую (например: любит горы, всегда поддерживает, обожает кофе)."),
@@ -1984,7 +1985,7 @@ def create_router(
             body = event.message.body
             details = (body.text or '').strip() if body else ''
             if not details:
-                await _reply(event, 'Напишите данные тренера или учителя текстом. /cancel — отмена.')
+                await _reply(event, TEACHER_DETAILS_PROMPT)
                 return
             try:
                 prompt, tags, title = build_song_request(details, TEACHER_SCENARIO_TITLE, 'fun')

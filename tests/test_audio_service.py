@@ -389,3 +389,23 @@ async def test_preview_seeks_into_vocals_instead_of_silent_intro(monkeypatch, tm
     pcm = array.array('h', subprocess.check_output(['ffmpeg','-v','error','-i',str(result),'-ss','1','-t','1','-f','s16le','-ac','1','-ar','8000','-']))
     assert max(abs(value) for value in pcm) > 2000
     storage.close.assert_called_once()
+
+
+@pytest.mark.parametrize('result', [
+    {'data': [{'audioUrl': 'https://cdn.example/song.mp3', 'lyrics': 'PRIVATE LYRICS'}]},
+    {'data': {'musics': [{'audio_url': 'https://cdn.example/song.mp3', 'prompt': 'PRIVATE LYRICS'}]}},
+    'https://cdn.example/song.mp3',
+])
+def test_song_audio_url_uses_only_valid_audio_fields(result):
+    assert service.song_audio_url(result) == 'https://cdn.example/song.mp3'
+
+
+@pytest.mark.parametrize('result', [
+    {'data': [{'lyrics': 'PRIVATE LYRICS', 'prompt': 'PRIVATE LYRICS'}]},
+    {'data': {'musics': [{'audioUrl': 'PRIVATE LYRICS'}]}},
+    'PRIVATE LYRICS',
+])
+def test_song_audio_url_never_falls_back_to_lyrics(result):
+    with pytest.raises(service.AudioServiceError) as error:
+        service.song_audio_url(result)
+    assert 'PRIVATE LYRICS' not in str(error.value)

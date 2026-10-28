@@ -4701,3 +4701,271 @@ async def test_new_year_checkout_keeps_scenario_format_and_regular_price(credit_
     assert saved['scenario'] == 'ny' and saved['audio_format'] == kind and saved['amount_kopecks'] == price
     assert duration in saved['tags'] and 'С Новым годом' in saved['prompt']
     assert saved['status'] == 'pending'
+
+
+def cartoon_photo(url='https://photos.example.com/first.png'):
+    event = photo_event()
+    event.message.body.attachments[0].payload = PhotoAttachmentPayload(photo_id=1, token='cartoon-photo', url=url)
+    return event
+
+
+async def start_cartoon(router, context, entry='cat_cartoon', mode='mode_ny'):
+    await dispatch_callback(router, callback_event(entry), context)
+    await dispatch_callback(router, callback_event('cartoon_style:' + mode), context)
+    assert await context.get_state() == PosterStates.waiting_for_avatar_photo
+
+
+async def test_cartoon_main_menu_order_and_names_are_exact():
+    buttons = handlers.main_keyboard().payload.buttons
+    assert [(button.text, button.payload) for row in buttons for button in row] == [
+        ('🎬 Ожившая открытка (Видео) — Новинка 🔥', 'cat_video'),
+        ('🎬 Мульт-открытка (10-15 сек) — Новинка 🔥', 'cat_cartoon'),
+        ('🎬 Мульт-поздравление (30 сек) — Новинка 🔥', 'cat_cartoon_long'),
+        ('📸 Нейрофотосессия', 'cat_photo'), ('🎵 Аудиопесни', 'cat_audio'), ('🎁 Открытки', 'cat_cards'),
+        ('🔮 Карта Желаний', 'cat_vision'), ('🧘 Медитации', 'cat_meditation'), ('🖼 Примеры', 'show_examples'), ('🆘 Помощь', 'show_help')]
+
+
+@pytest.mark.parametrize('entry,price,minutes', [('cat_cartoon', 890, '5-10'), ('cat_cartoon_long', 1690, '15-20')])
+@pytest.mark.parametrize('approve_second', [False, True])
+async def test_cartoon_avatars_approval_short_songs_and_regular_payment(credit_db, entry, price, minutes, approve_second):
+    await credit_db.grant_free_trial(456)
+    avatar = AsyncMock(side_effect=['https://cdn.example/avatar1.png', 'https://cdn.example/avatar2.png'])
+    video = AsyncMock()
+    router = create_router(avatar_generator=avatar, cartoon_video_generator=video, admin_user_id=999)
+    context = await ready_context()
+    await start_cartoon(router, context, entry, 'mode_modern_card')
+    first = cartoon_photo()
+    await call_handler(router, 'echo', first, context)
+    assert await context.get_state() == PosterStates.waiting_for_avatar_review
+    markup = first.message.answer.await_args.kwargs['attachments']
+    assert len(markup) == 2  # одно изображение и одна клавиатура
+    assert [row[0].payload for row in markup[1].payload.buttons] == ['avatar_ok_1', 'avatar_bad_1']
+    attempt = 1
+    if approve_second:
+        await dispatch_callback(router, callback_event('avatar_bad_1'), context)
+        assert await context.get_state() == PosterStates.waiting_for_avatar_photo
+        await call_handler(router, 'echo', cartoon_photo(), context)
+        assert avatar.await_count == 1  # то же фото просим заменить
+        second = cartoon_photo('https://photos.example.com/second.png')
+        await call_handler(router, 'echo', second, context)
+        assert [row[0].payload for row in second.message.answer.await_args.kwargs['attachments'][1].payload.buttons] == ['avatar_ok_2', 'avatar_bad_2']
+        attempt = 2
+    accepted = callback_event(f'avatar_ok_{attempt}')
+    await dispatch_callback(router, accepted, context)
+    data = await context.get_data()
+    assert data['chosen_avatar'] == f'https://cdn.example/avatar{attempt}.png'
+    assert data['cartoon_mode'] == 'mode_modern_card'
+    assert accepted.send.await_args.args[0] == 'Теперь выберите песню для вашего мультфильма:'
+    song_buttons = accepted.send.await_args.kwargs['attachments'][0].payload.buttons
+    assert [row[0].payload for row in song_buttons[:-1]] == ['cartoon_song:' + key for key in handlers.AUDIO_FUN_SCENARIOS]
+    pay = callback_event('cartoon_song:audio_fun_ny')
+    await dispatch_callback(router, pay, context)
+    assert pay.send.await_args.args[0] == f'Отлично! Стоимость — {price} ₽. Это займет около {minutes} минут.'
+    button = pay.send.await_args.kwargs['attachments'][0].payload.buttons[0][0]
+    assert button.text == f'Оплатить {price} ₽' and button.url == 'https://link.payform.ru/'
+    assert (await context.get_data())['chosen_song'] == 'audio_fun_ny'
+    assert avatar.await_count == attempt
+    assert handlers.send_offline_conversion.await_count == attempt
+    assert (await credit_db.get_user(456))['balance'] == 1
+    assert (await credit_db.get_user(456))['total_generations'] == 0
+    video.assert_not_awaited()
+    handlers.generate_song.assert_not_awaited()
+
+
+async def test_second_avatar_rejection_notifies_admin_once_with_client_id(credit_db):
+    avatar = AsyncMock(side_effect=['https://cdn.example/one.png', 'https://cdn.example/two.png'])
+    router = create_router(avatar_generator=avatar, admin_user_id=999)
+    context = await ready_context()
+    await start_cartoon(router, context)
+    await call_handler(router, 'collect_cartoon_photo', cartoon_photo(), context)
+    await dispatch_callback(router, callback_event('avatar_bad_1'), context)
+    await call_handler(router, 'collect_cartoon_photo', cartoon_photo('https://photos.example.com/second.png'), context)
+    rejected = callback_event('avatar_bad_2')
+    await dispatch_callback(router, rejected, context)
+    rejected.bot.send_message.assert_awaited_once()
+    notice = rejected.bot.send_message.await_args.kwargs
+    assert notice['user_id'] == 999 and 'ID клиента: 456' in notice['text']
+    assert rejected.send.await_args.args[0] == 'Понимаем вас. Передаем заказ нашему художнику, он свяжется с вами в течение часа.'
+    assert await context.get_state() == PosterStates.cartoon_manual_review
+    repeat = callback_event('avatar_bad_2')
+    await dispatch_callback(router, repeat, context)
+    repeat.bot.send_message.assert_not_awaited()
+    assert avatar.await_count == 2
+    counters = await credit_db.get_all_counters()
+    assert counters['avatar_bad_first'] == counters['avatar_bad_second'] == 1
+    assert 'chosen_avatar' not in await context.get_data()
+
+
+@pytest.mark.parametrize('entry', ['cat_cartoon', 'cat_cartoon_long'])
+@pytest.mark.parametrize('admin_id', [456, None])
+async def test_cartoon_admin_bypass_calls_video_stub_with_approved_avatar_and_song_url(credit_db, entry, admin_id):
+    video = AsyncMock(return_value='https://example.com/test-result.mp4')
+    router = create_router(avatar_generator=AsyncMock(return_value='https://cdn.example/avatar.png'),
+                           cartoon_video_generator=video, admin_user_id=admin_id)
+    context = await ready_context()
+    await start_cartoon(router, context, entry)
+    await call_handler(router, 'collect_cartoon_photo', cartoon_photo(), context)
+    await dispatch_callback(router, callback_event('avatar_ok_1'), context)
+    result = callback_event('cartoon_song:audio_fun_friend')
+    await dispatch_callback(router, result, context)
+    if admin_id == 456:
+        video.assert_awaited_once_with('https://cdn.example/avatar.png', handlers.CARTOON_TEST_SONG_URL + '?scenario=audio_fun_friend')
+        assert result.send.await_args_list[0].args[0] == '👑 Режим администратора: Оплата пропущена...'
+        assert 'https://example.com/test-result.mp4' in result.send.await_args_list[1].args[0]
+        assert not any('payform.ru' in str(call) for call in result.send.await_args_list)
+        assert await context.get_state() == PosterStates.waiting_for_mode
+    else:
+        video.assert_not_awaited()
+        assert 'payform.ru' in str(result.send.await_args_list)
+        assert await context.get_state() == PosterStates.waiting_for_cartoon_payment
+    handlers.generate_song.assert_not_awaited()
+
+
+async def test_failed_avatar_delivery_reuses_generated_image_without_another_openai_call(credit_db, max_image_upload):
+    avatar = AsyncMock(return_value='https://cdn.example/avatar.png')
+    router = create_router(avatar_generator=avatar)
+    context = await ready_context()
+    await start_cartoon(router, context)
+    max_image_upload.side_effect = [RuntimeError('upload failed'), AttachmentUpload(type='image', payload={'token': 'retry-token'})]
+    await call_handler(router, 'collect_cartoon_photo', cartoon_photo(), context)
+    assert await context.get_state() == PosterStates.waiting_for_avatar_photo
+    await call_handler(router, 'collect_cartoon_photo', cartoon_photo(), context)
+    assert await context.get_state() == PosterStates.waiting_for_avatar_review
+    avatar.assert_awaited_once()
+    handlers.send_offline_conversion.assert_awaited_once()
+
+
+async def test_cartoon_interest_stats_exclude_admin_and_do_not_count_old_buttons(credit_db):
+    router = create_router(admin_user_id=999, avatar_generator=AsyncMock(return_value='https://cdn.example/avatar.png'))
+    for actor in (456, 999):
+        context = await ready_context()
+        async def click(payload):
+            event = callback_event(payload)
+            event.get_ids = lambda: (123, actor)
+            await dispatch_callback(router, event, context)
+        async def photo(url):
+            event = cartoon_photo(url)
+            event.get_ids = lambda: (123, actor)
+            await call_handler(router, 'collect_cartoon_photo', event, context)
+        # Первый заказ: принят первый аватар. Повторная старая кнопка не считается.
+        await click('cat_cartoon')
+        await click('cartoon_style:mode_ny')
+        await photo('https://photos.example.com/first.png')
+        await click('avatar_ok_1')
+        await click('avatar_ok_1')
+        # Второй заказ: принят второй аватар.
+        await click('cat_cartoon_long')
+        await click('cartoon_style:mode_ny')
+        await photo('https://photos.example.com/first.png')
+        await click('avatar_bad_1')
+        await photo('https://photos.example.com/second.png')
+        await click('avatar_ok_2')
+        # Третий заказ: оба отклонены, передача художнику.
+        await click('cat_cartoon')
+        await click('cartoon_style:mode_ny')
+        await photo('https://photos.example.com/first.png')
+        await click('avatar_bad_1')
+        await photo('https://photos.example.com/second.png')
+        await click('avatar_bad_2')
+    event = message_event('/stats')
+    event.get_ids = lambda: (123, 999)
+    await call_handler(router, 'stats', event)
+    text = event.message.answer.await_args.args[0]
+    assert '🎬 Интерес к Мульт-услугам:' in text
+    for label, count in [('Мульт-открытка (клики)', 2), ('Мульт-поздравление (клики)', 1),
+                         ('Первый аватар — подошёл', 1), ('Первый аватар — не похож', 2),
+                         ('Второй аватар — подошёл', 1), ('Второй аватар — не подошёл', 1)]:
+        assert f'- {label}: {count}' in text
+    assert not any(key.startswith('gen_') for key in await credit_db.get_all_counters())
+
+
+@pytest.mark.parametrize('configured_admin', [True, False])
+async def test_cartoon_failed_handoff_is_retryable_and_never_claims_artist_was_notified(credit_db, caplog, configured_admin):
+    router = create_router(avatar_generator=AsyncMock(return_value='https://cdn.example/avatar.png'),
+                           admin_user_id=999 if configured_admin else None)
+    context = await ready_context()
+    await start_cartoon(router, context)
+    await call_handler(router, 'collect_cartoon_photo', cartoon_photo(), context)
+    await dispatch_callback(router, callback_event('avatar_bad_1'), context)
+    await call_handler(router, 'collect_cartoon_photo', cartoon_photo('https://photos.example.com/second.png'), context)
+    rejected = callback_event('avatar_bad_2')
+    rejected.bot.send_message.side_effect = RuntimeError('admin notification failed')
+    await dispatch_callback(router, rejected, context)
+    assert 'Не удалось отправить заявку художнику' in rejected.send.await_args.args[0]
+    assert not (await context.get_data()).get('cartoon_handoff_sent')
+    assert any(record.exc_info for record in caplog.records)
+    if configured_admin:
+        retry = callback_event('cartoon_retry_handoff')
+        await dispatch_callback(router, retry, context)
+        assert (await context.get_data())['cartoon_handoff_sent'] is True
+        assert retry.bot.send_message.await_args.kwargs['user_id'] == 999
+        assert 'в течение часа' in retry.send.await_args.args[0]
+        assert (await credit_db.get_all_counters())['avatar_bad_second'] == 1
+    else:
+        rejected.bot.send_message.assert_not_awaited()
+
+
+async def test_cartoon_real_dispatcher_routes_photos_and_cancel_before_state_handler(credit_db, monkeypatch, event_replies):
+    from maxapi import Dispatcher
+    from maxapi.context.isolation import SimpleEventIsolation
+    from maxapi.types import MessageCallback, MessageCreated, User
+    monkeypatch.setattr(handlers, '_reply', event_replies)
+    avatar = AsyncMock(return_value='https://cdn.example/avatar.png')
+    router = create_router(avatar_generator=avatar)
+    dp = Dispatcher(storage=MemoryContext, event_isolation=SimpleEventIsolation())
+    dp.include_routers(router)
+    bot = SimpleNamespace(me=User(user_id=999, first_name='Bot', is_bot=True),
+                          send_message=AsyncMock(return_value=object()), send_callback=AsyncMock())
+    user = {'user_id': 456, 'first_name': 'Test', 'is_bot': False}
+    def message(text=None, attachments=None, sender=None):
+        return {'sender': sender or user, 'recipient': {'chat_id': 123, 'chat_type': 'dialog'},
+                'timestamp': 1, 'body': {'mid': 'cartoon-test', 'seq': 1, 'text': text, 'attachments': attachments}}
+    async def click(payload):
+        await dp.handle(MessageCallback(timestamp=1, bot=bot, message=message(sender=bot.me.model_dump()),
+            callback={'timestamp': 1, 'callback_id': 'cartoon', 'payload': payload, 'user': user}))
+    try:
+        await click('cat_cartoon')
+        await click('cartoon_style:mode_ny')
+        context = dp.fsm.get_context(chat_id=123, user_id=456)
+        await dp.handle(MessageCreated(timestamp=2, bot=bot, message=message('/cancel')))
+        assert await context.get_data() == {}
+        assert await context.get_state() == PosterStates.waiting_for_mode
+        avatar.assert_not_awaited()
+        await click('cat_cartoon_long')
+        await click('cartoon_style:mode_ny')
+        await dp.handle(MessageCreated(timestamp=3, bot=bot, message=message(attachments=[{
+            'type': 'image', 'payload': {'photo_id': 1, 'token': 'source', 'url': 'https://photos.example.com/source.png'}}])))
+        assert await context.get_state() == PosterStates.waiting_for_avatar_review
+        avatar.assert_awaited_once()
+        await click('avatar_ok_1')
+        assert (await context.get_data())['chosen_avatar'] == 'https://cdn.example/avatar.png'
+        await click('cartoon_song:audio_fun_ny')
+        assert await context.get_state() == PosterStates.waiting_for_cartoon_payment
+        assert '1690 ₽' in bot.send_message.await_args.kwargs['text']
+        await dp.handle(MessageCreated(timestamp=4, bot=bot, message=message('/cancel')))
+        assert await context.get_data() == {}
+    finally:
+        await dp.shutdown()
+
+
+async def test_cartoon_cancel_during_avatar_generation_does_not_restore_cleared_session(credit_db):
+    import asyncio
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def avatar(photo_url, mode):
+        entered.set()
+        await release.wait()
+        return 'https://cdn.example/avatar.png'
+    router = create_router(avatar_generator=avatar)
+    context = await ready_context()
+    await start_cartoon(router, context)
+    event = cartoon_photo()
+    task = asyncio.create_task(call_handler(router, 'collect_cartoon_photo', event, context))
+    try:
+        await entered.wait()
+        await call_handler(router, 'cancel', message_event('/cancel'), context)
+    finally:
+        release.set()
+        await task
+    assert await context.get_state() == PosterStates.waiting_for_mode
+    assert await context.get_data() == {}
+    assert not any(call.args and call.args[0] == 'Ваш мульт-аватар готов! Подходит?' for call in event.message.answer.await_args_list)

@@ -6993,3 +6993,170 @@ async def test_cartoon_issued_legacy_preview_upgrades_saved_materials_without_ne
     assert (await context.get_data())['song_1_url']=='https://audio.example/old-song.mp3'
     assert await context.get_state()==PosterStates.waiting_for_mode
     handlers.generate_song.assert_not_awaited()
+
+
+async def confirm_second_song_context(context, *, flow='short', avatar=1, song=2, order_id=None):
+    await context.clear()
+    await context.update_data(cartoon_flow=flow,cartoon_theme='theme_ny',cartoon_mode='theme_ny',
+        cartoon_session_id='confirm-session',cartoon_preview_token='second-preview',
+        avatar_1_url='https://cdn.example/avatar1.png',avatar_2_url='https://cdn.example/avatar2.png',
+        chosen_avatar_variant=avatar,chosen_avatar=f'https://cdn.example/avatar{avatar}.png',
+        chosen_song='audio_fun_ny',song_attempt=2,selected_song_variant=song,
+        song_1_url='https://audio.example/song1.mp3',song_2_url='https://audio.example/song2.mp3',
+        **({'cartoon_order_id':order_id} if order_id else {}))
+    await context.set_state(PosterStates.waiting_for_cartoon_music_review)
+
+
+@pytest.mark.parametrize('flow',['short','long'])
+@pytest.mark.parametrize('avatar',[1,2])
+@pytest.mark.parametrize('song',[1,2])
+async def test_confirm_video_2_acknowledges_once_and_renders_selected_paid_variants(credit_db,monkeypatch,caplog,flow,avatar,song):
+    router,context=create_router(admin_user_id=999),await ready_context()
+    order_id='cartoon_456_theme_ny_confirm'
+    await credit_db.create_cartoon_order(order_id,456,'theme_ny',flow)
+    await credit_db.mark_cartoon_paid(order_id,'paid-confirm')
+    await confirm_second_song_context(context,flow=flow,avatar=avatar,song=song,order_id=order_id)
+    event=callback_event('confirm_video_2')
+    async def generate(url,prompt,**kwargs):
+        event.ack.assert_awaited_once_with(notification='Запускаю видео…')
+        assert url==f'https://cdn.example/avatar{avatar}.png'
+        assert prompt==handlers.CARTOON_VIDEO_PROMPTS['theme_ny']
+        await kwargs['on_task_created']('confirmed-task')
+        import json
+        saved=json.loads((await credit_db.get_cartoon_order(order_id))['fsm_data'])
+        assert saved['cartoon_kling_task_id']=='confirmed-task'
+        return 'https://video.example/confirmed.mp4'
+    animator=AsyncMock(side_effect=generate)
+    monkeypatch.setattr(handlers,'generate_video_from_avatar',animator)
+    with caplog.at_level(logging.INFO):
+        await dispatch_callback(router,event,context)
+    assert "Нажата кнопка 'Создать видео' после выбора второй песни" in caplog.text
+    animator.assert_awaited_once()
+    handlers.create_musical_video.assert_awaited_once_with(f'https://cdn.example/avatar{avatar}.png',
+        f'https://audio.example/song{song}.mp3',animated_video_url='https://video.example/confirmed.mp4')
+    assert await context.get_state()==PosterStates.waiting_for_mode
+    assert (await credit_db.get_cartoon_order(order_id))['status']=='completed'
+
+
+@pytest.mark.parametrize('missing',['all','avatar','song','song_choice','session'])
+async def test_confirm_video_2_lost_data_is_logged_and_explained(credit_db,missing,caplog):
+    router,context=create_router(admin_user_id=456),await ready_context()
+    await confirm_second_song_context(context)
+    data=await context.get_data()
+    if missing=='all': data={}
+    elif missing=='avatar':
+        for key in ('avatar_1_url','chosen_avatar'): data.pop(key,None)
+    elif missing=='song': data.pop('song_2_url')
+    elif missing=='song_choice': data['selected_song_variant']=None
+    elif missing=='session': data.pop('cartoon_session_id')
+    await context.set_data(data)
+    event=callback_event('confirm_video_2')
+    await dispatch_callback(router,event,context)
+    event.ack.assert_awaited_once_with(notification='Запускаю видео…')
+    assert event.send.await_args.args[0]=='❌ Ошибка данных. Пожалуйста, начните заново /start'
+    assert 'Данные из FSM потеряны' in caplog.text
+    handlers.generate_video_from_avatar.assert_not_awaited()
+    handlers.create_musical_video.assert_not_awaited()
+
+
+async def test_second_song_keyboard_uses_exact_confirm_video_2_payload(credit_db):
+    router,context=create_router(admin_user_id=456,avatar_generator=AsyncMock(return_value='https://cdn.example/avatar.png')),await ready_context()
+    await start_themed_cartoon(router,context);await submit_themed_song(router,context)
+    await dispatch_callback(router,callback_event('cartoon_music_bad:'+(await context.get_data())['cartoon_preview_token']),context)
+    event=await submit_themed_song(router,context,'Аня, будь счастлива!')
+    buttons=event.message.answer.await_args.kwargs['attachments'][1].payload.buttons
+    assert buttons[-1][0].text=='🎬 Создать видео' and buttons[-1][0].payload=='confirm_video_2'
+
+
+async def test_confirm_video_2_failure_has_traceback_and_support_without_silent_hang(credit_db,monkeypatch,caplog):
+    router,context=create_router(admin_user_id=456),await ready_context()
+    await confirm_second_song_context(context)
+    monkeypatch.setattr(handlers,'generate_video_from_avatar',AsyncMock(side_effect=RuntimeError('PiAPI failed')))
+    event=callback_event('confirm_video_2')
+    await dispatch_callback(router,event,context)
+    event.ack.assert_awaited_once_with(notification='Запускаю видео…')
+    assert any(record.exc_info for record in caplog.records)
+    assert event.send.await_args.args[0]==handlers.CARTOON_VIDEO_ERROR
+    assert await context.get_state()==PosterStates.cartoon_manual_review
+    assert (await context.get_data())['song_2_url']=='https://audio.example/song2.mp3'
+
+
+async def test_confirm_video_2_repeated_clicks_do_not_create_another_task(credit_db,monkeypatch):
+    import asyncio
+    entered,release=asyncio.Event(),asyncio.Event()
+    async def animate(*args,**kwargs):
+        entered.set();await release.wait()
+        return 'https://video.example/one.mp4'
+    animator=AsyncMock(side_effect=animate);monkeypatch.setattr(handlers,'generate_video_from_avatar',animator)
+    router,context=create_router(admin_user_id=456),await ready_context()
+    await confirm_second_song_context(context)
+    first=asyncio.create_task(dispatch_callback(router,callback_event('confirm_video_2'),context))
+    try:
+        await asyncio.wait_for(entered.wait(),timeout=5)
+        second=callback_event('confirm_video_2')
+        await dispatch_callback(router,second,context)
+        second.ack.assert_awaited_once_with(notification='Запускаю видео…')
+        assert 'уже создаётся' in second.send.await_args.args[0]
+    finally:
+        release.set();await first
+    await dispatch_callback(router,callback_event('confirm_video_2'),context)
+    animator.assert_awaited_once()
+
+
+@pytest.mark.parametrize('guard',['unpaid','manual','other_section','old_message'])
+async def test_confirm_video_2_does_not_bypass_payment_state_or_message_binding(credit_db,guard):
+    router,context=create_router(admin_user_id=999),await ready_context()
+    order_id='cartoon_456_theme_ny_guard'
+    await credit_db.create_cartoon_order(order_id,456,'theme_ny','short')
+    if guard!='unpaid':
+        await credit_db.mark_cartoon_paid(order_id,'guard-paid')
+    if guard=='manual':
+        await credit_db.finish_cartoon_order(order_id,456,manual=True)
+    await confirm_second_song_context(context,order_id=order_id)
+    if guard=='other_section':
+        await context.clear();await context.update_data(mode='mode_vision')
+        await context.set_state(PosterStates.waiting_for_prompt)
+    if guard=='old_message':
+        await context.update_data(cartoon_confirm_message_id='newest-preview')
+    event=callback_event('confirm_video_2')
+    await dispatch_callback(router,event,context)
+    event.ack.assert_awaited_once_with(notification='Запускаю видео…')
+    handlers.generate_video_from_avatar.assert_not_awaited()
+    handlers.create_musical_video.assert_not_awaited()
+    if guard=='other_section':
+        assert await context.get_state()==PosterStates.waiting_for_prompt
+
+
+async def test_confirm_video_2_real_dispatcher_routes_exact_payload_and_ack_first(credit_db,monkeypatch,event_replies):
+    from maxapi import Dispatcher
+    from maxapi.context.isolation import SimpleEventIsolation
+    from maxapi.types import MessageCallback,User
+    monkeypatch.setattr(handlers,'_reply',event_replies)
+    router=create_router(admin_user_id=456)
+    dp=Dispatcher(storage=MemoryContext,event_isolation=SimpleEventIsolation());dp.include_routers(router)
+    bot=SimpleNamespace(me=User(user_id=9999,first_name='Bot',is_bot=True),
+        send_message=AsyncMock(return_value=object()),send_callback=AsyncMock())
+    async def generate(url,prompt,**kwargs):
+        assert bot.send_callback.await_count==1
+        assert bot.send_callback.await_args.kwargs['notification']=='Запускаю видео…'
+        await kwargs['on_task_created']('real-confirm-task')
+        return 'https://video.example/real-confirm.mp4'
+    animator=AsyncMock(side_effect=generate);monkeypatch.setattr(handlers,'generate_video_from_avatar',animator)
+    try:
+        context=dp.fsm.get_context(chat_id=123,user_id=456)
+        await confirm_second_song_context(context,flow='long',avatar=2,song=1)
+        await context.update_data(cartoon_confirm_message_id='second-preview-message')
+        message={'sender':bot.me.model_dump(),'recipient':{'chat_id':123,'chat_type':'dialog'},'timestamp':1,
+                 'body':{'mid':'second-preview-message','seq':1,'text':'Второй вариант песни','attachments':[]}}
+        event=MessageCallback(timestamp=1,bot=bot,message=message,callback={'timestamp':1,'callback_id':'confirm-id',
+            'payload':'confirm_video_2','user':{'user_id':456,'first_name':'Admin','is_bot':False}})
+        await dp.handle(event)
+        animator.assert_awaited_once()
+        assert animator.await_args.args[0]=='https://cdn.example/avatar2.png'
+        handlers.create_musical_video.assert_awaited_once_with('https://cdn.example/avatar2.png',
+            'https://audio.example/song1.mp3',animated_video_url='https://video.example/real-confirm.mp4')
+        assert await context.get_state()==PosterStates.waiting_for_mode
+        assert any(any(getattr(a,'type',None)=='video' for a in call.kwargs.get('attachments',[]))
+                   for call in bot.send_message.await_args_list)
+    finally:
+        await dp.shutdown()

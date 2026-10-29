@@ -1678,15 +1678,15 @@ def create_router(
     def cartoon_style_keyboard(screen='cat_cards'):
         return navigation_keyboard((*((label, key) for key, label in CARTOON_THEMES.items()), ('⬅️ Назад', 'back_to_main')))
 
-    async def ensure_cartoon_access(event, context):
+    async def ensure_cartoon_access(event, context, *, acknowledged=False):
         user_id = event.get_ids()[1]
         if user_id is None:
-            if hasattr(event, 'callback'):
+            if hasattr(event, 'callback') and not acknowledged:
                 await event.ack(notification='Отправьте /start, чтобы открыть меню.')
             return False
         data = await context.get_data()
         if data.get('cartoon_video_failed'):
-            if hasattr(event, 'callback'):
+            if hasattr(event, 'callback') and not acknowledged:
                 await event.ack(notification='Материалы сохранены. Обратитесь в поддержку.')
                 if event.message is None:
                     return False
@@ -1698,7 +1698,7 @@ def create_router(
         if order and order['status'] == 'manual' and order['user_id'] == user_id:
             await context.update_data(cartoon_video_failed=True)
             await context.set_state(PosterStates.cartoon_manual_review)
-            if hasattr(event, 'callback'):
+            if hasattr(event, 'callback') and not acknowledged:
                 await event.ack(notification='Материалы сохранены. Обратитесь в поддержку.')
                 if event.message is None:
                     return False
@@ -1707,7 +1707,7 @@ def create_router(
         if (order and order['status'] == 'paid' and order['user_id'] == user_id
                 and order['theme'] == data.get('cartoon_theme') and order['tariff'] == data.get('cartoon_flow')):
             return True
-        if hasattr(event, 'callback'):
+        if hasattr(event, 'callback') and not acknowledged:
             await event.ack(notification='Сначала оплатите выбранную мульт-открытку.')
             if event.message is None:
                 return False
@@ -2111,7 +2111,7 @@ def create_router(
         if attempt == 2:
             return navigation_keyboard((('🎵 Выбрать вариант 1', 'cartoon_song_pick:1:' + token),
                                         ('🎵 Выбрать вариант 2', 'cartoon_song_pick:2:' + token),
-                                        ('🎬 Создать видео', 'cartoon_music_ok:' + token)))
+                                        ('🎬 Создать видео', 'confirm_video_2')))
         return navigation_keyboard((('✅ Да, создать видео!', 'cartoon_music_ok:' + token),
                                     ('🔄 Нет, изменить текст', 'cartoon_music_bad:' + token)))
 
@@ -2150,7 +2150,9 @@ def create_router(
             if sent is None:
                 raise RuntimeError('MAX не подтвердил отправку превью песни.')
             if (await context.get_data()).get('cartoon_session_id') == session:
-                await context.update_data(cartoon_preview_token=token, selected_song_variant=1 if attempt == 1 else None)
+                message_id = getattr(getattr(sent, 'body', None), 'mid', None)
+                await context.update_data(cartoon_preview_token=token, selected_song_variant=1 if attempt == 1 else None,
+                    cartoon_confirm_message_id=message_id if attempt == 2 and isinstance(message_id,str) else None)
                 await context.set_state(PosterStates.waiting_for_cartoon_music_review)
         except Exception:
             logger.exception('Ошибка подготовки песни для мульт-открытки:')
@@ -2212,78 +2214,142 @@ def create_router(
                 await _reply(event, CARTOON_SONG_PHRASE_PROMPT)
                 await persist_cartoon_state(context)
                 return
-            selected = data.get('selected_song_variant') or 1
-            full_song = data.get(f'song_{selected}_url') or data.get('video_song_url')
-            data.update(video_song_url=full_song, chosen_song_url=full_song, selected_song_variant=selected)
-            await context.update_data(video_song_url=full_song, chosen_song_url=full_song, selected_song_variant=selected)
-            await increment_counter('song_ok', user_id=user_id)
-            session = data['cartoon_session_id']
-            await context.set_state(PosterStates.cartoon_generating)
-            try:
-                await _reply(event, CARTOON_VIDEO_WAIT if data.get('cartoon_theme') else VIDEO_GENERATION_MESSAGE)
-                original = data.get('original_image_url') or data['chosen_avatar']
-                await context.update_data(original_image_url=original,
-                    **{f'avatar_{index}_url': url for index,url in data.get('avatar_urls',{}).items() if index in ('1','2')})
-                full_song = data['video_song_url']
-                prompt = CARTOON_VIDEO_PROMPTS.get(data.get('cartoon_theme')) or build_video_prompt(data.get('cartoon_mode',''))
-                if not default_cartoon_video:
-                    if not data.get('video_merged_url'):
-                        data['video_merged_url'] = await cartoon_video_generator(original, full_song)
-                elif not data.get('cartoon_theme'):
-                    data['video_merged_url'] = await render_video_with_song(data, original, data['chosen_song'])
-                else:
-                    source = [original, prompt]
-                    logger.info('Промпт для Kling (%s): %s', data['cartoon_theme'], prompt)
-                    if data.get('cartoon_kling_source') != source:
-                        data.update(cartoon_kling_source=source, cartoon_kling_task_id=None, cartoon_kling_video_url=None)
-                    if not data.get('cartoon_kling_task_id'):
-                        task_id = await create_video_task(original, prompt)
-                        if (await context.get_data()).get('cartoon_session_id') != session:
-                            return
-                        data['cartoon_kling_task_id'] = task_id
-                        await context.update_data(**{key:value for key,value in data.items() if key.startswith('cartoon_kling_')})
-                        await persist_cartoon_state(context)
-                    if not data.get('cartoon_kling_video_url'):
-                        data['cartoon_kling_video_url'] = await poll_video_task(data['cartoon_kling_task_id'], timeout=1200)
+            await generate_confirmed_cartoon_video(event, context, data)
+
+    async def generate_confirmed_cartoon_video(event, context, data, *, use_avatar_service=False):
+        user_id = event.get_ids()[1]
+        selected = data.get('selected_song_variant') or 1
+        full_song = data.get(f'song_{selected}_url') or data.get('video_song_url')
+        data.update(video_song_url=full_song, chosen_song_url=full_song, selected_song_variant=selected)
+        await context.update_data(video_song_url=full_song, chosen_song_url=full_song, selected_song_variant=selected)
+        await increment_counter('song_ok', user_id=user_id)
+        session = data['cartoon_session_id']
+        await context.set_state(PosterStates.cartoon_generating)
+        try:
+            await _reply(event, CARTOON_VIDEO_WAIT if data.get('cartoon_theme') else VIDEO_GENERATION_MESSAGE)
+            original = data.get('original_image_url') or data['chosen_avatar']
+            await context.update_data(original_image_url=original,
+                **{f'avatar_{index}_url': url for index,url in data.get('avatar_urls',{}).items() if index in ('1','2')})
+            full_song = data['video_song_url']
+            prompt = CARTOON_VIDEO_PROMPTS.get(data.get('cartoon_theme')) or build_video_prompt(data.get('cartoon_mode',''))
+            if not default_cartoon_video:
+                if not data.get('video_merged_url'):
+                    data['video_merged_url'] = await cartoon_video_generator(original, full_song)
+            elif not data.get('cartoon_theme'):
+                data['video_merged_url'] = await render_video_with_song(data, original, data['chosen_song'])
+            else:
+                source = [original, prompt]
+                logger.info('Промпт для Kling (%s): %s', data['cartoon_theme'], prompt)
+                if data.get('cartoon_kling_source') != source:
+                    data.update(cartoon_kling_source=source, cartoon_kling_task_id=None, cartoon_kling_video_url=None)
+                async def save_created_task(task_id):
                     if (await context.get_data()).get('cartoon_session_id') != session:
-                        return
-                    key = [data['cartoon_kling_video_url'], full_song, VIDEO_MERGE_POLICY]
-                    if data.get('video_merged_source') != key or not data.get('video_merged_url'):
-                        data['video_merged_url'] = await create_musical_video(original, full_song, animated_video_url=data['cartoon_kling_video_url'])
-                        data['video_merged_source'] = key
-                if (await context.get_data()).get('cartoon_session_id') != session:
-                    return
-                if (not isinstance(data.get('video_merged_url'), str)
-                        or not data['video_merged_url'].startswith('https://') or is_video_placeholder(data['video_merged_url'])):
-                    raise ValueError('Не получена HTTPS-ссылка на готовое мульт-видео.')
-                await context.update_data(**video_cache(data))
-                video = await upload_video_for_max(event.bot, data['video_merged_url'])
-                if (await context.get_data()).get('cartoon_session_id') != session:
-                    return
-                sent = await _reply(event, '🎬 Ваша мульт-открытка готова! ' + data['video_merged_url'], attachments=[video,
-                    InlineKeyboardBuilder().row(LinkButton(text='⬇️ Скачать MP4', url=data['video_merged_url'])).row(
-                        CallbackButton(text='⬅️ Главное меню', payload='back_to_main')).as_markup()])
-                if sent is None:
-                    raise RuntimeError('MAX не подтвердил отправку мульт-открытки.')
-                if (await context.get_data()).get('cartoon_session_id') == session:
-                    if data.get('cartoon_order_id'):
-                        await finish_cartoon_order(data['cartoon_order_id'], user_id)
-                    await increment_counter('video_success', user_id=user_id)
-                    await context.set_state(PosterStates.waiting_for_mode)
-                    await send_video_share(event.bot, user_id, bot_link=bot_link)
-            except Exception:
-                logger.exception('Ошибка генерации тематической мульт-открытки:')
-                if (await context.get_data()).get('cartoon_session_id') == session:
-                    await increment_counter('video_fail', user_id=user_id)
-                    await context.update_data(cartoon_video_failed=True, cartoon_preview_token=None)
-                    if data.get('cartoon_order_id'):
-                        await finish_cartoon_order(data['cartoon_order_id'], user_id, manual=True)
-                    await context.set_state(PosterStates.cartoon_manual_review)
-                    await cartoon_video_support(event)
-            finally:
-                if (await context.get_data()).get('cartoon_session_id') == session:
-                    await context.update_data(**video_cache(data), **{key:value for key,value in data.items() if key.startswith('cartoon_kling_')})
+                        raise asyncio.CancelledError
+                    data['cartoon_kling_task_id'] = task_id
+                    await context.update_data(**{key:value for key,value in data.items() if key.startswith('cartoon_kling_')})
                     await persist_cartoon_state(context)
+
+                if not data.get('cartoon_kling_video_url'):
+                    if use_avatar_service:
+                        data['cartoon_kling_video_url'] = await generate_video_from_avatar(
+                            original, prompt, mode=data.get('cartoon_theme') or data.get('cartoon_mode',''),
+                            people_count=0, task_id=data.get('cartoon_kling_task_id'), on_task_created=save_created_task)
+                    else:
+                        if not data.get('cartoon_kling_task_id'):
+                            await save_created_task(await create_video_task(original, prompt))
+                        data['cartoon_kling_video_url'] = await poll_video_task(data['cartoon_kling_task_id'], timeout=1200)
+                if (await context.get_data()).get('cartoon_session_id') != session:
+                    return
+                key = [data['cartoon_kling_video_url'], full_song, VIDEO_MERGE_POLICY]
+                if data.get('video_merged_source') != key or not data.get('video_merged_url'):
+                    data['video_merged_url'] = await create_musical_video(original, full_song, animated_video_url=data['cartoon_kling_video_url'])
+                    data['video_merged_source'] = key
+            if (await context.get_data()).get('cartoon_session_id') != session:
+                return
+            if (not isinstance(data.get('video_merged_url'), str)
+                    or not data['video_merged_url'].startswith('https://') or is_video_placeholder(data['video_merged_url'])):
+                raise ValueError('Не получена HTTPS-ссылка на готовое мульт-видео.')
+            await context.update_data(**video_cache(data))
+            video = await upload_video_for_max(event.bot, data['video_merged_url'])
+            if (await context.get_data()).get('cartoon_session_id') != session:
+                return
+            sent = await _reply(event, '🎬 Ваша мульт-открытка готова! ' + data['video_merged_url'], attachments=[video,
+                InlineKeyboardBuilder().row(LinkButton(text='⬇️ Скачать MP4', url=data['video_merged_url'])).row(
+                    CallbackButton(text='⬅️ Главное меню', payload='back_to_main')).as_markup()])
+            if sent is None:
+                raise RuntimeError('MAX не подтвердил отправку мульт-открытки.')
+            if (await context.get_data()).get('cartoon_session_id') == session:
+                if data.get('cartoon_order_id'):
+                    await finish_cartoon_order(data['cartoon_order_id'], user_id)
+                await increment_counter('video_success', user_id=user_id)
+                await context.set_state(PosterStates.waiting_for_mode)
+                await send_video_share(event.bot, user_id, bot_link=bot_link)
+        except Exception:
+            logger.exception('Ошибка генерации тематической мульт-открытки:')
+            if (await context.get_data()).get('cartoon_session_id') == session:
+                await increment_counter('video_fail', user_id=user_id)
+                await context.update_data(cartoon_video_failed=True, cartoon_preview_token=None)
+                if data.get('cartoon_order_id'):
+                    await finish_cartoon_order(data['cartoon_order_id'], user_id, manual=True)
+                await context.set_state(PosterStates.cartoon_manual_review)
+                await cartoon_video_support(event)
+        finally:
+            if (await context.get_data()).get('cartoon_session_id') == session:
+                await context.update_data(**video_cache(data), **{key:value for key,value in data.items() if key.startswith('cartoon_kling_')})
+                await persist_cartoon_state(context)
+
+    @router.message_callback(F.callback.payload == 'confirm_video_2')
+    async def confirm_video_2(event: MessageCallback, context: MemoryContext):
+        try:
+            await event.ack(notification='Запускаю видео…')
+            logger.info("Нажата кнопка 'Создать видео' после выбора второй песни")
+            data = dict(await context.get_data())
+            if not cartoon_product(data) or event.message is None or event.get_ids()[1] is None:
+                logger.error("Данные из FSM потеряны")
+                if event.message is not None:
+                    await _reply(event, "❌ Ошибка данных. Пожалуйста, начните заново /start")
+                return
+            if not await ensure_cartoon_access(event, context, acknowledged=True):
+                return
+            lock = cartoon_locks.setdefault(event.get_ids()[1], asyncio.Lock())
+            if lock.locked():
+                await _reply(event, 'Мульт-открытка уже создаётся. Подождите.')
+                return
+            async with lock:
+                data = dict(await context.get_data())
+                if await context.get_state() != PosterStates.waiting_for_cartoon_music_review:
+                    await _reply(event, 'Используйте кнопки под текущим сообщением мульт-открытки.')
+                    return
+                issued_message = data.get('cartoon_confirm_message_id')
+                clicked_message = getattr(getattr(event.message, 'body', None), 'mid', None)
+                if issued_message and clicked_message != issued_message:
+                    await _reply(event, 'Используйте кнопку под текущими вариантами песни.')
+                    return
+                avatar_variant = data.get('chosen_avatar_variant')
+                if avatar_variant not in (1,2):
+                    avatar_variant = next((i for i in (1,2)
+                        if data.get('chosen_avatar') and data['chosen_avatar'] ==
+                        (data.get(f'avatar_{i}_url') or data.get('avatar_urls',{}).get(str(i)))), None)
+                song_variant = data.get('selected_song_variant')
+                avatar_url = (data.get(f'avatar_{avatar_variant}_url') or data.get('avatar_urls',{}).get(str(avatar_variant))
+                              or data.get('chosen_avatar'))
+                song_url = data.get(f'song_{song_variant}_url') or data.get('chosen_song_url')
+                if (data.get('song_attempt') != 2 or avatar_variant not in (1,2) or song_variant not in (1,2)
+                        or not data.get('cartoon_session_id')
+                        or not all(isinstance(url,str) and url.startswith('https://') and urlsplit(url).hostname
+                                   for url in (avatar_url,song_url))):
+                    logger.error("Данные из FSM потеряны")
+                    await _reply(event, "❌ Ошибка данных. Пожалуйста, начните заново /start")
+                    return
+                data.update(chosen_avatar_variant=avatar_variant, chosen_avatar=avatar_url, original_image_url=avatar_url,
+                            selected_song_variant=song_variant, chosen_song_url=song_url, video_song_url=song_url)
+                await context.update_data(chosen_avatar=avatar_url, original_image_url=avatar_url,
+                                          chosen_song_url=song_url, video_song_url=song_url)
+                await generate_confirmed_cartoon_video(event, context, data, use_avatar_service=True)
+        except Exception:
+            logger.exception("Ошибка обработчика confirm_video_2:")
+            if event.message is not None:
+                await cartoon_video_support(event)
 
     async def collect_card_role_info(event: MessageCreated, context: MemoryContext):
         if is_bot_message(event):

@@ -316,3 +316,28 @@ async def test_cancellation_during_retry_delay_stops_without_another_post(monkey
     with pytest.raises(asyncio.CancelledError):
         await video.generate_video_from_avatar('https://images.example/a.png', people_count=1)
     assert post.call_count == 1
+
+
+@respx.mock
+async def test_generate_video_preserves_accepted_task_before_polling(fast_poll):
+    accepted=[]
+    async def remember(task_id):
+        accepted.append(task_id)
+    post=respx.post(video.TASK_URL).respond(200,json={'data':{'task_id':'remembered'}})
+    def ready(request):
+        assert accepted==['remembered']
+        return httpx.Response(200,json={'data':{'status':'completed','output':{'video':'https://video.example/ready.mp4'}}})
+    respx.get(video.TASK_URL+'/remembered').mock(side_effect=ready)
+    assert await video.generate_video_from_avatar('https://images.example/a.png',people_count=0,on_task_created=remember)=='https://video.example/ready.mp4'
+    assert post.call_count==1
+
+
+@respx.mock
+async def test_generate_video_resumes_saved_task_without_another_post(fast_poll):
+    post=respx.post(video.TASK_URL)
+    respx.get(video.TASK_URL+'/existing').respond(200,json={'data':{'status':'completed','output':{'video':'https://video.example/ready.mp4'}}})
+    remember=AsyncMock()
+    assert await video.generate_video_from_avatar('https://images.example/a.png',people_count=0,
+        task_id='existing',on_task_created=remember)=='https://video.example/ready.mp4'
+    assert not post.called
+    remember.assert_not_awaited()

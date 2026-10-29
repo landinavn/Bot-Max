@@ -69,6 +69,19 @@ async def init_db() -> None:
             )"""
         )
         await db.execute(
+            """CREATE TABLE IF NOT EXISTS cartoon_orders (
+                order_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL,
+                theme TEXT NOT NULL, tariff TEXT NOT NULL,
+                amount_kopecks INTEGER NOT NULL, product_name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','paid','completed','manual')),
+                provider_payment_id TEXT UNIQUE, payment_link TEXT,
+                photo_notified INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at INTEGER NOT NULL DEFAULT 0,
+                result_url TEXT, fsm_data TEXT, fsm_state TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, paid_at TEXT
+            )"""
+        )
+        await db.execute(
             """CREATE TABLE IF NOT EXISTS musical_orders (
                 order_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL,
                 image_url TEXT NOT NULL, audio_url TEXT NOT NULL, tariff TEXT NOT NULL,
@@ -422,6 +435,9 @@ async def add_credits(
             async with db.execute('SELECT 1 FROM musical_orders WHERE provider_payment_id=?', (provider_payment_id,)) as cursor:
                 if await cursor.fetchone():
                     raise ValueError('Платёж уже использован для музыкальной открытки.')
+            async with db.execute('SELECT 1 FROM cartoon_orders WHERE provider_payment_id=?', (provider_payment_id,)) as cursor:
+                if await cursor.fetchone():
+                    raise ValueError('Платёж уже использован для мульт-открытки.')
             await db.execute(
                 """UPDATE payment_orders SET status = 'paid', provider_payment_id = ?,
                    paid_at = CURRENT_TIMESTAMP WHERE order_id = ?""",
@@ -706,6 +722,8 @@ async def get_source_stats(admin_id: int | None = None) -> list[dict]:
                    SELECT user_id, amount_kopecks FROM audio_orders WHERE status = 'paid'
                    UNION ALL
                    SELECT user_id, amount_kopecks FROM musical_orders WHERE status = 'paid'
+                   UNION ALL
+                   SELECT user_id, amount_kopecks FROM cartoon_orders WHERE status IN ('paid','completed','manual')
                  ) GROUP BY user_id
                ) p ON p.user_id = u.user_id
                WHERE (? IS NULL OR u.user_id != ?)
@@ -893,6 +911,9 @@ async def mark_audio_paid(order_id: str, payment_id: str) -> bool:
         async with db.execute('SELECT 1 FROM musical_orders WHERE provider_payment_id=?', (payment_id,)) as cursor:
             if await cursor.fetchone():
                 raise ValueError('Платёж уже использован для музыкальной открытки.')
+        async with db.execute('SELECT 1 FROM cartoon_orders WHERE provider_payment_id=?', (payment_id,)) as cursor:
+            if await cursor.fetchone():
+                raise ValueError('Платёж уже использован для мульт-открытки.')
         await db.execute("UPDATE audio_orders SET status='paid', provider_payment_id=?, paid_at=CURRENT_TIMESTAMP WHERE order_id=?", (payment_id,order_id))
         await db.execute('INSERT INTO users(user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING', (order['user_id'],))
         await increment_purchases(order['user_id'], connection=db)
@@ -1026,7 +1047,7 @@ async def mark_musical_paid(order_id: str, payment_id: str) -> bool:
             if order['provider_payment_id'] != payment_id:
                 raise ValueError('Заказ уже оплачен другим платежом.')
             return False
-        for table in ('payment_orders', 'audio_orders'):
+        for table in ('payment_orders', 'audio_orders', 'cartoon_orders'):
             async with db.execute(f'SELECT 1 FROM {table} WHERE provider_payment_id=?', (payment_id,)) as cursor:
                 if await cursor.fetchone():
                     raise ValueError('Платёж уже использован другим заказом.')
@@ -1054,4 +1075,98 @@ async def pending_musical_orders():
 async def reset_musical_workers():
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         await db.execute('UPDATE musical_orders SET running=0 WHERE running=1')
+        await db.commit()
+
+
+
+CARTOON_TARIFFS = {
+    'short': (89000, 'Мульт-открытка (10-15 сек)'),
+    'long': (169000, 'Мульт-поздравление (до 30 сек)'),
+}
+CARTOON_ORDER_THEMES = frozenset({
+    'theme_ny', 'theme_bday', 'theme_bday_kid', 'theme_valentine',
+    'theme_feb23', 'theme_mar8', 'theme_mother', 'theme_father',
+})
+
+
+async def create_cartoon_order(order_id: str, user_id: int, theme: str, tariff: str):
+    if (not isinstance(order_id, str) or not order_id.startswith('cartoon_') or len(order_id) > 200
+            or isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0
+            or theme not in CARTOON_ORDER_THEMES or tariff not in CARTOON_TARIFFS):
+        raise ValueError('Некорректный мульт-заказ.')
+    price, name = CARTOON_TARIFFS[tariff]
+    values = (user_id, theme, tariff, price, name)
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        await db.execute('BEGIN IMMEDIATE')
+        async with db.execute('SELECT user_id,theme,tariff,amount_kopecks,product_name FROM cartoon_orders WHERE order_id=?', (order_id,)) as cursor:
+            existing = await cursor.fetchone()
+        if existing is not None and tuple(existing) != values:
+            raise ValueError('Номер мульт-заказа уже связан с другими данными.')
+        await db.execute('INSERT INTO cartoon_orders(order_id,user_id,theme,tariff,amount_kopecks,product_name) VALUES (?,?,?,?,?,?) ON CONFLICT(order_id) DO NOTHING', (order_id,*values))
+        await db.commit()
+
+
+async def get_cartoon_order(order_id: str):
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute('SELECT * FROM cartoon_orders WHERE order_id=?', (order_id,)) as cursor:
+            row = await cursor.fetchone()
+    if row is None:
+        return None
+    order = dict(row)
+    order.update(order_type='cartoon', credits=0, package_id='cartoon_' + order['tariff'])
+    return order
+
+
+async def update_cartoon_order(order_id: str, **fields):
+    if not fields or not set(fields) <= {'payment_link','photo_notified','next_attempt_at','result_url','fsm_data','fsm_state'}:
+        raise ValueError('Некорректные поля мульт-заказа.')
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        await db.execute('UPDATE cartoon_orders SET ' + ','.join(key+'=?' for key in fields) + ' WHERE order_id=?', (*fields.values(),order_id))
+        await db.commit()
+
+
+async def mark_cartoon_paid(order_id: str, payment_id: str) -> bool:
+    if not payment_id:
+        raise ValueError('Не указан платёж.')
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        await db.execute('BEGIN IMMEDIATE')
+        db.row_factory = aiosqlite.Row
+        async with db.execute('SELECT * FROM cartoon_orders WHERE order_id=?', (order_id,)) as cursor:
+            order = await cursor.fetchone()
+        if order is None:
+            raise ValueError('Мульт-заказ не найден.')
+        if order['status'] != 'pending':
+            if order['provider_payment_id'] != payment_id:
+                raise ValueError('Заказ уже оплачен другим платежом.')
+            return False
+        for table in ('payment_orders', 'audio_orders', 'musical_orders'):
+            async with db.execute(f'SELECT 1 FROM {table} WHERE provider_payment_id=?', (payment_id,)) as cursor:
+                if await cursor.fetchone():
+                    raise ValueError('Платёж уже использован другим заказом.')
+        await db.execute("UPDATE cartoon_orders SET status='paid', provider_payment_id=?, paid_at=CURRENT_TIMESTAMP WHERE order_id=?", (payment_id,order_id))
+        await db.execute('INSERT INTO users(user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING', (order['user_id'],))
+        await increment_purchases(order['user_id'], connection=db)
+        await increment_counter('buy_cartoon_' + order['tariff'], user_id=order['user_id'], connection=db)
+        await db.commit()
+    return True
+
+
+async def pending_cartoon_notifications():
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM cartoon_orders WHERE status='paid' AND photo_notified=0 AND next_attempt_at<=? ORDER BY created_at LIMIT 10", (_now_ts(),)) as cursor:
+            return [dict(row) for row in await cursor.fetchall()]
+
+
+async def latest_paid_cartoon(user_id: int):
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        async with db.execute("SELECT order_id FROM cartoon_orders WHERE user_id=? AND status='paid' ORDER BY paid_at DESC, rowid DESC LIMIT 1", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+    return await get_cartoon_order(row[0]) if row else None
+
+
+async def finish_cartoon_order(order_id: str, user_id: int, *, manual=False):
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        await db.execute("UPDATE cartoon_orders SET status=? WHERE order_id=? AND user_id=? AND status='paid'", ('manual' if manual else 'completed',order_id,user_id))
         await db.commit()

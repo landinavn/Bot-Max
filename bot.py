@@ -15,6 +15,7 @@ from prodamus import ProdamusPayments
 from webhook import start_webhook_server
 from audio_orders import PaidAudioWorker
 from musical_orders import PaidMusicalWorker
+from cartoon_orders import PaidCartoonWorker
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ async def main() -> None:
         webhook_runner = None
         audio_task = None
         musical_task = None
+        cartoon_task = None
         musical_worker = PaidMusicalWorker(bot)
         audio_worker = PaidAudioWorker(bot, payments=payments, admin_user_id=config.admin_user_id)
         try:
@@ -59,10 +61,17 @@ async def main() -> None:
             else:
                 audio_task = asyncio.create_task(audio_worker.run())
                 musical_task = asyncio.create_task(musical_worker.run())
+            cartoon_task = asyncio.create_task(PaidCartoonWorker(bot).run())
             logger.info("Запуск получения обновлений MAX.")
             await dispatcher.start_polling(bot)
         finally:
             try:
+                if cartoon_task is not None:
+                    cartoon_task.cancel()
+                    try:
+                        await cartoon_task
+                    except asyncio.CancelledError:
+                        pass
                 if musical_task is not None:
                     musical_task.cancel()
                     try:

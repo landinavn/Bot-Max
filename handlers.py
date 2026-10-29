@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from urllib.parse import unquote, urlencode, urlsplit
 from uuid import uuid4
+from time import time_ns
 from weakref import WeakValueDictionary
 
 from maxapi import F, Router
@@ -34,6 +35,7 @@ from audio_service import create_audio_preview, song_audio_url, TEACHER_MUSIC_TA
 from metrika_service import extract_yclid, send_offline_conversion
 
 from database import (
+    create_cartoon_order, get_cartoon_order, latest_paid_cartoon, finish_cartoon_order, update_cartoon_order,
     create_musical_order, get_musical_order,
     deduct_credit, get_user, grant_free_trial, get_global_stats, increment_generations,
     record_first_start, save_yclid, get_source_stats, get_stats_by_source, register_shared_image, get_shared_image,
@@ -1291,15 +1293,23 @@ def create_router(
             f"💳 Покупатели: {yandex['total_buyers']}\n"
             f"💰 Оплат: {yandex['total_revenue']:.2f} ₽".replace(".", ",")
         )
-        cartoon_counts = await get_all_counters()
-        cartoon_test_text = "\n\n🛠 Мульт-открытки — тесты администратора:\n" + "\n".join(
-            f"- {label}: {cartoon_counts.get(key, 0)}" for key, label in [
-                *((key + '_click', label) for key, label in CARTOON_THEMES.items()),
-                ('avatar_ok_1', 'Первый персонаж — да'), ('avatar_bad_1', 'Первый персонаж — нет'),
-                ('avatar_ok_2', 'Второй персонаж — да'), ('avatar_bad_2', 'Второй персонаж — нет'),
-                ('song_ok', 'Музыка одобрена'), ('song_bad', 'Изменить текст песни'),
-                ('video_success', 'Видео выдано'), ('video_fail', 'Ошибки видео'),
-            ])
+        cartoon_labels = [
+            *((key + '_click', label) for key, label in CARTOON_THEMES.items()),
+            ('avatar_ok_1', 'Первый персонаж — да'), ('avatar_bad_1', 'Первый персонаж — нет'),
+            ('avatar_ok_2', 'Второй персонаж — да'), ('avatar_bad_2', 'Второй персонаж — нет'),
+            ('song_ok', 'Музыка одобрена'), ('song_bad', 'Изменить текст песни'),
+            ('video_success', 'Видео выдано'), ('video_fail', 'Ошибки видео'),
+        ]
+        all_cartoon_counts = await get_all_counters()
+        cartoon_counts = {key: max(0, all_cartoon_counts.get(key, 0) - counters.get(key, 0)) for key, _ in cartoon_labels}
+        cartoon_test_text = (
+            "\n\n🎬 Мульт-открытки — клиенты:\n"
+            + "\n".join(f"- {label}: {counters.get(key, 0)}" for key, label in cartoon_labels)
+            + f"\n- Покупок за 890 ₽: {counters.get('buy_cartoon_short', 0)}"
+            + f"\n- Покупок за 1 690 ₽: {counters.get('buy_cartoon_long', 0)}"
+            + "\n\n🛠 Мульт-открытки — тесты администратора:\n"
+            + "\n".join(f"- {label}: {cartoon_counts.get(key, 0)}" for key, label in cartoon_labels)
+        )
         admin = await get_user(admin_user_id)
         admin_text = (
             "\n\n🛠 Тестовая активность (Админ):\n"
@@ -1662,20 +1672,122 @@ def create_router(
     def cartoon_style_keyboard(screen='cat_cards'):
         return navigation_keyboard((*((label, key) for key, label in CARTOON_THEMES.items()), ('⬅️ Назад', 'back_to_main')))
 
-    async def ensure_cartoon_admin(event, context):
-        if event.get_ids()[1] is None:
+    async def ensure_cartoon_access(event, context):
+        user_id = event.get_ids()[1]
+        if user_id is None:
             if hasattr(event, 'callback'):
                 await event.ack(notification='Отправьте /start, чтобы открыть меню.')
             return False
-        if admin_user_id is not None and event.get_ids()[1] == admin_user_id:
+        if admin_user_id is not None and user_id == admin_user_id:
+            return True
+        data = await context.get_data()
+        order = await get_cartoon_order(data.get('cartoon_order_id', ''))
+        if (order and order['status'] == 'paid' and order['user_id'] == user_id
+                and order['theme'] == data.get('cartoon_theme') and order['tariff'] == data.get('cartoon_flow')):
             return True
         if hasattr(event, 'callback'):
-            await event.ack(notification='Раздел скоро откроется.')
+            await event.ack(notification='Сначала оплатите выбранную мульт-открытку.')
             if event.message is None:
                 return False
+        await _reply(event, 'Сначала выберите тему и оплатите мульт-открытку.',
+                     attachments=[navigation_keyboard((('🎬 Мульт-открытка', 'cat_cartoon'), ('⬅️ Назад', 'back_to_main')))])
+        return False
+
+    async def persist_cartoon_state(context):
+        data = await context.get_data()
+        order_id = data.get('cartoon_order_id')
+        if order_id:
+            await update_cartoon_order(order_id, fsm_data=json.dumps(data, ensure_ascii=False),
+                                       fsm_state=str(await context.get_state()))
+
+    async def activate_cartoon_order(context, order):
+        saved = json.loads(order['fsm_data']) if order.get('fsm_data') else None
         await context.clear()
-        await context.set_state(PosterStates.waiting_for_mode)
-        await _reply(event, CARTOON_COMING_SOON, attachments=[navigation_keyboard((('⬅️ Назад', 'back_to_main'),))])
+        if saved:
+            await context.set_data(saved)
+            state = order['fsm_state']
+            if state == str(PosterStates.cartoon_generating):
+                # Resume the same stage and cached task, rather than issuing another paid request.
+                state = (PosterStates.waiting_for_cartoon_music_review if saved.get('cartoon_kling_task_id')
+                         else PosterStates.waiting_for_cartoon_song_phrase if saved.get('chosen_song_phrase')
+                         else PosterStates.waiting_for_avatar_photo)
+            await context.set_state(state)
+            return
+        await context.update_data(cartoon_order_id=order['order_id'], cartoon_flow=order['tariff'],
+            cartoon_amount_kopecks=order['amount_kopecks'], cartoon_session_id=uuid4().hex,
+            cartoon_theme=order['theme'], cartoon_mode=order['theme'], avatar_attempt=1,
+            avatar_urls={}, avatar_preview_urls={})
+        await context.set_state(PosterStates.waiting_for_avatar_photo)
+        await persist_cartoon_state(context)
+
+    async def send_cartoon_checkout(event, context, theme, product):
+        user_id = event.get_ids()[1]
+        data = await context.get_data()
+        order = await get_cartoon_order(data.get('cartoon_order_id', ''))
+        if not order or order['user_id'] != user_id or order['theme'] != theme or order['tariff'] != product[0]:
+            order_id = f"cartoon_{user_id}_{theme}_{time_ns()}"
+            await create_cartoon_order(order_id, user_id, theme, product[0])
+            order = await get_cartoon_order(order_id)
+        await context.clear()
+        await context.update_data(cartoon_order_id=order['order_id'], cartoon_flow=product[0],
+                                  cartoon_amount_kopecks=product[1], cartoon_theme=theme)
+        await context.set_state(PosterStates.waiting_for_cartoon_payment)
+        if order['status'] == 'paid':
+            await activate_cartoon_order(context, order)
+            await _reply(event, CARTOON_PHOTO_PROMPT if await context.get_state() == PosterStates.waiting_for_avatar_photo
+                         else 'Оплата подтверждена. Продолжайте по последнему сообщению.')
+            return
+        if order['status'] != 'pending':
+            await _reply(event, 'Этот заказ уже завершён. Выберите новую мульт-открытку.', attachments=[main_keyboard()])
+            return
+        try:
+            if payments is None:
+                raise RuntimeError('Не настроена интеграция Prodamus.')
+            link = await payments.create_payment_link(user_id, order_id=order['order_id'], amount=product[1] // 100,
+                                                     description=order['product_name'])
+            text = ('🎬 Мульт-открытка (10-15 сек) стоит 890 ₽. Оплатите, чтобы начать создание.' if product[0] == 'short'
+                    else '🎬 Мульт-поздравление (до 30 сек) стоит 1 690 ₽. Оплатите, чтобы начать создание.')
+            keyboard = InlineKeyboardBuilder().row(LinkButton(text=f"Оплатить {product[1] // 100} ₽", url=link)).row(
+                CallbackButton(text='Проверить оплату / продолжить', payload='cartoon_resume:' + order['order_id'])).as_markup()
+            await _reply(event, text, attachments=[keyboard])
+        except Exception:
+            logger.exception('Не удалось выставить счёт мульт-заказа %s:', order['order_id'])
+            await _reply(event, 'Не удалось создать платёжную ссылку. Попробуйте ещё раз; фото понадобится только после оплаты.',
+                         attachments=[navigation_keyboard((('Повторить оплату', theme), ('⬅️ Назад', 'back_to_main')))])
+
+    @router.message_callback(F.callback.payload.startswith('cartoon_resume:'))
+    async def resume_paid_cartoon(event: MessageCallback, context: MemoryContext):
+        order_id = event.callback.payload.removeprefix('cartoon_resume:')
+        order = await get_cartoon_order(order_id)
+        if event.message is None or not order or order['user_id'] != event.get_ids()[1]:
+            await event.ack(notification='Заказ недоступен.')
+            return
+        if order['status'] != 'paid':
+            await event.ack(notification='Оплата ещё не подтверждена.' if order['status'] == 'pending' else 'Заказ уже завершён.')
+            return
+        data = await context.get_data()
+        await event.ack(notification='Оплата подтверждена.')
+        if data.get('cartoon_order_id') != order_id or await context.get_state() == PosterStates.waiting_for_cartoon_payment:
+            await activate_cartoon_order(context, order)
+            await _reply(event, CARTOON_PHOTO_PROMPT if await context.get_state() == PosterStates.waiting_for_avatar_photo
+                         else 'Данные заказа восстановлены. Продолжайте по последнему сообщению.')
+        else:
+            await _reply(event, 'Продолжайте создание по последнему сообщению. Данные заказа сохранены.')
+
+    async def resume_cartoon_photo(event, context):
+        body = event.message.body
+        if not any(item.type == 'image' for item in (getattr(body, 'attachments', None) or [])):
+            return False
+        data = await context.get_data()
+        order = (await get_cartoon_order(data['cartoon_order_id']) if data.get('cartoon_order_id')
+                 else await latest_paid_cartoon(event.get_ids()[1]))
+        if order and order['status'] == 'paid' and order['user_id'] == event.get_ids()[1]:
+            await activate_cartoon_order(context, order)
+            if await context.get_state() == PosterStates.waiting_for_avatar_photo:
+                await collect_cartoon_photo(event, context)
+            else:
+                await _reply(event, 'Данные заказа восстановлены. Продолжайте по последнему сообщению.')
+            return True
         return False
 
     def cartoon_product(data):
@@ -1699,14 +1811,6 @@ def create_router(
         if event.message is None or user_id is None:
             await event.ack(notification='Отправьте /start, чтобы открыть меню.')
             return
-        if admin_user_id is None or user_id != admin_user_id:
-            await event.ack(notification='Раздел скоро откроется.')
-            await increment_counter('click_cartoon_short' if event.callback.payload == 'cat_cartoon' else 'click_cartoon_long', user_id=user_id)
-            await context.clear()
-            await context.set_state(PosterStates.waiting_for_mode)
-            await _reply(event, '🎬 Раздел «Мульт-открытка» уже совсем скоро заработает! Мы заканчиваем настройку оплаты, и в ближайшее время вы сможете создавать настоящие мультфильмы с вашим лицом. Следите за обновлениями! 🚀',
-                         attachments=[navigation_keyboard((('⬅️ Назад', 'back_to_main'),))])
-            return
         await event.ack(notification='Выберите стиль…')
         flow, price, text, _ = CARTOON_PRODUCTS[event.callback.payload]
         await increment_counter('click_cartoon_short' if flow == 'short' else 'click_cartoon_long', user_id=user_id)
@@ -1717,7 +1821,9 @@ def create_router(
 
     @router.message_callback(F.callback.payload.startswith('cartoon_style:') | F.callback.payload.in_(set(CARTOON_THEMES)))
     async def cartoon_style(event: MessageCallback, context: MemoryContext):
-        if not await ensure_cartoon_admin(event, context):
+        user_id = event.get_ids()[1]
+        if user_id is None:
+            await event.ack(notification='Отправьте /start, чтобы открыть меню.')
             return
         data = await context.get_data()
         target = event.callback.payload.removeprefix('cartoon_style:')
@@ -1727,6 +1833,15 @@ def create_router(
             return
         if await context.get_state() == PosterStates.cartoon_generating:
             await event.ack(notification='Аватар уже создаётся, пожалуйста, подождите.')
+            return
+        if user_id != admin_user_id:
+            if target not in CARTOON_THEMES:
+                await event.ack(notification='Выберите одну из новых тем.')
+                await _reply(event, product[2], attachments=[cartoon_style_keyboard()])
+                return
+            await event.ack(notification='Готовлю оплату…')
+            await increment_counter(target + '_click', user_id=user_id)
+            await send_cartoon_checkout(event, context, target, product)
             return
         await event.ack(notification='Выбираю стиль…')
         await context.clear()
@@ -1749,7 +1864,7 @@ def create_router(
             await _reply(event, text, attachments=[cartoon_style_keyboard(target)])
 
     async def collect_cartoon_photo(event: MessageCreated, context: MemoryContext):
-        if is_bot_message(event) or not await ensure_cartoon_admin(event, context):
+        if is_bot_message(event) or not await ensure_cartoon_access(event, context):
             return
         user_id = event.get_ids()[1]
         if is_bot_message(event) or user_id is None:
@@ -1814,6 +1929,8 @@ def create_router(
                 if (await context.get_data()).get('cartoon_session_id') == session:
                     await context.set_state(PosterStates.waiting_for_avatar_photo)
                     await _reply(event, 'Не удалось создать или отправить аватар. Отправьте фото ещё раз; готовый аватар будет отправлен повторно.')
+            finally:
+                await persist_cartoon_state(context)
 
     async def handoff_cartoon(event, context, user_id):
         data = await context.get_data()
@@ -1833,13 +1950,15 @@ def create_router(
                 return
         await _reply(event, 'Понимаем вас. Передаем заказ нашему художнику для ручной обработки. Он свяжется с вами в течение часа.' if data.get('cartoon_theme') else
                      'Понимаем вас. Передаем заказ нашему художнику, он свяжется с вами в течение часа.')
+        if data.get('cartoon_order_id'):
+            await finish_cartoon_order(data['cartoon_order_id'], user_id, manual=True)
         if data.get('cartoon_theme'):
             await context.clear()
             await context.set_state(None)
 
     @router.message_callback(F.callback.payload.in_(set(CARTOON_AVATAR_EVENTS)))
     async def cartoon_avatar_review(event: MessageCallback, context: MemoryContext):
-        if not await ensure_cartoon_admin(event, context):
+        if not await ensure_cartoon_access(event, context):
             return
         user_id = event.get_ids()[1]
         if event.message is None or user_id is None:
@@ -1872,10 +1991,11 @@ def create_router(
             else:
                 await context.set_state(PosterStates.cartoon_manual_review)
                 await handoff_cartoon(event, context, user_id)
+            await persist_cartoon_state(context)
 
     @router.message_callback(F.callback.payload == 'cartoon_retry_handoff')
     async def cartoon_retry_handoff(event: MessageCallback, context: MemoryContext):
-        if not await ensure_cartoon_admin(event, context):
+        if not await ensure_cartoon_access(event, context):
             return
         user_id = event.get_ids()[1]
         if event.message is None or user_id is None:
@@ -1891,7 +2011,7 @@ def create_router(
 
     @router.message_callback(F.callback.payload.startswith('cartoon_song:'))
     async def cartoon_song(event: MessageCallback, context: MemoryContext):
-        if not await ensure_cartoon_admin(event, context):
+        if not await ensure_cartoon_access(event, context):
             return
         user_id = event.get_ids()[1]
         if user_id is None:
@@ -1999,10 +2119,11 @@ def create_router(
         finally:
             if (await context.get_data()).get('cartoon_session_id') == session:
                 await context.update_data(**video_cache(data))
+                await persist_cartoon_state(context)
 
     @router.message_callback(F.callback.payload.startswith('cartoon_music_ok:') | F.callback.payload.startswith('cartoon_music_bad:'))
     async def cartoon_music_review(event: MessageCallback, context: MemoryContext):
-        if not await ensure_cartoon_admin(event, context):
+        if not await ensure_cartoon_access(event, context):
             return
         user_id = event.get_ids()[1]
         lock = cartoon_locks.setdefault(user_id, asyncio.Lock())
@@ -2022,6 +2143,7 @@ def create_router(
                 await context.update_data(cartoon_preview_token=None, chosen_song_url=None)
                 await context.set_state(PosterStates.waiting_for_cartoon_song_phrase)
                 await _reply(event, CARTOON_SONG_PHRASE_PROMPT)
+                await persist_cartoon_state(context)
                 return
             await increment_counter('song_ok', user_id=user_id)
             session = data['cartoon_session_id']
@@ -2041,6 +2163,7 @@ def create_router(
                         return
                     data['cartoon_kling_task_id'] = task_id
                     await context.update_data(**{key:value for key,value in data.items() if key.startswith('cartoon_kling_')})
+                    await persist_cartoon_state(context)
                 if not data.get('cartoon_kling_video_url'):
                     data['cartoon_kling_video_url'] = await poll_video_task(data['cartoon_kling_task_id'], timeout=1200)
                 if (await context.get_data()).get('cartoon_session_id') != session:
@@ -2061,6 +2184,8 @@ def create_router(
                 if sent is None:
                     raise RuntimeError('MAX не подтвердил отправку мульт-открытки.')
                 if (await context.get_data()).get('cartoon_session_id') == session:
+                    if data.get('cartoon_order_id'):
+                        await finish_cartoon_order(data['cartoon_order_id'], user_id)
                     await increment_counter('video_success', user_id=user_id)
                     await context.set_state(PosterStates.waiting_for_mode)
             except Exception:
@@ -2073,6 +2198,7 @@ def create_router(
             finally:
                 if (await context.get_data()).get('cartoon_session_id') == session:
                     await context.update_data(**video_cache(data), **{key:value for key,value in data.items() if key.startswith('cartoon_kling_')})
+                    await persist_cartoon_state(context)
 
     async def collect_card_role_info(event: MessageCreated, context: MemoryContext):
         if is_bot_message(event):
@@ -2268,7 +2394,7 @@ def create_router(
             return
         state = await context.get_state()
         cartoon = state == PosterStates.waiting_for_cartoon_song_phrase
-        if cartoon and not await ensure_cartoon_admin(event, context):
+        if cartoon and not await ensure_cartoon_access(event, context):
             return
         if state not in (PosterStates.waiting_for_cartoon_song_phrase, PosterStates.waiting_for_video_song_phrase):
             return
@@ -3680,8 +3806,10 @@ def create_router(
         await generate_and_send(event, context)
 
     @router.message_created(PosterStates.waiting_for_mode)
-    async def choose_mode(event: MessageCreated) -> None:
+    async def choose_mode(event: MessageCreated, context: MemoryContext) -> None:
         if not is_bot_message(event):
+            if await resume_cartoon_photo(event, context):
+                return
             await _reply(event, "Выберите карту желаний или открытку кнопкой.", attachments=[main_keyboard()])
 
     @router.message_created(PosterStates.generating)
@@ -3694,6 +3822,9 @@ def create_router(
         if is_bot_message(event):
             return
         state = await context.get_state()
+        if state is None or state == PosterStates.waiting_for_cartoon_payment:
+            if await resume_cartoon_photo(event, context):
+                return
         if state == PosterStates.waiting_for_card_role_info:
             await collect_card_role_info(event, context)
             return

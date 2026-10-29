@@ -1170,7 +1170,7 @@ async def test_eight_cartoon_themes_use_exact_identity_and_background(monkeypatc
         'IDENTITY REQUIREMENTS: '
         '- Despite the cartoon style, the character must be 100% recognizable as the person in the reference photo. '
         '- Keep the exact same hair color, hairstyle, and overall facial structure. '
-        'SCENE & BACKGROUND: - ' + background
+        + service.CARTOON_CLOTHING_STYLE + service.CARTOON_CLOTHING[theme] + ' SCENE & BACKGROUND: - ' + background
     )
     assert generate.await_args.kwargs['count']==1
 

@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from time import monotonic
+from collections.abc import Awaitable, Callable
 from urllib.parse import quote, urlsplit
 
 import httpx
@@ -184,7 +185,10 @@ async def poll_video_task(task_id: str, timeout: int = 1200) -> str:
         raise TimeoutError(f"Таймаут ожидания PiAPI ({timeout} секунд), task_id={task_id}") from None
 
 
-async def generate_video_from_avatar(avatar_url: str, prompt: str | None = None, *, mode: str = '', people_count: int | None = None) -> str:
+async def generate_video_from_avatar(
+    avatar_url: str, prompt: str | None = None, *, mode: str = '', people_count: int | None = None,
+    task_id: str | None = None, on_task_created: Callable[[str], Awaitable[None]] | None = None,
+) -> str:
     """Создать задачу по аватару и вернуть ссылку на готовое видео."""
     if people_count is None:
         people_count = await count_people_in_photo(avatar_url)
@@ -193,5 +197,8 @@ async def generate_video_from_avatar(avatar_url: str, prompt: str | None = None,
     video_prompt = build_video_prompt(mode, people_count) if prompt is None or people_count > 5 else prompt
     logger.info('На фото найдено %s человек. Промпт для Kling: %s', people_count, video_prompt)
     logger.info('Промпт для Kling (%s): %s', mode, video_prompt)
-    task_id = await create_video_task_with_retry(avatar_url, video_prompt)
+    if task_id is None:
+        task_id = await create_video_task_with_retry(avatar_url, video_prompt)
+        if on_task_created is not None:
+            await on_task_created(task_id)
     return await poll_video_task(task_id)

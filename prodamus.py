@@ -324,7 +324,11 @@ class ProdamusPayments:
             # Сумма уже сверена с сохранённым заказом: ранее выданные счета
             # остаются действительными после изменения прайса.
             tariff = CARTOON_TARIFFS.get(order['tariff'])
-            if tariff is None or tariff[1] != order['product_name']:
+            # Сохраняем совместимость с уже выданными счетами короткого формата.
+            names = {tariff[1]} if tariff else set()
+            if order['tariff'] == 'short':
+                names.add('Мульт-открытка (10-15 сек)')
+            if order['product_name'] not in names:
                 raise ValueError('Неизвестный мульт-тариф.')
         elif order.get('order_type') == 'musical':
             if MUSICAL_TARIFFS.get(order['tariff']) != (order['amount_kopecks'], order['product_name']):

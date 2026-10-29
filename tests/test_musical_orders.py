@@ -23,10 +23,11 @@ async def test_paid_music_survives_lost_fsm_and_delivers_only_once(credit_db):
     worker=PaidMusicalWorker(bot,renderer=render,uploader=upload)
     await asyncio.gather(worker.process('music_paid'),worker.process('music_paid'))
     render.assert_awaited_once_with('https://cdn.example/card.jpg','https://cdn.example/full.mp3')
-    assert bot.send_message.await_count == 2
+    assert bot.send_message.await_count == 3
     assert bot.send_message.await_args_list[0].kwargs['text'] == MUSICAL_VIDEO_WAIT_MESSAGE
     assert bot.send_message.await_args.kwargs['user_id'] == 456
-    assert bot.send_message.await_args.kwargs['attachments'][0].type.value == 'video'
+    assert bot.send_message.await_args_list[1].kwargs['attachments'][0].type.value == 'video'
+    assert bot.send_message.await_args.kwargs['attachments'][0].payload.buttons[0][0].text == '🔗 Поделиться ботом'
     assert (await credit_db.get_musical_order('music_paid'))['delivered'] == 1
     assert await credit_db.pending_musical_orders() == []
 
@@ -35,7 +36,7 @@ async def test_music_delivery_retry_uses_cached_file_without_rendering_again(cre
     await paid(credit_db)
     render=AsyncMock(return_value='https://cdn.example/final.mp4')
     upload=AsyncMock(return_value=object())
-    bot=SimpleNamespace(send_message=AsyncMock(side_effect=[object(),RuntimeError('MAX unavailable'),object()]))
+    bot=SimpleNamespace(send_message=AsyncMock(side_effect=[object(),RuntimeError('MAX unavailable'),object(),object()]))
     worker=PaidMusicalWorker(bot,renderer=render,uploader=upload)
     await worker.process('music_paid')
     order=await credit_db.get_musical_order('music_paid')
@@ -78,3 +79,17 @@ async def test_paid_music_wait_notice_precedes_render_and_is_not_repeated_on_del
     worker.renderer.assert_awaited_once()
     assert sum(c.kwargs['text']==MUSICAL_VIDEO_WAIT_MESSAGE for c in bot.send_message.await_args_list)==1
     assert (await credit_db.get_musical_order('music_paid'))['delivered']==1
+
+
+async def test_paid_music_share_failure_does_not_retry_paid_render_or_delivery(credit_db,caplog):
+    await paid(credit_db)
+    bot=SimpleNamespace(send_message=AsyncMock(side_effect=[object(),object(),RuntimeError('share failed')]))
+    render=AsyncMock(return_value='https://cdn.example/paid.mp4')
+    upload=AsyncMock(return_value=AttachmentUpload(type='video',payload={'token':'paid'}))
+    worker=PaidMusicalWorker(bot,renderer=render,uploader=upload,bot_link='https://max.ru/custom_bot')
+    await worker.process('music_paid')
+    order=await credit_db.get_musical_order('music_paid')
+    assert order['delivered']==1 and order['attempts']==0 and order['failed']==0
+    assert bot.send_message.await_args.kwargs['attachments'][0].payload.buttons[0][0].url=='https://max.ru/custom_bot'
+    await worker.process('music_paid')
+    render.assert_awaited_once();upload.assert_awaited_once()

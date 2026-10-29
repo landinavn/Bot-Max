@@ -38,7 +38,7 @@ def sample_media(tmp_path):
 
 
 @respx.mock
-async def test_merge_replaces_original_audio_copies_video_uploads_and_cleans_temp(storage, sample_media, tmp_path, monkeypatch):
+async def test_merge_replaces_original_audio_encodes_h264_uploads_and_cleans_temp(storage, sample_media, tmp_path, monkeypatch):
     import array
     respx.get('https://input.example/video.mp4').respond(200, content=sample_media[0])
     respx.get('https://input.example/song.mp3').respond(200, content=sample_media[1])
@@ -56,7 +56,9 @@ async def test_merge_replaces_original_audio_copies_video_uploads_and_cleans_tem
     result.write_bytes(stored['Body'])
     probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_streams', '-show_format', '-of', 'json', str(result)]))
     assert [s['codec_type'] for s in probe['streams']] == ['video', 'audio']
-    assert probe['streams'][0]['codec_name'] == 'mpeg4'  # Видео скопировано, не перекодировано.
+    assert probe['streams'][0]['codec_name'] == 'h264'
+    assert probe['streams'][0]['pix_fmt'] == 'yuv420p'
+    assert stored['ContentDisposition'] == 'inline; filename="musical-card.mp4"'
     assert probe['streams'][1]['codec_name'] == 'aac'
     assert 3.4 <= float(probe['format']['duration']) <= 3.7
     assert int(probe['streams'][0]['nb_frames']) >= 34  # Исходный ролик имел только 20 кадров.
@@ -129,10 +131,10 @@ async def test_looped_video_matches_full_song_even_when_shorter_or_much_longer(s
     result = json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams','-show_format','-of','json',str(target)]))
     video, sound = result['streams']
     assert abs(float(sound['duration'])-duration) < 0.1
-    # Поток копируется без перекодирования: длительность кратна кадру (здесь 0.1 с).
+    # Длительность H.264 кратна кадру (здесь 0.1 с).
     assert duration-0.11 <= float(video['duration']) <= duration+0.2
     assert abs(float(result['format']['duration'])-duration) < 0.2
-    assert video['codec_name'] == 'mpeg4' and sound['codec_name'] == 'aac'
+    assert video['codec_name'] == 'h264' and video['pix_fmt'] == 'yuv420p' and sound['codec_name'] == 'aac'
     if duration > 2:
         assert int(video['nb_frames']) > 600  # Больше минуты видео из исходных двух секунд.
 
@@ -178,14 +180,14 @@ async def test_musical_card_is_static_h264_with_full_aac_song_and_cleans_files(s
     probe = json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams','-show_format','-of','json',str(result)]))
     video, sound = probe['streams']
     assert video['codec_name'] == 'h264' and video['pix_fmt'] == 'yuv420p'
-    assert (video['width'],video['height']) == (66,68)
+    assert (video['width'],video['height']) == (64,66)
     assert sound['codec_name'] == 'aac'
     assert abs(float(sound['duration'])-duration) < 0.1
     assert abs(float(probe['format']['duration'])-duration) < 0.15
     frames = []
     for seek in (0.2,duration-0.3):
         frames.append(subprocess.check_output(['ffmpeg','-v','error','-ss',str(seek),'-i',str(result),'-vframes','1','-f','rawvideo','-pix_fmt','rgb24','-']))
-    assert len(frames[0]) == len(frames[1]) == 66*68*3
+    assert len(frames[0]) == len(frames[1]) == 64*66*3
     # H.264 может слегка менять квантование одинаковых кадров.
     assert sum(abs(a-b) for a,b in zip(*frames))/len(frames[0]) < 5
     pcm = array.array('h', subprocess.check_output(['ffmpeg','-v','error','-i',str(result),'-ss','1','-t','1','-f','s16le','-ac','1','-ar','8000','-']))
@@ -240,7 +242,8 @@ async def test_cartoon_musical_video_keeps_kling_video_and_loops_full_song(stora
     assert not image.called
     path=tmp_path/'animated-with-full-song.mp4';path.write_bytes(storage.objects[0]['Body'])
     probe=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams','-of','json',str(path)]))
-    assert probe['streams'][0]['codec_name']=='mpeg4' # Сохранён видеоряд Kling, а не новый статичный H.264.
+    assert probe['streams'][0]['codec_name']=='h264'
+    assert probe['streams'][0]['pix_fmt']=='yuv420p'
     assert float(probe['streams'][1]['duration'])>3.4
 
 
@@ -257,3 +260,41 @@ async def test_cartoon_audio_preview_upload_is_an_audio_attachment_and_cleans_te
     bot=SimpleNamespace(upload_media=AsyncMock(side_effect=upload))
     result=await media.upload_audio_for_max(bot,'https://preview.example/clip.mp3')
     assert result.type.value=='audio' and not paths[0].parent.exists()
+
+
+@respx.mock
+async def test_animated_odd_size_high_chroma_input_becomes_mobile_h264_aac(storage,sample_media,tmp_path):
+    source=tmp_path/'odd-source.mp4'
+    subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','testsrc=size=65x67:rate=10:duration=2',
+        '-c:v','libx264','-pix_fmt','yuv444p',str(source)],check=True)
+    respx.get('https://input.example/odd.mp4').respond(200,content=source.read_bytes())
+    respx.get('https://input.example/full.mp3').respond(200,content=sample_media[1])
+    await media.create_musical_video('https://input.example/avatar.png','https://input.example/full.mp3',
+                                   animated_video_url='https://input.example/odd.mp4')
+    result=tmp_path/'compatible.mp4';result.write_bytes(storage.objects[0]['Body'])
+    info=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams','-show_format','-of','json',str(result)]))
+    video,audio=info['streams']
+    assert video['codec_name']=='h264' and video['pix_fmt']=='yuv420p'
+    assert (video['width'],video['height'])==(64,66)
+    assert audio['codec_name']=='aac' and float(audio['duration'])>3.4
+    assert storage.objects[0]['ContentType']=='video/mp4'
+    frames=[]
+    for seek in (0.2,0.8):
+        frames.append(subprocess.check_output(['ffmpeg','-v','error','-ss',str(seek),'-i',str(result),
+            '-vframes','1','-f','rawvideo','-pix_fmt','rgb24','-']))
+    assert frames[0]!=frames[1]  # Анимация сохранена при перекодировании.
+    assert result.read_bytes().index(b'moov')<result.read_bytes().index(b'mdat')  # Быстрый просмотр до полной загрузки.
+
+
+@respx.mock
+async def test_max_video_upload_rejects_audio_attachment_and_cleans_temp():
+    from maxapi.types import AttachmentUpload
+    respx.get('https://cdn.example/video.mp4').respond(200,content=b'fake-mp4')
+    paths=[]
+    async def upload(media):
+        paths.append(Path(media.path))
+        return AttachmentUpload(type='audio',payload={'token':'wrong-type'})
+    bot=SimpleNamespace(upload_media=AsyncMock(side_effect=upload))
+    with pytest.raises(media.MediaServiceError,match='вместо video'):
+        await media.upload_video_for_max(bot,'https://cdn.example/video.mp4')
+    assert paths and not paths[0].exists()

@@ -51,6 +51,7 @@ from prodamus import PACKAGES, ProdamusPayments
 from audio_service import generate_song, wait_for_song, wait_for_song_result, make_protected_preview, TEACHER_SCENARIO_TITLE, song_tracks, build_song_request, write_song_lyrics, validate_song_arguments, InvalidSongArguments, AudioNotConfigured, SongFailed
 from audio_orders import PaidAudioWorker, SUPPORT_URL
 from max_client import log_max_error
+from video_delivery import send_video_share
 from image_service import (
     count_people_in_photo, create_cartoon_avatar_preview, CARTOON_IMAGE_PROMPTS,
     GenerationLimitError,
@@ -1262,14 +1263,14 @@ def create_router(
                             raise ValueError('Видеосервис пока не вернул готовое видео.')
                         await save_pending_video_result(job['id'], result)
                     attachments = [InlineKeyboardBuilder().row(LinkButton(text='⬇️ Скачать видео', url=result)).as_markup()]
-                    if job.get('render_kind') == 'musical':
-                        attachments.append(await upload_video_for_max(event.bot, result))
+                    attachments.append(await upload_video_for_max(event.bot, result))
                     sent = await event.bot.send_message(user_id=job['user_id'], text='🎬 Ваше видео готово: ' + result,
                         attachments=attachments)
                     if sent is None:
                         raise RuntimeError('MAX не подтвердил отправку видео.')
                     await mark_video_completed(job['id'])
                     success += 1
+                    await send_video_share(event.bot, job['user_id'], bot_link=bot_link)
                 except Exception:
                     failed += 1
                     logger.exception('Ошибка отложенного видео %s для пользователя %s:', job['id'], job['user_id'])
@@ -2061,10 +2062,14 @@ def create_router(
                     return
                 if not isinstance(result, str) or not result.startswith('https://'):
                     raise ValueError('PiAPI не вернул HTTPS-ссылку на видео.')
-                await _reply(event, '🎬 Ваше видео с песней готово: ' + result,
+                video = await upload_video_for_max(event.bot, result)
+                sent = await _reply(event, '🎬 Ваше видео с песней готово: ' + result,
                              attachments=[InlineKeyboardBuilder().row(LinkButton(text='⬇️ Скачать видео', url=result)).row(
-                                 CallbackButton(text='⬅️ Главное меню', payload='back_to_main')).as_markup()])
+                                 CallbackButton(text='⬅️ Главное меню', payload='back_to_main')).as_markup(), video])
+                if sent is None:
+                    raise RuntimeError('MAX не подтвердил отправку мульт-видео.')
                 await context.set_state(PosterStates.waiting_for_mode)
+                await send_video_share(event.bot, event.get_ids()[1], bot_link=bot_link)
             except Exception:
                 logger.exception('Ошибка генерации мульт-видео PiAPI:')
                 if (await context.get_data()).get('cartoon_session_id') != data.get('cartoon_session_id'):
@@ -2168,7 +2173,7 @@ def create_router(
                     data['cartoon_kling_video_url'] = await poll_video_task(data['cartoon_kling_task_id'], timeout=1200)
                 if (await context.get_data()).get('cartoon_session_id') != session:
                     return
-                key = [data['cartoon_kling_video_url'], full_song, 'cartoon-full-song-v1']
+                key = [data['cartoon_kling_video_url'], full_song, VIDEO_MERGE_POLICY]
                 if data.get('video_merged_source') != key or not data.get('video_merged_url'):
                     data['video_merged_url'] = await create_musical_video(original, full_song, animated_video_url=data['cartoon_kling_video_url'])
                     data['video_merged_source'] = key
@@ -2188,6 +2193,7 @@ def create_router(
                         await finish_cartoon_order(data['cartoon_order_id'], user_id)
                     await increment_counter('video_success', user_id=user_id)
                     await context.set_state(PosterStates.waiting_for_mode)
+                    await send_video_share(event.bot, user_id, bot_link=bot_link)
             except Exception:
                 logger.exception('Ошибка генерации тематической мульт-открытки:')
                 if (await context.get_data()).get('cartoon_session_id') == session:
@@ -2581,6 +2587,7 @@ def create_router(
                     raise RuntimeError('MAX не подтвердил отправку музыкальной открытки.')
                 await context.update_data(video_complete=True, video_result_url=result)
                 await context.set_state(PosterStates.waiting_for_mode)
+                await send_video_share(event.bot, event.get_ids()[1], bot_link=bot_link)
             except Exception:
                 logger.exception('Ошибка создания музыкальной открытки:')
                 if (await context.get_data()).get('video_generation_id') != generation_id:

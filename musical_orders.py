@@ -10,13 +10,16 @@ from database import (get_musical_order, update_musical_order, claim_musical_ord
                       pending_musical_orders, reset_musical_workers)
 from media_service import create_musical_video, upload_video_for_max, MUSICAL_VIDEO_WAIT_MESSAGE
 from audio_orders import SUPPORT_URL
+from config import DEFAULT_BOT_LINK, validate_bot_link
+from video_delivery import send_video_share
 
 logger = logging.getLogger(__name__)
 
 
 class PaidMusicalWorker:
-    def __init__(self, bot, *, renderer=None, uploader=None, poll_interval=2):
+    def __init__(self, bot, *, renderer=None, uploader=None, poll_interval=2, bot_link=DEFAULT_BOT_LINK):
         self.bot = bot
+        self.bot_link = validate_bot_link(bot_link)
         self.renderer = renderer or create_musical_video
         self.uploader = uploader or upload_video_for_max
         self.poll_interval = poll_interval
@@ -59,6 +62,7 @@ class PaidMusicalWorker:
             if sent is None:
                 raise RuntimeError('MAX не подтвердил отправку музыкальной открытки.')
             await update_musical_order(order_id, delivered=1, error=None)
+            await send_video_share(self.bot, order['user_id'], bot_link=self.bot_link)
         except asyncio.CancelledError:
             raise
         except Exception:

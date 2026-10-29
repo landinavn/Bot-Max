@@ -715,7 +715,8 @@ async def test_music_webhook_worker_renders_after_payment_and_reuses_result_for_
         duplicate=await post_notification(client,data)
         assert duplicate.status==200
     render.assert_awaited_once_with('https://cdn.example/card.jpg','https://cdn.example/full.mp3')
-    assert bot.send_message.await_count == 2
+    assert bot.send_message.await_count == 3  # Уведомление, video и отдельная кнопка «Поделиться».
+    assert bot.send_message.await_args.kwargs['attachments'][0].payload.buttons[0][0].text=='🔗 Поделиться ботом'
     assert (await credit_db.get_musical_order('music_test'))['delivered']==1
 
 

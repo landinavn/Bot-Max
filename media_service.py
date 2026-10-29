@@ -16,8 +16,8 @@ from config import Config
 from image_service import _storage_client
 
 logger = logging.getLogger(__name__)
-VIDEO_MERGE_POLICY = 'loop-full-song-v1'
-MUSICAL_VIDEO_POLICY = 'static-image-full-song-v1'
+VIDEO_MERGE_POLICY = 'h264-aac-full-song-v2'
+MUSICAL_VIDEO_POLICY = 'static-image-h264-aac-full-song-v2'
 MUSICAL_VIDEO_WAIT_MESSAGE = (
     '🎵 Создаю вашу музыкальную открытку. Пожалуйста, подождите около 1-2 минут — '
     'я накладываю музыку и готовлю видео-файл. Не закрывайте чат!'
@@ -79,7 +79,8 @@ async def _download(http, url: str, path: Path, limit: int):
 def _upload_video(client, settings, path: Path) -> str:
     key = f'videos/{uuid4().hex}.mp4'
     with path.open('rb') as stream:
-        client.put_object(Bucket=settings.storage_bucket, Key=key, Body=stream, ContentType='video/mp4')
+        client.put_object(Bucket=settings.storage_bucket, Key=key, Body=stream, ContentType='video/mp4',
+                          ContentDisposition='inline; filename="musical-card.mp4"')
     base = settings.storage_public_base_url or f"https://storage.yandexcloud.net/{quote(settings.storage_bucket, safe='')}"
     return base.rstrip('/') + '/' + key
 
@@ -102,7 +103,9 @@ async def merge_video_and_audio(video_url: str, audio_url: str) -> str:
             logger.info('Повторяю видеоряд на всю песню: %.2f секунд.', duration)
             await run_media_process(binary, '-nostdin', '-v', 'error', '-protocol_whitelist', 'file,pipe',
                 '-stream_loop', '-1', '-i', str(source_video), '-i', str(source_audio), '-map', '0:v:0', '-map', '1:a:0',
-                '-c:v', 'copy', '-c:a', 'aac', '-t', f'{duration:.6f}', '-shortest', '-movflags', '+faststart', '-y', str(target))
+                '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+                '-c:a', 'aac', '-b:a', '192k', '-t', f'{duration:.6f}', '-shortest', '-movflags', '+faststart',
+                '-map_metadata', '-1', '-map_chapters', '-1', '-y', str(target), timeout=600)
             if not target.is_file() or not target.stat().st_size:
                 raise MediaServiceError('ffmpeg не создал готовое видео.')
             logger.info('Загружаю склеенное видео в Yandex Object Storage.')
@@ -130,11 +133,11 @@ async def create_musical_video(image_url: str, audio_url: str, *, animated_video
                 await _download(http, image_url, image, 32 * 1024 * 1024)
                 await _download(http, audio_url, audio, 32 * 1024 * 1024)
             duration = await audio_duration(audio)
-            # pad нужен для нечётных размеров; исходное изображение не кадрируется.
+            # Чётные размеры и yuv420p обеспечивают совместимость H.264 на телефонах.
             await run_media_process(binary, '-nostdin', '-v', 'error', '-protocol_whitelist', 'file,pipe',
                 '-y', '-loop', '1', '-framerate', '25', '-i', str(image), '-i', str(audio),
                 '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'libx264', '-tune', 'stillimage',
-                '-vf', 'pad=ceil(iw/2)*2:ceil(ih/2)*2', '-c:a', 'aac', '-b:a', '192k',
+                '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2', '-c:a', 'aac', '-b:a', '192k',
                 '-pix_fmt', 'yuv420p', '-t', f'{duration:.6f}', '-shortest', '-movflags', '+faststart',
                 '-map_metadata', '-1', '-map_chapters', '-1', str(target), timeout=600)
             if not target.is_file() or not target.stat().st_size:
@@ -155,6 +158,8 @@ async def upload_video_for_max(bot, video_url: str):
         async with httpx.AsyncClient(timeout=120, trust_env=False, follow_redirects=False) as http:
             await _download(http, video_url, path, 128 * 1024 * 1024)
         attachment = await bot.upload_media(InputMedia(path=str(path), type=UploadType.VIDEO))
+        if getattr(attachment.type, 'value', attachment.type) != 'video':
+            raise MediaServiceError('MAX вернул вложение другого типа вместо video.')
         token = attachment.payload.token
         if not isinstance(token, str) or not token.strip():
             raise MediaServiceError('MAX вернул пустой media token видео.')

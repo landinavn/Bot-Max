@@ -179,7 +179,7 @@ async def test_default_avatar_prompt_matches_smiling_and_blinking_request(fast_p
 ])
 @respx.mock
 async def test_style_specific_prompt_reaches_piapi_and_is_logged(mode, addition, fast_poll, caplog):
-    base = 'The character is smiling and blinking.'
+    base = 'The character is smiling, blinking naturally, and slightly moving their head from side to side.'
     post = respx.post(video.TASK_URL).respond(200, json={'data': {'task_id': 'styled'}})
     respx.get(video.TASK_URL + '/styled').respond(200, json={'data': {'status': 'completed', 'output': {'video': 'https://video.example/styled.mp4'}}})
     with caplog.at_level(logging.INFO, logger=video.__name__):
@@ -207,7 +207,7 @@ async def test_crowd_threshold_controls_real_piapi_prompt_and_logs_count(count, 
             'The people remain completely still like in a photograph. DO NOT animate faces or bodies.')
         assert 'Snow' not in prompt and 'smiling' not in prompt
     else:
-        assert 'The character is smiling and blinking.' in prompt and 'Snow is gently falling' in prompt
+        assert 'The character is smiling, blinking naturally, and slightly moving their head from side to side.' in prompt and 'Snow is gently falling' in prompt
     assert f'На фото найдено {count} человек. Промпт для Kling: {prompt}' in caplog.text
 
 
@@ -234,7 +234,7 @@ async def test_supplied_count_avoids_duplicate_vision_and_custom_prompt_cannot_a
 ])
 def test_cartoon_kling_prompt_uses_exact_short_themed_animation(theme,details):
     assert video.build_video_prompt(theme)==video.CARTOON_VIDEO_PROMPTS[theme]
-    assert video.CARTOON_VIDEO_PROMPTS[theme]=='The character is smiling and blinking. '+details
+    assert video.CARTOON_VIDEO_PROMPTS[theme]=='The character is smiling, blinking naturally, and slightly moving their head from side to side. '+details
 
 
 @pytest.mark.parametrize('response', [

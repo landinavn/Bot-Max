@@ -272,7 +272,7 @@ SONG_PROMO_EXPIRED_TEXT = 'К сожалению, 48 часов уже прош�
 CATEGORY_BUTTONS = (
     ("🎵 Музыкальная открытка — Новинка 🔥", "cat_video"),
     ("🎬 Мульт-открытка — Новинка 🔥", "cat_cartoon"),
-    ("🎬 Мульт-поздравление (30 сек) — Новинка 🔥", "cat_cartoon_long"),
+    ("🎬 Мульт-поздравление — Новинка 🔥", "cat_cartoon_long"),
     ("📸 Нейрофотосессия", "cat_photo"),
     ("🎵 Аудиопесни", "cat_audio"),
     ("🎁 Открытки", "cat_cards"),
@@ -1625,6 +1625,7 @@ def create_router(
         return False
 
     async def send_cartoon_video_examples(event) -> None:
+        failed = False
         for filename in CARTOON_EXAMPLE_FILES:
             try:
                 path = EXAMPLES_DIR / filename
@@ -1635,7 +1636,13 @@ def create_router(
                     raise RuntimeError('MAX не вернул корректное video-вложение.')
                 await _reply(event, 'Пример мульт-открытки:', attachments=[video])
             except Exception:
+                failed = True
                 logger.exception('Не удалось отправить видео-пример %s:', filename)
+        if failed:
+            try:
+                await _reply(event, 'Видео-примеры временно недоступны')
+            except Exception:
+                logger.exception('Не удалось отправить сообщение о недоступности видео-примеров:')
 
     async def send_welcome_message(
         event: MessageCreated | MessageCallback | BotStarted, context: MemoryContext,

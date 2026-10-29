@@ -4779,7 +4779,7 @@ async def test_cartoon_main_menu_order_and_names_are_exact():
     assert [(button.text, button.payload) for row in buttons for button in row] == [
         ('🎵 Музыкальная открытка — Новинка 🔥', 'cat_video'),
         ('🎬 Мульт-открытка — Новинка 🔥', 'cat_cartoon'),
-        ('🎬 Мульт-поздравление (30 сек) — Новинка 🔥', 'cat_cartoon_long'),
+        ('🎬 Мульт-поздравление — Новинка 🔥', 'cat_cartoon_long'),
         ('📸 Нейрофотосессия', 'cat_photo'), ('🎵 Аудиопесни', 'cat_audio'), ('🎁 Открытки', 'cat_cards'),
         ('🔮 Карта Желаний', 'cat_vision'), ('🧘 Медитации', 'cat_meditation'), ('🖼 Примеры', 'show_examples'), ('🆘 Помощь', 'show_help')]
 
@@ -7195,7 +7195,8 @@ async def test_short_cartoon_missing_examples_logs_and_keeps_menu(credit_db, cap
     event = callback_event('cat_cartoon')
     context = await ready_context()
     await dispatch_callback(create_router(admin_user_id=999), event, context)
-    assert event.send.await_count == 1
+    assert event.send.await_count == 2
+    assert event.send.await_args_list[0].args[0] == 'Видео-примеры временно недоступны'
     assert event.send.await_args.args[0] == handlers.CARTOON_PRODUCTS['cat_cartoon'][2]
     assert all(name in caplog.text for name in handlers.CARTOON_EXAMPLE_FILES)
     assert await context.get_state() == PosterStates.waiting_for_cartoon_style
@@ -7230,9 +7231,20 @@ async def test_short_cartoon_video_error_continues_to_second_example_and_menu(cr
     elif failure == 'wrong_type':
         responses[0] = AttachmentUpload(type='image', payload={'token': 'wrong'})
     else:
-        event.send.side_effect = [RuntimeError('send failed'), None, None]
+        event.send.side_effect = [RuntimeError('send failed'), None, None, None]
     event.bot.upload_media = AsyncMock(side_effect=responses)
     await dispatch_callback(create_router(admin_user_id=999), event, await ready_context())
     assert event.bot.upload_media.await_count == 2
-    assert event.send.await_args_list[-2].kwargs['attachments'] == [videos[1]]
+    assert event.send.await_args_list[-3].kwargs['attachments'] == [videos[1]]
+    assert event.send.await_args_list[-2].args[0] == 'Видео-примеры временно недоступны'
     assert event.send.await_args_list[-1].args[0] == handlers.CARTOON_PRODUCTS['cat_cartoon'][2]
+
+
+async def test_short_cartoon_unavailable_notice_failure_still_sends_themes(credit_db):
+    event = callback_event('cat_cartoon')
+    event.send.side_effect = [RuntimeError('notice failed'), None]
+    context = await ready_context()
+    await dispatch_callback(create_router(admin_user_id=999), event, context)
+    assert event.send.await_args_list[0].args[0] == 'Видео-примеры временно недоступны'
+    assert event.send.await_args_list[-1].args[0] == handlers.CARTOON_PRODUCTS['cat_cartoon'][2]
+    assert await context.get_state() == PosterStates.waiting_for_cartoon_style

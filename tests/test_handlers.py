@@ -6493,3 +6493,133 @@ async def test_themed_cartoon_second_avatar_approval_uses_only_second_clean_imag
     counts=await credit_db.get_all_counters()
     assert counts['avatar_bad_1']==counts['avatar_ok_2']==1
     assert not counts.get('avatar_ok_1')
+
+
+async def test_broadcast_update_sends_exact_announcement_and_menu_button_to_active_users(credit_db,monkeypatch):
+    for user_id in (101,102,103):
+        await credit_db.add_credits(user_id,1)
+    await credit_db.mark_user_inactive(102)
+    sleep=AsyncMock();monkeypatch.setattr(handlers.asyncio,'sleep',sleep)
+    event=message_event('/broadcast_update')
+    await call_handler(create_router(admin_user_id=456),'broadcast_update',event)
+    assert [c.kwargs['user_id'] for c in event.bot.send_message.await_args_list]==[101,103]
+    expected=(
+        '🎉 У нас большое обновление! Твой нейро-художник научился ещё большему! 🎨✨\n\n'
+        'Теперь в боте можно создавать:\n'
+        '🎵 Персональные песни — трогательную песню в подарок или весёлую песню по фану.\n'
+        '💌 Музыкальные открытки — поздравления, которые не только приятно смотреть, но и слушать!\n'
+        '🎄 Новогодние нейрофотосессии — волшебные праздничные фотографии с твоим лицом.\n'
+        '🎬 Ожившие открытки — поздравления в формате видео.\n\n'
+        'А скоро появятся мульт-открытки, настоящие мульт-поздравления и медитации! ✨\n\n'
+        '🏆 Кстати, 30 октября — День тренера! Успей создать необычный музыкальный подарок любимому тренеру!\n\n'
+        '👇 Нажми кнопку ниже, чтобы открыть обновлённое меню и посмотреть все новинки!\n\n'
+        'Спасибо, что ты с нами! ❤️'
+    )
+    for sent in event.bot.send_message.await_args_list:
+        assert sent.kwargs['text']==expected
+        buttons=sent.kwargs['attachments'][0].payload.buttons
+        assert len(buttons)==1 and len(buttons[0])==1
+        assert (buttons[0][0].text,buttons[0][0].payload)==('🚀 Открыть меню','back_to_main')
+    assert event.message.answer.await_args_list[0].args[0]=='🚀 Начинаю рассылку обновления для 2 пользователей...'
+    assert event.message.answer.await_args.args[0]=='✅ Рассылка завершена! Успешно: 2, Ошибок: 0'
+    assert sleep.await_args_list==[call(0.5),call(0.5)]
+
+
+@pytest.mark.parametrize('status',[403,429,500])
+async def test_broadcast_update_continues_after_each_user_error(credit_db,monkeypatch,caplog,status):
+    for user_id in (101,102):await credit_db.add_credits(user_id,1)
+    monkeypatch.setattr(handlers.asyncio,'sleep',AsyncMock())
+    event=message_event('/broadcast_update')
+    event.bot.send_message.side_effect=[MaxApiError(code=status,raw='failed announcement'),object()]
+    await call_handler(create_router(admin_user_id=456),'broadcast_update',event)
+    assert [c.kwargs['user_id'] for c in event.bot.send_message.await_args_list]==[101,102]
+    assert event.message.answer.await_args.args[0]=='✅ Рассылка завершена! Успешно: 1, Ошибок: 1'
+    assert 'пользователю 101' in caplog.text
+    assert (await credit_db.get_user(101))['is_active']==(0 if status==403 else 1)
+
+
+@pytest.mark.parametrize('admin,actor,is_bot',[(None,456,False),(999,456,False),(456,None,False),(456,456,True)])
+async def test_broadcast_update_is_admin_only(credit_db,admin,actor,is_bot):
+    await credit_db.add_credits(101,1)
+    event=message_event('/broadcast_update');event.get_ids=lambda:(123,actor)
+    event.message.sender.is_bot=is_bot
+    await call_handler(create_router(admin_user_id=admin),'broadcast_update',event)
+    event.bot.send_message.assert_not_awaited();event.message.answer.assert_not_awaited()
+
+
+async def test_broadcast_update_empty_list_reports_zero_without_sends(credit_db):
+    event=message_event('/broadcast_update')
+    await call_handler(create_router(admin_user_id=456),'broadcast_update',event)
+    event.bot.send_message.assert_not_awaited()
+    assert event.message.answer.await_args.args[0]=='✅ Рассылка завершена! Успешно: 0, Ошибок: 0'
+
+
+async def test_broadcast_update_secondary_block_marking_error_does_not_stop_loop(credit_db,monkeypatch):
+    for user_id in (101,102):await credit_db.add_credits(user_id,1)
+    monkeypatch.setattr(handlers.asyncio,'sleep',AsyncMock())
+    monkeypatch.setattr(handlers,'mark_user_inactive',AsyncMock(side_effect=RuntimeError('database busy')))
+    event=message_event('/broadcast_update');event.bot.send_message.side_effect=[MaxApiError(code=403,raw='blocked'),object()]
+    await call_handler(create_router(admin_user_id=456),'broadcast_update',event)
+    assert event.bot.send_message.await_count==2
+    assert 'Успешно: 1, Ошибок: 1' in event.message.answer.await_args.args[0]
+
+
+async def test_broadcast_update_missing_max_confirmation_counts_as_failure(credit_db,monkeypatch):
+    await credit_db.add_credits(101,1)
+    monkeypatch.setattr(handlers.asyncio,'sleep',AsyncMock())
+    event=message_event('/broadcast_update');event.bot.send_message.return_value=None
+    await call_handler(create_router(admin_user_id=456),'broadcast_update',event)
+    assert 'Успешно: 0, Ошибок: 1' in event.message.answer.await_args.args[0]
+
+
+async def test_broadcast_update_shares_lock_with_existing_broadcast_commands(credit_db,monkeypatch):
+    import asyncio
+    await credit_db.add_credits(101,1)
+    entered,release=asyncio.Event(),asyncio.Event()
+    async def send(**kwargs):entered.set();await release.wait();return object()
+    router=create_router(admin_user_id=456)
+    first=message_event('/broadcast_update');first.bot.send_message.side_effect=send
+    task=asyncio.create_task(call_handler(router,'broadcast_update',first))
+    try:
+        await asyncio.wait_for(entered.wait(),timeout=5)
+        duplicate=message_event('/broadcast_update');await call_handler(router,'broadcast_update',duplicate)
+        generic=message_event('/broadcast Привет');await call_handler(router,'broadcast',generic)
+        assert 'Рассылка уже выполняется' in duplicate.message.answer.await_args.args[0]
+        assert 'Рассылка уже выполняется' in generic.message.answer.await_args.args[0]
+        duplicate.bot.send_message.assert_not_awaited();generic.bot.send_message.assert_not_awaited()
+    finally:
+        release.set();await task
+
+
+async def test_broadcast_update_rechecks_activity_before_sending(credit_db,monkeypatch):
+    for user_id in (101,102):await credit_db.add_credits(user_id,1)
+    monkeypatch.setattr(handlers.asyncio,'sleep',AsyncMock())
+    event=message_event('/broadcast_update')
+    async def send(**kwargs):
+        if kwargs['user_id']==101:await credit_db.mark_user_inactive(102)
+        return object()
+    event.bot.send_message.side_effect=send
+    await call_handler(create_router(admin_user_id=456),'broadcast_update',event)
+    assert event.bot.send_message.await_args_list==[call(user_id=101,text=handlers.BROADCAST_UPDATE_TEXT,attachments=event.bot.send_message.await_args.kwargs['attachments'])]
+    assert 'Успешно: 1, Ошибок: 0' in event.message.answer.await_args.args[0]
+
+
+async def test_broadcast_update_real_dispatcher_resolves_command_and_keeps_menu_callback(credit_db,monkeypatch,event_replies):
+    from maxapi import Dispatcher
+    from maxapi.context.isolation import SimpleEventIsolation
+    from maxapi.types import MessageCreated,User
+    monkeypatch.setattr(handlers,'_reply',event_replies)
+    monkeypatch.setattr(handlers.asyncio,'sleep',AsyncMock())
+    await credit_db.add_credits(101,1)
+    dp=Dispatcher(storage=MemoryContext,event_isolation=SimpleEventIsolation());dp.include_routers(create_router(admin_user_id=456))
+    bot=SimpleNamespace(me=User(user_id=9999,first_name='Bot',is_bot=True),send_message=AsyncMock(return_value=object()))
+    event=MessageCreated(timestamp=1,bot=bot,message={'sender':{'user_id':456,'first_name':'Admin','is_bot':False},
+        'recipient':{'chat_id':123,'chat_type':'dialog'},'timestamp':1,
+        'body':{'mid':'update-announcement','seq':1,'text':'/broadcast_update','attachments':[]}})
+    try:
+        await dp.handle(event)
+        recipients=[c.kwargs['user_id'] for c in bot.send_message.await_args_list if c.kwargs.get('text')==handlers.BROADCAST_UPDATE_TEXT]
+        assert recipients==[101,456] # Админ тоже активен после middleware.
+        assert bot.send_message.await_args.kwargs['text']=='✅ Рассылка завершена! Успешно: 2, Ошибок: 0'
+    finally:
+        await dp.shutdown()

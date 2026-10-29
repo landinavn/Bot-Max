@@ -154,6 +154,20 @@ WELCOME_TEXT = (
     "\n"
     "👇 Выбери, что хочешь создать:"
 )
+BROADCAST_UPDATE_TEXT = (
+    '🎉 У нас большое обновление! Твой нейро-художник научился ещё большему! 🎨✨\n\n'
+    'Теперь в боте можно создавать:\n'
+    '🎵 Персональные песни — трогательную песню в подарок или весёлую песню по фану.\n'
+    '💌 Музыкальные открытки — поздравления, которые не только приятно смотреть, но и слушать!\n'
+    '🎄 Новогодние нейрофотосессии — волшебные праздничные фотографии с твоим лицом.\n'
+    '🎬 Ожившие открытки — поздравления в формате видео.\n\n'
+    'А скоро появятся мульт-открытки, настоящие мульт-поздравления и медитации! ✨\n\n'
+    '🏆 Кстати, 30 октября — День тренера! Успей создать необычный музыкальный подарок любимому тренеру!\n\n'
+    '👇 Нажми кнопку ниже, чтобы открыть обновлённое меню и посмотреть все новинки!\n\n'
+    'Спасибо, что ты с нами! ❤️'
+)
+
+
 MODE_BUTTONS = (
     ("🎄 Открытка: Новый год", "mode_ny"),
     ("👨‍👩‍👧‍👦 Семейный Новый год", "mode_ny_family"),
@@ -1422,6 +1436,38 @@ def create_router(
             title = "Рассылка остановлена" if stopped else "Рассылка завершена"
             await _reply(event, f"{title}. Отправлено: {sent}. "
                          f"Недоступны (403): {blocked}. Ошибок: {failed}.")
+
+    @router.message_created(Command('broadcast_update'))
+    async def broadcast_update(event: MessageCreated) -> None:
+        if is_bot_message(event) or admin_user_id is None or event.get_ids()[1] != admin_user_id:
+            return
+        if broadcast_lock.locked():
+            await _reply(event, 'Рассылка уже выполняется. Дождитесь завершения.')
+            return
+        async with broadcast_lock:
+            users = await get_active_user_ids()
+            await _reply(event, f'🚀 Начинаю рассылку обновления для {len(users)} пользователей...')
+            keyboard = navigation_keyboard((('🚀 Открыть меню', 'back_to_main'),))
+            success_count = failed_count = 0
+            for user_id in users:
+                try:
+                    user = await get_user(user_id)
+                    if user is None or not user['is_active']:
+                        continue
+                    sent = await event.bot.send_message(user_id=user_id, text=BROADCAST_UPDATE_TEXT, attachments=[keyboard])
+                    if sent is None:
+                        raise RuntimeError('MAX не подтвердил отправку анонса.')
+                    success_count += 1
+                except Exception as exc:
+                    failed_count += 1
+                    logger.exception('Ошибка отправки обновления пользователю %s:', user_id)
+                    if max_error_status(exc) == 403:
+                        try:
+                            await mark_user_inactive(user_id)
+                        except Exception:
+                            logger.exception('Не удалось отметить пользователя %s недоступным:', user_id)
+                await asyncio.sleep(0.5)
+            await _reply(event, f'✅ Рассылка завершена! Успешно: {success_count}, Ошибок: {failed_count}')
 
     async def segmented_broadcast(event: MessageCreated, *, has_generated: bool) -> None:
         if is_bot_message(event) or admin_user_id is None or event.get_ids()[1] != admin_user_id:

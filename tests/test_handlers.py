@@ -6200,3 +6200,296 @@ async def test_musical_card_wait_notice_is_sent_before_ffmpeg(credit_db,monkeypa
     await dispatch_callback_and_phrase(router,event,context)
     assert sum(c.args and c.args[0]==handlers.MUSICAL_VIDEO_WAIT_MESSAGE for c in event.send.await_args_list)==1
     assert await context.get_state()==PosterStates.waiting_for_mode
+
+
+async def start_themed_cartoon(router,context,theme='theme_ny',entry='cat_cartoon'):
+    await dispatch_callback(router,callback_event(entry),context)
+    selected=callback_event(theme)
+    await dispatch_callback(router,selected,context)
+    assert selected.send.await_args.args[0]==handlers.CARTOON_PHOTO_PROMPT
+    await call_handler(router,'collect_cartoon_photo',cartoon_photo(),context)
+    await dispatch_callback(router,callback_event('avatar_ok_1'),context)
+    assert await context.get_state()==PosterStates.waiting_for_cartoon_song_phrase
+
+
+async def submit_themed_song(router,context,phrase='Маша, с днём рождения!'):
+    event=message_event(phrase)
+    await call_handler(router,'echo',event,context)
+    assert await context.get_state()==PosterStates.waiting_for_cartoon_music_review
+    return event
+
+
+@pytest.mark.parametrize('theme',list(handlers.CARTOON_THEMES))
+@pytest.mark.parametrize('entry',['cat_cartoon','cat_cartoon_long'])
+async def test_themed_cartoon_requires_music_confirmation_before_kling(credit_db,theme,entry,max_image_upload):
+    avatar=AsyncMock(return_value='https://cdn.example/clean-avatar.png')
+    router,context=create_router(admin_user_id=456,avatar_generator=avatar),await ready_context()
+    menu=callback_event(entry);await dispatch_callback(router,menu,context)
+    buttons=menu.send.await_args.kwargs['attachments'][0].payload.buttons
+    assert [row[0].payload for row in buttons[:-1]]==list(handlers.CARTOON_THEMES)
+    await dispatch_callback(router,callback_event(theme),context)
+    photo=cartoon_photo();await call_handler(router,'collect_cartoon_photo',photo,context)
+    avatar.assert_awaited_once_with('https://photos.example.com/first.png',theme)
+    data=await context.get_data()
+    assert data['original_image_url']=='https://cdn.example/clean-avatar.png'
+    assert data['watermarked_image_url']=='https://preview.example/avatar-watermarked.png'
+    max_image_upload.assert_awaited_once_with(photo.bot,data['watermarked_image_url'])
+    assert photo.message.answer.await_args.args[0]=='Вот ваш персонаж! Вам нравится?'
+    approved=callback_event('avatar_ok_1');await dispatch_callback(router,approved,context)
+    assert approved.send.await_args.args[0]==handlers.CARTOON_SONG_PHRASE_PROMPT
+    assert await context.get_state()==PosterStates.waiting_for_cartoon_song_phrase
+    song=await submit_themed_song(router,context)
+    assert song.message.answer.await_args.args[0]=='🎧 Вот фрагмент вашей песни. Всё нравится?'
+    media=song.message.answer.await_args.kwargs['attachments']
+    assert media[0].type.value=='audio' and len(media)==2
+    assert all(getattr(item,'type',None)!='image' for item in media)
+    assert 'https://audio.example/1.mp3' not in str(song.message.answer.await_args_list)
+    handlers.create_audio_preview.assert_awaited_once_with('https://audio.example/1.mp3')
+    handlers.create_video_task.assert_not_awaited();handlers.create_musical_video.assert_not_awaited()
+    handlers.generate_song.assert_awaited_once()
+    assert 'Маша, с днём рождения!' in handlers.generate_song.await_args.args[0]
+    token=(await context.get_data())['cartoon_preview_token']
+    final=callback_event('cartoon_music_ok:'+token)
+    await dispatch_callback(router,final,context)
+    handlers.create_video_task.assert_awaited_once_with('https://cdn.example/clean-avatar.png',handlers.CARTOON_VIDEO_PROMPTS[theme])
+    handlers.poll_video_task.assert_awaited_once_with('cartoon-kling-job',timeout=1200)
+    handlers.create_musical_video.assert_awaited_once_with('https://cdn.example/clean-avatar.png','https://audio.example/1.mp3',animated_video_url='https://video.example/cartoon-kling.mp4')
+    assert final.send.await_args_list[0].args[0]==handlers.CARTOON_VIDEO_WAIT
+    assert final.send.await_args.kwargs['attachments'][0].type.value=='video'
+    counts=await credit_db.get_all_counters()
+    assert counts[theme+'_click']==counts['avatar_ok_1']==counts['song_ok']==counts['video_success']==1
+    assert not (await credit_db.get_all_counters(admin_id=456)).get('video_success',0)
+    assert await context.get_state()==PosterStates.waiting_for_mode
+
+
+async def test_themed_cartoon_song_change_reuses_avatar_and_rejects_old_confirmation(credit_db):
+    waiter=AsyncMock(side_effect=['https://audio.example/first.mp3','https://audio.example/second.mp3'])
+    avatar=AsyncMock(return_value='https://cdn.example/clean.png')
+    router,context=create_router(admin_user_id=456,avatar_generator=avatar,song_waiter=waiter),await ready_context()
+    await start_themed_cartoon(router,context)
+    await submit_themed_song(router,context,'Первая фраза')
+    first=(await context.get_data())['cartoon_preview_token']
+    await dispatch_callback(router,callback_event('cartoon_music_bad:'+first),context)
+    assert await context.get_state()==PosterStates.waiting_for_cartoon_song_phrase
+    await submit_themed_song(router,context,'Вторая фраза')
+    second=(await context.get_data())['cartoon_preview_token']
+    assert second!=first
+    await dispatch_callback(router,callback_event('cartoon_music_ok:'+first),context)
+    handlers.create_video_task.assert_not_awaited()
+    assert await context.get_state()==PosterStates.waiting_for_cartoon_music_review
+    await dispatch_callback(router,callback_event('cartoon_music_ok:'+second),context)
+    avatar.assert_awaited_once()
+    assert handlers.generate_song.await_count==2
+    assert 'Вторая фраза' in handlers.generate_song.await_args.args[0]
+    assert (await credit_db.get_all_counters())['song_bad']==1
+
+
+async def test_themed_cartoon_second_rejection_hands_off_and_clears_fsm(credit_db):
+    avatar=AsyncMock(side_effect=['https://cdn.example/first.png','https://cdn.example/second.png'])
+    router,context=create_router(admin_user_id=456,avatar_generator=avatar),await ready_context()
+    await dispatch_callback(router,callback_event('cat_cartoon'),context)
+    await dispatch_callback(router,callback_event('theme_mother'),context)
+    await call_handler(router,'collect_cartoon_photo',cartoon_photo(),context)
+    await dispatch_callback(router,callback_event('avatar_bad_1'),context)
+    await call_handler(router,'collect_cartoon_photo',cartoon_photo('https://photos.example.com/clearer.png'),context)
+    event=callback_event('avatar_bad_2');await dispatch_callback(router,event,context)
+    assert 'для ручной обработки' in event.send.await_args.args[0]
+    assert event.bot.send_message.await_args.kwargs['user_id']==456
+    assert 'ID клиента: 456' in event.bot.send_message.await_args.kwargs['text']
+    assert await context.get_state() is None and await context.get_data()=={}
+    counts=await credit_db.get_all_counters()
+    assert counts['avatar_bad_1']==counts['avatar_bad_2']==1
+
+
+@pytest.mark.parametrize('payload',['cat_cartoon','cat_cartoon_long',*handlers.CARTOON_THEMES,'cartoon_style:mode_ny','avatar_ok_1','cartoon_song:audio_fun_ny','cartoon_music_ok:forged'])
+async def test_cartoon_customer_cannot_bypass_admin_gate_with_old_or_forged_buttons(credit_db,payload):
+    avatar=AsyncMock()
+    router,context=create_router(admin_user_id=999,avatar_generator=avatar),await ready_context()
+    await context.update_data(cartoon_flow='short',cartoon_theme='theme_ny',cartoon_preview_token='forged',original_image_url='https://cdn.example/a.png',video_song_url='https://audio.example/full.mp3')
+    await context.set_state(PosterStates.waiting_for_cartoon_music_review)
+    event=callback_event(payload);await dispatch_callback(router,event,context)
+    assert event.send.await_args.args[0]==handlers.CARTOON_COMING_SOON
+    assert not await context.get_data()
+    avatar.assert_not_awaited();handlers.generate_song.assert_not_awaited();handlers.create_video_task.assert_not_awaited()
+
+
+async def test_themed_cartoon_video_timeout_reuses_kling_task_and_song(credit_db):
+    router,context=create_router(admin_user_id=456,avatar_generator=AsyncMock(return_value='https://cdn.example/clean.png')),await ready_context()
+    await start_themed_cartoon(router,context)
+    await submit_themed_song(router,context)
+    token=(await context.get_data())['cartoon_preview_token']
+    handlers.poll_video_task.side_effect=[TimeoutError('still processing'),'https://video.example/ready.mp4']
+    await dispatch_callback(router,callback_event('cartoon_music_ok:'+token),context)
+    assert await context.get_state()==PosterStates.waiting_for_cartoon_music_review
+    await dispatch_callback(router,callback_event('cartoon_music_ok:'+token),context)
+    handlers.create_video_task.assert_awaited_once()
+    handlers.generate_song.assert_awaited_once()
+    assert handlers.poll_video_task.await_count==2
+    counts=await credit_db.get_all_counters()
+    assert counts['video_fail']==counts['video_success']==1
+
+
+async def test_themed_cartoon_duplicate_confirmation_is_locked(credit_db):
+    import asyncio
+    entered,release=asyncio.Event(),asyncio.Event()
+    async def poll(*args,**kwargs):
+        entered.set();await release.wait();return 'https://video.example/ready.mp4'
+    handlers.poll_video_task.side_effect=poll
+    router,context=create_router(admin_user_id=456,avatar_generator=AsyncMock(return_value='https://cdn.example/clean.png')),await ready_context()
+    await start_themed_cartoon(router,context);await submit_themed_song(router,context)
+    token=(await context.get_data())['cartoon_preview_token']
+    first=asyncio.create_task(dispatch_callback(router,callback_event('cartoon_music_ok:'+token),context))
+    try:
+        await asyncio.wait_for(entered.wait(),timeout=5)
+        await dispatch_callback(router,callback_event('cartoon_music_ok:'+token),context)
+    finally:
+        release.set();await first
+    handlers.create_video_task.assert_awaited_once()
+    assert (await credit_db.get_all_counters())['song_ok']==1
+
+
+async def test_themed_cartoon_admin_stats_show_theme_and_decisions(credit_db):
+    router,context=create_router(admin_user_id=456,avatar_generator=AsyncMock(return_value='https://cdn.example/clean.png')),await ready_context()
+    await start_themed_cartoon(router,context,'theme_father');await submit_themed_song(router,context)
+    token=(await context.get_data())['cartoon_preview_token']
+    await dispatch_callback(router,callback_event('cartoon_music_ok:'+token),context)
+    event=message_event('/stats');await call_handler(router,'stats',event)
+    text=event.message.answer.await_args.args[0]
+    assert 'Мульт-открытки — тесты администратора' in text
+    assert '- 👨‍👧 День отца: 1' in text and '- Музыка одобрена: 1' in text and '- Видео выдано: 1' in text
+
+
+async def test_themed_cartoon_real_dispatcher_routes_photo_phrase_review_and_final_video(credit_db,monkeypatch,event_replies):
+    from maxapi import Dispatcher
+    from maxapi.context.isolation import SimpleEventIsolation
+    from maxapi.types import MessageCallback,MessageCreated,User
+    monkeypatch.setattr(handlers,'_reply',event_replies)
+    router=create_router(admin_user_id=456,avatar_generator=AsyncMock(return_value='https://cdn.example/original.png'))
+    dp=Dispatcher(storage=MemoryContext,event_isolation=SimpleEventIsolation());dp.include_routers(router)
+    bot=SimpleNamespace(me=User(user_id=9999,first_name='Bot',is_bot=True),send_message=AsyncMock(return_value=object()),send_callback=AsyncMock())
+    user={'user_id':456,'first_name':'Admin','is_bot':False}
+    def message(text=None,attachments=None,sender=None):
+        return {'sender':sender or user,'recipient':{'chat_id':123,'chat_type':'dialog'},'timestamp':1,'body':{'mid':'theme-flow','seq':1,'text':text,'attachments':attachments}}
+    async def click(payload):
+        await dp.handle(MessageCallback(timestamp=1,bot=bot,message=message(sender=bot.me.model_dump()),callback={'timestamp':1,'callback_id':payload,'payload':payload,'user':user}))
+    try:
+        await click('cat_cartoon');await click('theme_mar8')
+        context=dp.fsm.get_context(chat_id=123,user_id=456)
+        await dp.handle(MessageCreated(timestamp=2,bot=bot,message=message(attachments=[{'type':'image','payload':{'photo_id':1,'token':'source','url':'https://photos.example.com/photo.png'}}])))
+        assert await context.get_state()==PosterStates.waiting_for_avatar_review
+        await click('avatar_ok_1')
+        await dp.handle(MessageCreated(timestamp=3,bot=bot,message=message('Мама, спасибо за всё!')))
+        assert await context.get_state()==PosterStates.waiting_for_cartoon_music_review
+        assert bot.send_message.await_args.kwargs['attachments'][0].type.value=='audio'
+        handlers.create_video_task.assert_not_awaited()
+        await dp.handle(MessageCreated(timestamp=4,bot=bot,message=message('что дальше?')))
+        assert 'кнопкой' in bot.send_message.await_args.kwargs['text']
+        await click('cartoon_music_ok:'+(await context.get_data())['cartoon_preview_token'])
+        assert bot.send_message.await_args.kwargs['attachments'][0].type.value=='video'
+        assert await context.get_state()==PosterStates.waiting_for_mode
+    finally:
+        await dp.shutdown()
+
+
+@pytest.mark.parametrize('stage',['song','video'])
+async def test_themed_cartoon_cancel_drops_late_api_results(credit_db,stage):
+    import asyncio
+    entered,release=asyncio.Event(),asyncio.Event()
+    async def delayed(*args,**kwargs):
+        entered.set();await release.wait();return 'https://cdn.example/late.'+('mp3' if stage=='song' else 'mp4')
+    router,context=create_router(admin_user_id=456,avatar_generator=AsyncMock(return_value='https://cdn.example/original.png'),
+        song_waiter=delayed if stage=='song' else None),await ready_context()
+    await start_themed_cartoon(router,context)
+    if stage=='song':
+        event=message_event('Маша, будь счастлива!')
+        task=asyncio.create_task(call_handler(router,'echo',event,context))
+    else:
+        await submit_themed_song(router,context)
+        handlers.poll_video_task.side_effect=delayed
+        event=callback_event('cartoon_music_ok:'+(await context.get_data())['cartoon_preview_token'])
+        task=asyncio.create_task(dispatch_callback(router,event,context))
+    try:
+        await asyncio.wait_for(entered.wait(),timeout=5)
+        await call_handler(router,'cancel',message_event('/cancel'),context)
+    finally:
+        release.set();await task
+    assert await context.get_data()=={} and await context.get_state()==PosterStates.waiting_for_mode
+    handlers.create_musical_video.assert_not_awaited()
+    if stage=='song':handlers.create_audio_preview.assert_not_awaited()
+    assert not (await credit_db.get_all_counters()).get('video_success')
+
+
+async def test_themed_cartoon_max_delivery_retry_keeps_kling_and_merged_video(credit_db):
+    router,context=create_router(admin_user_id=456,avatar_generator=AsyncMock(return_value='https://cdn.example/original.png')),await ready_context()
+    await start_themed_cartoon(router,context);await submit_themed_song(router,context)
+    token=(await context.get_data())['cartoon_preview_token']
+    handlers.upload_video_for_max.side_effect=[RuntimeError('upload unavailable'),AttachmentUpload(type='video',payload={'token':'retried-video'})]
+    await dispatch_callback(router,callback_event('cartoon_music_ok:'+token),context)
+    assert await context.get_state()==PosterStates.waiting_for_cartoon_music_review
+    await dispatch_callback(router,callback_event('cartoon_music_ok:'+token),context)
+    handlers.create_video_task.assert_awaited_once();handlers.poll_video_task.assert_awaited_once()
+    handlers.create_musical_video.assert_awaited_once();handlers.generate_song.assert_awaited_once()
+    assert await context.get_state()==PosterStates.waiting_for_mode
+
+
+async def test_themed_cartoon_actual_piapi_request_uses_clean_avatar_and_theme_prompt(credit_db,monkeypatch):
+    import json
+    import respx
+    import video_service
+    router,context=create_router(admin_user_id=456,avatar_generator=AsyncMock(return_value='https://cdn.example/original.png')),await ready_context()
+    await start_themed_cartoon(router,context,'theme_valentine');await submit_themed_song(router,context)
+    monkeypatch.setattr(handlers,'create_video_task',video_service.create_video_task)
+    monkeypatch.setattr(handlers,'poll_video_task',video_service.poll_video_task)
+    monkeypatch.setattr(video_service.Config,'from_env',lambda:SimpleNamespace(piapi_key='test-piapi-key'))
+    monkeypatch.setattr(video_service.asyncio,'sleep',AsyncMock())
+    with respx.mock:
+        post=respx.post(video_service.TASK_URL).respond(200,json={'data':{'task_id':'real-theme-job'}})
+        respx.get(video_service.TASK_URL+'/real-theme-job').respond(200,json={'data':{'status':'completed','output':{'video':'https://video.example/real.mp4'}}})
+        await dispatch_callback(router,callback_event('cartoon_music_ok:'+(await context.get_data())['cartoon_preview_token']),context)
+        request=json.loads(post.calls[0].request.content)
+        assert request['input']['image_url']=='https://cdn.example/original.png'
+        assert request['input']['prompt']==handlers.CARTOON_VIDEO_PROMPTS['theme_valentine']
+        assert request['input']['enable_audio'] is False
+        assert post.calls[0].request.headers['X-API-Key']=='test-piapi-key'
+    assert await context.get_state()==PosterStates.waiting_for_mode
+
+
+@pytest.mark.parametrize('stage',['song','video'])
+async def test_themed_cartoon_progress_message_failure_does_not_leave_generating_state(credit_db,stage):
+    router,context=create_router(admin_user_id=456,avatar_generator=AsyncMock(return_value='https://cdn.example/original.png')),await ready_context()
+    await start_themed_cartoon(router,context)
+    if stage=='song':
+        event=message_event('Маша, будь счастлива!')
+        event.message.answer.side_effect=[RuntimeError('MAX unavailable'),object()]
+        await call_handler(router,'echo',event,context)
+        assert await context.get_state()==PosterStates.waiting_for_cartoon_song_phrase
+        handlers.generate_song.assert_not_awaited()
+    else:
+        await submit_themed_song(router,context)
+        event=callback_event('cartoon_music_ok:'+(await context.get_data())['cartoon_preview_token'])
+        event.send.side_effect=[RuntimeError('MAX unavailable'),object()]
+        await dispatch_callback(router,event,context)
+        assert await context.get_state()==PosterStates.waiting_for_cartoon_music_review
+        handlers.create_video_task.assert_not_awaited()
+
+
+async def test_themed_cartoon_second_avatar_approval_uses_only_second_clean_image(credit_db):
+    router,context=create_router(admin_user_id=456,avatar_generator=AsyncMock(side_effect=['https://cdn.example/first.png','https://cdn.example/second.png'])),await ready_context()
+    handlers.create_cartoon_avatar_preview.side_effect=['https://preview.example/first.png','https://preview.example/second.png']
+    await dispatch_callback(router,callback_event('cat_cartoon'),context)
+    await dispatch_callback(router,callback_event('theme_father'),context)
+    await call_handler(router,'collect_cartoon_photo',cartoon_photo(),context)
+    await dispatch_callback(router,callback_event('avatar_bad_1'),context)
+    await dispatch_callback(router,callback_event('avatar_ok_1'),context)
+    assert await context.get_state()==PosterStates.waiting_for_avatar_photo
+    await call_handler(router,'collect_cartoon_photo',cartoon_photo('https://photos.example.com/second.png'),context)
+    await dispatch_callback(router,callback_event('avatar_ok_2'),context)
+    data=await context.get_data()
+    assert data['original_image_url']=='https://cdn.example/second.png'
+    assert data['watermarked_image_url']=='https://preview.example/second.png'
+    await submit_themed_song(router,context)
+    await dispatch_callback(router,callback_event('cartoon_music_ok:'+(await context.get_data())['cartoon_preview_token']),context)
+    assert handlers.create_video_task.await_args.args[0]=='https://cdn.example/second.png'
+    counts=await credit_db.get_all_counters()
+    assert counts['avatar_bad_1']==counts['avatar_ok_2']==1
+    assert not counts.get('avatar_ok_1')

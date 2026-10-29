@@ -21,6 +21,19 @@ DEFAULT_ANIMATION_PROMPT = (
 )
 
 
+CARTOON_VIDEO_BASE = 'Subtle cinematic animation. The 3D Pixar character is smiling warmly, blinking naturally, and making very slight head movements. High quality 3D render, smooth motion. CRITICAL: Do not distort the face, keep the exact facial features identical to the source image. Animation details: '
+CARTOON_VIDEO_PROMPTS = {
+    'theme_ny': CARTOON_VIDEO_BASE + 'Gentle snow is falling, fairy lights are twinkling, soft glowing bokeh.',
+    'theme_bday': CARTOON_VIDEO_BASE + 'Colorful balloons are gently floating, confetti is slowly falling.',
+    'theme_bday_kid': CARTOON_VIDEO_BASE + 'Pastel balloons are gently bobbing, cute confetti is floating.',
+    'theme_valentine': CARTOON_VIDEO_BASE + 'Floating hearts are gently pulsing, rose petals are slowly falling.',
+    'theme_feb23': CARTOON_VIDEO_BASE + 'The St. George ribbon is gently waving, the red star is glowing softly, snow is falling.',
+    'theme_mar8': CARTOON_VIDEO_BASE + 'Spring flowers are gently swaying in a soft breeze, warm sunlight is shimmering.',
+    'theme_mother': CARTOON_VIDEO_BASE + 'Soft particles are floating gently, warm light is softly pulsing.',
+    'theme_father': CARTOON_VIDEO_BASE + 'Warm light is gently flickering, subtle dust motes are floating.',
+}
+
+
 CROWD_VIDEO_PROMPT = (
     'Cinematic background animation only. The glowing lights shimmer, and there is a subtle camera zoom. '
     'The people remain completely still like in a photograph. DO NOT animate faces or bodies.'
@@ -32,6 +45,8 @@ def build_video_prompt(mode: str, people_count: int = 0) -> str:
     if people_count > 5:
         return CROWD_VIDEO_PROMPT
     normalized = (mode or '').lower()
+    if normalized in CARTOON_VIDEO_PROMPTS:
+        return CARTOON_VIDEO_PROMPTS[normalized]
     prompt = DEFAULT_ANIMATION_PROMPT
     scrapbook = 'scrapbook' in normalized or 'modern_card' in normalized
     winter_scrapbook = scrapbook and any(season in normalized for season in ('winter', 'christmas', 'snow'))

@@ -54,3 +54,14 @@ def mock_musical_card_media(monkeypatch):
     import handlers
     monkeypatch.setattr(handlers, 'create_musical_video', AsyncMock(return_value='https://video.example/musical.mp4'))
     monkeypatch.setattr(handlers, 'upload_video_for_max', AsyncMock(return_value=AttachmentUpload(type='video', payload={'token': 'musical-video-token'})))
+
+
+@pytest.fixture(autouse=True)
+def mock_cartoon_theme_media(monkeypatch):
+    from unittest.mock import AsyncMock
+    from maxapi.types import AttachmentUpload
+    import handlers
+    monkeypatch.setattr(handlers, 'create_cartoon_avatar_preview', AsyncMock(return_value='https://preview.example/avatar-watermarked.png'))
+    monkeypatch.setattr(handlers, 'upload_audio_for_max', AsyncMock(return_value=AttachmentUpload(type='audio',payload={'token':'song-preview-token'})))
+    monkeypatch.setattr(handlers, 'create_video_task', AsyncMock(return_value='cartoon-kling-job'))
+    monkeypatch.setattr(handlers, 'poll_video_task', AsyncMock(return_value='https://video.example/cartoon-kling.mp4'))

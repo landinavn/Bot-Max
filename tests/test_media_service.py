@@ -229,3 +229,31 @@ async def test_musical_mp4_is_uploaded_as_video_attachment_to_max_and_temp_remov
     attachment=await media.upload_video_for_max(bot,'https://cdn.example/musical.mp4')
     assert attachment.type.value == 'video' and attachment.payload.token == 'video-token'
     assert not paths[0].parent.exists()
+
+
+@respx.mock
+async def test_cartoon_musical_video_keeps_kling_video_and_loops_full_song(storage,sample_media,tmp_path):
+    respx.get('https://input.example/kling.mp4').respond(200,content=sample_media[0])
+    respx.get('https://input.example/full-song.mp3').respond(200,content=sample_media[1])
+    image=respx.get('https://input.example/clean-avatar.png')
+    await media.create_musical_video('https://input.example/clean-avatar.png','https://input.example/full-song.mp3',animated_video_url='https://input.example/kling.mp4')
+    assert not image.called
+    path=tmp_path/'animated-with-full-song.mp4';path.write_bytes(storage.objects[0]['Body'])
+    probe=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams','-of','json',str(path)]))
+    assert probe['streams'][0]['codec_name']=='mpeg4' # Сохранён видеоряд Kling, а не новый статичный H.264.
+    assert float(probe['streams'][1]['duration'])>3.4
+
+
+@respx.mock
+async def test_cartoon_audio_preview_upload_is_an_audio_attachment_and_cleans_temp():
+    from maxapi.types import AttachmentUpload
+    respx.get('https://preview.example/clip.mp3').respond(200,content=b'SHORT-CLIP')
+    paths=[]
+    async def upload(item):
+        assert item.type.value=='audio'
+        path=Path(item.path);paths.append(path)
+        assert path.read_bytes()==b'SHORT-CLIP'
+        return AttachmentUpload(type='audio',payload={'token':'audio-token'})
+    bot=SimpleNamespace(upload_media=AsyncMock(side_effect=upload))
+    result=await media.upload_audio_for_max(bot,'https://preview.example/clip.mp3')
+    assert result.type.value=='audio' and not paths[0].parent.exists()

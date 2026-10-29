@@ -4778,7 +4778,7 @@ async def test_cartoon_main_menu_order_and_names_are_exact():
         ('🔮 Карта Желаний', 'cat_vision'), ('🧘 Медитации', 'cat_meditation'), ('🖼 Примеры', 'show_examples'), ('🆘 Помощь', 'show_help')]
 
 
-@pytest.mark.parametrize('entry,price,minutes', [('cat_cartoon', 890, '5-10'), ('cat_cartoon_long', 1690, '15-20')])
+@pytest.mark.parametrize('entry,price,minutes', [('cat_cartoon', 590, '5-10'), ('cat_cartoon_long', 1290, '15-20')])
 @pytest.mark.parametrize('approve_second', [False, True])
 async def test_cartoon_avatars_approval_short_songs_and_admin_generation(credit_db, entry, price, minutes, approve_second):
     await credit_db.grant_free_trial(456)
@@ -6638,7 +6638,28 @@ async def test_broadcast_update_real_dispatcher_resolves_command_and_keeps_menu_
         await dp.shutdown()
 
 
-@pytest.mark.parametrize('entry,amount', [('cat_cartoon',890),('cat_cartoon_long',1690)])
+@pytest.mark.parametrize('entry,tariff', [('cat_cartoon','short'),('cat_cartoon_long','long')])
+async def test_cartoon_reselection_replaces_old_pending_price_without_changing_old_invoice(credit_db,monkeypatch,entry,tariff):
+    current=dict(credit_db.CARTOON_TARIFFS)
+    old_amount=current[tariff][0]+(30000 if tariff=='short' else 40000)
+    monkeypatch.setattr(credit_db,'CARTOON_TARIFFS',{**current,tariff:(old_amount,current[tariff][1])})
+    old_id='cartoon_456_theme_ny_old'
+    await credit_db.create_cartoon_order(old_id,456,'theme_ny',tariff)
+    monkeypatch.setattr(credit_db,'CARTOON_TARIFFS',current)
+    payments=SimpleNamespace(create_payment_link=AsyncMock(return_value='https://shop.payform.ru/new-price'))
+    router,context=create_router(admin_user_id=999,payments=payments),await ready_context()
+    await context.clear()
+    await context.update_data(cartoon_order_id=old_id,cartoon_flow=tariff,cartoon_theme='theme_ny')
+    await context.set_state(PosterStates.waiting_for_cartoon_payment)
+    await dispatch_callback(router,callback_event('theme_ny'),context)
+    new_id=(await context.get_data())['cartoon_order_id']
+    assert new_id!=old_id
+    assert (await credit_db.get_cartoon_order(new_id))['amount_kopecks']==current[tariff][0]
+    assert (await credit_db.get_cartoon_order(old_id))['amount_kopecks']==old_amount
+    assert payments.create_payment_link.await_args.kwargs['amount']==current[tariff][0]//100
+
+
+@pytest.mark.parametrize('entry,amount', [('cat_cartoon',590),('cat_cartoon_long',1290)])
 @pytest.mark.parametrize('theme', list(handlers.CARTOON_THEMES))
 async def test_cartoon_checkout_before_photo_and_paid_resume(credit_db, entry, amount, theme):
     payments=SimpleNamespace(create_payment_link=AsyncMock(return_value='https://shop.payform.ru/cartoon-personal'))
@@ -6652,8 +6673,8 @@ async def test_cartoon_checkout_before_photo_and_paid_resume(credit_db, entry, a
     assert order['user_id']==456 and order['theme']==theme
     assert order['amount_kopecks']==amount*100 and order['status']=='pending'
     payments.create_payment_link.assert_awaited_once_with(456,order_id=order['order_id'],amount=amount,description=order['product_name'])
-    expected=('🎬 Мульт-открытка (10-15 сек) стоит 890 ₽. Оплатите, чтобы начать создание.' if amount==890 else
-              '🎬 Мульт-поздравление (до 30 сек) стоит 1 690 ₽. Оплатите, чтобы начать создание.')
+    expected=('🎬 Мульт-открытка (10-15 сек) стоит 590 ₽. Оплатите, чтобы начать создание.' if amount==590 else
+              '🎬 Мульт-поздравление (до 30 сек) стоит 1290 ₽. Оплатите, чтобы начать создание.')
     assert event.send.await_args.args[0]==expected
     assert event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0].url=='https://shop.payform.ru/cartoon-personal'
     assert await context.get_state()==PosterStates.waiting_for_cartoon_payment

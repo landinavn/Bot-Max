@@ -12,7 +12,7 @@ async def test_cartoon_order_survives_reinitialization_and_rejects_rebinding(cre
     await db.create_cartoon_order('cartoon_456_theme_ny_1', 456, 'theme_ny', 'short')
     await db.init_db()
     row = await db.get_cartoon_order('cartoon_456_theme_ny_1')
-    assert (row['user_id'], row['theme'], row['tariff'], row['amount_kopecks']) == (456, 'theme_ny', 'short', 89000)
+    assert (row['user_id'], row['theme'], row['tariff'], row['amount_kopecks']) == (456, 'theme_ny', 'short', 59000)
     assert row['status'] == 'pending' and row['order_type'] == 'cartoon' and row['credits'] == 0
     with pytest.raises(ValueError):
         await db.create_cartoon_order(row['order_id'], 457, 'theme_ny', 'short')

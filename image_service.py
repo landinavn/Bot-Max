@@ -857,7 +857,16 @@ NY_FAMILY_PHOTOSESSION_PROMPTS = {
 }
 
 
-CARTOON_THEME_IMAGE_BASE = 'Create a 3D Pixar/Disney style avatar of the person from the reference photo. CRITICAL: Preserve the exact face shape, nose, eyes, and skin tone. Keep original hairstyle. The character is smiling softly. High quality 3D render, soft lighting. Background: '
+CARTOON_THEME_IMAGE_BASE = (
+    'Transform the person from the reference photo into a 3D animated movie character in the style of Pixar/Disney. '
+    'STYLE REQUIREMENTS (Absolute Priority): '
+    '- 3D rendered cartoon style, smooth stylized skin, big expressive eyes, slightly exaggerated cute facial features. '
+    '- The character must look like a high-quality 3D animation, NOT a real photograph. '
+    'IDENTITY REQUIREMENTS: '
+    '- Despite the cartoon style, the character must be 100% recognizable as the person in the reference photo. '
+    '- Keep the exact same hair color, hairstyle, and overall facial structure. '
+    'SCENE & BACKGROUND: - '
+)
 CARTOON_IMAGE_PROMPTS = {
     'theme_ny': CARTOON_THEME_IMAGE_BASE + 'Christmas tree with glowing fairy lights, gentle falling snow, magical winter atmosphere.',
     'theme_bday': CARTOON_THEME_IMAGE_BASE + 'Colorful balloons, festive confetti, warm glowing candles, birthday party.',
@@ -871,10 +880,9 @@ CARTOON_IMAGE_PROMPTS = {
 
 
 CARTOON_AVATAR_PROMPT = (
-    'Create a single high-quality 3D Pixar/Disney style avatar from the reference photo. '
-    'Preserve the exact face, recognizable facial features, hairstyle, age and skin tone of each reference person. '
-    'Keep the same people, without adding or removing anyone. Expressive eyes, warm friendly expression, '
-    'soft cinematic lighting. Use a soft blurred Christmas tree background. '
+    CARTOON_THEME_IMAGE_BASE
+    + 'Use a soft blurred Christmas tree background. '
+    'Keep the same people, without adding or removing anyone. Preserve their age and skin tone. '
     'No text, captions or watermarks.'
 )
 CARTOON_AVATAR_THEMES = {

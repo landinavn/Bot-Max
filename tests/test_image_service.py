@@ -1055,8 +1055,9 @@ async def test_cartoon_avatar_uses_one_image_shared_openai_pipeline_and_identity
     args, kwargs = generate.await_args
     assert args == (PHOTO_URL, 'Мульт-аватар') and kwargs['count'] == 1
     prompt = kwargs['prompt_override']
-    assert '3D Pixar/Disney style avatar' in prompt
-    assert 'Preserve the exact face' in prompt and 'soft blurred Christmas tree background' in prompt
+    assert '3D animated movie character in the style of Pixar/Disney' in prompt
+    assert '100% recognizable' in prompt and 'soft blurred Christmas tree background' in prompt
+    assert 'NOT a real photograph' in prompt
     assert service.CARTOON_AVATAR_THEMES[mode] in prompt
     assert 'postcard_text' not in kwargs
 
@@ -1161,7 +1162,16 @@ async def test_eight_cartoon_themes_use_exact_identity_and_background(monkeypatc
     monkeypatch.setattr(service,'_generate_and_store',generate)
     assert await service.generate_cartoon_avatar(PHOTO_URL,theme)=='https://cdn.example/clean-avatar.png'
     prompt=generate.await_args.kwargs['prompt_override']
-    assert prompt=='Create a 3D Pixar/Disney style avatar of the person from the reference photo. CRITICAL: Preserve the exact face shape, nose, eyes, and skin tone. Keep original hairstyle. The character is smiling softly. High quality 3D render, soft lighting. Background: '+background
+    assert prompt == (
+        'Transform the person from the reference photo into a 3D animated movie character in the style of Pixar/Disney. '
+        'STYLE REQUIREMENTS (Absolute Priority): '
+        '- 3D rendered cartoon style, smooth stylized skin, big expressive eyes, slightly exaggerated cute facial features. '
+        '- The character must look like a high-quality 3D animation, NOT a real photograph. '
+        'IDENTITY REQUIREMENTS: '
+        '- Despite the cartoon style, the character must be 100% recognizable as the person in the reference photo. '
+        '- Keep the exact same hair color, hairstyle, and overall facial structure. '
+        'SCENE & BACKGROUND: - ' + background
+    )
     assert generate.await_args.kwargs['count']==1
 
 

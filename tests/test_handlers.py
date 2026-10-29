@@ -5430,7 +5430,7 @@ async def test_default_cartoon_generator_uses_real_piapi_chain(credit_db, monkey
         assert post.call_count == get.call_count == 1
         payload = json.loads(post.calls[0].request.content)
         assert payload['input'] == {'image_url': 'https://cdn.example/avatar.png',
-            'prompt': video_service.build_video_prompt('mode_ny'), 'version': '3.0-turbo', 'mode': 'std', 'duration': 5, 'enable_audio': False}
+            'prompt': video_service.build_video_prompt('mode_ny'), 'version': '3.0', 'mode': 'std', 'duration': 5, 'enable_audio': False}
         assert post.calls[0].request.headers['X-API-Key'] == get.calls[0].request.headers['X-API-Key'] == 'piapi-test-key'
     assert 'https://video.example/kling.mp4' in event.send.await_args.args[0]
     button = event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0]
@@ -6432,24 +6432,30 @@ async def test_themed_cartoon_max_delivery_retry_keeps_kling_and_merged_video(cr
     assert await context.get_state()==PosterStates.waiting_for_mode
 
 
-async def test_themed_cartoon_actual_piapi_request_uses_clean_avatar_and_theme_prompt(credit_db,monkeypatch):
+@pytest.mark.parametrize('internal_error', [False, True])
+async def test_themed_cartoon_actual_piapi_request_uses_clean_avatar_and_theme_prompt(credit_db,monkeypatch,internal_error):
     import json
     import respx
     import video_service
     router,context=create_router(admin_user_id=456,avatar_generator=AsyncMock(return_value='https://cdn.example/original.png')),await ready_context()
     await start_themed_cartoon(router,context,'theme_valentine');await submit_themed_song(router,context)
-    monkeypatch.setattr(handlers,'create_video_task',video_service.create_video_task)
+    monkeypatch.setattr(handlers,'create_video_task',video_service.create_video_task_with_retry)
     monkeypatch.setattr(handlers,'poll_video_task',video_service.poll_video_task)
     monkeypatch.setattr(video_service.Config,'from_env',lambda:SimpleNamespace(piapi_key='test-piapi-key'))
     monkeypatch.setattr(video_service.asyncio,'sleep',AsyncMock())
     with respx.mock:
-        post=respx.post(video_service.TASK_URL).respond(200,json={'data':{'task_id':'real-theme-job'}})
+        import httpx
+        post=respx.post(video_service.TASK_URL).mock(side_effect=(
+            [httpx.Response(200,json={'code':10000,'message':'Internal error'})] if internal_error else []
+        ) + [httpx.Response(200,json={'data':{'task_id':'real-theme-job'}})])
         respx.get(video_service.TASK_URL+'/real-theme-job').respond(200,json={'data':{'status':'completed','output':{'video':'https://video.example/real.mp4'}}})
         await dispatch_callback(router,callback_event('cartoon_music_ok:'+(await context.get_data())['cartoon_preview_token']),context)
         request=json.loads(post.calls[0].request.content)
         assert request['input']['image_url']=='https://cdn.example/original.png'
         assert request['input']['prompt']==handlers.CARTOON_VIDEO_PROMPTS['theme_valentine']
         assert request['input']['enable_audio'] is False
+        assert request['input']['version'] == '3.0'
+        assert post.call_count == (2 if internal_error else 1)
         assert post.calls[0].request.headers['X-API-Key']=='test-piapi-key'
     assert await context.get_state()==PosterStates.waiting_for_mode
 

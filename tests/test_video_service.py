@@ -34,7 +34,7 @@ async def test_create_exact_kling_task_and_log(caplog):
     assert json.loads(request.content) == {
         'model': 'kling', 'task_type': 'video_generation',
         'input': {'image_url': 'https://images.example/avatar.png', 'prompt': 'Snow and glowing lights',
-                  'version': '3.0-turbo', 'mode': 'std', 'duration': 5, 'enable_audio': False},
+                  'version': '3.0', 'mode': 'std', 'duration': 5, 'enable_audio': False},
         'config': {'service_mode': 'public'},
     }
     assert route.call_count == 1
@@ -179,8 +179,7 @@ async def test_default_avatar_prompt_matches_smiling_and_blinking_request(fast_p
 ])
 @respx.mock
 async def test_style_specific_prompt_reaches_piapi_and_is_logged(mode, addition, fast_poll, caplog):
-    base = ('Subtle cinematic animation. The people in the photo are smiling warmly and blinking naturally. '
-            'Any string lights or garlands in the background are glowing softly. High quality, photorealistic.')
+    base = 'The character is smiling and blinking.'
     post = respx.post(video.TASK_URL).respond(200, json={'data': {'task_id': 'styled'}})
     respx.get(video.TASK_URL + '/styled').respond(200, json={'data': {'status': 'completed', 'output': {'video': 'https://video.example/styled.mp4'}}})
     with caplog.at_level(logging.INFO, logger=video.__name__):
@@ -208,7 +207,7 @@ async def test_crowd_threshold_controls_real_piapi_prompt_and_logs_count(count, 
             'The people remain completely still like in a photograph. DO NOT animate faces or bodies.')
         assert 'Snow' not in prompt and 'smiling' not in prompt
     else:
-        assert 'smiling warmly and blinking naturally' in prompt and 'Snow is gently falling' in prompt
+        assert 'The character is smiling and blinking.' in prompt and 'Snow is gently falling' in prompt
     assert f'На фото найдено {count} человек. Промпт для Kling: {prompt}' in caplog.text
 
 
@@ -224,15 +223,96 @@ async def test_supplied_count_avoids_duplicate_vision_and_custom_prompt_cannot_a
 
 
 @pytest.mark.parametrize('theme,details',[
-    ('theme_ny','Gentle snow is falling, fairy lights are twinkling, soft glowing bokeh.'),
-    ('theme_bday','Colorful balloons are gently floating, confetti is slowly falling.'),
-    ('theme_bday_kid','Pastel balloons are gently bobbing, cute confetti is floating.'),
-    ('theme_valentine','Floating hearts are gently pulsing, rose petals are slowly falling.'),
-    ('theme_feb23','The St. George ribbon is gently waving, the red star is glowing softly, snow is falling.'),
-    ('theme_mar8','Spring flowers are gently swaying in a soft breeze, warm sunlight is shimmering.'),
-    ('theme_mother','Soft particles are floating gently, warm light is softly pulsing.'),
-    ('theme_father','Warm light is gently flickering, subtle dust motes are floating.'),
+    ('theme_ny','Snow is falling, fairy lights are twinkling.'),
+    ('theme_bday','Balloons are floating, confetti is falling.'),
+    ('theme_bday_kid','Pastel balloons are bobbing, confetti is floating.'),
+    ('theme_valentine','Hearts are pulsing, rose petals are falling.'),
+    ('theme_feb23','The St. George ribbon is waving, snow is falling.'),
+    ('theme_mar8','Flowers are swaying, sunlight is shimmering.'),
+    ('theme_mother','Soft particles are floating.'),
+    ('theme_father','Warm light is flickering, dust motes are floating.'),
 ])
-def test_cartoon_kling_prompt_preserves_face_and_exact_themed_animation(theme,details):
+def test_cartoon_kling_prompt_uses_exact_short_themed_animation(theme,details):
     assert video.build_video_prompt(theme)==video.CARTOON_VIDEO_PROMPTS[theme]
-    assert video.CARTOON_VIDEO_PROMPTS[theme]=='Subtle cinematic animation. The 3D Pixar character is smiling warmly, blinking naturally, and making very slight head movements. High quality 3D render, smooth motion. CRITICAL: Do not distort the face, keep the exact facial features identical to the source image. Animation details: '+details
+    assert video.CARTOON_VIDEO_PROMPTS[theme]=='The character is smiling and blinking. '+details
+
+
+@pytest.mark.parametrize('response', [
+    httpx.Response(200, json={'code': 10000, 'message': 'Internal error'}),
+    httpx.Response(200, json={'code': 500, 'message': 'Server error'}),
+    httpx.Response(200, json={'code': '10000', 'message': 'Internal error'}),
+    httpx.Response(500, text='Server error test-piapi-secret'),
+])
+@respx.mock
+async def test_internal_creation_error_retries_then_polls_only_accepted_task(response, fast_poll, caplog):
+    post = respx.post(video.TASK_URL).mock(side_effect=[
+        response, response, httpx.Response(200, json={'data': {'task_id': 'accepted'}}),
+    ])
+    get = respx.get(video.TASK_URL + '/accepted').respond(
+        200, json={'data': {'status': 'completed', 'output': {'video': 'https://video.example/done.mp4'}}})
+    with caplog.at_level(logging.WARNING, logger=video.__name__):
+        result = await video.generate_video_from_avatar('https://images.example/a.png', mode='theme_ny', people_count=1)
+    assert result == 'https://video.example/done.mp4'
+    assert post.call_count == 3 and get.call_count == 1
+    assert [call.args for call in fast_poll.await_args_list] == [(15,), (15,), (15,)]
+    assert 'Попытка 1 провалилась (Internal error). Повтор через 15 секунд...' in caplog.text
+    assert 'Попытка 2 провалилась (Internal error). Повтор через 15 секунд...' in caplog.text
+    assert 'test-piapi-secret' not in caplog.text
+    for call in post.calls:
+        payload = json.loads(call.request.content)
+        assert payload['input']['version'] == '3.0'
+        assert payload['input']['prompt'] == video.CARTOON_VIDEO_PROMPTS['theme_ny']
+
+
+@respx.mock
+async def test_internal_creation_errors_stop_after_three_attempts(fast_poll):
+    post = respx.post(video.TASK_URL).respond(200, json={'code': 10000, 'message': 'Internal error'})
+    with pytest.raises(video.VideoServiceError, match='^Сервис Kling временно недоступен. Попробуйте позже.$'):
+        await video.generate_video_from_avatar('https://images.example/a.png', people_count=1)
+    assert post.call_count == 3
+    assert [call.args for call in fast_poll.await_args_list] == [(15,), (15,)]
+
+
+@pytest.mark.parametrize('response', [
+    httpx.Response(401, text='invalid key'),
+    httpx.Response(403, text='forbidden'),
+    httpx.Response(429, text='rate limited'),
+    httpx.Response(200, json={'code': 400, 'message': 'invalid prompt'}),
+    httpx.Response(200, json={'data': {}}),
+    httpx.Response(200, text='not JSON'),
+])
+@respx.mock
+async def test_other_creation_errors_are_not_retried(response, fast_poll):
+    post = respx.post(video.TASK_URL).mock(return_value=response)
+    with pytest.raises(video.VideoServiceError):
+        await video.generate_video_from_avatar('https://images.example/a.png', people_count=1)
+    assert post.call_count == 1
+    fast_poll.assert_not_awaited()
+
+
+@pytest.mark.parametrize('error_type', [httpx.ReadTimeout, httpx.ConnectError])
+@respx.mock
+async def test_ambiguous_transport_failure_never_creates_duplicate_task(error_type, fast_poll):
+    post = respx.post(video.TASK_URL).mock(side_effect=error_type('network'))
+    with pytest.raises(video.VideoServiceError):
+        await video.generate_video_from_avatar('https://images.example/a.png', people_count=1)
+    assert post.call_count == 1
+    fast_poll.assert_not_awaited()
+
+
+@respx.mock
+async def test_poll_error_never_reposts_accepted_task(fast_poll):
+    post = respx.post(video.TASK_URL).respond(200, json={'data': {'task_id': 'accepted'}})
+    respx.get(video.TASK_URL + '/accepted').respond(500, text='Internal error')
+    with pytest.raises(video.VideoServiceError, match='HTTP 500'):
+        await video.generate_video_from_avatar('https://images.example/a.png', people_count=1)
+    assert post.call_count == 1
+
+
+@respx.mock
+async def test_cancellation_during_retry_delay_stops_without_another_post(monkeypatch):
+    post = respx.post(video.TASK_URL).respond(200, json={'code': 10000})
+    monkeypatch.setattr(video.asyncio, 'sleep', AsyncMock(side_effect=asyncio.CancelledError))
+    with pytest.raises(asyncio.CancelledError):
+        await video.generate_video_from_avatar('https://images.example/a.png', people_count=1)
+    assert post.call_count == 1

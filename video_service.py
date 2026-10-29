@@ -1,4 +1,4 @@
-"""Генерация видео PiAPI/Kling: один POST и ограниченное ожидание результата."""
+"""Генерация видео PiAPI/Kling: повторы внутренних ошибок и ограниченное ожидание."""
 
 import asyncio
 import json
@@ -15,22 +15,18 @@ logger = logging.getLogger(__name__)
 TASK_URL = "https://api.piapi.ai/api/v1/task"
 POLL_INTERVAL = 15
 REQUEST_TIMEOUT = 30
-DEFAULT_ANIMATION_PROMPT = (
-    "Subtle cinematic animation. The people in the photo are smiling warmly and blinking naturally. "
-    "Any string lights or garlands in the background are glowing softly. High quality, photorealistic."
-)
+DEFAULT_ANIMATION_PROMPT = "The character is smiling and blinking."
 
 
-CARTOON_VIDEO_BASE = 'Subtle cinematic animation. The 3D Pixar character is smiling warmly, blinking naturally, and making very slight head movements. High quality 3D render, smooth motion. CRITICAL: Do not distort the face, keep the exact facial features identical to the source image. Animation details: '
 CARTOON_VIDEO_PROMPTS = {
-    'theme_ny': CARTOON_VIDEO_BASE + 'Gentle snow is falling, fairy lights are twinkling, soft glowing bokeh.',
-    'theme_bday': CARTOON_VIDEO_BASE + 'Colorful balloons are gently floating, confetti is slowly falling.',
-    'theme_bday_kid': CARTOON_VIDEO_BASE + 'Pastel balloons are gently bobbing, cute confetti is floating.',
-    'theme_valentine': CARTOON_VIDEO_BASE + 'Floating hearts are gently pulsing, rose petals are slowly falling.',
-    'theme_feb23': CARTOON_VIDEO_BASE + 'The St. George ribbon is gently waving, the red star is glowing softly, snow is falling.',
-    'theme_mar8': CARTOON_VIDEO_BASE + 'Spring flowers are gently swaying in a soft breeze, warm sunlight is shimmering.',
-    'theme_mother': CARTOON_VIDEO_BASE + 'Soft particles are floating gently, warm light is softly pulsing.',
-    'theme_father': CARTOON_VIDEO_BASE + 'Warm light is gently flickering, subtle dust motes are floating.',
+    'theme_ny': DEFAULT_ANIMATION_PROMPT + ' Snow is falling, fairy lights are twinkling.',
+    'theme_bday': DEFAULT_ANIMATION_PROMPT + ' Balloons are floating, confetti is falling.',
+    'theme_bday_kid': DEFAULT_ANIMATION_PROMPT + ' Pastel balloons are bobbing, confetti is floating.',
+    'theme_valentine': DEFAULT_ANIMATION_PROMPT + ' Hearts are pulsing, rose petals are falling.',
+    'theme_feb23': DEFAULT_ANIMATION_PROMPT + ' The St. George ribbon is waving, snow is falling.',
+    'theme_mar8': DEFAULT_ANIMATION_PROMPT + ' Flowers are swaying, sunlight is shimmering.',
+    'theme_mother': DEFAULT_ANIMATION_PROMPT + ' Soft particles are floating.',
+    'theme_father': DEFAULT_ANIMATION_PROMPT + ' Warm light is flickering, dust motes are floating.',
 }
 
 
@@ -60,7 +56,12 @@ def build_video_prompt(mode: str, people_count: int = 0) -> str:
 
 
 class VideoServiceError(RuntimeError):
-    """Ошибка PiAPI или некорректный ответ сервиса."""
+    """Ошибка PiAPI с кодом провайдера или HTTP для точного выбора повторов."""
+
+    def __init__(self, message: str, *, code=None, http_status: int | None = None):
+        super().__init__(message)
+        self.code = code
+        self.http_status = http_status
 
 
 def _api_key() -> str:
@@ -93,7 +94,8 @@ async def _request(client, method: str, url: str, key: str, **kwargs) -> dict:
     except httpx.RequestError:
         raise VideoServiceError("Не удалось подключиться к PiAPI.") from None
     if not response.is_success:
-        raise VideoServiceError(f"PiAPI HTTP {response.status_code}: {_safe_detail(response.text, key)}")
+        raise VideoServiceError(f"PiAPI HTTP {response.status_code}: {_safe_detail(response.text, key)}",
+                                http_status=response.status_code)
     try:
         result = response.json()
     except ValueError:
@@ -101,7 +103,7 @@ async def _request(client, method: str, url: str, key: str, **kwargs) -> dict:
     if not isinstance(result, dict):
         raise VideoServiceError("PiAPI вернул некорректный объект ответа.")
     if result.get("code") not in (None, 200):
-        raise VideoServiceError(f"Ошибка PiAPI: {_safe_detail(result, key)}")
+        raise VideoServiceError(f"Ошибка PiAPI: {_safe_detail(result, key)}", code=result.get("code"))
     return result
 
 
@@ -114,11 +116,11 @@ async def create_video_task(image_url: str, prompt: str) -> str:
     key = _api_key()
     payload = {
         "model": "kling", "task_type": "video_generation",
-        "input": {"image_url": image_url, "prompt": prompt, "version": "3.0-turbo", "mode": "std", "duration": 5,
+        "input": {"image_url": image_url, "prompt": prompt, "version": "3.0", "mode": "std", "duration": 5,
                   "enable_audio": False},
         "config": {"service_mode": "public"},
     }
-    logger.info("PiAPI: создаю задачу Kling (5 секунд, std, 3.0-turbo, enable_audio=false).")
+    logger.info("PiAPI: создаю задачу Kling (5 секунд, std, 3.0, enable_audio=false).")
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT, trust_env=False) as client:
         result = await _request(client, "POST", TASK_URL, key, json=payload)
     data = result.get("data")
@@ -127,6 +129,21 @@ async def create_video_task(image_url: str, prompt: str) -> str:
         raise VideoServiceError("Нет data.task_id в ответе PiAPI.")
     logger.info("PiAPI: создана задача %s", task_id)
     return task_id
+
+
+async def create_video_task_with_retry(image_url: str, prompt: str) -> str:
+    """До трёх POST только после явного ответа 10000/500 без принятой задачи."""
+    for attempt in range(3):
+        try:
+            return await create_video_task(image_url, prompt)
+        except VideoServiceError as exc:
+            if exc.code not in (10000, 500, '10000', '500') and exc.http_status != 500:
+                raise
+            if attempt == 2:
+                raise VideoServiceError("Сервис Kling временно недоступен. Попробуйте позже.") from exc
+            logger.warning("Попытка %s провалилась (Internal error). Повтор через 15 секунд...", attempt + 1)
+            await asyncio.sleep(15)
+    raise AssertionError("Недостижимый конец цикла повторов PiAPI.")
 
 
 async def poll_video_task(task_id: str, timeout: int = 1200) -> str:
@@ -176,5 +193,5 @@ async def generate_video_from_avatar(avatar_url: str, prompt: str | None = None,
     video_prompt = build_video_prompt(mode, people_count) if prompt is None or people_count > 5 else prompt
     logger.info('На фото найдено %s человек. Промпт для Kling: %s', people_count, video_prompt)
     logger.info('Промпт для Kling (%s): %s', mode, video_prompt)
-    task_id = await create_video_task(avatar_url, video_prompt)
+    task_id = await create_video_task_with_retry(avatar_url, video_prompt)
     return await poll_video_task(task_id)

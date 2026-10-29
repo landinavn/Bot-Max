@@ -4778,7 +4778,7 @@ async def test_cartoon_main_menu_order_and_names_are_exact():
     buttons = handlers.main_keyboard().payload.buttons
     assert [(button.text, button.payload) for row in buttons for button in row] == [
         ('🎵 Музыкальная открытка — Новинка 🔥', 'cat_video'),
-        ('🎬 Мульт-открытка (10-15 сек) — Новинка 🔥', 'cat_cartoon'),
+        ('🎬 Мульт-открытка — Новинка 🔥', 'cat_cartoon'),
         ('🎬 Мульт-поздравление (30 сек) — Новинка 🔥', 'cat_cartoon_long'),
         ('📸 Нейрофотосессия', 'cat_photo'), ('🎵 Аудиопесни', 'cat_audio'), ('🎁 Открытки', 'cat_cards'),
         ('🔮 Карта Желаний', 'cat_vision'), ('🧘 Медитации', 'cat_meditation'), ('🖼 Примеры', 'show_examples'), ('🆘 Помощь', 'show_help')]
@@ -4854,7 +4854,10 @@ async def test_cartoon_admin_bypass_calls_video_stub_with_approved_avatar_and_so
     if admin_id is None:
         event = callback_event(entry)
         await dispatch_callback(router, event, context)
-        assert 'Выберите стиль:' in event.send.await_args.args[0]
+        if entry == 'cat_cartoon_long':
+            assert event.send.await_args.args[0] == handlers.CARTOON_COMING_SOON
+        else:
+            assert 'Выберите стиль:' in event.send.await_args.args[0]
         video.assert_not_awaited()
         return
     await start_cartoon(router, context, entry)
@@ -6156,7 +6159,7 @@ async def test_musical_payment_link_retry_reuses_saved_order_image_and_song(cred
     assert (await context.get_data())['music_checkout_id']==first
 
 
-@pytest.mark.parametrize('entry',['cat_cartoon','cat_cartoon_long'])
+@pytest.mark.parametrize('entry',['cat_cartoon'])
 async def test_cartoon_customer_can_choose_theme_before_payment(credit_db,entry):
     avatar=AsyncMock()
     router,context=create_router(admin_user_id=999,avatar_generator=avatar),await ready_context()
@@ -6306,7 +6309,10 @@ async def test_cartoon_customer_cannot_bypass_payment_with_old_or_forged_buttons
     await context.update_data(cartoon_flow='short',cartoon_theme='theme_ny',cartoon_preview_token='forged',original_image_url='https://cdn.example/a.png',video_song_url='https://audio.example/full.mp3')
     await context.set_state(PosterStates.waiting_for_cartoon_music_review)
     event=callback_event(payload);await dispatch_callback(router,event,context)
-    if payload in handlers.CARTOON_PRODUCTS:
+    if payload == 'cat_cartoon_long':
+        assert event.send.await_args.args[0] == handlers.CARTOON_COMING_SOON
+        assert await context.get_state() == PosterStates.waiting_for_cartoon_music_review
+    elif payload in handlers.CARTOON_PRODUCTS:
         assert await context.get_state() == PosterStates.waiting_for_cartoon_style
     elif payload in handlers.CARTOON_THEMES:
         assert await context.get_state() == PosterStates.waiting_for_cartoon_payment
@@ -6663,7 +6669,7 @@ async def test_cartoon_reselection_replaces_old_pending_price_without_changing_o
     assert payments.create_payment_link.await_args.kwargs['amount']==current[tariff][0]//100
 
 
-@pytest.mark.parametrize('entry,amount', [('cat_cartoon',590),('cat_cartoon_long',1290)])
+@pytest.mark.parametrize('entry,amount', [('cat_cartoon',590)])
 @pytest.mark.parametrize('theme', list(handlers.CARTOON_THEMES))
 async def test_cartoon_checkout_before_photo_and_paid_resume(credit_db, entry, amount, theme):
     payments=SimpleNamespace(create_payment_link=AsyncMock(return_value='https://shop.payform.ru/cartoon-personal'))
@@ -6676,8 +6682,9 @@ async def test_cartoon_checkout_before_photo_and_paid_resume(credit_db, entry, a
     assert order['order_id'].startswith(f'cartoon_456_{theme}_')
     assert order['user_id']==456 and order['theme']==theme
     assert order['amount_kopecks']==amount*100 and order['status']=='pending'
+    assert order['product_name'] == 'Мульт-открытка'
     payments.create_payment_link.assert_awaited_once_with(456,order_id=order['order_id'],amount=amount,description=order['product_name'])
-    expected=('🎬 Мульт-открытка (10-15 сек) стоит 590 ₽. Оплатите, чтобы начать создание.' if amount==590 else
+    expected=('🎬 Мульт-открытка стоит 590 ₽. Оплатите, чтобы начать создание.' if amount==590 else
               '🎬 Мульт-поздравление (до 30 сек) стоит 1290 ₽. Оплатите, чтобы начать создание.')
     assert event.send.await_args.args[0]==expected
     assert event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0].url=='https://shop.payform.ru/cartoon-personal'
@@ -7160,3 +7167,72 @@ async def test_confirm_video_2_real_dispatcher_routes_exact_payload_and_ack_firs
                    for call in bot.send_message.await_args_list)
     finally:
         await dp.shutdown()
+
+
+@pytest.mark.parametrize('admin_id', [999, 456])
+async def test_short_cartoon_sends_two_examples_before_eight_themes(credit_db, example_photos, admin_id):
+    for name in handlers.CARTOON_EXAMPLE_FILES:
+        (example_photos / name).write_bytes(b'example')
+    event = callback_event('cat_cartoon')
+    videos = [AttachmentUpload(type='video', payload={'token': token}) for token in ('cartoon-1', 'cartoon-2')]
+    event.bot.upload_media = AsyncMock(side_effect=videos)
+    context = await ready_context()
+    await dispatch_callback(create_router(admin_user_id=admin_id), event, context)
+    assert [c.args[0].path for c in event.bot.upload_media.await_args_list] == [
+        str(example_photos / name) for name in handlers.CARTOON_EXAMPLE_FILES]
+    assert all(c.args[0].type == 'video' for c in event.bot.upload_media.await_args_list)
+    assert len(event.send.await_args_list) == 3
+    assert event.send.await_args_list[0].kwargs['attachments'] == [videos[0]]
+    assert event.send.await_args_list[1].kwargs['attachments'] == [videos[1]]
+    menu = event.send.await_args_list[2]
+    assert menu.args[0] == '🎬 Создаем короткий мультфильм с вашим лицом, длительность около 40 секунд. Выберите стиль:'
+    buttons = menu.kwargs['attachments'][0].payload.buttons
+    assert [b.payload for row in buttons for b in row if b.payload.startswith('theme_')] == list(handlers.CARTOON_THEMES)
+    assert await context.get_state() == PosterStates.waiting_for_cartoon_style
+
+
+async def test_short_cartoon_missing_examples_logs_and_keeps_menu(credit_db, caplog):
+    event = callback_event('cat_cartoon')
+    context = await ready_context()
+    await dispatch_callback(create_router(admin_user_id=999), event, context)
+    assert event.send.await_count == 1
+    assert event.send.await_args.args[0] == handlers.CARTOON_PRODUCTS['cat_cartoon'][2]
+    assert all(name in caplog.text for name in handlers.CARTOON_EXAMPLE_FILES)
+    assert await context.get_state() == PosterStates.waiting_for_cartoon_style
+
+
+async def test_long_cartoon_customer_sees_only_placeholder_and_back(credit_db):
+    context = await ready_context()
+    await context.update_data(existing='keep')
+    state = await context.get_state()
+    event = callback_event('cat_cartoon_long')
+    event.bot.upload_media = AsyncMock()
+    payments = SimpleNamespace(create_payment_link=AsyncMock())
+    await dispatch_callback(create_router(admin_user_id=999, payments=payments), event, context)
+    assert event.send.await_args.args[0] == handlers.CARTOON_COMING_SOON
+    buttons = event.send.await_args.kwargs['attachments'][0].payload.buttons
+    assert [(b.text, b.payload) for row in buttons for b in row] == [('⬅️ Назад', 'back_to_main')]
+    assert await context.get_state() == state
+    assert (await context.get_data())['existing'] == 'keep'
+    event.bot.upload_media.assert_not_awaited()
+    payments.create_payment_link.assert_not_awaited()
+
+
+@pytest.mark.parametrize('failure', ['upload', 'send', 'wrong_type'])
+async def test_short_cartoon_video_error_continues_to_second_example_and_menu(credit_db, example_photos, failure):
+    for name in handlers.CARTOON_EXAMPLE_FILES:
+        (example_photos / name).write_bytes(b'local-video')
+    event = callback_event('cat_cartoon')
+    videos = [AttachmentUpload(type='video', payload={'token': token}) for token in ('first', 'second')]
+    responses = list(videos)
+    if failure == 'upload':
+        responses[0] = RuntimeError('upload failed')
+    elif failure == 'wrong_type':
+        responses[0] = AttachmentUpload(type='image', payload={'token': 'wrong'})
+    else:
+        event.send.side_effect = [RuntimeError('send failed'), None, None]
+    event.bot.upload_media = AsyncMock(side_effect=responses)
+    await dispatch_callback(create_router(admin_user_id=999), event, await ready_context())
+    assert event.bot.upload_media.await_count == 2
+    assert event.send.await_args_list[-2].kwargs['attachments'] == [videos[1]]
+    assert event.send.await_args_list[-1].args[0] == handlers.CARTOON_PRODUCTS['cat_cartoon'][2]

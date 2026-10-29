@@ -1080,7 +1080,7 @@ async def reset_musical_workers():
 
 
 CARTOON_TARIFFS = {
-    'short': (59000, 'Мульт-открытка (10-15 сек)'),
+    'short': (59000, 'Мульт-открытка'),
     'long': (129000, 'Мульт-поздравление (до 30 сек)'),
 }
 CARTOON_ORDER_THEMES = frozenset({

@@ -787,3 +787,23 @@ async def test_cartoon_old_invoice_remains_payable_after_price_change(payments,c
     response=await post_notification(client,data)
     assert response.status==200 and await response.text()=='OK'
     assert (await credit_db.get_cartoon_order(order_id))['status']=='paid'
+
+
+@pytest.mark.parametrize('name', ['Мульт-открытка', 'Мульт-открытка (10-15 сек)'])
+async def test_short_cartoon_product_name_invoice_remains_payable(payments, credit_db, monkeypatch, name):
+    current = dict(credit_db.CARTOON_TARIFFS)
+    monkeypatch.setattr(credit_db, 'CARTOON_TARIFFS', {**current, 'short': (59000, name)})
+    order_id = 'cartoon_456_theme_ny_old_name'
+    await credit_db.create_cartoon_order(order_id, 456, 'theme_ny', 'short')
+    link = await payments.create_payment_link(456, order_id=order_id, amount=590, description=name)
+    monkeypatch.setattr(credit_db, 'CARTOON_TARIFFS', current)
+    fields = parse_form_fields(parse_qsl(urlsplit(link).query))
+    assert fields['products'] == [{'name': name, 'price': '590.00', 'quantity': '1'}]
+    assert sign_link_payload({k: v for k, v in fields.items() if k != 'sign'}, SECRET) == fields['sign']
+    order, payment_id = await payments.validate_payment({
+        'order_num': order_id, 'order_id': 'old-name-provider', 'payment_status': 'success',
+        'sum': '590', 'products': fields['products'], 'customer_extra': fields['customer_extra'],
+    })
+    assert payment_id == 'old-name-provider'
+    assert await credit_db.mark_cartoon_paid(order['order_id'], payment_id)
+    assert (await credit_db.get_cartoon_order(order_id))['status'] == 'paid'

@@ -35,7 +35,7 @@ from audio_service import create_audio_preview, song_audio_url, TEACHER_MUSIC_TA
 from metrika_service import extract_yclid, send_offline_conversion
 
 from database import (
-    create_cartoon_order, get_cartoon_order, latest_paid_cartoon, finish_cartoon_order, update_cartoon_order,
+    CARTOON_TARIFFS, create_cartoon_order, get_cartoon_order, latest_paid_cartoon, finish_cartoon_order, update_cartoon_order,
     create_musical_order, get_musical_order,
     deduct_credit, get_user, grant_free_trial, get_global_stats, increment_generations,
     record_first_start, save_yclid, get_source_stats, get_stats_by_source, register_shared_image, get_shared_image,
@@ -271,7 +271,7 @@ SONG_PROMO_EXPIRED_TEXT = 'К сожалению, 48 часов уже прош�
 
 CATEGORY_BUTTONS = (
     ("🎵 Музыкальная открытка — Новинка 🔥", "cat_video"),
-    ("🎬 Мульт-открытка (10-15 сек) — Новинка 🔥", "cat_cartoon"),
+    ("🎬 Мульт-открытка — Новинка 🔥", "cat_cartoon"),
     ("🎬 Мульт-поздравление (30 сек) — Новинка 🔥", "cat_cartoon_long"),
     ("📸 Нейрофотосессия", "cat_photo"),
     ("🎵 Аудиопесни", "cat_audio"),
@@ -529,7 +529,7 @@ VIDEO_UPSELL_TEXT = (
 
 
 CARTOON_PRODUCTS = {
-    'cat_cartoon': ('short', 59000, '🎬 Создаем короткий мультфильм с вашим лицом! Выберите стиль:', '5-10'),
+    'cat_cartoon': ('short', 59000, '🎬 Создаем короткий мультфильм с вашим лицом, длительность около 40 секунд. Выберите стиль:', '5-10'),
     'cat_cartoon_long': ('long', 129000, '🎬 Создаем полноценное мульт-поздравление с сюжетом! Выберите стиль:', '15-20'),
 }
 CARTOON_AVATAR_EVENTS = {'avatar_ok_1': 'avatar_ok_first', 'avatar_bad_1': 'avatar_bad_first',
@@ -542,6 +542,8 @@ CARTOON_THEMES = {
 }
 CARTOON_PHOTO_PROMPT = '📸 Отправьте четкое фото (анфас, хорошее освещение). Мы нарисуем вашего персонажа!'
 CARTOON_SONG_PHRASE_PROMPT = 'Теперь напишите имя и фразу для припева (например: «Маша, с днём рождения!»).'
+CARTOON_EXAMPLE_FILES = ('cartoon_example.mp4', 'cartoon_example1.mp4')
+
 CARTOON_COMING_SOON = '🎬 Раздел «Мульт-открытка» уже совсем скоро заработает! Мы заканчиваем настройку оплаты, и в ближайшее время вы сможете создавать настоящие мультфильмы с вашим лицом. Следите за обновлениями! 🚀'
 CARTOON_VIDEO_ERROR = (
     '😔 Произошла техническая ошибка при создании видео. Ваши аватар и песня сохранены. '
@@ -1622,6 +1624,19 @@ def create_router(
                 logger.error("Не удалось отправить альбом примеров: %s", exc)
         return False
 
+    async def send_cartoon_video_examples(event) -> None:
+        for filename in CARTOON_EXAMPLE_FILES:
+            try:
+                path = EXAMPLES_DIR / filename
+                if not path.is_file():
+                    raise FileNotFoundError(path)
+                video = await event.bot.upload_media(InputMedia(path=str(path), type=UploadType.VIDEO))
+                if video.type != 'video' or not isinstance(video.payload.token, str) or not video.payload.token.strip():
+                    raise RuntimeError('MAX не вернул корректное video-вложение.')
+                await _reply(event, 'Пример мульт-открытки:', attachments=[video])
+            except Exception:
+                logger.exception('Не удалось отправить видео-пример %s:', filename)
+
     async def send_welcome_message(
         event: MessageCreated | MessageCallback | BotStarted, context: MemoryContext,
         *, payload: str | None = None, timestamp_ms: int | None = None,
@@ -1747,7 +1762,9 @@ def create_router(
         data = await context.get_data()
         order = await get_cartoon_order(data.get('cartoon_order_id', ''))
         if (not order or order['user_id'] != user_id or order['theme'] != theme or order['tariff'] != product[0]
-                or (order['status'] == 'pending' and order['amount_kopecks'] != product[1])):
+                or (order['status'] == 'pending' and (
+                    order['amount_kopecks'] != product[1]
+                    or order['product_name'] != CARTOON_TARIFFS[product[0]][1]))):
             order_id = f"cartoon_{user_id}_{theme}_{time_ns()}"
             await create_cartoon_order(order_id, user_id, theme, product[0])
             order = await get_cartoon_order(order_id)
@@ -1768,7 +1785,7 @@ def create_router(
                 raise RuntimeError('Не настроена интеграция Prodamus.')
             link = await payments.create_payment_link(user_id, order_id=order['order_id'], amount=product[1] // 100,
                                                      description=order['product_name'])
-            text = ('🎬 Мульт-открытка (10-15 сек) стоит 590 ₽. Оплатите, чтобы начать создание.' if product[0] == 'short'
+            text = ('🎬 Мульт-открытка стоит 590 ₽. Оплатите, чтобы начать создание.' if product[0] == 'short'
                     else '🎬 Мульт-поздравление (до 30 сек) стоит 1290 ₽. Оплатите, чтобы начать создание.')
             keyboard = InlineKeyboardBuilder().row(LinkButton(text=f"Оплатить {product[1] // 100} ₽", url=link)).row(
                 CallbackButton(text='Проверить оплату / продолжить', payload='cartoon_resume:' + order['order_id'])).as_markup()
@@ -1851,9 +1868,15 @@ def create_router(
         await event.ack(notification='Выберите стиль…')
         flow, price, text, _ = CARTOON_PRODUCTS[event.callback.payload]
         await increment_counter('click_cartoon_short' if flow == 'short' else 'click_cartoon_long', user_id=user_id)
+        if flow == 'long' and user_id != admin_user_id:
+            await _reply(event, CARTOON_COMING_SOON,
+                         attachments=[navigation_keyboard((('⬅️ Назад', 'back_to_main'),))])
+            return
         await context.clear()
         await context.update_data(cartoon_flow=flow, cartoon_amount_kopecks=price, cartoon_session_id=uuid4().hex)
         await context.set_state(PosterStates.waiting_for_cartoon_style)
+        if flow == 'short':
+            await send_cartoon_video_examples(event)
         await _reply(event, text, attachments=[cartoon_style_keyboard()])
 
     @router.message_callback(F.callback.payload.startswith('cartoon_style:') | F.callback.payload.in_(set(CARTOON_THEMES)))

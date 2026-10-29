@@ -8,7 +8,7 @@ from urllib.parse import parse_qsl
 
 from aiohttp import web
 
-from database import add_credits, mark_audio_paid, mark_musical_paid
+from database import mark_cartoon_paid, add_credits, mark_audio_paid, mark_musical_paid
 from prodamus import ProdamusPayments, parse_form_fields, verify_signature
 
 logger = logging.getLogger(__name__)
@@ -66,6 +66,10 @@ def create_webhook_app(payments: ProdamusPayments, *, audio_worker=None, musical
                 logger.info("Prodamus: уведомление без успешной оплаты пропущено.")
                 return web.Response(text="OK")
             order, payment_id = await payments.validate_payment(data)
+            if order.get('order_type') == 'cartoon':
+                accepted = await mark_cartoon_paid(order['order_id'], payment_id)
+                logger.info('Prodamus: %s.', 'мульт-заказ оплачен, запрос фото в очереди' if accepted else 'повтор оплаты мульт-заказа')
+                return web.Response(text='OK')
             if order.get('order_type') == 'musical':
                 accepted = await mark_musical_paid(order['order_id'], payment_id)
                 logger.info('Prodamus: %s.', 'музыкальный заказ сохранён в очереди' if accepted else 'повтор оплаты музыкального заказа')

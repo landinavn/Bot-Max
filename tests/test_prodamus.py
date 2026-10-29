@@ -717,3 +717,54 @@ async def test_music_webhook_worker_renders_after_payment_and_reuses_result_for_
     render.assert_awaited_once_with('https://cdn.example/card.jpg','https://cdn.example/full.mp3')
     assert bot.send_message.await_count == 2
     assert (await credit_db.get_musical_order('music_test'))['delivered']==1
+
+
+@pytest.mark.parametrize('tariff,amount', [('short',890),('long',1690)])
+async def test_cartoon_personal_link_validated_webhook_and_duplicate_are_idempotent(payments, client, credit_db, tariff, amount):
+    db=credit_db
+    order_id='cartoon_456_theme_feb23_123'
+    await db.create_cartoon_order(order_id,456,'theme_feb23',tariff)
+    order=await db.get_cartoon_order(order_id)
+    link=await payments.create_payment_link(456,order_id=order_id,amount=amount,description=order['product_name'])
+    assert await payments.create_payment_link(456,order_id=order_id,amount=amount,description=order['product_name'])==link
+    payments._request_payment_link.assert_awaited_once()
+    fields=parse_form_fields(parse_qsl(urlsplit(link).query))
+    assert fields['order_id']==order_id and fields['_param_credits']=='0'
+    assert fields['_param_package_id']=='cartoon_'+tariff
+    assert fields['products']==[{'name':order['product_name'],'price':f'{amount}.00','quantity':'1'}]
+    assert sign_link_payload({k:v for k,v in fields.items() if k!='sign'},SECRET)==fields['sign']
+    data={'order_num':order_id,'order_id':'cartoon-provider-1','payment_status':'success','sum':str(amount),
+          'currency':'rub','products':fields['products'],'customer_extra':fields['customer_extra']}
+    for _ in range(2):
+        response=await post_notification(client,data)
+        assert response.status==200 and await response.text()=='OK'
+    assert (await db.get_cartoon_order(order_id))['status']=='paid'
+    assert (await db.get_user(456))['balance']==0
+    assert (await db.get_user(456))['total_purchases']==1
+    assert (await db.get_all_counters())['buy_cartoon_'+tariff]==1
+    assert len(await db.pending_cartoon_notifications())==1
+
+
+@pytest.mark.parametrize('change', ['sum','product','user','signature','test','failed'])
+async def test_cartoon_invalid_or_unsuccessful_webhook_never_unlocks_photo(payments, client, credit_db, change):
+    await credit_db.create_cartoon_order('cartoon_456_theme_ny_1',456,'theme_ny','short')
+    order=await credit_db.get_cartoon_order('cartoon_456_theme_ny_1')
+    data={'order_num':order['order_id'],'order_id':'provider-1','payment_status':'success','sum':'890',
+          'products':[{'name':order['product_name'],'price':'890.00','quantity':'1'}]}
+    if change=='sum': data['sum']='1'
+    if change=='product': data['products'][0]['name']='Другой товар'
+    if change=='user': data['_param_user_id']='999'
+    if change=='test': data['is_test']='1'
+    if change=='failed': data['payment_status']='failed'
+    response=await post_notification(client,data,signature='bad' if change=='signature' else None)
+    assert response.status==(403 if change=='signature' else 200 if change in ('test','failed') else 400)
+    assert (await credit_db.get_cartoon_order(order['order_id']))['status']=='pending'
+    assert await credit_db.pending_cartoon_notifications()==[]
+
+
+async def test_paid_cartoon_counts_as_source_buyer_and_revenue(credit_db):
+    await credit_db.record_first_start(456,'yandex_newyear')
+    await credit_db.create_cartoon_order('cartoon_456_theme_ny_1',456,'theme_ny','long')
+    await credit_db.mark_cartoon_paid('cartoon_456_theme_ny_1','pay-source')
+    stats=await credit_db.get_stats_by_source('yandex_newyear')
+    assert stats['total_buyers']==1 and stats['total_revenue']==1690

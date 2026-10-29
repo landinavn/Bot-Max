@@ -867,16 +867,37 @@ CARTOON_THEME_IMAGE_BASE = (
     '- Keep the exact same hair color, hairstyle, and overall facial structure. '
     'SCENE & BACKGROUND: - '
 )
-CARTOON_IMAGE_PROMPTS = {
-    'theme_ny': CARTOON_THEME_IMAGE_BASE + 'Christmas tree with glowing fairy lights, gentle falling snow, magical winter atmosphere.',
-    'theme_bday': CARTOON_THEME_IMAGE_BASE + 'Colorful balloons, festive confetti, warm glowing candles, birthday party.',
-    'theme_bday_kid': CARTOON_THEME_IMAGE_BASE + "Soft pastel balloons, cute toys, gentle warm lighting, cheerful kids' party.",
-    'theme_valentine': CARTOON_THEME_IMAGE_BASE + 'Floating red and pink hearts, rose petals, soft romantic pink lighting.',
-    'theme_feb23': CARTOON_THEME_IMAGE_BASE + 'A gently waving St. George ribbon, a softly glowing red star, subtle falling snow, patriotic atmosphere.',
-    'theme_mar8': CARTOON_THEME_IMAGE_BASE + 'Spring tulips and mimosa flowers, warm spring sunlight, gentle petals.',
-    'theme_mother': CARTOON_THEME_IMAGE_BASE + 'Warm golden hour lighting, gentle floating soft particles (like dandelion fluff), very cozy and tender atmosphere.',
-    'theme_father': CARTOON_THEME_IMAGE_BASE + 'Warm workshop lighting, subtle tools in the background, strong and caring atmosphere.',
+CARTOON_IMAGE_BACKGROUNDS = {
+    'theme_ny': 'Christmas tree with glowing fairy lights, gentle falling snow, magical winter atmosphere.',
+    'theme_bday': 'Colorful balloons, festive confetti, warm glowing candles, birthday party.',
+    'theme_bday_kid': "Soft pastel balloons, cute toys, gentle warm lighting, cheerful kids' party.",
+    'theme_valentine': 'Floating red and pink hearts, rose petals, soft romantic pink lighting.',
+    'theme_feb23': 'A gently waving St. George ribbon, a softly glowing red star, subtle falling snow, patriotic atmosphere.',
+    'theme_mar8': 'Spring tulips and mimosa flowers, warm spring sunlight, gentle petals.',
+    'theme_mother': 'Warm golden hour lighting, gentle floating soft particles (like dandelion fluff), very cozy and tender atmosphere.',
+    'theme_father': 'Warm workshop lighting, subtle tools in the background, strong and caring atmosphere.',
 }
+
+CARTOON_CLOTHING = {
+    'theme_ny': 'CLOTHING: Cozy winter sweater.',
+    'theme_bday': 'CLOTHING: Elegant party outfit.',
+    'theme_bday_kid': 'CLOTHING: Cute colorful kids outfit.',
+    'theme_valentine': 'CLOTHING: Romantic elegant outfit.',
+    'theme_feb23': 'CLOTHING: Stylized military uniform or smart tactical shirt (no weapons, just clothing).',
+    'theme_mar8': 'CLOTHING: Elegant spring dress.',
+    'theme_mother': 'CLOTHING: Cozy, warm, tender clothing.',
+    'theme_father': 'CLOTHING: Casual smart clothes (polo or button-down shirt).',
+}
+CARTOON_CLOTHING_STYLE = (
+    'IGNORE the clothing in the reference photo. All clothing must be stylized 3D Pixar/Disney animation, '
+    'NOT photorealistic clothing. '
+)
+CARTOON_IMAGE_PROMPTS = {
+    theme: CARTOON_THEME_IMAGE_BASE.removesuffix('SCENE & BACKGROUND: - ')
+        + CARTOON_CLOTHING_STYLE + CARTOON_CLOTHING[theme] + ' SCENE & BACKGROUND: - ' + background
+    for theme, background in CARTOON_IMAGE_BACKGROUNDS.items()
+}
+
 
 
 CARTOON_AVATAR_PROMPT = (

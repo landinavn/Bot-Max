@@ -4858,7 +4858,7 @@ async def test_cartoon_admin_bypass_calls_video_stub_with_approved_avatar_and_so
     if admin_id is None:
         event = callback_event(entry)
         await dispatch_callback(router, event, context)
-        assert 'скоро заработает' in event.send.await_args.args[0]
+        assert 'Выберите стиль:' in event.send.await_args.args[0]
         video.assert_not_awaited()
         return
     await start_cartoon(router, context, entry)
@@ -4945,7 +4945,7 @@ async def test_cartoon_failed_handoff_is_retryable_and_never_claims_artist_was_n
     if not configured_admin:
         event = callback_event('cat_cartoon')
         await dispatch_callback(router, event, context)
-        assert 'скоро заработает' in event.send.await_args.args[0]
+        assert 'Выберите стиль:' in event.send.await_args.args[0]
         return
     await start_cartoon(router, context)
     await call_handler(router, 'collect_cartoon_photo', cartoon_photo(), context)
@@ -6161,14 +6161,14 @@ async def test_musical_payment_link_retry_reuses_saved_order_image_and_song(cred
 
 
 @pytest.mark.parametrize('entry',['cat_cartoon','cat_cartoon_long'])
-async def test_cartoon_customer_sees_placeholder_and_no_avatar_or_payment(credit_db,entry):
+async def test_cartoon_customer_can_choose_theme_before_payment(credit_db,entry):
     avatar=AsyncMock()
     router,context=create_router(admin_user_id=999,avatar_generator=avatar),await ready_context()
     event=callback_event(entry)
     await dispatch_callback(router,event,context)
-    assert event.send.await_args.args[0]=='🎬 Раздел «Мульт-открытка» уже совсем скоро заработает! Мы заканчиваем настройку оплаты, и в ближайшее время вы сможете создавать настоящие мультфильмы с вашим лицом. Следите за обновлениями! 🚀'
-    assert event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0].payload=='back_to_main'
-    assert await context.get_data()=={}
+    assert event.send.await_args.args[0] == handlers.CARTOON_PRODUCTS[entry][2]
+    assert event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0].payload=='theme_ny'
+    assert (await context.get_data())['cartoon_flow']==handlers.CARTOON_PRODUCTS[entry][0]
     avatar.assert_not_awaited(); handlers.generate_song.assert_not_awaited()
 
 
@@ -6302,14 +6302,21 @@ async def test_themed_cartoon_second_rejection_hands_off_and_clears_fsm(credit_d
 
 
 @pytest.mark.parametrize('payload',['cat_cartoon','cat_cartoon_long',*handlers.CARTOON_THEMES,'cartoon_style:mode_ny','avatar_ok_1','cartoon_song:audio_fun_ny','cartoon_music_ok:forged'])
-async def test_cartoon_customer_cannot_bypass_admin_gate_with_old_or_forged_buttons(credit_db,payload):
+async def test_cartoon_customer_cannot_bypass_payment_with_old_or_forged_buttons(credit_db,payload):
     avatar=AsyncMock()
     router,context=create_router(admin_user_id=999,avatar_generator=avatar),await ready_context()
     await context.update_data(cartoon_flow='short',cartoon_theme='theme_ny',cartoon_preview_token='forged',original_image_url='https://cdn.example/a.png',video_song_url='https://audio.example/full.mp3')
     await context.set_state(PosterStates.waiting_for_cartoon_music_review)
     event=callback_event(payload);await dispatch_callback(router,event,context)
-    assert event.send.await_args.args[0]==handlers.CARTOON_COMING_SOON
-    assert not await context.get_data()
+    if payload in handlers.CARTOON_PRODUCTS:
+        assert await context.get_state() == PosterStates.waiting_for_cartoon_style
+    elif payload in handlers.CARTOON_THEMES:
+        assert await context.get_state() == PosterStates.waiting_for_cartoon_payment
+        assert 'Не удалось создать платёжную ссылку' in event.send.await_args.args[0]
+    elif payload.startswith('cartoon_style:'):
+        assert 'Выберите одну из новых тем' in event.ack.await_args.kwargs['notification']
+    else:
+        assert 'оплатите мульт-открытку' in event.send.await_args.args[0]
     avatar.assert_not_awaited();handlers.generate_song.assert_not_awaited();handlers.create_video_task.assert_not_awaited()
 
 
@@ -6627,5 +6634,182 @@ async def test_broadcast_update_real_dispatcher_resolves_command_and_keeps_menu_
         recipients=[c.kwargs['user_id'] for c in bot.send_message.await_args_list if c.kwargs.get('text')==handlers.BROADCAST_UPDATE_TEXT]
         assert recipients==[101,456] # Админ тоже активен после middleware.
         assert bot.send_message.await_args.kwargs['text']=='✅ Рассылка завершена! Успешно: 2, Ошибок: 0'
+    finally:
+        await dp.shutdown()
+
+
+@pytest.mark.parametrize('entry,amount', [('cat_cartoon',890),('cat_cartoon_long',1690)])
+@pytest.mark.parametrize('theme', list(handlers.CARTOON_THEMES))
+async def test_cartoon_checkout_before_photo_and_paid_resume(credit_db, entry, amount, theme):
+    payments=SimpleNamespace(create_payment_link=AsyncMock(return_value='https://shop.payform.ru/cartoon-personal'))
+    avatar=AsyncMock(return_value='https://cdn.example/clean.png')
+    router,context=create_router(admin_user_id=999,payments=payments,avatar_generator=avatar),await ready_context()
+    await dispatch_callback(router,callback_event(entry),context)
+    event=callback_event(theme);await dispatch_callback(router,event,context)
+    data=await context.get_data()
+    order=await credit_db.get_cartoon_order(data['cartoon_order_id'])
+    assert order['order_id'].startswith(f'cartoon_456_{theme}_')
+    assert order['user_id']==456 and order['theme']==theme
+    assert order['amount_kopecks']==amount*100 and order['status']=='pending'
+    payments.create_payment_link.assert_awaited_once_with(456,order_id=order['order_id'],amount=amount,description=order['product_name'])
+    expected=('🎬 Мульт-открытка (10-15 сек) стоит 890 ₽. Оплатите, чтобы начать создание.' if amount==890 else
+              '🎬 Мульт-поздравление (до 30 сек) стоит 1 690 ₽. Оплатите, чтобы начать создание.')
+    assert event.send.await_args.args[0]==expected
+    assert event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0].url=='https://shop.payform.ru/cartoon-personal'
+    assert await context.get_state()==PosterStates.waiting_for_cartoon_payment
+    await call_handler(router,'echo',cartoon_photo(),context)
+    await call_handler(router,'collect_cartoon_photo',cartoon_photo(),context)
+    avatar.assert_not_awaited()
+    early=callback_event('cartoon_resume:'+order['order_id'])
+    await dispatch_callback(router,early,context)
+    assert 'ещё не подтверждена' in early.ack.await_args.kwargs['notification']
+    await credit_db.mark_cartoon_paid(order['order_id'],'cartoon-pay')
+    # No manual "I paid" gate: the first photo after the webhook activates the saved order.
+    await call_handler(router,'echo',cartoon_photo(),context)
+    avatar.assert_awaited_once_with('https://photos.example.com/first.png',theme)
+    assert await context.get_state()==PosterStates.waiting_for_avatar_review
+    assert (await context.get_data())['cartoon_order_id']==order['order_id']
+
+
+async def test_cartoon_payment_retry_reuses_order_without_requesting_photo(credit_db):
+    payments=SimpleNamespace(create_payment_link=AsyncMock(side_effect=[RuntimeError('provider down'),'https://shop.payform.ru/retry']))
+    avatar=AsyncMock()
+    router,context=create_router(admin_user_id=999,payments=payments,avatar_generator=avatar),await ready_context()
+    await dispatch_callback(router,callback_event('cat_cartoon'),context)
+    await dispatch_callback(router,callback_event('theme_ny'),context)
+    first=(await context.get_data())['cartoon_order_id']
+    await dispatch_callback(router,callback_event('theme_ny'),context)
+    assert (await context.get_data())['cartoon_order_id']==first
+    assert payments.create_payment_link.await_args_list[0]==payments.create_payment_link.await_args_list[1]
+    avatar.assert_not_awaited()
+    assert await context.get_state()==PosterStates.waiting_for_cartoon_payment
+
+
+async def test_paid_cartoon_cannot_be_resumed_by_another_user(credit_db):
+    await credit_db.create_cartoon_order('cartoon_999_theme_ny_1',999,'theme_ny','short')
+    await credit_db.mark_cartoon_paid('cartoon_999_theme_ny_1','other-pay')
+    router,context=create_router(admin_user_id=1000),await ready_context()
+    event=callback_event('cartoon_resume:cartoon_999_theme_ny_1')
+    await dispatch_callback(router,event,context)
+    assert event.ack.await_args.kwargs['notification']=='Заказ недоступен.'
+    assert 'cartoon_order_id' not in await context.get_data()
+
+
+async def test_paid_cartoon_full_flow_no_second_payment_and_completed_order_cannot_be_reused(credit_db):
+    payments=SimpleNamespace(create_payment_link=AsyncMock(return_value='https://shop.payform.ru/pay'))
+    avatar=AsyncMock(return_value='https://cdn.example/clean.png')
+    router,context=create_router(admin_user_id=999,payments=payments,avatar_generator=avatar),await ready_context()
+    await dispatch_callback(router,callback_event('cat_cartoon'),context)
+    await dispatch_callback(router,callback_event('theme_ny'),context)
+    order_id=(await context.get_data())['cartoon_order_id']
+    await credit_db.mark_cartoon_paid(order_id,'full-flow-pay')
+    await dispatch_callback(router,callback_event('cartoon_resume:'+order_id),context)
+    await call_handler(router,'collect_cartoon_photo',cartoon_photo(),context)
+    await dispatch_callback(router,callback_event('avatar_ok_1'),context)
+    await submit_themed_song(router,context)
+    token=(await context.get_data())['cartoon_preview_token']
+    await dispatch_callback(router,callback_event('cartoon_music_ok:'+token),context)
+    assert await context.get_state()==PosterStates.waiting_for_mode
+    assert (await credit_db.get_cartoon_order(order_id))['status']=='completed'
+    payments.create_payment_link.assert_awaited_once()
+    handlers.create_video_task.assert_awaited_once()
+    handlers.create_musical_video.assert_awaited_once()
+    event=callback_event('cartoon_resume:'+order_id)
+    await dispatch_callback(router,event,context)
+    assert event.ack.await_args.kwargs['notification']=='Заказ уже завершён.'
+    assert (await credit_db.get_user(456))['total_purchases']==1
+
+
+async def test_paid_cartoon_second_avatar_attempt_survives_lost_fsm(credit_db):
+    avatar=AsyncMock(side_effect=['https://cdn.example/one.png','https://cdn.example/two.png'])
+    payments=SimpleNamespace(create_payment_link=AsyncMock(return_value='https://shop.payform.ru/pay'))
+    router,context=create_router(admin_user_id=999,payments=payments,avatar_generator=avatar),await ready_context()
+    await dispatch_callback(router,callback_event('cat_cartoon'),context)
+    await dispatch_callback(router,callback_event('theme_father'),context)
+    order_id=(await context.get_data())['cartoon_order_id']
+    await credit_db.mark_cartoon_paid(order_id,'restart-pay')
+    await call_handler(router,'echo',cartoon_photo(),context)
+    await dispatch_callback(router,callback_event('avatar_bad_1'),context)
+    await context.clear()
+    await dispatch_callback(router,callback_event('cartoon_resume:'+order_id),context)
+    assert (await context.get_data())['avatar_attempt']==2
+    await call_handler(router,'collect_cartoon_photo',cartoon_photo('https://photos.example.com/another.png'),context)
+    assert avatar.await_count==2
+    assert await context.get_state()==PosterStates.waiting_for_avatar_review
+
+
+async def test_paid_cartoon_timeout_then_fsm_loss_reuses_existing_kling_task(credit_db):
+    payments=SimpleNamespace(create_payment_link=AsyncMock(return_value='https://shop.payform.ru/pay'))
+    router,context=create_router(admin_user_id=999,payments=payments,
+        avatar_generator=AsyncMock(return_value='https://cdn.example/clean.png')),await ready_context()
+    await dispatch_callback(router,callback_event('cat_cartoon'),context)
+    await dispatch_callback(router,callback_event('theme_ny'),context)
+    order_id=(await context.get_data())['cartoon_order_id']
+    await credit_db.mark_cartoon_paid(order_id,'kling-restart-pay')
+    await call_handler(router,'echo',cartoon_photo(),context)
+    await dispatch_callback(router,callback_event('avatar_ok_1'),context)
+    await submit_themed_song(router,context)
+    token=(await context.get_data())['cartoon_preview_token']
+    handlers.poll_video_task.side_effect=[TimeoutError('processing'),'https://video.example/final.mp4']
+    await dispatch_callback(router,callback_event('cartoon_music_ok:'+token),context)
+    await context.clear()
+    await dispatch_callback(router,callback_event('cartoon_resume:'+order_id),context)
+    await dispatch_callback(router,callback_event('cartoon_music_ok:'+token),context)
+    handlers.create_video_task.assert_awaited_once()
+    assert handlers.poll_video_task.await_count==2
+    assert (await credit_db.get_cartoon_order(order_id))['status']=='completed'
+
+
+async def test_cartoon_stats_separate_customer_generation_from_admin_tests(credit_db):
+    for key in ('theme_ny_click','avatar_ok_1','song_ok','video_success'):
+        await credit_db.increment_counter(key,user_id=456)
+        await credit_db.increment_counter(key,user_id=999)
+    router=create_router(admin_user_id=999)
+    event=message_event('/stats');event.get_ids=lambda:(123,999)
+    await call_handler(router,'stats',event)
+    text=event.message.answer.await_args.args[0]
+    client_text=text.split('🎬 Мульт-открытки — клиенты:')[1].split('🛠 Мульт-открытки — тесты администратора:')[0]
+    admin_text=text.split('🛠 Мульт-открытки — тесты администратора:')[1]
+    assert '- Видео выдано: 1' in client_text and '- Видео выдано: 1' in admin_text
+
+
+async def test_cartoon_real_dispatcher_requires_webhook_before_photo_then_restores_paid_order(credit_db,monkeypatch,event_replies):
+    from maxapi import Dispatcher
+    from maxapi.context.isolation import SimpleEventIsolation
+    from maxapi.types import MessageCallback,MessageCreated,User
+    monkeypatch.setattr(handlers,'_reply',event_replies)
+    avatar=AsyncMock(return_value='https://cdn.example/paid.png')
+    payments=SimpleNamespace(create_payment_link=AsyncMock(return_value='https://shop.payform.ru/paid'))
+    router=create_router(admin_user_id=999,avatar_generator=avatar,payments=payments)
+    dp=Dispatcher(storage=MemoryContext,event_isolation=SimpleEventIsolation());dp.include_routers(router)
+    bot=SimpleNamespace(me=User(user_id=9999,first_name='Bot',is_bot=True),
+                        send_message=AsyncMock(return_value=object()),send_callback=AsyncMock())
+    user={'user_id':456,'first_name':'Customer','is_bot':False}
+    def message(text=None,attachments=None,sender=None):
+        return {'sender':sender or user,'recipient':{'chat_id':123,'chat_type':'dialog'},'timestamp':1,
+                'body':{'mid':'paid-cartoon','seq':1,'text':text,'attachments':attachments}}
+    async def click(payload):
+        await dp.handle(MessageCallback(timestamp=1,bot=bot,message=message(sender=bot.me.model_dump()),
+            callback={'timestamp':1,'callback_id':payload,'payload':payload,'user':user}))
+    async def photo():
+        await dp.handle(MessageCreated(timestamp=1,bot=bot,message=message(attachments=[
+            {'type':'image','payload':{'photo_id':1,'token':'photo','url':'https://photos.example.com/customer.png'}}])))
+    try:
+        await click('cat_cartoon')
+        await click('theme_feb23')
+        order_id=payments.create_payment_link.await_args.kwargs['order_id']
+        await photo()
+        avatar.assert_not_awaited()
+        await credit_db.mark_cartoon_paid(order_id,'dispatcher-paid')
+        await photo()
+        avatar.assert_awaited_once_with('https://photos.example.com/customer.png','theme_feb23')
+        await click('avatar_ok_1')
+        await dp.handle(MessageCreated(timestamp=1,bot=bot,message=message('Иван, с праздником!')))
+        order=await credit_db.get_cartoon_order(order_id)
+        import json
+        token=json.loads(order['fsm_data'])['cartoon_preview_token']
+        await click('cartoon_music_ok:'+token)
+        assert (await credit_db.get_cartoon_order(order_id))['status']=='completed'
+        payments.create_payment_link.assert_awaited_once()
     finally:
         await dp.shutdown()

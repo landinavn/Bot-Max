@@ -221,3 +221,18 @@ async def test_supplied_count_avoids_duplicate_vision_and_custom_prompt_cannot_a
     await video.generate_video_from_avatar('https://images.example/group.png', 'Make everyone dance', mode='mode_bday_young', people_count=6)
     counter.assert_not_awaited()
     assert json.loads(post.calls[0].request.content)['input']['prompt'] == video.CROWD_VIDEO_PROMPT
+
+
+@pytest.mark.parametrize('theme,details',[
+    ('theme_ny','Gentle snow is falling, fairy lights are twinkling, soft glowing bokeh.'),
+    ('theme_bday','Colorful balloons are gently floating, confetti is slowly falling.'),
+    ('theme_bday_kid','Pastel balloons are gently bobbing, cute confetti is floating.'),
+    ('theme_valentine','Floating hearts are gently pulsing, rose petals are slowly falling.'),
+    ('theme_feb23','The St. George ribbon is gently waving, the red star is glowing softly, snow is falling.'),
+    ('theme_mar8','Spring flowers are gently swaying in a soft breeze, warm sunlight is shimmering.'),
+    ('theme_mother','Soft particles are floating gently, warm light is softly pulsing.'),
+    ('theme_father','Warm light is gently flickering, subtle dust motes are floating.'),
+])
+def test_cartoon_kling_prompt_preserves_face_and_exact_themed_animation(theme,details):
+    assert video.build_video_prompt(theme)==video.CARTOON_VIDEO_PROMPTS[theme]
+    assert video.CARTOON_VIDEO_PROMPTS[theme]=='Subtle cinematic animation. The 3D Pixar character is smiling warmly, blinking naturally, and making very slight head movements. High quality 3D render, smooth motion. CRITICAL: Do not distort the face, keep the exact facial features identical to the source image. Animation details: '+details

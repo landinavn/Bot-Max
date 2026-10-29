@@ -1144,3 +1144,43 @@ async def test_people_counter_failure_returns_zero_without_retry(config, api, fa
         api.post('https://api.openai.com/v1/chat/completions', payload=correction_response('6','length'))
     assert await service.count_people_in_photo(PHOTO_URL) == 0
     assert len(post_requests(api)) == 1
+
+
+@pytest.mark.parametrize('theme,background',[
+    ('theme_ny','Christmas tree with glowing fairy lights, gentle falling snow, magical winter atmosphere.'),
+    ('theme_bday','Colorful balloons, festive confetti, warm glowing candles, birthday party.'),
+    ('theme_bday_kid',"Soft pastel balloons, cute toys, gentle warm lighting, cheerful kids' party."),
+    ('theme_valentine','Floating red and pink hearts, rose petals, soft romantic pink lighting.'),
+    ('theme_feb23','A gently waving St. George ribbon, a softly glowing red star, subtle falling snow, patriotic atmosphere.'),
+    ('theme_mar8','Spring tulips and mimosa flowers, warm spring sunlight, gentle petals.'),
+    ('theme_mother','Warm golden hour lighting, gentle floating soft particles (like dandelion fluff), very cozy and tender atmosphere.'),
+    ('theme_father','Warm workshop lighting, subtle tools in the background, strong and caring atmosphere.'),
+])
+async def test_eight_cartoon_themes_use_exact_identity_and_background(monkeypatch,theme,background):
+    generate=AsyncMock(return_value=['https://cdn.example/clean-avatar.png'])
+    monkeypatch.setattr(service,'_generate_and_store',generate)
+    assert await service.generate_cartoon_avatar(PHOTO_URL,theme)=='https://cdn.example/clean-avatar.png'
+    prompt=generate.await_args.kwargs['prompt_override']
+    assert prompt=='Create a 3D Pixar/Disney style avatar of the person from the reference photo. CRITICAL: Preserve the exact face shape, nose, eyes, and skin tone. Keep original hairstyle. The character is smiling softly. High quality 3D render, soft lighting. Background: '+background
+    assert generate.await_args.kwargs['count']==1
+
+
+async def test_cartoon_preview_publishes_separate_watermarked_image_without_overwriting_original(monkeypatch,tmp_path):
+    original=BytesIO();Image.new('RGB',(400,300),'navy').save(original,'PNG')
+    source=original.getvalue()
+    download=AsyncMock(return_value=source)
+    monkeypatch.setattr(service,'_download_photo',download)
+    monkeypatch.setattr(service.Config,'from_env',lambda:Config(token='test',photo_path=tmp_path,storage_bucket='avatars'))
+    client=Mock();monkeypatch.setattr(service,'_storage_client',lambda config:client)
+    stored=[];paths=[]
+    def store(client,config,path):
+        stored.append(path.read_bytes());paths.append(path)
+        return 'https://cdn.example/watermarked.png'
+    monkeypatch.setattr(service,'_store_image',store)
+    assert await service.create_cartoon_avatar_preview('https://cdn.example/original.png')=='https://cdn.example/watermarked.png'
+    assert download.await_args.args[1]=='https://cdn.example/original.png'
+    assert source==original.getvalue() and source!=stored[0]
+    with Image.open(BytesIO(stored[0])) as preview:
+        assert preview.size==(400,300)
+    assert not paths[0].parent.exists()
+    client.close.assert_called_once()

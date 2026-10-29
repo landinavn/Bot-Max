@@ -857,6 +857,19 @@ NY_FAMILY_PHOTOSESSION_PROMPTS = {
 }
 
 
+CARTOON_THEME_IMAGE_BASE = 'Create a 3D Pixar/Disney style avatar of the person from the reference photo. CRITICAL: Preserve the exact face shape, nose, eyes, and skin tone. Keep original hairstyle. The character is smiling softly. High quality 3D render, soft lighting. Background: '
+CARTOON_IMAGE_PROMPTS = {
+    'theme_ny': CARTOON_THEME_IMAGE_BASE + 'Christmas tree with glowing fairy lights, gentle falling snow, magical winter atmosphere.',
+    'theme_bday': CARTOON_THEME_IMAGE_BASE + 'Colorful balloons, festive confetti, warm glowing candles, birthday party.',
+    'theme_bday_kid': CARTOON_THEME_IMAGE_BASE + "Soft pastel balloons, cute toys, gentle warm lighting, cheerful kids' party.",
+    'theme_valentine': CARTOON_THEME_IMAGE_BASE + 'Floating red and pink hearts, rose petals, soft romantic pink lighting.',
+    'theme_feb23': CARTOON_THEME_IMAGE_BASE + 'A gently waving St. George ribbon, a softly glowing red star, subtle falling snow, patriotic atmosphere.',
+    'theme_mar8': CARTOON_THEME_IMAGE_BASE + 'Spring tulips and mimosa flowers, warm spring sunlight, gentle petals.',
+    'theme_mother': CARTOON_THEME_IMAGE_BASE + 'Warm golden hour lighting, gentle floating soft particles (like dandelion fluff), very cozy and tender atmosphere.',
+    'theme_father': CARTOON_THEME_IMAGE_BASE + 'Warm workshop lighting, subtle tools in the background, strong and caring atmosphere.',
+}
+
+
 CARTOON_AVATAR_PROMPT = (
     'Create a single high-quality 3D Pixar/Disney style avatar from the reference photo. '
     'Preserve the exact face, recognizable facial features, hairstyle, age and skin tone of each reference person. '
@@ -881,10 +894,11 @@ CARTOON_AVATAR_THEMES = {
 
 
 async def generate_cartoon_avatar(photo_url: str, mode: str) -> str:
-    if mode not in CARTOON_AVATAR_THEMES:
+    if mode not in CARTOON_AVATAR_THEMES and mode not in CARTOON_IMAGE_PROMPTS:
         raise ValueError('Неизвестный стиль мульт-аватара.')
     urls = await _generate_and_store(photo_url, 'Мульт-аватар', count=1,
-        prompt_override=CARTOON_AVATAR_PROMPT + ' ' + CARTOON_AVATAR_THEMES[mode])
+        prompt_override=(CARTOON_IMAGE_PROMPTS[mode] if mode in CARTOON_IMAGE_PROMPTS else
+                         CARTOON_AVATAR_PROMPT + ' ' + CARTOON_AVATAR_THEMES[mode]))
     if len(urls) != 1:
         raise ImageGenerationError('Ожидался один мульт-аватар.')
     return urls[0]
@@ -967,3 +981,23 @@ class ImageService:
             text=caption,
             attachments=[InputMedia(str(self.photo_path), type=UploadType.IMAGE)],
         )
+
+
+async def create_cartoon_avatar_preview(original_image_url: str) -> str:
+    """Отдельная копия с PREVIEW: чистый оригинал остаётся для Kling."""
+    _validate_inputs(original_image_url, 'Мульт-аватар')
+    config = Config.from_env()
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+        data = await _download_photo(session, original_image_url)
+    marked = await asyncio.to_thread(add_preview_watermark, data)
+    client = await asyncio.to_thread(_storage_client, config)
+    try:
+        with TemporaryDirectory(prefix='cartoon-preview-') as directory:
+            path = Path(directory)/'preview.png'
+            await asyncio.to_thread(path.write_bytes, marked)
+            url = await asyncio.to_thread(_store_image, client, config, path)
+        if urlsplit(url).scheme != 'https':
+            raise ImageGenerationError('Превью аватара не получило HTTPS-ссылку.')
+        return url
+    finally:
+        await asyncio.to_thread(client.close)

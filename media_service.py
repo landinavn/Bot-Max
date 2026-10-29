@@ -113,8 +113,10 @@ async def merge_video_and_audio(video_url: str, audio_url: str) -> str:
         await asyncio.to_thread(client.close)
 
 
-async def create_musical_video(image_url: str, audio_url: str) -> str:
-    """Статичная картинка и полная песня в совместимом с MAX MP4."""
+async def create_musical_video(image_url: str, audio_url: str, *, animated_video_url: str | None = None) -> str:
+    """Статичная картинка или готовая анимация и полная песня в MP4."""
+    if animated_video_url is not None:
+        return await merge_video_and_audio(animated_video_url, audio_url)
     binary = shutil.which('ffmpeg')
     if not binary:
         raise MediaServiceError('Для музыкальной открытки установите ffmpeg.')
@@ -156,4 +158,18 @@ async def upload_video_for_max(bot, video_url: str):
         token = attachment.payload.token
         if not isinstance(token, str) or not token.strip():
             raise MediaServiceError('MAX вернул пустой media token видео.')
+        return attachment
+
+
+async def upload_audio_for_max(bot, audio_url: str):
+    """Отправить короткое превью аудиовложением, без полного трека или картинки."""
+    from maxapi.types import InputMedia
+    from maxapi.enums.upload_type import UploadType
+    with tempfile.TemporaryDirectory(prefix='max-cartoon-preview-') as directory:
+        path = Path(directory)/'preview.mp3'
+        async with httpx.AsyncClient(timeout=120, trust_env=False, follow_redirects=False) as http:
+            await _download(http, audio_url, path, 32 * 1024 * 1024)
+        attachment = await bot.upload_media(InputMedia(path=str(path), type=UploadType.AUDIO))
+        if not isinstance(attachment.payload.token, str) or not attachment.payload.token.strip():
+            raise MediaServiceError('MAX вернул пустой media token аудио.')
         return attachment

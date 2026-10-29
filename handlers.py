@@ -529,8 +529,8 @@ VIDEO_UPSELL_TEXT = (
 
 
 CARTOON_PRODUCTS = {
-    'cat_cartoon': ('short', 89000, '🎬 Создаем короткий мультфильм с вашим лицом! Выберите стиль:', '5-10'),
-    'cat_cartoon_long': ('long', 169000, '🎬 Создаем полноценное мульт-поздравление с сюжетом! Выберите стиль:', '15-20'),
+    'cat_cartoon': ('short', 59000, '🎬 Создаем короткий мультфильм с вашим лицом! Выберите стиль:', '5-10'),
+    'cat_cartoon_long': ('long', 129000, '🎬 Создаем полноценное мульт-поздравление с сюжетом! Выберите стиль:', '15-20'),
 }
 CARTOON_AVATAR_EVENTS = {'avatar_ok_1': 'avatar_ok_first', 'avatar_bad_1': 'avatar_bad_first',
                        'avatar_ok_2': 'avatar_ok_second', 'avatar_bad_2': 'avatar_bad_second'}
@@ -1306,8 +1306,8 @@ def create_router(
         cartoon_test_text = (
             "\n\n🎬 Мульт-открытки — клиенты:\n"
             + "\n".join(f"- {label}: {counters.get(key, 0)}" for key, label in cartoon_labels)
-            + f"\n- Покупок за 890 ₽: {counters.get('buy_cartoon_short', 0)}"
-            + f"\n- Покупок за 1 690 ₽: {counters.get('buy_cartoon_long', 0)}"
+            + f"\n- Покупок за 590 ₽: {counters.get('buy_cartoon_short', 0)}"
+            + f"\n- Покупок за 1290 ₽: {counters.get('buy_cartoon_long', 0)}"
             + "\n\n🛠 Мульт-открытки — тесты администратора:\n"
             + "\n".join(f"- {label}: {cartoon_counts.get(key, 0)}" for key, label in cartoon_labels)
         )
@@ -1725,7 +1725,8 @@ def create_router(
         user_id = event.get_ids()[1]
         data = await context.get_data()
         order = await get_cartoon_order(data.get('cartoon_order_id', ''))
-        if not order or order['user_id'] != user_id or order['theme'] != theme or order['tariff'] != product[0]:
+        if (not order or order['user_id'] != user_id or order['theme'] != theme or order['tariff'] != product[0]
+                or (order['status'] == 'pending' and order['amount_kopecks'] != product[1])):
             order_id = f"cartoon_{user_id}_{theme}_{time_ns()}"
             await create_cartoon_order(order_id, user_id, theme, product[0])
             order = await get_cartoon_order(order_id)
@@ -1746,8 +1747,8 @@ def create_router(
                 raise RuntimeError('Не настроена интеграция Prodamus.')
             link = await payments.create_payment_link(user_id, order_id=order['order_id'], amount=product[1] // 100,
                                                      description=order['product_name'])
-            text = ('🎬 Мульт-открытка (10-15 сек) стоит 890 ₽. Оплатите, чтобы начать создание.' if product[0] == 'short'
-                    else '🎬 Мульт-поздравление (до 30 сек) стоит 1 690 ₽. Оплатите, чтобы начать создание.')
+            text = ('🎬 Мульт-открытка (10-15 сек) стоит 590 ₽. Оплатите, чтобы начать создание.' if product[0] == 'short'
+                    else '🎬 Мульт-поздравление (до 30 сек) стоит 1290 ₽. Оплатите, чтобы начать создание.')
             keyboard = InlineKeyboardBuilder().row(LinkButton(text=f"Оплатить {product[1] // 100} ₽", url=link)).row(
                 CallbackButton(text='Проверить оплату / продолжить', payload='cartoon_resume:' + order['order_id'])).as_markup()
             await _reply(event, text, attachments=[keyboard])

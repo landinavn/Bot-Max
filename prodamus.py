@@ -321,7 +321,10 @@ class ProdamusPayments:
             if expected.get(order['package_id']) != (order['amount_kopecks'], order['product_name']):
                 raise ValueError('Неизвестный аудиотариф.')
         elif order.get('order_type') == 'cartoon':
-            if CARTOON_TARIFFS.get(order['tariff']) != (order['amount_kopecks'], order['product_name']):
+            # Сумма уже сверена с сохранённым заказом: ранее выданные счета
+            # остаются действительными после изменения прайса.
+            tariff = CARTOON_TARIFFS.get(order['tariff'])
+            if tariff is None or tariff[1] != order['product_name']:
                 raise ValueError('Неизвестный мульт-тариф.')
         elif order.get('order_type') == 'musical':
             if MUSICAL_TARIFFS.get(order['tariff']) != (order['amount_kopecks'], order['product_name']):

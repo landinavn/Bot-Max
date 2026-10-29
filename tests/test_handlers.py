@@ -5006,7 +5006,7 @@ async def test_cartoon_real_dispatcher_routes_photos_and_cancel_before_state_han
         assert await context.get_state() == PosterStates.waiting_for_cartoon_song_phrase
         await dp.handle(MessageCreated(timestamp=4, bot=bot, message=message('С Новым годом, друзья!')))
         assert await context.get_state() == PosterStates.waiting_for_mode
-        assert 'https://video.example/cartoon.mp4' in bot.send_message.await_args.kwargs['text']
+        assert any('https://video.example/cartoon.mp4' in c.kwargs.get('text','') for c in bot.send_message.await_args_list)
         await dp.handle(MessageCreated(timestamp=4, bot=bot, message=message('/cancel')))
         assert await context.get_data() == {}
     finally:
@@ -5581,7 +5581,7 @@ async def test_process_pending_videos_continues_after_failure_and_marks_only_del
     event = message_event('/process_pending_videos')
     await call_handler(create_router(admin_user_id=456, cartoon_video_generator=generate), 'process_pending_videos', event)
     assert generate.await_args_list == [call('https://images.example/a.png', 'https://audio.example/a.mp3'), call('https://images.example/b.png', 'https://audio.example/b.mp3')]
-    event.bot.send_message.assert_awaited_once()
+    assert event.bot.send_message.await_count == 2
     assert event.bot.send_message.await_args.kwargs['user_id'] == 789
     assert [job['id'] for job in await credit_db.get_all_pending_videos()] == [first]
     assert 'Успешно: 1, Ошибок: 1' in event.message.answer.await_args.args[0]
@@ -5600,7 +5600,7 @@ async def test_pending_video_failed_delivery_reuses_result_after_restart(credit_
     await call_handler(create_router(admin_user_id=456, cartoon_video_generator=generate), 'process_pending_videos', retry)
     generate.assert_awaited_once()
     assert await credit_db.get_all_pending_videos() == []
-    assert 'https://video.example/a.mp4' in retry.bot.send_message.await_args.kwargs['text']
+    assert 'https://video.example/a.mp4' in retry.bot.send_message.await_args_list[0].kwargs['text']
 
 
 async def test_pending_video_placeholder_is_never_completed_or_sent(credit_db):
@@ -5644,7 +5644,7 @@ async def test_process_pending_videos_serializes_repeated_admin_commands(credit_
     finally:
         release.set()
         await task
-    first.bot.send_message.assert_awaited_once()
+    assert first.bot.send_message.await_count == 2
     second.bot.send_message.assert_not_awaited()
 
 
@@ -5736,7 +5736,7 @@ async def test_pending_processor_delivers_merged_result(credit_db, monkeypatch, 
     event = message_event('/process_pending_videos')
     await call_handler(create_router(admin_user_id=456), 'process_pending_videos', event)
     merger.assert_awaited_once_with('https://video.example/animated.mp4', 'https://audio.example/song.mp3')
-    assert 'https://cdn.example/pending-merged.mp4' in event.bot.send_message.await_args.kwargs['text']
+    assert 'https://cdn.example/pending-merged.mp4' in event.bot.send_message.await_args_list[-2].kwargs['text']
     assert await credit_db.get_all_pending_videos() == []
 
 
@@ -6392,7 +6392,8 @@ async def test_themed_cartoon_real_dispatcher_routes_photo_phrase_review_and_fin
         await dp.handle(MessageCreated(timestamp=4,bot=bot,message=message('что дальше?')))
         assert 'кнопкой' in bot.send_message.await_args.kwargs['text']
         await click('cartoon_music_ok:'+(await context.get_data())['cartoon_preview_token'])
-        assert bot.send_message.await_args.kwargs['attachments'][0].type.value=='video'
+        assert bot.send_message.await_args_list[-2].kwargs['attachments'][0].type.value=='video'
+        assert bot.send_message.await_args.kwargs['attachments'][0].payload.buttons[0][0].text=='🔗 Поделиться ботом'
         assert await context.get_state()==PosterStates.waiting_for_mode
     finally:
         await dp.shutdown()
@@ -6813,3 +6814,37 @@ async def test_cartoon_real_dispatcher_requires_webhook_before_photo_then_restor
         payments.create_payment_link.assert_awaited_once()
     finally:
         await dp.shutdown()
+
+
+@pytest.mark.parametrize('kind',['musical','cartoon'])
+@pytest.mark.parametrize('share_fails',[False,True])
+async def test_video_share_follows_video_attachment_and_never_restarts_generation(credit_db,kind,share_fails):
+    router,context=create_router(admin_user_id=456,bot_link='https://max.ru/custom_bot',
+        postcard_generator=AsyncMock(return_value=['https://cdn.example/card.png']),
+        avatar_generator=AsyncMock(return_value='https://cdn.example/avatar.png')),await ready_context()
+    if kind=='cartoon':
+        await start_themed_cartoon(router,context)
+        await submit_themed_song(router,context)
+        event=callback_event('cartoon_music_ok:'+(await context.get_data())['cartoon_preview_token'])
+    else:
+        await prepare_teacher_video(router,context,'cat_video')
+        event=callback_event('video_song:audio_fun_ny')
+    async def share(**kwargs):
+        # Видео уже выдано вложением, когда начинается отправка отдельного приглашения.
+        assert any(getattr(item.type,'value',item.type)=='video'
+                   for sent in event.send.await_args_list for item in sent.kwargs.get('attachments',[]))
+        if share_fails:
+            raise RuntimeError('share unavailable')
+        return object()
+    event.bot.send_message.side_effect=share
+    if kind=='cartoon':
+        await dispatch_callback(router,event,context)
+    else:
+        await dispatch_callback_and_phrase(router,event,context)
+    assert await context.get_state()==PosterStates.waiting_for_mode
+    message=event.bot.send_message.await_args.kwargs
+    from video_delivery import VIDEO_SHARE_TEXT
+    assert message['text']==VIDEO_SHARE_TEXT
+    assert message['attachments'][0].payload.buttons[0][0].url=='https://max.ru/custom_bot'
+    handlers.create_musical_video.assert_awaited_once()
+    assert not any('Не удалось создать видео' in str(c) for c in event.send.await_args_list)

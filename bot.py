@@ -51,7 +51,7 @@ async def main() -> None:
         audio_task = None
         musical_task = None
         cartoon_task = None
-        musical_worker = PaidMusicalWorker(bot)
+        musical_worker = PaidMusicalWorker(bot, bot_link=config.bot_link)
         audio_worker = PaidAudioWorker(bot, payments=payments, admin_user_id=config.admin_user_id)
         try:
             if payments is not None:

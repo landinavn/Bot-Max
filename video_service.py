@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 TASK_URL = "https://api.piapi.ai/api/v1/task"
 POLL_INTERVAL = 15
 REQUEST_TIMEOUT = 30
-DEFAULT_ANIMATION_PROMPT = "The character is smiling and blinking."
+DEFAULT_ANIMATION_PROMPT = "The character is smiling, blinking naturally, and slightly moving their head from side to side."
 
 
 CARTOON_VIDEO_PROMPTS = {

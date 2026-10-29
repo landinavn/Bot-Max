@@ -39,6 +39,10 @@ logger = logging.getLogger(__name__)
 
 FONT_PATH = Path(__file__).resolve().parent / "font.ttf"
 MAX_THEME_INFO_LENGTH = 500
+FACE_ORIENTATION_REQUIREMENT = (
+    "FACE ORIENTATION: If the person in the reference photo is looking sideways or in profile, "
+    "turn their head and face to look directly at the camera. The eyes must look straight ahead."
+)
 POSTCARD_PROMPTS = {
     "mode_teacher": (
         "Create a beautiful, elegant greeting card for a teacher. The background and thematic elements "
@@ -105,6 +109,11 @@ POSTCARD_PROMPTS = {
         "Leave plenty of empty space on the left side or at the top for custom text. Cinematic lighting, highly detailed."
     ),
 }
+POSTCARD_PROMPTS = {
+    mode: prompt + ' ' + FACE_ORIENTATION_REQUIREMENT
+    for mode, prompt in POSTCARD_PROMPTS.items()
+}
+
 MAX_CARD_TEXT_LENGTH = 200
 
 
@@ -865,7 +874,7 @@ CARTOON_THEME_IMAGE_BASE = (
     'IDENTITY REQUIREMENTS: '
     '- Despite the cartoon style, the character must be 100% recognizable as the person in the reference photo. '
     '- Keep the exact same hair color, hairstyle, and overall facial structure. '
-    'SCENE & BACKGROUND: - '
+    + FACE_ORIENTATION_REQUIREMENT + ' SCENE & BACKGROUND: - '
 )
 CARTOON_IMAGE_BACKGROUNDS = {
     'theme_ny': 'Christmas tree with glowing fairy lights, gentle falling snow, magical winter atmosphere.',

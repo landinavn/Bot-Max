@@ -275,6 +275,7 @@ async def test_generation_uploads_photo_and_parses_response(config, storage, api
     assert fields["quality"].get_content() == "high"
     assert fields["size"].get_content() == "1024x1536"
     prompt = fields["prompt"].get_content()
+    assert service.FACE_ORIENTATION_REQUIREMENT not in prompt
     assert dream in prompt
     assert prompt.startswith("Create a realistic photographic vision board collage")
     sections = (
@@ -619,6 +620,7 @@ async def test_postcard_uses_template_and_stores_text_overlay(config, storage, a
     assert storage.uploaded_images[0] != generated
     fields = await multipart_fields(post_requests(api)[0])
     prompt = fields["prompt"].get_content()
+    assert service.FACE_ORIENTATION_REQUIREMENT in prompt
     expected_prompt = service.POSTCARD_PROMPTS[mode].format(teacher_info=info, coach_info=info) if info else service.POSTCARD_PROMPTS[mode]
     assert prompt.startswith(expected_prompt)
     assert "Preserve every reference person's identity" in prompt
@@ -1058,6 +1060,7 @@ async def test_cartoon_avatar_uses_one_image_shared_openai_pipeline_and_identity
     assert '3D animated movie character in the style of Pixar/Disney' in prompt
     assert '100% recognizable' in prompt and 'soft blurred Christmas tree background' in prompt
     assert 'NOT a real photograph' in prompt
+    assert service.FACE_ORIENTATION_REQUIREMENT in prompt
     assert service.CARTOON_AVATAR_THEMES[mode] in prompt
     assert 'postcard_text' not in kwargs
 
@@ -1170,6 +1173,7 @@ async def test_eight_cartoon_themes_use_exact_identity_and_background(monkeypatc
         'IDENTITY REQUIREMENTS: '
         '- Despite the cartoon style, the character must be 100% recognizable as the person in the reference photo. '
         '- Keep the exact same hair color, hairstyle, and overall facial structure. '
+        + service.FACE_ORIENTATION_REQUIREMENT + ' '
         + service.CARTOON_CLOTHING_STYLE + service.CARTOON_CLOTHING[theme] + ' SCENE & BACKGROUND: - ' + background
     )
     assert generate.await_args.kwargs['count']==1

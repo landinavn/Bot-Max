@@ -25,6 +25,7 @@ from maxapi.types import (
     MessageCallback,
     MessageCreated,
     PhotoAttachmentPayload,
+    AttachmentUpload,
 )
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
@@ -276,7 +277,7 @@ SONG_PROMO_EXPIRED_TEXT = 'К сожалению, 48 часов уже прош�
 CATEGORY_BUTTONS = (
     ("🎵 Музыкальная открытка — Новинка 🔥", "cat_video"),
     ("🎬 Мульт-открытка — Новинка 🔥", "cat_cartoon"),
-    ("🎬 Мульт-поздравление — Новинка 🔥", "cat_cartoon_long"),
+    ("👑 Эксклюзив (ручная работа) — от 2 000 ₽", "custom_order"),
     ("📸 Нейрофотосессия", "cat_photo"),
     ("🎵 Аудиопесни", "cat_audio"),
     ("🎁 Открытки", "cat_cards"),
@@ -531,6 +532,7 @@ VIDEO_UPSELL_TEXT = (
 
 
 
+# Long-product metadata is retained only to fulfil previously paid orders.
 CARTOON_PRODUCTS = {
     'cat_cartoon': ('short', 59000, '🎬 Создаем короткий мультфильм с вашим лицом, длительность около 40 секунд. Выберите стиль:', '5-10'),
     'cat_cartoon_long': ('long', 129000, '🎬 Создаем полноценное мульт-поздравление с сюжетом! Выберите стиль:', '15-20'),
@@ -701,6 +703,12 @@ async def purchase_keyboard(user_id: int | None):
 
 
 class PosterStates(StatesGroup):
+    waiting_for_custom_occasion = State()
+    waiting_for_custom_contact = State()
+    waiting_for_custom_names = State()
+    waiting_for_custom_idea = State()
+    waiting_for_custom_materials = State()
+    waiting_for_custom_deadline = State()
     waiting_for_mode = State()
     waiting_for_photo = State()
     waiting_for_card_role_info = State()
@@ -738,6 +746,31 @@ class PosterStates(StatesGroup):
     # Принимать описание и из состояния, сохранённого прежней версией.
     waiting_for_sphere = State()
     generating = State()
+
+
+CUSTOM_ORDER_TEXT = (
+    '👑 Эксклюзивный заказ (ручная работа)\n\n'
+    'Мы создаем уникальные видео-поздравления, мультфильмы (включая длинные 30-секундные и более) '
+    'и рекламные ролики вручную. Стоимость зависит от сложности и сроков:\n'
+    '• Простое видео (15-30 сек) — от 2 000 ₽\n'
+    '• Мультфильм с сюжетом (40-60 сек) — от 4 000 ₽\n'
+    '• Эксклюзивный проект / Реклама (до 3 мин) — от 8 000 ₽\n\n'
+    'Заполните короткую заявку, и наш менеджер свяжется с вами для обсуждения деталей!'
+)
+CUSTOM_FORM_STEPS = (
+    (PosterStates.waiting_for_custom_occasion, 'occasion', 300,
+     '1/6. Какой повод? (Например: Свадьба, Юбилей, Реклама для бизнеса, Презентация)'),
+    (PosterStates.waiting_for_custom_contact, 'contact', 300,
+     '2/6. Оставьте ваш номер телефона или ник в мессенджере (MAX/Telegram) для связи с менеджером.'),
+    (PosterStates.waiting_for_custom_names, 'names', 300,
+     '3/6. Кого поздравляем или как называется ваш бренд/компания?'),
+    (PosterStates.waiting_for_custom_idea, 'idea', 1500,
+     '4/6. Опишите идею или задачу. Что должно происходить в видео?'),
+    (PosterStates.waiting_for_custom_materials, 'materials', 0,
+     '5/6. Отправьте фото людей (для частного заказа) или логотипы/фото товара (для бизнеса).'),
+)
+CUSTOM_DEADLINES = {'custom_deadline_1': '1-3 дня', 'custom_deadline_3': '3-5 дней',
+                    'custom_deadline_7': 'до 7 дней'}
 
 
 GIFT_SCENARIO_STATES = {
@@ -1426,6 +1459,9 @@ def create_router(
             f"- Аудиопесни: {c('click_audio')}\n"
             f"- Мульт-услуги: {c('click_cartoon_short') + c('click_cartoon_long')}\n"
             f"- Медитации: {c('click_meditation')}\n\n"
+            "👑 Эксклюзив (ручная работа):\n"
+            f"- Клики по кнопке: {c('click_custom_order')}\n"
+            f"- Отправлено заявок: {c('submit_custom_order')}\n\n"
             f"🛠 Админ (тесты): Сгенерировано {admin['total_generations'] if admin else 0}, "
             f"Покупок {admin['total_purchases'] if admin else 0}."
         )
@@ -1779,6 +1815,9 @@ def create_router(
         await persist_cartoon_state(context)
 
     async def send_cartoon_checkout(event,context,theme,product):
+        if product[0] == 'long':
+            await show_custom_order(event, context)
+            return
         user_id=event.get_ids()[1]
         try:
             data=await context.get_data()
@@ -1943,12 +1982,98 @@ def create_router(
         await event.ack(notification='Готовлю счёт…')
         data=await context.get_data()
         tariff=event.callback.payload.removeprefix('promo_cartoon_tariff:')
-        if event.message is None or tariff not in {'short','long'} or not data.get('cartoon_promo_choose_tariff') or data.get('cartoon_theme') not in CARTOON_THEMES:
+        if tariff == 'long':
+            await show_custom_order(event, context)
             return
-        product=CARTOON_PRODUCTS['cat_cartoon' if tariff=='short' else 'cat_cartoon_long']
+        if event.message is None or tariff != 'short' or not data.get('cartoon_promo_choose_tariff') or data.get('cartoon_theme') not in CARTOON_THEMES:
+            return
+        product=CARTOON_PRODUCTS['cat_cartoon']
         await send_cartoon_checkout(event,context,data['cartoon_theme'],product)
 
-    @router.message_callback(F.callback.payload.in_(set(CARTOON_PRODUCTS)))
+    async def show_custom_order(event, context):
+        if event.message is None or event.get_ids()[1] is None:
+            return
+        if await context.get_state() in (PosterStates.generating, PosterStates.cartoon_generating,
+                                         PosterStates.waiting_for_audio_generation):
+            await _reply(event, 'Текущая генерация ещё не завершена. Пожалуйста, подождите.')
+            return
+        await context.clear()
+        await _reply(event, CUSTOM_ORDER_TEXT, attachments=[navigation_keyboard((
+            ('📝 Заполнить заявку', 'custom_start_form'), ('⬅️ Назад', 'back_to_main')))])
+
+    # Старые неоплаченные кнопки длинного продукта ведут в ручной заказ.
+    @router.message_callback(F.callback.payload.in_({'custom_order', 'cat_cartoon_long'}))
+    async def custom_order_menu(event: MessageCallback, context: MemoryContext):
+        await event.ack(notification='Открываю эксклюзивные заказы…')
+        if event.message is None or event.get_ids()[1] is None:
+            return
+        if event.callback.payload == 'custom_order':
+            await increment_counter('click_custom_order', user_id=event.get_ids()[1])
+        await show_custom_order(event, context)
+
+    @router.message_callback(F.callback.payload == 'custom_start_form')
+    async def custom_start_form(event: MessageCallback, context: MemoryContext):
+        await event.ack(notification='Открываю анкету…')
+        if event.message is None or event.get_ids()[1] is None:
+            return
+        if await context.get_state() in (PosterStates.generating, PosterStates.cartoon_generating,
+                                         PosterStates.waiting_for_audio_generation):
+            await _reply(event, 'Текущая генерация ещё не завершена. Пожалуйста, подождите.')
+            return
+        if admin_user_id is None:
+            await _reply(event, 'Приём заявок временно недоступен. Пожалуйста, обратитесь в поддержку.',
+                         attachments=[navigation_keyboard((('⬅️ Назад', 'back_to_main'),))])
+            return
+        await context.clear()
+        await context.set_state(PosterStates.waiting_for_custom_occasion)
+        await _reply(event, CUSTOM_FORM_STEPS[0][3])
+
+    @router.message_callback(F.callback.payload.in_(set(CUSTOM_DEADLINES)))
+    async def custom_submit(event: MessageCallback, context: MemoryContext):
+        await event.ack(notification='Отправляю заявку…')
+        user_id = event.get_ids()[1]
+        if event.message is None or user_id is None:
+            return
+        lock = generation_locks.setdefault(user_id, asyncio.Lock())
+        async with lock:
+            data = await context.get_data()
+            if (await context.get_state() != PosterStates.waiting_for_custom_deadline
+                    or not all(data.get('custom_' + field) for field in ('occasion', 'contact', 'names', 'idea', 'materials'))):
+                await _reply(event, 'Анкета не заполнена или уже отправлена. Откройте раздел «Эксклюзив» заново.',
+                             attachments=[navigation_keyboard((('👑 Эксклюзив', 'custom_order'),))])
+                return
+            deadline = data.get('custom_deadline') or CUSTOM_DEADLINES[event.callback.payload]
+            await context.update_data(custom_deadline=deadline)
+            text = ('🚨 НОВАЯ ЗАЯВКА НА ЭКСКЛЮЗИВ!\n\n'
+                    f'👤 Клиент ID: {user_id}\n📞 Контакт: {data["custom_contact"]}\n'
+                    f'🎉 Повод: {data["custom_occasion"]}\n🏢 Имена/Бренд: {data["custom_names"]}\n'
+                    f'💡 Идея: {data["custom_idea"]}\n⏳ Срок: {deadline}')
+            try:
+                if admin_user_id is None:
+                    raise RuntimeError('ADMIN_USER_ID не настроен.')
+                materials = data['custom_materials']
+                # Не повторяем уже доставленные части при сбое следующей отправки.
+                for index in range(data.get('custom_delivery_index', 0), (len(materials) + 2) // 3):
+                    images = [AttachmentUpload(type=UploadType.IMAGE, payload={'token': item['token']})
+                              for item in materials[index * 3:(index + 1) * 3]]
+                    sent = await event.bot.send_message(user_id=admin_user_id,
+                        text=text if index == 0 else f'Материалы к заявке клиента {user_id}',
+                        attachments=images)
+                    if sent is None:
+                        raise RuntimeError('MAX не подтвердил доставку заявки администратору.')
+                    await context.update_data(custom_delivery_index=index + 1)
+                if not data.get('custom_submission_counted'):
+                    await increment_counter('submit_custom_order', user_id=user_id)
+                    await context.update_data(custom_submission_counted=True)
+            except Exception:
+                logger.exception('Не удалось отправить эксклюзивную заявку пользователя %s:', user_id)
+                await _reply(event, 'Не удалось отправить заявку. Ваши ответы сохранены. Нажмите, чтобы повторить:',
+                             attachments=[navigation_keyboard((('Отправить ещё раз', event.callback.payload),))])
+                return
+            await _reply(event, '✅ Спасибо! Ваша заявка принята. Менеджер свяжется с вами по указанному контакту в течение часа.')
+            await context.clear()
+
+    @router.message_callback(F.callback.payload == 'cat_cartoon')
     async def cartoon_menu(event: MessageCallback, context: MemoryContext):
         user_id = event.get_ids()[1]
         if event.message is None or user_id is None:
@@ -1957,10 +2082,6 @@ def create_router(
         await event.ack(notification='Выберите стиль…')
         flow, price, text, _ = CARTOON_PRODUCTS[event.callback.payload]
         await increment_counter('click_cartoon_short' if flow == 'short' else 'click_cartoon_long', user_id=user_id)
-        if flow == 'long' and user_id != admin_user_id:
-            await _reply(event, CARTOON_COMING_SOON,
-                         attachments=[navigation_keyboard((('⬅️ Назад', 'back_to_main'),))])
-            return
         await context.clear()
         await context.update_data(cartoon_flow=flow, cartoon_amount_kopecks=price, cartoon_session_id=uuid4().hex)
         await context.set_state(PosterStates.waiting_for_cartoon_style)
@@ -1997,10 +2118,9 @@ def create_router(
             if data.get('cartoon_promo_choose_tariff'):
                 await context.update_data(cartoon_theme=target)
                 short,_=await quote_repeat_price(user_id,'cartoon',59000,CARTOON_TARIFFS['short'][1])
-                long,_=await quote_repeat_price(user_id,'cartoon',129000,CARTOON_TARIFFS['long'][1])
                 await _reply(event,'Выберите тариф:',attachments=[navigation_keyboard((
                     (f'Мульт-открытка — {short//100} ₽','promo_cartoon_tariff:short'),
-                    (f'Мульт-поздравление — {long//100} ₽','promo_cartoon_tariff:long'),
+                    ('👑 Эксклюзив (ручная работа)','custom_order'),
                     ('⬅️ Назад','promo_cartoon')))])
                 return
             await send_cartoon_checkout(event, context, target, product)
@@ -4189,11 +4309,54 @@ def create_router(
         if not is_bot_message(event):
             await _reply(event, "Плакат уже создаётся. Пожалуйста, подождите.")
 
+    @router.message_created(PosterStates.waiting_for_custom_occasion)
+    @router.message_created(PosterStates.waiting_for_custom_contact)
+    @router.message_created(PosterStates.waiting_for_custom_names)
+    @router.message_created(PosterStates.waiting_for_custom_idea)
+    @router.message_created(PosterStates.waiting_for_custom_materials)
+    @router.message_created(PosterStates.waiting_for_custom_deadline)
+    async def collect_custom_form(event: MessageCreated, context: MemoryContext) -> None:
+        if is_bot_message(event):
+            return
+        state = await context.get_state()
+        if state == PosterStates.waiting_for_custom_deadline:
+            await _reply(event, '6/6. Насколько срочно нужен заказ?',
+                         attachments=[navigation_keyboard(tuple((label, key) for key, label in CUSTOM_DEADLINES.items()))])
+            return
+        step_index = next((i for i, step in enumerate(CUSTOM_FORM_STEPS) if step[0] == state), None)
+        if step_index is None:
+            return
+        _, field, limit, question = CUSTOM_FORM_STEPS[step_index]
+        body = event.message.body
+        if field == 'materials':
+            photos = [item.payload.model_dump() for item in (getattr(body, 'attachments', None) or [])
+                      if item.type == 'image' and isinstance(item.payload, PhotoAttachmentPayload)
+                      and item.payload.token and item.payload.url]
+            if not photos:
+                await _reply(event, 'Отправьте фото как изображение.\n\n' + question)
+                return
+            await context.update_data(custom_materials=photos)
+            await context.set_state(PosterStates.waiting_for_custom_deadline)
+            await _reply(event, '6/6. Насколько срочно нужен заказ?',
+                         attachments=[navigation_keyboard(tuple((label, key) for key, label in CUSTOM_DEADLINES.items()))])
+        else:
+            text = (getattr(body, 'text', None) or '').strip()
+            if not text or text.startswith('/') or len(text) > limit:
+                await _reply(event, f'Напишите ответ текстом (до {limit} символов).\n\n' + question)
+                return
+            await context.update_data(**{'custom_' + field: text})
+            next_step = CUSTOM_FORM_STEPS[step_index + 1]
+            await context.set_state(next_step[0])
+            await _reply(event, next_step[3])
+
     @router.message_created()
     async def echo(event: MessageCreated, context: MemoryContext) -> None:
         if is_bot_message(event):
             return
         state = await context.get_state()
+        if state in tuple(step[0] for step in CUSTOM_FORM_STEPS) + (PosterStates.waiting_for_custom_deadline,):
+            await collect_custom_form(event, context)
+            return
         if state == PosterStates.cartoon_manual_review and (await context.get_data()).get('cartoon_video_failed'):
             await cartoon_video_support(event)
             return

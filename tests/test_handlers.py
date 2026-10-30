@@ -2986,10 +2986,8 @@ async def test_nonadmin_family_template_only_receives_payment_link(credit_db, ad
     context = await family_context()
     event = callback_event("photo_temp_fam3")
     await dispatch_callback(router, event, context)
-    assert event.send.await_args.args[0] == handlers.PHOTO_TRIAL_CHECKOUT_TEXT
-    button = event.send.await_args.kwargs["attachments"][0].payload.buttons[0][0]
-    assert button.text == "Оплатить 590 ₽"
-    assert button.url == handlers.PHOTO_TRIAL_PAYMENT_URL
+    assert event.send.await_args.args[0] == 'Оплата временно недоступна. Попробуйте позже.'
+    assert 'payform.ru' not in str(event.send.await_args_list)
     assert await context.get_state() == PosterStates.waiting_for_mode
     frames.assert_not_awaited()
 
@@ -3002,7 +3000,7 @@ async def test_nonadmin_cannot_generate_from_stale_admin_photo_state():
     event = photo_event()
     await call_handler(create_router(admin_user_id=999, photosession_generator=frames), "collect_photosession_photo", event, context)
     frames.assert_not_awaited()
-    assert event.message.answer.await_args.args[0] == handlers.PHOTO_TRIAL_CHECKOUT_TEXT
+    assert event.message.answer.await_args.args[0] == 'Оплата временно недоступна. Попробуйте позже.'
     assert await context.get_state() == PosterStates.waiting_for_mode
 
 
@@ -3135,7 +3133,7 @@ async def test_toddlers_keeps_existing_access_and_style_restrictions(admin_id, s
     await dispatch_callback(create_router(admin_user_id=admin_id, photosession_generator=frames), event, context)
     frames.assert_not_awaited()
     if admin_id != 456:
-        assert event.send.await_args.args[0] == handlers.PHOTO_TRIAL_CHECKOUT_TEXT
+        assert event.send.await_args.args[0] == 'Оплата временно недоступна. Попробуйте позже.'
 
 
 @pytest.mark.parametrize("old_template", ["fam3", "fam4"])
@@ -3176,7 +3174,7 @@ async def test_family_album_between_text_and_template_buttons(credit_db, example
     await dispatch_callback(create_router(), event, context)
     replies = event.send.await_args_list
     assert len(replies) == 3
-    assert "attachments" not in replies[0].kwargs or replies[0].args[0] == handlers.PHOTO_TRIAL_CHECKOUT_TEXT
+    assert "attachments" not in replies[0].kwargs or replies[0].args[0] == 'Оплата временно недоступна. Попробуйте позже.'
     assert replies[1].kwargs["text"] == "Примеры работ:"
     assert len(replies[1].kwargs["attachments"]) == 3
     buttons = replies[2].kwargs["attachments"][0].payload.buttons
@@ -4265,7 +4263,7 @@ async def test_admin_direct_wait_finishes_in_the_callback_without_background_wai
     submit.assert_awaited_once()
 
 
-@pytest.mark.parametrize('active,price', [(True, 392), (False, 490)])
+@pytest.mark.parametrize('active,price', [(True, 490), (False, 490)])
 async def test_song_upsell_checkout_uses_personal_order_and_current_promo(credit_db, active, price):
     import json
     await credit_db.create_audio_order('upsell-ready', 456, 'gift', 'bday', 'Аня', None, 'lyrics', 'pop', 'Для Ани')
@@ -4279,8 +4277,8 @@ async def test_song_upsell_checkout_uses_personal_order_and_current_promo(credit
     call = payments.create_audio_payment_link.await_args
     saved = await credit_db.get_audio_order(call.kwargs['order_id'])
     assert saved['user_id'] == 456 and saved['amount_kopecks'] == price * 100
-    assert saved['product_name'] == (credit_db.SONG_PROMO_PRODUCT if active else 'Песня в подарок')
-    assert event.send.await_args.args[0] == ('Отличный выбор! Переходите по ссылке для оплаты со скидкой:' if active else handlers.SONG_PROMO_EXPIRED_TEXT)
+    assert saved['product_name'] == 'Песня в подарок'
+    assert event.send.await_args.args[0] == 'Песня в подарок стоит 490 ₽. Перейдите по ссылке для оплаты:'
     button = event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0]
     assert button.type == 'link' and button.url == 'https://pay.example/personal'
     assert str(price) in button.text
@@ -4299,7 +4297,7 @@ async def test_song_upsell_without_song_collects_details_before_payment(credit_d
     assert await context.get_state() == PosterStates.waiting_for_mode
     buttons = event.send.await_args.kwargs['attachments'][0].payload.buttons
     assert buttons[0][0].payload == 'gift_scen_bday'
-    assert ('392' if active else '490') in event.send.await_args.args[0]
+    assert '490' in event.send.await_args.args[0]
     payments.create_audio_payment_link.assert_not_awaited()
 
 

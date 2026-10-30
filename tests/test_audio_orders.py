@@ -309,35 +309,43 @@ async def test_worker_notifies_during_long_song_and_delivers_same_job(credit_db,
 
 
 async def test_song_checkout_reprices_atomically_and_keeps_issued_invoices(credit_db, monkeypatch):
+    import aiosqlite
     now = 1800000000
     monkeypatch.setattr(credit_db, '_now_ts', lambda: now)
     name = await order(credit_db, kind='gift')
     tracks = json.dumps(RESULT['data']['musics'])
     await credit_db.update_audio_order(name, tracks_json=tracks, lyrics='saved lyrics',
                                       preview_url='https://preview.example/song.mp3', preview_delivered=1,
-                                      payment_link='https://pay.example/490')
+                                      payment_link='https://pay.example/historical-392')
+    async with aiosqlite.connect(credit_db.DATABASE_PATH) as db:
+        await db.execute("UPDATE audio_orders SET amount_kopecks=39200,product_name=? WHERE order_id=?",
+                         (credit_db.SONG_PROMO_PRODUCT,name))
+        await db.commit()
     await credit_db.set_song_promo(123)
     candidates = await asyncio.gather(*(credit_db.song_checkout_order(name) for _ in range(5)))
-    discounted = candidates[0]
+    current = candidates[0]
     assert len({item['order_id'] for item in candidates}) == 1
-    assert discounted['amount_kopecks'] == 39200 and discounted['package_id'] == 'audio_gift_first'
-    assert discounted['tracks_json'] == tracks and discounted['lyrics'] == 'saved lyrics'
-    assert discounted['payment_link'] is None
-    assert (await credit_db.get_audio_order(name))['payment_link'] == 'https://pay.example/490'
+    assert current['order_id'] != name
+    assert current['amount_kopecks'] == 49000 and current['package_id'] == 'audio_gift'
+    assert current['tracks_json'] == tracks and current['lyrics'] == 'saved lyrics'
+    assert current['payment_link'] is None
+    historical = await credit_db.get_audio_order(name)
+    assert historical['payment_link'] == 'https://pay.example/historical-392'
+    assert historical['amount_kopecks'] == 39200
     now += 48 * 3600
-    full = await credit_db.song_checkout_order(discounted['order_id'])
+    full = await credit_db.song_checkout_order(current['order_id'])
     assert full['amount_kopecks'] == 49000 and full['tracks_json'] == tracks
-    # Оплаченный ранее выданный счёт на 392 обрабатывается даже после окончания окна.
-    await credit_db.mark_audio_paid(discounted['order_id'], 'discount-payment')
+    # Already issued 392 RUB invoices remain valid; cached tracks need no second API call.
+    await credit_db.mark_audio_paid(name, 'discount-payment')
     submit = AsyncMock()
     bot = SimpleNamespace(send_message=AsyncMock())
-    await PaidAudioWorker(bot, generator=submit).process(discounted['order_id'])
+    await PaidAudioWorker(bot, generator=submit).process(name)
     submit.assert_not_awaited()
-    assert (await credit_db.get_audio_order(discounted['order_id']))['delivered'] == 1
+    assert (await credit_db.get_audio_order(name))['delivered'] == 1
     assert (await credit_db.get_user(123))['balance'] == 0
 
 
-async def test_background_gift_preview_offers_discount_without_charging_or_regenerating(credit_db):
+async def test_background_gift_preview_uses_current_price_without_charging_or_regenerating(credit_db):
     await credit_db.set_song_promo(123)
     name = await order(credit_db, kind='gift')
     await credit_db.update_audio_order(name, preview_requested=1)
@@ -347,10 +355,10 @@ async def test_background_gift_preview_offers_discount_without_charging_or_regen
     await PaidAudioWorker(bot, generator=submit, waiter=wait).process(name)
     buttons = bot.send_message.await_args.kwargs['attachments'][0].payload.buttons
     pay = buttons[1][0]
-    assert pay.text == 'Оплатить 392 ₽ и получить полный трек'
+    assert pay.text == 'Оплатить 490 ₽ и получить полный трек'
     assert pay.payload.startswith('audio_gift_checkout:')
     saved = await credit_db.get_audio_order(pay.payload.split(':', 1)[1])
-    assert saved['amount_kopecks'] == 39200 and saved['tracks_json']
+    assert saved['amount_kopecks'] == 49000 and saved['tracks_json']
     assert 'https://audio.example/one.mp3' not in bot.send_message.await_args.kwargs['text']
     assert (await credit_db.get_user(123))['total_purchases'] == 0
     submit.assert_awaited_once()

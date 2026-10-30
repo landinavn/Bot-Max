@@ -35,7 +35,7 @@ from audio_service import create_audio_preview, song_audio_url, TEACHER_MUSIC_TA
 from metrika_service import extract_yclid, send_offline_conversion
 
 from database import (
-    create_photo_order, get_photo_order, CARTOON_TARIFFS, create_cartoon_order, get_cartoon_order, latest_paid_cartoon, finish_cartoon_order, update_cartoon_order,
+    create_photo_order, get_photo_order, update_photo_order, CARTOON_TARIFFS, create_cartoon_order, get_cartoon_order, latest_paid_cartoon, finish_cartoon_order, update_cartoon_order,
     create_musical_order, get_musical_order,
     deduct_credit, get_user, grant_free_trial, get_global_stats, increment_generations,
     record_first_start, save_yclid, get_source_stats, get_stats_by_source, register_shared_image, get_shared_image,
@@ -520,7 +520,6 @@ AUDIO_GIFT_COUNTERS['audio_gift_teacher'] = 'audio_scen_teacher_gift'
 VIDEO_SHORT_SCENARIOS = {**AUDIO_FUN_SCENARIOS, 'audio_video_teacher': (TEACHER_SCENARIO_TITLE, TEACHER_DETAILS_PROMPT)}
 VIDEO_SONG_SCENARIOS = {**VIDEO_SHORT_SCENARIOS, **{key: value for key, value in AUDIO_GIFT_SCENARIOS.items() if key != 'audio_gift_teacher'}}
 VIDEO_CARD_SCREENS = {'cat_cards', 'sub_ny', 'sub_bday', 'sub_halloween', 'sub_goodmorning'}
-VIDEO_PAYMENT_PLACEHOLDER_URL = 'https://link.payform.ru/'  # TODO: Заменить на реальную ссылку
 VIDEO_UPSELL_TEXT = (
     'Ваша открытка готова! 🎄\n\n'
     '✨ А хотите сделать её настоящим музыкальным подарком? Мы можем наложить на вашу открытку короткую персональную песню (30-40 секунд) и получится красивая музыкальная открытка, которую можно отправить в мессенджере.'
@@ -597,7 +596,6 @@ PHOTO_NY_TRIAL_TEMPLATES = {
     "photo_temp_mom_daughter": ("👩‍👧 Мама + дочка", "mom_daughter"),
     "photo_temp_rabbit": ("🐰 С кроликом", "rabbit"),
 }
-PHOTO_TRIAL_PAYMENT_URL = "https://link.payform.ru/?paymentLinkId=72139edd-76b7-4dcf-b7e4-a34f6bd9c625"
 PHOTO_TRIAL_CHECKOUT_TEXT = (
     "Вы выбрали тариф «Попробовать» (3 фото) за 590 ₽.\n\n"
     "Для продолжения, пожалуйста, оплатите заказ по ссылке ниже. После оплаты обязательно вернитесь в бота!"
@@ -765,7 +763,7 @@ def main_keyboard():
     ))
 
 
-def photo_trial_payment_keyboard(url=PHOTO_TRIAL_PAYMENT_URL):
+def photo_trial_payment_keyboard(url):
     return InlineKeyboardBuilder().row(
         LinkButton(text="Оплатить 590 ₽", url=url)
     ).row(CallbackButton(text="Выбрать сюжет", payload="photo_choose_template")).row(
@@ -955,9 +953,13 @@ def create_router(
 
     async def send_photo_trial_checkout(event, context):
         user_id = event.get_ids()[1]
-        # Preserve the existing static checkout when Prodamus is not configured.
-        if payments is None or user_id is None or user_id == admin_user_id:
-            await _reply(event, PHOTO_TRIAL_CHECKOUT_TEXT, attachments=[photo_trial_payment_keyboard()])
+        if user_id is not None and user_id == admin_user_id:
+            await _reply(event, '👑 Режим администратора: оплата не требуется. Выберите сюжет.',
+                         attachments=[navigation_keyboard((('Выбрать сюжет','photo_choose_template'),))])
+            return
+        if payments is None or user_id is None:
+            await _reply(event, 'Оплата временно недоступна. Попробуйте позже.',
+                         attachments=[navigation_keyboard((('Выбрать сюжет','photo_choose_template'),('⬅️ Назад','photo_tariff_back')))])
             return
         try:
             data = await context.get_data()
@@ -967,8 +969,9 @@ def create_router(
                 await create_photo_order(order_id, user_id, 590)
                 order = await get_photo_order(order_id)
                 await context.update_data(photo_order_id=order_id)
+            await update_photo_order(order['order_id'], style=data.get('photo_style'), template=data.get('template'))
             if order['status'] == 'paid':
-                await _reply(event, 'Оплата фотосессии уже подтверждена. Ваш заказ сохранён.')
+                await _reply(event, 'Оплата фотосессии уже подтверждена. Ваш заказ сохранён в очереди.')
                 return
             link = await payments.create_payment_link(user_id, order_id=order['order_id'],
                                                      amount=590, description=order['product_name'])
@@ -3232,8 +3235,7 @@ def create_router(
             await event.ack(notification='Отправьте /start, чтобы открыть меню.')
             return
         await event.ack(notification='Открываю подарок…')
-        active = await check_song_promo(user_id)
-        text = ('Отличный выбор! Переходите по ссылке для оплаты со скидкой:' if active else SONG_PROMO_EXPIRED_TEXT)
+        text = 'Песня в подарок стоит 490 ₽. Перейдите по ссылке для оплаты:'
         order = await latest_gift_preview(user_id)
         if order:
             try:
@@ -3246,7 +3248,7 @@ def create_router(
         await context.clear()
         await context.set_state(PosterStates.waiting_for_mode)
         buttons = [(label, payload) for payload, (label, _) in AUDIO_GIFT_SCENARIOS.items()]
-        await _reply(event, ('Скидка FIRST: песня за 392 ₽! ' if active else text + '\n\n') +
+        await _reply(event, 'Песня в подарок стоит 490 ₽. ' +
                      'Сначала выберите сценарий и напишите детали песни. После превью я пришлю ссылку на оплату по действующей цене.',
                      attachments=[navigation_keyboard((*buttons, ('⬅️ Назад', 'cat_audio')))])
 

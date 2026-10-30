@@ -71,8 +71,13 @@ async def make_order(db, kind, tariff, user_id=101, suffix='one'):
     if kind in ('audio','gift_discount'):
         if kind == 'gift_discount':
             await db.set_song_promo(user_id)
-        await db.create_audio_order(key,user_id,tariff,'boss','Имя, припев','pop','[Verse] words','pop','Title',
-                                    song_discount=kind=='gift_discount')
+        await db.create_audio_order(key,user_id,tariff,'boss','Имя, припев','pop','[Verse] words','pop','Title')
+        if kind == 'gift_discount':
+            # Historical invoice issued before the fixed 490 RUB catalog.
+            async with aiosqlite.connect(db.DATABASE_PATH) as connection:
+                await connection.execute("UPDATE audio_orders SET amount_kopecks=39200,product_name=? WHERE order_id=?",
+                                         (db.SONG_PROMO_PRODUCT,key))
+                await connection.commit()
         return await db.get_audio_order(key)
     if kind == 'musical':
         key = 'music_' + key

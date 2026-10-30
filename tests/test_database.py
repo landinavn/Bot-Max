@@ -266,10 +266,10 @@ async def test_package_counter_migration_backfills_paid_orders_once(credit_db):
         await db.execute("DROP TABLE global_counters")
         await db.commit()
     await credit_db.init_db()
-    assert await credit_db.get_all_counters() == {"buy_1": 1, "buy_5": 1, "buy_15": 2}
+    assert await credit_db.get_all_counters() == {"buy_1": 1, "buy_5": 1, "buy_15": 2, "buy_credit_99": 1, "buy_credit_299": 1, "buy_credit_799": 2}
     await credit_db.increment_counter("gen_scrapbook")
     await credit_db.init_db()
-    assert await credit_db.get_all_counters() == {"buy_1": 1, "buy_5": 1, "buy_15": 2, "gen_scrapbook": 1}
+    assert await credit_db.get_all_counters() == {"buy_1": 1, "buy_5": 1, "buy_15": 2, "gen_scrapbook": 1, "buy_credit_99": 1, "buy_credit_299": 1, "buy_credit_799": 2}
 
 
 @pytest.mark.parametrize("admin", [True, False])
@@ -412,7 +412,7 @@ async def test_concurrent_promo_orders_reuse_one_bound_order(credit_db):
     user = await credit_db.get_user(456)
     assert user["balance"] == 3 and user["promo_redeemed_at"] is not None
     assert not await credit_db.is_promo_active(456)
-    assert await credit_db.get_all_counters() == {"buy_3": 1, "buy_3_promo": 1}
+    assert await credit_db.get_all_counters() == {"buy_3": 1, "buy_3_promo": 1, "buy_credit_199": 1, "buy_credit_149": 1}
     with pytest.raises(credit_db.PromoUnavailableError):
         await credit_db.create_payment_order("second-promo", 456, 3, 14900, "3 генерации", promo=True)
 
@@ -470,7 +470,7 @@ async def test_all_stats_exclude_admin_without_changing_recorded_activity(credit
         "total_purchases": 1, "total_revenue_credits": 3,
     }
     counters = await credit_db.get_all_counters(admin_id=999)
-    assert counters == {"gen_halloween": 2, "gen_ny": 1, "buy_3": 1, "gen_unclassified": 0}
+    assert counters == {"gen_halloween": 2, "gen_ny": 1, "buy_3": 1, "buy_credit_199": 1, "gen_unclassified": 0}
     source = next(row for row in await credit_db.get_source_stats(admin_id=999) if row["source"] == "vk_ads")
     assert source["total_users"] == 2 and source["new_users"] == 2
     assert source["users_with_generation"] == 2 and source["buyers"] == 1 and source["revenue_kopecks"] == 19900
@@ -504,12 +504,12 @@ async def test_user_counter_migration_backfills_payments_once_and_preserves_uncl
         await db.execute("DROP TABLE user_counters")
         await db.commit()
     await credit_db.init_db()
-    assert await credit_db.get_all_counters(admin_id=999) == {"buy_3": 1, "gen_unclassified": 4}
+    assert await credit_db.get_all_counters(admin_id=999) == {"buy_3": 1, "buy_credit_199": 1, "gen_unclassified": 4}
     assert (await credit_db.get_global_stats(admin_id=999))["total_generated"] == 4
     await credit_db.increment_generations(123, event_name="gen_halloween")
     await credit_db.increment_generations(999, event_name="gen_halloween")
     await credit_db.init_db()
-    assert await credit_db.get_all_counters(admin_id=999) == {"buy_3": 1, "gen_halloween": 1, "gen_unclassified": 4}
+    assert await credit_db.get_all_counters(admin_id=999) == {"buy_3": 1, "buy_credit_199": 1, "gen_halloween": 1, "gen_unclassified": 4}
     assert (await credit_db.get_all_counters())["gen_ny"] == 7
 
 

@@ -1069,16 +1069,15 @@ async def test_admin_stats_does_not_change_fsm(credit_db, state):
     event.message.answer.assert_awaited_once()
     text = event.message.answer.await_args.args[0]
     assert text.startswith(
-        "📊 Статистика бота:\n\n👥 Всего запускали: 1\n🟢 Доступны для сообщений: 1\n"
-        "🔴 Заблокировали/Удалили: 0\n🔄 Вернулись после 1-го дня: 0\n\n"
-        "👥 Всего пользователей: 1\n💳 Покупателей: 1\n"
+        "📊 СТАТИСТИКА БОТА:\n\n👥 Всего запускали: 1\n🟢 Доступны: 1 | "
+        "🔴 Заблокировали: 0\n🔄 Вернулись на 2-й день: 0\n💳 Покупателей: 1\n"
     )
     assert "- 5 генераций (299 ₽): 1" in text
     assert "- 1 генерация (99 ₽): 0" in text
     assert "- 15 генераций (799 ₽): 0" in text
-    assert "🖼 Всего сгенерировано картинок: 1\n" in text
+    assert "- Всего сгенерировано: 1\n" in text
     assert "💰 Всего покупок: 1" in text
-    for label in ("Карта желаний", "Новый год", "Семейный НГ", "ДР (Молодым)", "ДР (Старшим)", "Доброе утро", "Скрапбукинг"):
+    for label in ("Карта желаний", "Новый год (все виды)", "Доброе утро", "Скрапбукинг"):
         assert f"- {label}: 0" in text
     assert await context.get_state() == state
     assert await context.get_data() == before
@@ -1203,7 +1202,7 @@ async def test_source_stats_include_generation_and_actual_paid_amount(credit_db)
     event.get_ids = lambda: (123, 789)
     await call_handler(router, "stats", event)
     text = event.message.answer.await_args.args[0]
-    assert "Реклама VK\n👥 Новые пользователи: 1\n🖼 Пользователи с генерацией: 1\n💳 Покупатели: 1\n💰 Сумма оплат: 99,00 ₽" in text
+    assert "- Реклама VK: 1 польз. / 1 покуп. / 99,00 ₽" in text
     assert "Реклама Яндекса" in text and "Без метки" in text
 
 
@@ -1487,28 +1486,24 @@ async def test_no_credit_does_not_call_text_api(credit_db, text_correction):
 
 
 async def test_stats_displays_distinct_nonzero_values_for_each_event(credit_db):
-    fields = [
-        ("buy_1", "1 генерация (99 ₽)"), ("buy_5", "5 генераций (299 ₽)"),
-        ("buy_15", "15 генераций (799 ₽)"), ("gen_vision", "Карта желаний"),
-        ("gen_ny", "Новый год"), ("gen_ny_family", "Семейный НГ"),
-        ("gen_bday_young", "ДР (Молодым)"), ("gen_bday_old", "ДР (Старшим)"),
-        ("gen_halloween", "Хэллоуин"), ("gen_bday_old_elegant", "ДР Старшим 2"),
-        ("gen_ny_cozy", "Уютный НГ"), ("gen_ny_fairytale", "Зимняя сказка"),
-        ("gen_ny_elegant", "Элегантный НГ"), ("gen_goodmorning", "Доброе утро"),
-        ("gen_scrapbook", "Скрапбукинг"),
-    ]
-    for count, (key, _) in enumerate(fields, 1):
+    fields = [('buy_credit_99','1 генерация (99 ₽)'), ('buy_credit_299','5 генераций (299 ₽)'),
+              ('buy_credit_799','15 генераций (799 ₽)'), ('gen_vision','Карта желаний'),
+              ('gen_halloween','Хэллоуин'), ('gen_goodmorning','Доброе утро'), ('gen_scrapbook','Скрапбукинг')]
+    for count,(key,_) in enumerate(fields,1):
         for _ in range(count):
-            await credit_db.increment_counter(key, user_id=123)
-    await credit_db.increment_counter("gen_8march", user_id=123)
-    event = message_event("/stats")
-    await call_handler(create_router(admin_user_id=456), "stats", event)
-    text = event.message.answer.await_args.args[0]
-    for count, (_, label) in enumerate(fields, 1):
+            await credit_db.increment_counter(key,user_id=123)
+    for key in ('gen_ny','gen_ny_family','gen_ny_cozy','gen_ny_fairytale','gen_ny_elegant'):
+        await credit_db.increment_counter(key,user_id=123)
+    await credit_db.increment_counter('gen_8march',user_id=123)
+    event=message_event('/stats')
+    await call_handler(create_router(admin_user_id=456),'stats',event)
+    text=event.message.answer.await_args.args[0]
+    for count,(_,label) in enumerate(fields,1):
         assert f"- {label}: {count}\n" in text
-    assert "📍 Источники первого запуска" in text
-    assert "8 Марта" not in text
-    assert (await credit_db.get_all_counters())["gen_8march"] == 1
+    assert '- Новый год (все виды): 5' in text
+    assert '📍 ИСТОЧНИКИ ТРАФИКА:' in text
+    assert '8 Марта' not in text
+    assert (await credit_db.get_all_counters())['gen_8march']==1
 
 
 @pytest.mark.parametrize("failure", ["missing", "upload", "send"])
@@ -1638,10 +1633,10 @@ async def test_stats_reports_active_blocked_and_returned(credit_db):
     await call_handler(create_router(admin_user_id=456), "stats", event)
     text = event.message.answer.await_args.args[0]
     assert "Всего запускали: 2" in text
-    assert "Доступны для сообщений: 1" in text
-    assert "Заблокировали/Удалили: 1" in text
-    assert "Вернулись после 1-го дня: 1" in text
-    assert "Проданные пакеты" in text and "Скрапбукинг" in text
+    assert "Доступны: 1" in text
+    assert "Заблокировали: 1" in text
+    assert "Вернулись на 2-й день: 1" in text
+    assert "Пакеты кредитов" in text and "Скрапбукинг" in text
 
 
 @pytest.mark.parametrize("kind", ["message", "callback", "bot_started"])
@@ -1853,12 +1848,12 @@ async def test_stats_excludes_admin_everywhere_and_appends_admin_test_activity(c
     event = message_event("/stats")
     await call_handler(create_router(admin_user_id=456), "stats", event)
     text = event.message.answer.await_args.args[0]
-    assert "Всего запускали: 1" in text and "Всего пользователей: 1" in text
+    assert "Всего запускали: 1" in text and text.count("Всего запускали:") == 1
     assert "Покупателей: 1" in text and "Всего покупок: 1" in text
-    assert "- Хэллоуин: 1\n" in text and "Всего сгенерировано картинок: 1" in text
+    assert "- Хэллоуин: 1\n" in text and "Всего сгенерировано: 1" in text
     assert "- 5 генераций (299 ₽): 0" in text
-    assert "Сумма оплат: 199,00 ₽" in text and "299,00 ₽" not in text
-    assert "🛠 Тестовая активность (Админ):\n- Сгенерировано: 7\n- Покупок: 1" in text
+    assert "/ 199,00 ₽" in text and "299,00 ₽" not in text
+    assert "🛠 Админ (тесты): Сгенерировано 7, Покупок 1." in text
 
 
 async def test_admin_stats_without_existing_admin_record_shows_zero_test_activity(credit_db):
@@ -1866,7 +1861,7 @@ async def test_admin_stats_without_existing_admin_record_shows_zero_test_activit
     await call_handler(create_router(admin_user_id=456), "stats", event)
     text = event.message.answer.await_args.args[0]
     assert "Всего запускали: 0" in text
-    assert "🛠 Тестовая активность (Админ):\n- Сгенерировано: 0\n- Покупок: 0" in text
+    assert "🛠 Админ (тесты): Сгенерировано 0, Покупок 0." in text
 
 
 @pytest.mark.parametrize("generated,command", [(True, "broadcast_gen"), (False, "broadcast_nogen")])
@@ -2392,18 +2387,17 @@ async def test_stats_interest_counts_per_user_and_excludes_admin(credit_db, exam
     event = message_event("/stats")
     await call_handler(router, "stats", event)
     text = event.message.answer.await_args.args[0]
-    assert "🖱 Интерес к новым разделам:\n- Фотосессия (клики): 2\n- Аудиопесни (клики): 1" in text
-    assert "- Медитации (клики): 2" in text
-    assert text.index("🖼 Всего сгенерировано картинок:") < text.index("🖱 Интерес к новым разделам:") < text.index("📍 Источники")
-    assert "🖼 Всего сгенерировано картинок: 0" in text
-    assert "8 Марта" not in text
+    assert "- Фотосессии: 2 (НГ: 0 | Студия: 0)" in text
+    assert "- Аудиопесни: 1" in text and "- Медитации: 2" in text
+    assert text.index("📍 ИСТОЧНИКИ ТРАФИКА:") < text.index("🖼 СГЕНЕРИРОВАНО КАРТИНОК:") < text.index("🖱 ИНТЕРЕС К КНОПКАМ")
+    assert "- Всего сгенерировано: 0" in text and "8 Марта" not in text
 
 
 async def test_stats_interest_defaults_to_zero(credit_db):
     event = message_event("/stats")
     await call_handler(create_router(admin_user_id=456), "stats", event)
     text = event.message.answer.await_args.args[0]
-    assert "- Фотосессия (клики): 0\n- Аудиопесни (клики): 0" in text
+    assert "- Фотосессии: 0 (НГ: 0 | Студия: 0)\n- Аудиопесни: 0" in text
 
 
 @pytest.mark.parametrize("mode", [payload for _, payload in handlers.MODE_BUTTONS] + ["mode_bday", "create_poster", "mode_8march"])
@@ -2546,7 +2540,7 @@ async def test_utility_sections_handle_deleted_message(payload):
 @pytest.mark.parametrize("tariff", ["photo_tariff_590", "photo_tariff_990", "photo_tariff_1490"])
 async def test_photo_style_tariff_preview_has_no_payment_or_generation(credit_db, example_photos, style, style_name, tariff):
     await credit_db.grant_free_trial(456)
-    payments = SimpleNamespace(create_payment_link=AsyncMock())
+    payments = SimpleNamespace(create_payment_link=AsyncMock(return_value="https://shop.payform.ru/personal-photo"))
     vision, card = AsyncMock(), AsyncMock()
     router = create_router(vision, postcard_generator=card, payments=payments)
     context = await ready_context()
@@ -2613,7 +2607,10 @@ async def test_photo_style_tariff_preview_has_no_payment_or_generation(credit_db
     assert (await credit_db.get_user(456))["balance"] == 1
     assert (await credit_db.get_user(456))["total_generations"] == 0
     assert (await credit_db.get_user(456))["total_purchases"] == 0
-    payments.create_payment_link.assert_not_awaited()
+    if ny_trial:
+        payments.create_payment_link.assert_awaited_once()
+    else:
+        payments.create_payment_link.assert_not_awaited()
     vision.assert_not_awaited()
     card.assert_not_awaited()
 
@@ -2667,11 +2664,8 @@ async def test_photo_click_stats_are_separate_and_exclude_admin(credit_db):
     event = message_event("/stats")
     await call_handler(router, "stats", event)
     text = event.message.answer.await_args.args[0]
-    assert "📸 Интерес к Фотосессиям (клики):" in text
-    assert text.index("- Аудиопесни (клики):") < text.index("📸 Интерес к Фотосессиям (клики):")
-    for count, (_, _, label) in enumerate(PHOTO_CLICK_CASES, 1):
-        assert f"- {label}: {count}\n" in text
-    assert "🖼 Всего сгенерировано картинок: 0" in text
+    assert f"- Фотосессии: 0 (НГ: {filtered['click_photo_ny']} | Студия: {filtered['click_photo_studio']})" in text
+    assert "- Всего сгенерировано: 0" in text
     assert "8 Марта" not in text
 
 
@@ -2679,8 +2673,7 @@ async def test_photo_click_stats_defaults_to_zero(credit_db):
     event = message_event("/stats")
     await call_handler(create_router(admin_user_id=456), "stats", event)
     text = event.message.answer.await_args.args[0]
-    for _, _, label in PHOTO_CLICK_CASES:
-        assert f"- {label}: 0\n" in text
+    assert "- Фотосессии: 0 (НГ: 0 | Студия: 0)" in text
 
 
 @pytest.mark.parametrize("payload,event_name,label", PHOTO_CLICK_CASES)
@@ -2704,7 +2697,7 @@ NY_TRIAL_TEMPLATES = [
 @pytest.mark.parametrize("label,payload,template", NY_TRIAL_TEMPLATES[1:])
 async def test_legacy_ny_template_buttons_use_real_checkout(credit_db, label, payload, template):
     await credit_db.grant_free_trial(456)
-    payments = SimpleNamespace(create_payment_link=AsyncMock())
+    payments = SimpleNamespace(create_payment_link=AsyncMock(return_value="https://shop.payform.ru/personal-photo"))
     generator = AsyncMock()
     router = create_router(generator, postcard_generator=generator, payments=payments)
     context = await ready_context()
@@ -2731,7 +2724,7 @@ async def test_legacy_ny_template_buttons_use_real_checkout(credit_db, label, pa
     pay = buttons[0][0]
     assert pay["type"] == "link"
     assert pay["text"] == "Оплатить 590 ₽"
-    assert pay["url"] == "https://link.payform.ru/?paymentLinkId=72139edd-76b7-4dcf-b7e4-a34f6bd9c625"
+    assert pay["url"] == "https://shop.payform.ru/personal-photo"
     assert "payload" not in pay
     assert buttons[-1][0]["payload"] == "photo_tariff_back"
     # Повторный выбор сюжета обновляет FSM, без создания заказа пакета кредитов.
@@ -2743,7 +2736,7 @@ async def test_legacy_ny_template_buttons_use_real_checkout(credit_db, label, pa
     if template in {"fam3", "fam4", "toddlers"}:
         expected_counters["select_photo_" + template] = 1
     assert await credit_db.get_all_counters() == expected_counters
-    payments.create_payment_link.assert_not_awaited()
+    payments.create_payment_link.assert_awaited()
     generator.assert_not_awaited()
     assert (await credit_db.get_user(456))["balance"] == 1
     assert (await credit_db.get_user(456))["total_purchases"] == 0
@@ -2789,7 +2782,7 @@ async def test_ny_trial_deleted_message_does_not_change_context(credit_db, paylo
 
 async def test_ny_trial_tariff_immediately_offers_real_payment_link(credit_db):
     await credit_db.grant_free_trial(456)
-    payments = SimpleNamespace(create_payment_link=AsyncMock())
+    payments = SimpleNamespace(create_payment_link=AsyncMock(return_value="https://shop.payform.ru/personal-photo"))
     generator = AsyncMock()
     router = create_router(generator, postcard_generator=generator, payments=payments)
     context = await ready_context()
@@ -2809,12 +2802,12 @@ async def test_ny_trial_tariff_immediately_offers_real_payment_link(credit_db):
     button = event.send.await_args_list[0].kwargs["attachments"][0].model_dump()["payload"]["buttons"][0][0]
     assert button["text"] == "Оплатить 590 ₽"
     assert button["type"] == "link"
-    assert button["url"] == "https://link.payform.ru/?paymentLinkId=72139edd-76b7-4dcf-b7e4-a34f6bd9c625"
+    assert button["url"] == "https://shop.payform.ru/personal-photo"
     assert "payload" not in button
     assert (await credit_db.get_user(456))["balance"] == 1
     assert (await credit_db.get_user(456))["total_purchases"] == 0
     assert (await credit_db.get_user(456))["total_generations"] == 0
-    payments.create_payment_link.assert_not_awaited()
+    payments.create_payment_link.assert_awaited()
     generator.assert_not_awaited()
 
 
@@ -3238,10 +3231,10 @@ async def test_stats_campaign_block_is_last_and_excludes_admin(credit_db):
     event.get_ids = lambda: (123, 789)
     await call_handler(create_router(admin_user_id=789), 'stats', event)
     text = event.message.answer.await_args.args[0]
-    assert text.endswith(
-        '📍 Статистика по кампании «Yandex New Year»:\n'
-        '👥 Новые пользователи: 1\n🖼 Сгенерировали: 1\n💳 Покупатели: 1\n💰 Оплат: 99,00 ₽'
-    )
+    assert text.count('Yandex New Year') == 1
+    assert '- Yandex New Year: 1 польз. / 1 покуп. / 99,00 ₽' in text
+    assert 'Статистика по кампании' not in text
+    assert text.endswith('🛠 Админ (тесты): Сгенерировано 1, Покупок 1.')
 
 
 @pytest.mark.parametrize('tariff,counter', list(handlers.AUDIO_CLICK_EVENTS.items()))
@@ -3312,9 +3305,10 @@ async def test_audio_stats_count_each_click_and_exclude_admin(credit_db):
     stats = message_event('/stats')
     await call_handler(router, 'stats', stats)
     text = stats.message.answer.await_args.args[0]
-    assert ('- Аудиопесни (клики): 1\n- Песня по фану (199 ₽): 2\n'
-            '- Песня в подарок (490 ₽): 1') in text
-    assert (await credit_db.get_global_stats())['total_generated'] == 0
+    assert '- Аудиопесни: 1' in text
+    filtered=await credit_db.get_all_counters(admin_id=456)
+    assert filtered['click_audio_fun']==2 and filtered['click_audio_gift']==1
+    assert (await credit_db.get_global_stats())['total_generated']==0
 
 
 async def test_audio_stats_default_to_zero(credit_db):
@@ -3399,9 +3393,9 @@ async def test_song_stats_count_scenarios_and_exclude_admin(credit_db):
     stats = message_event('/stats')
     await call_handler(router, 'stats', stats)
     text = stats.message.answer.await_args.args[0]
-    assert '🎵 Интерес к Аудиопесням (сценарии):' in text
+    assert '🖱 ИНТЕРЕС К КНОПКАМ' in text
     for payload, (label, _) in handlers.AUDIO_FUN_SCENARIOS.items():
-        assert '- ' + label + ': 1' in text
+        assert (await credit_db.get_all_counters(admin_id=456))[handlers.AUDIO_FUN_COUNTERS[payload]] == 1
         assert (await credit_db.get_all_counters())[handlers.AUDIO_FUN_COUNTERS[payload]] == 2
 
 
@@ -3544,8 +3538,8 @@ async def test_gift_stats_count_scenarios_and_exclude_admin(credit_db):
     stats = message_event('/stats')
     await call_handler(router, 'stats', stats)
     empty = stats.message.answer.await_args.args[0]
-    for label, _ in handlers.AUDIO_GIFT_SCENARIOS.values():
-        assert '- ' + label + ': 0' in empty
+    for key in handlers.AUDIO_GIFT_COUNTERS.values():
+        assert (await credit_db.get_all_counters(admin_id=456)).get(key,0) == 0
     for user_id in (101, 456):
         for payload in handlers.AUDIO_GIFT_SCENARIOS:
             event = callback_event(payload)
@@ -3553,9 +3547,9 @@ async def test_gift_stats_count_scenarios_and_exclude_admin(credit_db):
             await dispatch_callback(router, event, await ready_context())
     await call_handler(router, 'stats', stats)
     text = stats.message.answer.await_args.args[0]
-    assert '🎁 Интерес к Аудиопесням (Подарочный формат):' in text
+    assert '🖱 ИНТЕРЕС К КНОПКАМ' in text
     for payload, (label, _) in handlers.AUDIO_GIFT_SCENARIOS.items():
-        assert '- ' + label + ': 1' in text
+        assert (await credit_db.get_all_counters(admin_id=456))[handlers.AUDIO_GIFT_COUNTERS[payload]] == 1
         assert (await credit_db.get_all_counters())[handlers.AUDIO_GIFT_COUNTERS[payload]] == 2
 
 
@@ -3776,8 +3770,8 @@ async def test_new_engagement_stats_zero_and_admin_exclusion(credit_db):
     stats = message_event('/stats')
     await call_handler(router, 'stats', stats)
     text = stats.message.answer.await_args.args[0]
-    for _, label in expected.values():
-        assert label + ': 0' in text
+    for key in expected:
+        assert (await credit_db.get_all_counters(admin_id=456)).get(key,0)==0
     for user_id in (101, 456):
         for payload, _ in expected.values():
             context = await ready_context()
@@ -3789,10 +3783,9 @@ async def test_new_engagement_stats_zero_and_admin_exclusion(credit_db):
     assert {key: counters[key] for key in expected} == dict.fromkeys(expected, 2)
     await call_handler(router, 'stats', stats)
     text = stats.message.answer.await_args.args[0]
-    for _, label in expected.values():
-        assert label + ': 1' in text
-    assert text.index('🖼 Всего сгенерировано картинок:') < text.index('📸 Выбор шаблонов Фотосессий:')
-    assert text.index('📸 Выбор шаблонов Фотосессий:') < text.index('🎵 Активность Аудиопесен:')
+    for key in expected:
+        assert (await credit_db.get_all_counters(admin_id=456))[key]==1
+    assert text.index('🖼 СГЕНЕРИРОВАНО КАРТИНОК:') < text.index('🖱 ИНТЕРЕС К КНОПКАМ')
     assert (await credit_db.get_global_stats())['total_generated'] == 0
 
 
@@ -4547,9 +4540,9 @@ async def test_video_click_statistics_exclude_admin_and_never_increment_generati
     event = message_event('/stats')
     await call_handler(router, 'stats', event)
     text = event.message.answer.await_args.args[0]
-    assert '- Видео — вход в меню: 1' in text
-    assert '- Старая кнопка анимации (клики): 1' in text
-    assert '- Старая кнопка видео (клики): 1' in text
+    assert '🖱 ИНТЕРЕС К КНОПКАМ' in text
+    filtered=await credit_db.get_all_counters(admin_id=456)
+    assert filtered['click_video_menu']==filtered['click_video_animate_199']==filtered['click_video_full_249']==1
 
 
 @pytest.mark.parametrize('payload', ['video_style:mode_ny', 'video_song:gift_scen_bday', 'upsell_video', 'upsell_animate'])
@@ -4686,7 +4679,7 @@ async def test_new_year_audio_scenarios_use_correct_fsm_prompt_and_stats(credit_
     admin = message_event('/stats')
     admin.get_ids = lambda: (123, 999)
     await call_handler(router, 'stats', admin)
-    assert '- 🎄 Новогодняя: 1' in admin.message.answer.await_args.args[0]
+    assert (await credit_db.get_all_counters(admin_id=999))[counter] == 1
 
 
 @pytest.mark.parametrize('entry,price', [('cat_video', 299), ('upsell_video', 149), ('upsell_animate', 149)])
@@ -4928,11 +4921,9 @@ async def test_cartoon_interest_stats_exclude_admin_and_do_not_count_old_buttons
     event.get_ids = lambda: (123, 999)
     await call_handler(router, 'stats', event)
     text = event.message.answer.await_args.args[0]
-    assert '🎬 Интерес к Мульт-услугам:' in text
-    for label, count in [('Мульт-открытка (клики)', 2), ('Мульт-поздравление (клики)', 1),
-                         ('Первый аватар — подошёл', 0), ('Первый аватар — не похож', 0),
-                         ('Второй аватар — подошёл', 0), ('Второй аватар — не подошёл', 0)]:
-        assert f'- {label}: {count}' in text
+    assert '- Мульт-услуги: 3' in text
+    filtered=await credit_db.get_all_counters(admin_id=999)
+    assert filtered['click_cartoon_short']==2 and filtered['click_cartoon_long']==1
     assert not any(key.startswith('gen_') for key in await credit_db.get_all_counters())
 
 
@@ -5181,10 +5172,8 @@ async def test_teacher_and_newyear_video_interest_counters_exclude_admin(credit_
     event.get_ids = lambda: (123, 999)
     await call_handler(router, 'stats', event)
     text = event.message.answer.await_args.args[0]
-    gift = text.split('Подарочный формат):\n', 1)[1].split('Интерес к Аудиопесням (для видео)', 1)[0]
-    video = text.split('Интерес к Аудиопесням (для видео):\n', 1)[1].split('Интерес к Мульт-услугам', 1)[0]
-    assert '- 👨‍🏫 Для тренера / учителя: 1' in gift
-    assert '- 👨‍🏫 Для тренера / учителя: 1' in video and '- 🎄 Новогодняя: 1' in video
+    assert '🖱 ИНТЕРЕС К КНОПКАМ' in text
+    assert 'Подарочный формат' not in text
 
 
 async def test_switching_video_teacher_to_newyear_clears_teacher_lyrics():
@@ -5291,7 +5280,7 @@ async def test_role_cards_collect_context_before_photo_then_generate_and_count(c
     stats = message_event('/stats')
     await call_handler(create_router(admin_user_id=456), 'stats', stats)
     # Админский снимок исключает собственные тестовые генерации.
-    assert ('- Учителям: 0' if mode == 'mode_teacher' else '- Тренерам: 0') in stats.message.answer.await_args.args[0]
+    assert ('- Учителям: 0' if mode == 'mode_teacher' else 'Тренерам: 0') in stats.message.answer.await_args.args[0]
 
 
 @pytest.mark.parametrize('mode,field,info,event_name', [
@@ -6371,8 +6360,10 @@ async def test_themed_cartoon_admin_stats_show_theme_and_decisions(credit_db):
     await dispatch_callback(router,callback_event('cartoon_music_ok:'+token),context)
     event=message_event('/stats');await call_handler(router,'stats',event)
     text=event.message.answer.await_args.args[0]
-    assert 'Мульт-открытки — тесты администратора' in text
-    assert '- 👨‍👧 День отца: 1' in text and '- Музыка одобрена: 1' in text and '- Видео выдано: 1' in text
+    assert '🛠 Админ (тесты):' in text and '- Мульт-услуги: 0' in text
+    counters=await credit_db.get_all_counters()
+    assert counters['theme_father_click']==counters['song_ok']==counters['video_success']==1
+    assert (await credit_db.get_all_counters(admin_id=456)).get('video_success',0)==0
 
 
 async def test_themed_cartoon_real_dispatcher_routes_photo_phrase_review_and_final_video(credit_db,monkeypatch,event_replies):
@@ -6805,9 +6796,10 @@ async def test_cartoon_stats_separate_customer_generation_from_admin_tests(credi
     event=message_event('/stats');event.get_ids=lambda:(123,999)
     await call_handler(router,'stats',event)
     text=event.message.answer.await_args.args[0]
-    client_text=text.split('🎬 Мульт-открытки — клиенты:')[1].split('🛠 Мульт-открытки — тесты администратора:')[0]
-    admin_text=text.split('🛠 Мульт-открытки — тесты администратора:')[1]
-    assert '- Видео выдано: 1' in client_text and '- Видео выдано: 1' in admin_text
+    assert '- Мульт-услуги: 0' in text
+    clients=await credit_db.get_all_counters(admin_id=999)
+    all_counts=await credit_db.get_all_counters()
+    assert clients['video_success']==1 and all_counts['video_success']==2
 
 
 async def test_cartoon_real_dispatcher_requires_webhook_before_photo_then_restores_paid_order(credit_db,monkeypatch,event_replies):
@@ -7248,3 +7240,52 @@ async def test_short_cartoon_unavailable_notice_failure_still_sends_themes(credi
     assert event.send.await_args_list[0].args[0] == 'Видео-примеры временно недоступны'
     assert event.send.await_args_list[-1].args[0] == handlers.CARTOON_PRODUCTS['cat_cartoon'][2]
     assert await context.get_state() == PosterStates.waiting_for_cartoon_style
+
+
+async def test_stats_report_has_exact_six_blocks_unique_sources_and_admin_last(credit_db):
+    await credit_db.record_first_start(101,'yandex_newyear')
+    await credit_db.record_first_start(456,'yandex_newyear')
+    for _ in range(4):
+        await credit_db.increment_generations(456,event_name='gen_ny')
+    for key in ('gen_ny','gen_ny_family','gen_ny_cozy','gen_ny_fairytale','gen_ny_elegant'):
+        await credit_db.increment_generations(101,event_name=key)
+    await credit_db.increment_generations(101,event_name='gen_bday_old_elegant')
+    await credit_db.create_payment_order('report-purchase',101,3,19900,handlers.PACKAGES[3][1])
+    await credit_db.add_credits(101,3,payment_order_id='report-purchase',provider_payment_id='report-paid')
+    await credit_db.increment_counter('click_cartoon_short',user_id=101)
+    await credit_db.increment_counter('click_cartoon_long',user_id=101)
+    await credit_db.increment_counter('click_cartoon_short',user_id=456)
+    event=message_event('/stats')
+    await call_handler(create_router(admin_user_id=456),'stats',event)
+    text=event.message.answer.await_args.args[0]
+    blocks=['📊 СТАТИСТИКА БОТА:', '💰 ПРОДАЖИ:', '📍 ИСТОЧНИКИ ТРАФИКА:',
+            '🖼 СГЕНЕРИРОВАНО КАРТИНОК:', '🖱 ИНТЕРЕС К КНОПКАМ (КЛИКИ):', '🛠 Админ (тесты):']
+    assert [text.index(block) for block in blocks] == sorted(text.index(block) for block in blocks)
+    assert all(text.count(block)==1 for block in blocks)
+    assert text.count('Yandex New Year')==1
+    assert '- Yandex New Year: 1 польз. / 1 покуп. / 199,00 ₽' in text
+    assert 'Статистика по кампании' not in text
+    assert '- Новый год (все виды): 5' in text
+    assert '- ДР (Молодым): 0 | ДР (Старшим): 1' in text
+    assert '- Мульт-услуги: 2' in text
+    assert '- Всего сгенерировано: 6' in text
+    assert '- 3 генерации (199 ₽ / 149 ₽): 1 (из них по акции: 0)' in text
+    assert text.endswith('🛠 Админ (тесты): Сгенерировано 4, Покупок 0.')
+
+
+async def test_photo_checkout_personal_order_is_reused_for_template(credit_db):
+    payments=SimpleNamespace(create_payment_link=AsyncMock(return_value='https://shop.payform.ru/photo-personal'))
+    router,context=create_router(admin_user_id=999,payments=payments),await ready_context()
+    await context.update_data(photo_style='photo_style_ny')
+    tariff=callback_event('photo_tariff_590')
+    await dispatch_callback(router,tariff,context)
+    order_id=(await context.get_data())['photo_order_id']
+    order=await credit_db.get_photo_order(order_id)
+    assert order['user_id']==456 and order['amount_kopecks']==59000
+    assert order['status']=='pending'
+    payments.create_payment_link.assert_awaited_with(456,order_id=order_id,amount=590,description='Фотосессия Попробовать')
+    template=callback_event('photo_temp_fam3')
+    await dispatch_callback(router,template,context)
+    assert (await context.get_data())['photo_order_id']==order_id
+    assert template.send.await_args.kwargs['attachments'][0].payload.buttons[0][0].url=='https://shop.payform.ru/photo-personal'
+    assert (await credit_db.get_all_counters()).get('buy_photo_590',0)==0

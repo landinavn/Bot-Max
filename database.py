@@ -69,6 +69,15 @@ async def init_db() -> None:
             )"""
         )
         await db.execute(
+            """CREATE TABLE IF NOT EXISTS photo_orders (
+                order_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, tariff INTEGER NOT NULL,
+                amount_kopecks INTEGER NOT NULL, product_name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','paid')),
+                provider_payment_id TEXT UNIQUE, payment_link TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, paid_at TEXT
+            )"""
+        )
+        await db.execute(
             """CREATE TABLE IF NOT EXISTS cartoon_orders (
                 order_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL,
                 theme TEXT NOT NULL, tariff TEXT NOT NULL,
@@ -247,6 +256,7 @@ async def init_db() -> None:
                    SELECT user_id, 'buy_3_promo', COUNT(*) FROM payment_orders
                    WHERE status = 'paid' AND package_id = 'promo_3' GROUP BY user_id"""
             )
+        await _backfill_sale_counters(db, force=not counters_exist or not user_counters_exist)
         await db.commit()
 
 
@@ -438,6 +448,9 @@ async def add_credits(
             async with db.execute('SELECT 1 FROM cartoon_orders WHERE provider_payment_id=?', (provider_payment_id,)) as cursor:
                 if await cursor.fetchone():
                     raise ValueError('Платёж уже использован для мульт-открытки.')
+            async with db.execute('SELECT 1 FROM photo_orders WHERE provider_payment_id=?', (provider_payment_id,)) as cursor:
+                if await cursor.fetchone():
+                    raise ValueError('Платёж уже использован для фотосессии.')
             await db.execute(
                 """UPDATE payment_orders SET status = 'paid', provider_payment_id = ?,
                    paid_at = CURRENT_TIMESTAMP WHERE order_id = ?""",
@@ -449,6 +462,7 @@ async def add_credits(
             (user_id, amount),
         )
         if payment_order_id is not None:
+            await _record_sale_counters(db, 'credit', dict(order))
             await increment_purchases(user_id, connection=db)
             if order["credits"] in (1, 3, 5, 15):
                 await increment_counter(f"buy_{order['credits']}", user_id=user_id, connection=db)
@@ -724,6 +738,8 @@ async def get_source_stats(admin_id: int | None = None) -> list[dict]:
                    SELECT user_id, amount_kopecks FROM musical_orders WHERE status = 'paid'
                    UNION ALL
                    SELECT user_id, amount_kopecks FROM cartoon_orders WHERE status IN ('paid','completed','manual')
+                   UNION ALL
+                   SELECT user_id, amount_kopecks FROM photo_orders WHERE status = 'paid'
                  ) GROUP BY user_id
                ) p ON p.user_id = u.user_id
                WHERE (? IS NULL OR u.user_id != ?)
@@ -739,6 +755,9 @@ async def get_source_stats(admin_id: int | None = None) -> list[dict]:
             "users_with_generation": 0, "buyers": 0, "revenue_kopecks": 0,
         })
         result.append({**row, "label": label})
+    # SQL GROUP BY already guarantees uniqueness; keep unknown source names too.
+    for source in sorted(rows.keys() - SOURCE_LABELS.keys()):
+        result.append({**rows[source], "label": source})
     return result
 
 
@@ -914,10 +933,14 @@ async def mark_audio_paid(order_id: str, payment_id: str) -> bool:
         async with db.execute('SELECT 1 FROM cartoon_orders WHERE provider_payment_id=?', (payment_id,)) as cursor:
             if await cursor.fetchone():
                 raise ValueError('Платёж уже использован для мульт-открытки.')
+        async with db.execute('SELECT 1 FROM photo_orders WHERE provider_payment_id=?', (payment_id,)) as cursor:
+            if await cursor.fetchone():
+                raise ValueError('Платёж уже использован для фотосессии.')
         await db.execute("UPDATE audio_orders SET status='paid', provider_payment_id=?, paid_at=CURRENT_TIMESTAMP WHERE order_id=?", (payment_id,order_id))
         await db.execute('INSERT INTO users(user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING', (order['user_id'],))
         await increment_purchases(order['user_id'], connection=db)
         await increment_counter('buy_audio_' + order['audio_format'], user_id=order['user_id'], connection=db)
+        await _record_sale_counters(db, 'audio', dict(order))
         await db.commit()
     return True
 
@@ -1047,14 +1070,14 @@ async def mark_musical_paid(order_id: str, payment_id: str) -> bool:
             if order['provider_payment_id'] != payment_id:
                 raise ValueError('Заказ уже оплачен другим платежом.')
             return False
-        for table in ('payment_orders', 'audio_orders', 'cartoon_orders'):
+        for table in ('payment_orders', 'audio_orders', 'cartoon_orders', 'photo_orders'):
             async with db.execute(f'SELECT 1 FROM {table} WHERE provider_payment_id=?', (payment_id,)) as cursor:
                 if await cursor.fetchone():
                     raise ValueError('Платёж уже использован другим заказом.')
         await db.execute("UPDATE musical_orders SET status='paid', provider_payment_id=?, paid_at=CURRENT_TIMESTAMP WHERE order_id=?", (payment_id,order_id))
         await db.execute('INSERT INTO users(user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING', (order['user_id'],))
         await increment_purchases(order['user_id'], connection=db)
-        await increment_counter('buy_music_' + order['tariff'], user_id=order['user_id'], connection=db)
+        await _record_sale_counters(db, 'musical', dict(order))
         await db.commit()
     return True
 
@@ -1140,7 +1163,7 @@ async def mark_cartoon_paid(order_id: str, payment_id: str) -> bool:
             if order['provider_payment_id'] != payment_id:
                 raise ValueError('Заказ уже оплачен другим платежом.')
             return False
-        for table in ('payment_orders', 'audio_orders', 'musical_orders'):
+        for table in ('payment_orders', 'audio_orders', 'musical_orders', 'photo_orders'):
             async with db.execute(f'SELECT 1 FROM {table} WHERE provider_payment_id=?', (payment_id,)) as cursor:
                 if await cursor.fetchone():
                     raise ValueError('Платёж уже использован другим заказом.')
@@ -1148,6 +1171,7 @@ async def mark_cartoon_paid(order_id: str, payment_id: str) -> bool:
         await db.execute('INSERT INTO users(user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING', (order['user_id'],))
         await increment_purchases(order['user_id'], connection=db)
         await increment_counter('buy_cartoon_' + order['tariff'], user_id=order['user_id'], connection=db)
+        await _record_sale_counters(db, 'cartoon', dict(order))
         await db.commit()
     return True
 
@@ -1170,3 +1194,129 @@ async def finish_cartoon_order(order_id: str, user_id: int, *, manual=False):
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         await db.execute("UPDATE cartoon_orders SET status=? WHERE order_id=? AND user_id=? AND status='paid'", ('manual' if manual else 'completed',order_id,user_id))
         await db.commit()
+
+
+PHOTO_TARIFFS = {
+    590: (59000, 'Фотосессия Попробовать'),
+    990: (99000, 'Фотосессия Стандарт'),
+    1490: (149000, 'Фотосессия Премиум'),
+}
+
+
+def sale_counter_keys(kind: str, order: dict) -> tuple[str, ...]:
+    """Classify by validated order family and tariff; equal prices are not products."""
+    if kind == 'credit':
+        credits = order['credits']
+        keys = {1: ('buy_credit_99',), 3: ('buy_credit_199',),
+                5: ('buy_credit_299',), 15: ('buy_credit_799',)}.get(credits, ())
+        return keys + (('buy_credit_149',) if credits == 3 and order['package_id'] == 'promo_3' else ())
+    if kind == 'audio':
+        return ('buy_song_199' if order['audio_format'] == 'fun' else 'buy_song_490',)
+    if kind == 'musical':
+        return (('buy_music_direct',) if order['tariff'] == 'direct'
+                else ('buy_music_upsell', 'buy_music_card_149'))
+    if kind == 'cartoon':
+        return ('buy_cartoon_590' if order['tariff'] == 'short' else 'buy_cartoon_1290',)
+    if kind == 'photo':
+        return (f"buy_photo_{order['tariff']}",)
+    raise ValueError('Неизвестный тип продажи.')
+
+
+async def _record_sale_counters(db, kind: str, order: dict) -> None:
+    for key in sale_counter_keys(kind, order):
+        await increment_counter(key, user_id=order['user_id'], connection=db)
+
+
+async def _backfill_sale_counters(db, *, force=False) -> None:
+    """One-time migration from confirmed orders, within init_db's transaction."""
+    await db.execute('CREATE TABLE IF NOT EXISTS stats_migrations (name TEXT PRIMARY KEY)')
+    async with db.execute("SELECT 1 FROM stats_migrations WHERE name='sales_v2'") as cursor:
+        if await cursor.fetchone() and not force:
+            return
+    totals = {}
+    for kind, table, fields, status in (
+        ('credit', 'payment_orders', 'credits,package_id', "status='paid'"),
+        ('audio', 'audio_orders', 'audio_format', "status='paid'"),
+        ('musical', 'musical_orders', 'tariff', "status='paid'"),
+        ('cartoon', 'cartoon_orders', 'tariff', "status IN ('paid','completed','manual')"),
+        ('photo', 'photo_orders', 'tariff', "status='paid'"),
+    ):
+        async with db.execute(f'SELECT user_id,{fields},COUNT(*) FROM {table} WHERE {status} GROUP BY user_id,{fields}') as cursor:
+            names = [column[0] for column in cursor.description]
+            for row in await cursor.fetchall():
+                order = dict(zip(names, row))
+                for key in sale_counter_keys(kind, order):
+                    pair = (order['user_id'], key)
+                    totals[pair] = totals.get(pair, 0) + row[-1]
+    global_totals = {}
+    for (user_id, key), count in totals.items():
+        await db.execute('INSERT INTO user_counters(user_id,event_name,count) VALUES (?,?,?) '
+                         'ON CONFLICT(user_id,event_name) DO NOTHING', (user_id, key, count))
+        global_totals[key] = global_totals.get(key, 0) + count
+    for key, count in global_totals.items():
+        await db.execute('INSERT INTO global_counters(event_name,count) VALUES (?,?) '
+                         'ON CONFLICT(event_name) DO NOTHING', (key, count))
+    await db.execute("INSERT INTO stats_migrations(name) VALUES ('sales_v2') ON CONFLICT(name) DO NOTHING")
+
+
+async def create_photo_order(order_id: str, user_id: int, tariff: int = 590):
+    if (not isinstance(order_id, str) or not order_id.startswith('photo_')
+            or isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0
+            or isinstance(tariff, bool) or tariff not in PHOTO_TARIFFS):
+        raise ValueError('Некорректный фотозаказ.')
+    amount, name = PHOTO_TARIFFS[tariff]
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        await db.execute('BEGIN IMMEDIATE')
+        async with db.execute('SELECT user_id,tariff FROM photo_orders WHERE order_id=?', (order_id,)) as cursor:
+            existing = await cursor.fetchone()
+        if existing and tuple(existing) != (user_id, tariff):
+            raise ValueError('Фотозаказ уже связан с другими данными.')
+        await db.execute('INSERT INTO photo_orders(order_id,user_id,tariff,amount_kopecks,product_name) '
+                         'VALUES (?,?,?,?,?) ON CONFLICT(order_id) DO NOTHING',
+                         (order_id,user_id,tariff,amount,name))
+        await db.commit()
+
+
+async def get_photo_order(order_id: str):
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute('SELECT * FROM photo_orders WHERE order_id=?', (order_id,)) as cursor:
+            row = await cursor.fetchone()
+    if row is None:
+        return None
+    order = dict(row)
+    order.update(order_type='photo', credits=0, package_id=f"photo_{order['tariff']}")
+    return order
+
+
+async def set_photo_payment_link(order_id: str, link: str):
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        await db.execute('UPDATE photo_orders SET payment_link=? WHERE order_id=?', (link,order_id))
+        await db.commit()
+
+
+async def mark_photo_paid(order_id: str, payment_id: str) -> bool:
+    if not payment_id:
+        raise ValueError('Не указан платёж.')
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        await db.execute('BEGIN IMMEDIATE')
+        db.row_factory = aiosqlite.Row
+        async with db.execute('SELECT * FROM photo_orders WHERE order_id=?', (order_id,)) as cursor:
+            order = await cursor.fetchone()
+        if order is None:
+            raise ValueError('Фотозаказ не найден.')
+        if order['status'] == 'paid':
+            if order['provider_payment_id'] != payment_id:
+                raise ValueError('Заказ уже оплачен другим платежом.')
+            return False
+        for table in ('payment_orders', 'audio_orders', 'musical_orders', 'cartoon_orders'):
+            async with db.execute(f'SELECT 1 FROM {table} WHERE provider_payment_id=?', (payment_id,)) as cursor:
+                if await cursor.fetchone():
+                    raise ValueError('Платёж уже использован другим заказом.')
+        await db.execute("UPDATE photo_orders SET status='paid',provider_payment_id=?,paid_at=CURRENT_TIMESTAMP WHERE order_id=?",
+                         (payment_id,order_id))
+        await db.execute('INSERT INTO users(user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING', (order['user_id'],))
+        await increment_purchases(order['user_id'], connection=db)
+        await _record_sale_counters(db, 'photo', dict(order))
+        await db.commit()
+    return True

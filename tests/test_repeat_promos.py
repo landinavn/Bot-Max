@@ -275,13 +275,13 @@ async def test_promo_buttons_open_correct_category_and_expired_fallback(credit_d
             assert any('Срок действия скидки истёк' in str(c) for c in event.send.await_args_list)
 
 
-@pytest.mark.parametrize('tariff,amount',[('short',472),('long',1032)])
+@pytest.mark.parametrize('tariff,amount',[('short',472)])
 async def test_promo_cartoon_theme_then_tariff_checkout(credit_db,sales_payments,tariff,amount):
     await credit_db.set_promo(456,'cartoon')
     router,context=create_router(admin_user_id=999,payments=sales_payments),await ready_context()
     await dispatch_callback(router,callback_event('promo_cartoon'),context)
     theme=callback_event('theme_ny');await dispatch_callback(router,theme,context)
-    assert '472' in str(theme.send.await_args) and '1032' in str(theme.send.await_args)
+    assert '472' in str(theme.send.await_args) and 'promo_cartoon_tariff:long' not in str(theme.send.await_args)
     pay=callback_event('promo_cartoon_tariff:'+tariff)
     await dispatch_callback(router,pay,context)
     order=await credit_db.get_cartoon_order((await context.get_data())['cartoon_order_id'])

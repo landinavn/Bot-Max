@@ -4770,12 +4770,12 @@ async def test_cartoon_main_menu_order_and_names_are_exact():
     assert [(button.text, button.payload) for row in buttons for button in row] == [
         ('🎵 Музыкальная открытка — Новинка 🔥', 'cat_video'),
         ('🎬 Мульт-открытка — Новинка 🔥', 'cat_cartoon'),
-        ('🎬 Мульт-поздравление — Новинка 🔥', 'cat_cartoon_long'),
+        ('👑 Эксклюзив (ручная работа) — от 2 000 ₽', 'custom_order'),
         ('📸 Нейрофотосессия', 'cat_photo'), ('🎵 Аудиопесни', 'cat_audio'), ('🎁 Открытки', 'cat_cards'),
         ('🔮 Карта Желаний', 'cat_vision'), ('🧘 Медитации', 'cat_meditation'), ('🖼 Примеры', 'show_examples'), ('🆘 Помощь', 'show_help')]
 
 
-@pytest.mark.parametrize('entry,price,minutes', [('cat_cartoon', 590, '5-10'), ('cat_cartoon_long', 1290, '15-20')])
+@pytest.mark.parametrize('entry,price,minutes', [('cat_cartoon', 590, '5-10')])
 @pytest.mark.parametrize('approve_second', [False, True])
 async def test_cartoon_avatars_approval_short_songs_and_admin_generation(credit_db, entry, price, minutes, approve_second):
     await credit_db.grant_free_trial(456)
@@ -4835,7 +4835,7 @@ async def test_second_avatar_rejection_keeps_two_choices_without_admin_handoff(c
     assert avatar.await_count==2
 
 
-@pytest.mark.parametrize('entry', ['cat_cartoon', 'cat_cartoon_long'])
+@pytest.mark.parametrize('entry', ['cat_cartoon'])
 @pytest.mark.parametrize('admin_id', [456, None])
 async def test_cartoon_admin_bypass_calls_video_stub_with_approved_avatar_and_song_url(credit_db, entry, admin_id):
     video = AsyncMock(return_value='https://video.example/test-result.mp4')
@@ -4902,7 +4902,7 @@ async def test_cartoon_interest_stats_exclude_admin_and_do_not_count_old_buttons
         await click('avatar_ok_1')
         await click('avatar_ok_1')
         # Второй заказ: принят второй аватар.
-        await click('cat_cartoon_long')
+        await click('cat_cartoon')
         await click('cartoon_style:mode_ny')
         await photo('https://photos.example.com/first.png')
         await click('avatar_bad_1')
@@ -4921,7 +4921,7 @@ async def test_cartoon_interest_stats_exclude_admin_and_do_not_count_old_buttons
     text = event.message.answer.await_args.args[0]
     assert '- Мульт-услуги: 3' in text
     filtered=await credit_db.get_all_counters(admin_id=999)
-    assert filtered['click_cartoon_short']==2 and filtered['click_cartoon_long']==1
+    assert filtered['click_cartoon_short']==3 and filtered.get('click_cartoon_long',0)==0
     assert not any(key.startswith('gen_') for key in await credit_db.get_all_counters())
 
 
@@ -4980,7 +4980,7 @@ async def test_cartoon_real_dispatcher_routes_photos_and_cancel_before_state_han
         assert await context.get_data() == {}
         assert await context.get_state() == PosterStates.waiting_for_mode
         avatar.assert_not_awaited()
-        await click('cat_cartoon_long')
+        await click('cat_cartoon')
         await click('cartoon_style:mode_ny')
         await dp.handle(MessageCreated(timestamp=3, bot=bot, message=message(attachments=[{
             'type': 'image', 'payload': {'photo_id': 1, 'token': 'source', 'url': 'https://photos.example.com/source.png'}}])))
@@ -5394,7 +5394,7 @@ def piapi_animation(monkeypatch):
     return animator
 
 
-@pytest.mark.parametrize('entry', ['cat_cartoon', 'cat_cartoon_long'])
+@pytest.mark.parametrize('entry', ['cat_cartoon'])
 async def test_default_cartoon_generator_uses_real_piapi_chain(credit_db, monkeypatch, entry):
     import json
     import httpx
@@ -6209,7 +6209,7 @@ async def submit_themed_song(router,context,phrase='Маша, с днём рож
 
 
 @pytest.mark.parametrize('theme',list(handlers.CARTOON_THEMES))
-@pytest.mark.parametrize('entry',['cat_cartoon','cat_cartoon_long'])
+@pytest.mark.parametrize('entry',['cat_cartoon'])
 async def test_themed_cartoon_requires_music_confirmation_before_kling(credit_db,theme,entry,max_image_upload):
     avatar=AsyncMock(return_value='https://cdn.example/clean-avatar.png')
     router,context=create_router(admin_user_id=456,avatar_generator=avatar),await ready_context()
@@ -6297,8 +6297,8 @@ async def test_cartoon_customer_cannot_bypass_payment_with_old_or_forged_buttons
     await context.set_state(PosterStates.waiting_for_cartoon_music_review)
     event=callback_event(payload);await dispatch_callback(router,event,context)
     if payload == 'cat_cartoon_long':
-        assert event.send.await_args.args[0] == handlers.CARTOON_COMING_SOON
-        assert await context.get_state() == PosterStates.waiting_for_cartoon_music_review
+        assert event.send.await_args.args[0] == handlers.CUSTOM_ORDER_TEXT
+        assert await context.get_state() is None
     elif payload in handlers.CARTOON_PRODUCTS:
         assert await context.get_state() == PosterStates.waiting_for_cartoon_style
     elif payload in handlers.CARTOON_THEMES:
@@ -6637,7 +6637,7 @@ async def test_broadcast_update_real_dispatcher_resolves_command_and_keeps_menu_
         await dp.shutdown()
 
 
-@pytest.mark.parametrize('entry,tariff', [('cat_cartoon','short'),('cat_cartoon_long','long')])
+@pytest.mark.parametrize('entry,tariff', [('cat_cartoon','short')])
 async def test_cartoon_reselection_replaces_old_pending_price_without_changing_old_invoice(credit_db,monkeypatch,entry,tariff):
     current=dict(credit_db.CARTOON_TARIFFS)
     old_amount=current[tariff][0]+(30000 if tariff=='short' else 40000)
@@ -7200,11 +7200,11 @@ async def test_long_cartoon_customer_sees_only_placeholder_and_back(credit_db):
     event.bot.upload_media = AsyncMock()
     payments = SimpleNamespace(create_payment_link=AsyncMock())
     await dispatch_callback(create_router(admin_user_id=999, payments=payments), event, context)
-    assert event.send.await_args.args[0] == handlers.CARTOON_COMING_SOON
+    assert event.send.await_args.args[0] == handlers.CUSTOM_ORDER_TEXT
     buttons = event.send.await_args.kwargs['attachments'][0].payload.buttons
-    assert [(b.text, b.payload) for row in buttons for b in row] == [('⬅️ Назад', 'back_to_main')]
-    assert await context.get_state() == state
-    assert (await context.get_data())['existing'] == 'keep'
+    assert [(b.text, b.payload) for row in buttons for b in row] == [('📝 Заполнить заявку', 'custom_start_form'), ('⬅️ Назад', 'back_to_main')]
+    assert await context.get_state() is None
+    assert await context.get_data() == {}
     event.bot.upload_media.assert_not_awaited()
     payments.create_payment_link.assert_not_awaited()
 
@@ -7240,7 +7240,7 @@ async def test_short_cartoon_unavailable_notice_failure_still_sends_themes(credi
     assert await context.get_state() == PosterStates.waiting_for_cartoon_style
 
 
-async def test_stats_report_has_exact_seven_blocks_unique_sources_and_admin_last(credit_db):
+async def test_stats_report_has_eight_blocks_unique_sources_and_admin_last(credit_db):
     await credit_db.record_first_start(101,'yandex_newyear')
     await credit_db.record_first_start(456,'yandex_newyear')
     for _ in range(4):
@@ -7257,7 +7257,7 @@ async def test_stats_report_has_exact_seven_blocks_unique_sources_and_admin_last
     await call_handler(create_router(admin_user_id=456),'stats',event)
     text=event.message.answer.await_args.args[0]
     blocks=['📊 СТАТИСТИКА БОТА:', '💰 ПРОДАЖИ:', '🔁 Повторные покупки со скидкой 20%:', '📍 ИСТОЧНИКИ ТРАФИКА:',
-            '🖼 СГЕНЕРИРОВАНО КАРТИНОК:', '🖱 ИНТЕРЕС К КНОПКАМ (КЛИКИ):', '🛠 Админ (тесты):']
+            '🖼 СГЕНЕРИРОВАНО КАРТИНОК:', '🖱 ИНТЕРЕС К КНОПКАМ (КЛИКИ):', '👑 Эксклюзив (ручная работа):', '🛠 Админ (тесты):']
     assert [text.index(block) for block in blocks] == sorted(text.index(block) for block in blocks)
     assert all(text.count(block)==1 for block in blocks)
     assert text.count('Yandex New Year')==1

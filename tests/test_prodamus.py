@@ -700,10 +700,13 @@ async def test_music_webhook_worker_renders_after_payment_and_reuses_result_for_
     from types import SimpleNamespace
     from musical_orders import PaidMusicalWorker
     notified=asyncio.Event()
+    finished=asyncio.Event()
     async def send(**kwargs):
         assert kwargs['user_id']==456
         if kwargs.get('attachments'):
             notified.set()
+        if 'Понравился результат?' in kwargs.get('text',''):
+            finished.set()
         return object()
     bot=SimpleNamespace(send_message=AsyncMock(side_effect=send))
     render=AsyncMock(return_value='https://cdn.example/paid.mp4')
@@ -722,8 +725,9 @@ async def test_music_webhook_worker_renders_after_payment_and_reuses_result_for_
             await asyncio.sleep(0.01)
         duplicate=await post_notification(client,data)
         assert duplicate.status==200
+        await asyncio.wait_for(finished.wait(),timeout=3)
     render.assert_awaited_once_with('https://cdn.example/card.jpg','https://cdn.example/full.mp3')
-    assert bot.send_message.await_count == 3  # Уведомление, video и отдельная кнопка «Поделиться».
+    assert bot.send_message.await_count == 4  # Прогресс, video, повторный подарок и «Поделиться».
     assert bot.send_message.await_args.kwargs['attachments'][0].payload.buttons[0][0].text=='🔗 Поделиться ботом'
     assert (await credit_db.get_musical_order('music_test'))['delivered']==1
 

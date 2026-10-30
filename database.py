@@ -1,16 +1,18 @@
 """Постоянный баланс пользователей. Все изменения фиксируются в SQLite."""
 
+import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from secrets import token_urlsafe
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo
 
 import aiosqlite
 
 DATABASE_PATH = Path(__file__).resolve().parent / "database.sqlite3"
 PROMO_SECONDS = 24 * 60 * 60
+logger = logging.getLogger(__name__)
 
 
 class PromoUnavailableError(ValueError):
@@ -269,6 +271,7 @@ async def init_db() -> None:
                    SELECT user_id, 'buy_3_promo', COUNT(*) FROM payment_orders
                    WHERE status = 'paid' AND package_id = 'promo_3' GROUP BY user_id"""
             )
+        await _init_repeat_promos(db)
         await _backfill_sale_counters(db, force=not counters_exist or not user_counters_exist)
         await db.commit()
 
@@ -1019,24 +1022,21 @@ MUSICAL_TARIFFS = {
 
 async def create_musical_order(order_id: str, user_id: int, image_url: str, audio_url: str, tariff: str):
     from urllib.parse import urlsplit
-    if not isinstance(order_id, str) or not order_id.startswith('music_') or len(order_id) > 200:
+    if not isinstance(order_id,str) or not order_id.startswith(('music_','promo_music_card_')) or len(order_id)>200:
         raise ValueError('Некорректный номер музыкального заказа.')
-    if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0 or tariff not in MUSICAL_TARIFFS:
+    if isinstance(user_id,bool) or not isinstance(user_id,int) or user_id<=0 or tariff not in MUSICAL_TARIFFS:
         raise ValueError('Некорректный покупатель или музыкальный тариф.')
-    for url in (image_url, audio_url):
-        parsed = urlsplit(url)
-        if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password:
+    for url in (image_url,audio_url):
+        parsed=urlsplit(url)
+        if parsed.scheme!='https' or not parsed.hostname or parsed.username or parsed.password:
             raise ValueError('Музыкальному заказу нужны HTTPS-ссылки на картинку и полную песню.')
-    price, name = MUSICAL_TARIFFS[tariff]
-    values = (user_id, image_url, audio_url, tariff, price, name)
-    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
         await db.execute('BEGIN IMMEDIATE')
-        async with db.execute('SELECT user_id,image_url,audio_url,tariff,amount_kopecks,product_name FROM musical_orders WHERE order_id=?', (order_id,)) as cursor:
-            existing = await cursor.fetchone()
-        if existing is not None and tuple(existing) != values:
-            raise ValueError('Номер музыкального заказа уже связан с другими данными.')
-        await db.execute('INSERT INTO musical_orders(order_id,user_id,image_url,audio_url,tariff,amount_kopecks,product_name) VALUES (?,?,?,?,?,?,?) ON CONFLICT(order_id) DO NOTHING', (order_id,*values))
+        result=await _create_repeat_order(db,'musical_orders',order_id,
+            {'user_id':user_id,'image_url':image_url,'audio_url':audio_url,'tariff':tariff},
+            *MUSICAL_TARIFFS[tariff],category='music_card' if tariff=='direct' else None)
         await db.commit()
+        return result
 
 
 async def get_musical_order(order_id: str):
@@ -1052,7 +1052,7 @@ async def get_musical_order(order_id: str):
 
 
 async def update_musical_order(order_id: str, **fields):
-    allowed = {'payment_link','result_url','delivered','running','attempts','failed','next_attempt_at','error'}
+    allowed = {'payment_link','result_url','delivered','running','attempts','failed','next_attempt_at','error','promo_due'}
     if not fields or not set(fields) <= allowed:
         raise ValueError('Некорректные поля музыкального заказа.')
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
@@ -1082,6 +1082,7 @@ async def mark_musical_paid(order_id: str, payment_id: str) -> bool:
         await db.execute('INSERT INTO users(user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING', (order['user_id'],))
         await increment_purchases(order['user_id'], connection=db)
         await _record_sale_counters(db, 'musical', dict(order))
+        await _consume_repeat_promo(db, dict(order), 'music_card')
         await db.commit()
     return True
 
@@ -1117,20 +1118,16 @@ CARTOON_ORDER_THEMES = frozenset({
 
 
 async def create_cartoon_order(order_id: str, user_id: int, theme: str, tariff: str):
-    if (not isinstance(order_id, str) or not order_id.startswith('cartoon_') or len(order_id) > 200
-            or isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0
+    if (not isinstance(order_id,str) or not order_id.startswith(('cartoon_','promo_cartoon_')) or len(order_id)>200
+            or isinstance(user_id,bool) or not isinstance(user_id,int) or user_id<=0
             or theme not in CARTOON_ORDER_THEMES or tariff not in CARTOON_TARIFFS):
         raise ValueError('Некорректный мульт-заказ.')
-    price, name = CARTOON_TARIFFS[tariff]
-    values = (user_id, theme, tariff, price, name)
-    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
         await db.execute('BEGIN IMMEDIATE')
-        async with db.execute('SELECT user_id,theme,tariff,amount_kopecks,product_name FROM cartoon_orders WHERE order_id=?', (order_id,)) as cursor:
-            existing = await cursor.fetchone()
-        if existing is not None and tuple(existing) != values:
-            raise ValueError('Номер мульт-заказа уже связан с другими данными.')
-        await db.execute('INSERT INTO cartoon_orders(order_id,user_id,theme,tariff,amount_kopecks,product_name) VALUES (?,?,?,?,?,?) ON CONFLICT(order_id) DO NOTHING', (order_id,*values))
+        result=await _create_repeat_order(db,'cartoon_orders',order_id,
+            {'user_id':user_id,'theme':theme,'tariff':tariff},*CARTOON_TARIFFS[tariff],category='cartoon')
         await db.commit()
+        return result
 
 
 async def get_cartoon_order(order_id: str):
@@ -1176,6 +1173,7 @@ async def mark_cartoon_paid(order_id: str, payment_id: str) -> bool:
         await increment_purchases(order['user_id'], connection=db)
         await increment_counter('buy_cartoon_' + order['tariff'], user_id=order['user_id'], connection=db)
         await _record_sale_counters(db, 'cartoon', dict(order))
+        await _consume_repeat_promo(db, dict(order), 'cartoon')
         await db.commit()
     return True
 
@@ -1196,7 +1194,7 @@ async def latest_paid_cartoon(user_id: int):
 
 async def finish_cartoon_order(order_id: str, user_id: int, *, manual=False):
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
-        await db.execute("UPDATE cartoon_orders SET status=? WHERE order_id=? AND user_id=? AND status='paid'", ('manual' if manual else 'completed',order_id,user_id))
+        await db.execute("UPDATE cartoon_orders SET status=?,promo_due=? WHERE order_id=? AND user_id=? AND status='paid'", ('manual' if manual else 'completed',0 if manual else 1,order_id,user_id))
         await db.commit()
 
 
@@ -1207,7 +1205,7 @@ PHOTO_TARIFFS = {
 }
 
 
-def sale_counter_keys(kind: str, order: dict) -> tuple[str, ...]:
+def _base_sale_counter_keys(kind: str, order: dict) -> tuple[str, ...]:
     """Classify by validated order family and tariff; equal prices are not products."""
     if kind == 'credit':
         credits = order['credits']
@@ -1241,9 +1239,9 @@ async def _backfill_sale_counters(db, *, force=False) -> None:
     for kind, table, fields, status in (
         ('credit', 'payment_orders', 'credits,package_id', "status='paid'"),
         ('audio', 'audio_orders', 'audio_format', "status='paid'"),
-        ('musical', 'musical_orders', 'tariff', "status='paid'"),
-        ('cartoon', 'cartoon_orders', 'tariff', "status IN ('paid','completed','manual')"),
-        ('photo', 'photo_orders', 'tariff', "status='paid'"),
+        ('musical', 'musical_orders', 'tariff,promo_token', "status='paid'"),
+        ('cartoon', 'cartoon_orders', 'tariff,promo_token', "status IN ('paid','completed','manual')"),
+        ('photo', 'photo_orders', 'tariff,promo_token', "status='paid'"),
     ):
         async with db.execute(f'SELECT user_id,{fields},COUNT(*) FROM {table} WHERE {status} GROUP BY user_id,{fields}') as cursor:
             names = [column[0] for column in cursor.description]
@@ -1264,21 +1262,16 @@ async def _backfill_sale_counters(db, *, force=False) -> None:
 
 
 async def create_photo_order(order_id: str, user_id: int, tariff: int = 590):
-    if (not isinstance(order_id, str) or not order_id.startswith('photo_')
-            or isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0
-            or isinstance(tariff, bool) or tariff not in PHOTO_TARIFFS):
+    if (not isinstance(order_id,str) or not order_id.startswith(('photo_','promo_photo_')) or len(order_id)>200
+            or isinstance(user_id,bool) or not isinstance(user_id,int) or user_id<=0
+            or isinstance(tariff,bool) or tariff not in PHOTO_TARIFFS):
         raise ValueError('Некорректный фотозаказ.')
-    amount, name = PHOTO_TARIFFS[tariff]
-    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
         await db.execute('BEGIN IMMEDIATE')
-        async with db.execute('SELECT user_id,tariff FROM photo_orders WHERE order_id=?', (order_id,)) as cursor:
-            existing = await cursor.fetchone()
-        if existing and tuple(existing) != (user_id, tariff):
-            raise ValueError('Фотозаказ уже связан с другими данными.')
-        await db.execute('INSERT INTO photo_orders(order_id,user_id,tariff,amount_kopecks,product_name) '
-                         'VALUES (?,?,?,?,?) ON CONFLICT(order_id) DO NOTHING',
-                         (order_id,user_id,tariff,amount,name))
+        result=await _create_repeat_order(db,'photo_orders',order_id,
+            {'user_id':user_id,'tariff':tariff},*PHOTO_TARIFFS[tariff],category='photo')
         await db.commit()
+        return result
 
 
 async def get_photo_order(order_id: str):
@@ -1322,12 +1315,13 @@ async def mark_photo_paid(order_id: str, payment_id: str) -> bool:
         await db.execute('INSERT INTO users(user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING', (order['user_id'],))
         await increment_purchases(order['user_id'], connection=db)
         await _record_sale_counters(db, 'photo', dict(order))
+        await _consume_repeat_promo(db, dict(order), 'photo')
         await db.commit()
     return True
 
 
 async def update_photo_order(order_id: str, **fields):
-    if not fields or not set(fields) <= {'style','template','generation_status','user_notified','admin_notified','next_attempt_at'}:
+    if not fields or not set(fields) <= {'style','template','generation_status','user_notified','admin_notified','next_attempt_at','reference_url','promo_due'}:
         raise ValueError('Некорректные поля фотозаказа.')
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         await db.execute('UPDATE photo_orders SET '+','.join(key+'=?' for key in fields)+' WHERE order_id=?',
@@ -1346,3 +1340,341 @@ async def get_pending_photo_jobs(*, notifications=False, notify_admin=False) -> 
             params = (int(notify_admin), _now_ts())
         async with db.execute(query + ' ORDER BY paid_at,order_id', params) as cursor:
             return [dict(row) for row in await cursor.fetchall()]
+
+
+REPEAT_CATEGORIES = {'music_card','cartoon','photo'}
+PHOTO_PACKAGE_SIZES = {590:3,990:5,1490:7}
+REPEAT_SUFFIX = ' (скидка 20%)'
+
+
+class PromoReservedError(ValueError):
+    def __init__(self,order_id):
+        self.order_id=order_id
+        super().__init__('Скидка уже закреплена за неоплаченным заказом.')
+
+
+def _promo_input(user_id,category):
+    if isinstance(user_id,bool) or not isinstance(user_id,int) or user_id<=0 or category not in REPEAT_CATEGORIES:
+        raise ValueError('Некорректный пользователь или категория промо.')
+
+
+def repeat_discount(amount_kopecks: int) -> int:
+    return amount_kopecks * 80 // 10000 * 100
+
+
+async def _init_repeat_promos(db):
+    await db.execute("""CREATE TABLE IF NOT EXISTS active_promos(
+        user_id INTEGER NOT NULL,category TEXT NOT NULL,expires_at TIMESTAMP NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,token TEXT NOT NULL,reserved_order_id TEXT,
+        PRIMARY KEY(user_id,category))""")
+    await db.execute("""CREATE TABLE IF NOT EXISTS promo_redemptions(
+        token TEXT PRIMARY KEY,order_id TEXT NOT NULL,user_id INTEGER NOT NULL,category TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+    await db.execute("""CREATE TABLE IF NOT EXISTS promo_offers(
+        delivery_key TEXT PRIMARY KEY,user_id INTEGER NOT NULL,category TEXT NOT NULL,
+        expires_at TIMESTAMP NOT NULL,token TEXT NOT NULL,notified INTEGER NOT NULL DEFAULT 0,
+        lease_until INTEGER NOT NULL DEFAULT 0)""")
+    async with db.execute('PRAGMA table_info(promo_offers)') as cursor:
+        offer_columns={row[1] for row in await cursor.fetchall()}
+    if 'lease_until' not in offer_columns:
+        await db.execute('ALTER TABLE promo_offers ADD COLUMN lease_until INTEGER NOT NULL DEFAULT 0')
+    await db.execute("""CREATE TABLE IF NOT EXISTS photo_results(
+        order_id TEXT NOT NULL,slot INTEGER NOT NULL,image_url TEXT NOT NULL,
+        delivered INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(order_id,slot))""")
+    for table in ('musical_orders','cartoon_orders','photo_orders'):
+        async with db.execute(f'PRAGMA table_info({table})') as cursor:
+            columns={row[1] for row in await cursor.fetchall()}
+        fields={'promo_token':'TEXT','promo_expires_at':'TIMESTAMP','promo_base_amount_kopecks':'INTEGER',
+                'promo_base_product_name':'TEXT','promo_due':'INTEGER NOT NULL DEFAULT 0'}
+        if table=='photo_orders':
+            fields['reference_url']='TEXT'
+        for column,definition in fields.items():
+            if column not in columns:
+                await db.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
+
+
+async def set_promo(user_id,category,hours=24,*,connection=None):
+    _promo_input(user_id,category)
+    if isinstance(hours,bool) or not isinstance(hours,(int,float)) or not 0<hours<87600:
+        raise ValueError('Некорректная длительность промо.')
+    if connection is None:
+        async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+            await db.execute('BEGIN IMMEDIATE')
+            result=await set_promo(user_id,category,hours,connection=db)
+            await db.commit()
+            return result
+    expires_at=_now_ts()+int(hours*3600)
+    await connection.execute("""INSERT INTO active_promos(user_id,category,expires_at,token)
+        VALUES (?,?,?,?) ON CONFLICT(user_id,category) DO UPDATE SET expires_at=excluded.expires_at,
+        token=excluded.token,reserved_order_id=NULL,created_at=CURRENT_TIMESTAMP""",
+        (user_id,category,expires_at,token_urlsafe(24)))
+    logger.info(f"Промо 20% выдано: user={user_id}, category={category}, expires={expires_at}")
+    return expires_at
+
+
+async def _active_promo_row(db,user_id,category):
+    db.row_factory=aiosqlite.Row
+    await db.execute('DELETE FROM active_promos WHERE user_id=? AND category=? AND expires_at<=?',
+                     (user_id,category,_now_ts()))
+    async with db.execute('SELECT * FROM active_promos WHERE user_id=? AND category=?',(user_id,category)) as cursor:
+        row=await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def get_active_promo(user_id,category):
+    _promo_input(user_id,category)
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        row=await _active_promo_row(db,user_id,category)
+        await db.commit()
+        return row['expires_at'] if row else None
+
+
+async def clear_promo(user_id,category,*,connection=None,token=None):
+    _promo_input(user_id,category)
+    if connection is None:
+        async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+            await clear_promo(user_id,category,connection=db,token=token)
+            await db.commit()
+        return
+    query='DELETE FROM active_promos WHERE user_id=? AND category=?'
+    params=(user_id,category)
+    if token is not None:
+        query+=' AND token=?'
+        params+= (token,)
+    await connection.execute(query,params)
+
+
+async def quote_repeat_price(user_id,category,base_amount,base_name):
+    if await get_active_promo(user_id,category) is not None:
+        return repeat_discount(base_amount),base_name+REPEAT_SUFFIX
+    return base_amount,base_name
+
+
+async def get_promo_reservation(user_id,category):
+    _promo_input(user_id,category)
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        row=await _active_promo_row(db,user_id,category)
+        await db.commit()
+        return row['reserved_order_id'] if row else None
+
+
+async def _create_repeat_order(db,table,order_id,identity,base_amount,base_name,*,category):
+    db.row_factory=aiosqlite.Row
+    async with db.execute(f'SELECT * FROM {table} WHERE order_id=?',(order_id,)) as cursor:
+        existing=await cursor.fetchone()
+    if existing:
+        if any(existing[key]!=value for key,value in identity.items()):
+            raise ValueError('Номер заказа уже связан с другими данными.')
+        return order_id
+    promo=await _active_promo_row(db,identity['user_id'],category) if category else None
+    if promo and promo['reserved_order_id']:
+        raise PromoReservedError(promo['reserved_order_id'])
+    if not promo and order_id.startswith('promo_'):
+        raise PromoUnavailableError('Срок действия скидки истёк.')
+    amount,name=base_amount,base_name
+    values={'order_id':order_id,**identity,'amount_kopecks':amount,'product_name':name}
+    if promo:
+        order_id=f"promo_{category}_{identity['user_id']}_{_now_ts()}_{token_urlsafe(6)}"
+        values.update(order_id=order_id,amount_kopecks=repeat_discount(base_amount),product_name=base_name+REPEAT_SUFFIX,
+                      promo_token=promo['token'],promo_expires_at=promo['expires_at'],
+                      promo_base_amount_kopecks=base_amount,promo_base_product_name=base_name)
+        await db.execute('UPDATE active_promos SET reserved_order_id=? WHERE user_id=? AND category=?',
+                         (order_id,identity['user_id'],category))
+        logger.info(f"Применена скидка 20%: user={identity['user_id']}, category={category}, amount={values['amount_kopecks']//100}")
+    columns=','.join(values)
+    await db.execute(f"INSERT INTO {table}({columns}) VALUES ({','.join('?' for _ in values)})",tuple(values.values()))
+    return order_id
+
+
+def repeat_order_value(order,category,base_value,*,creation=False):
+    """Validate persisted discount snapshots; issued invoices survive expiry."""
+    if not order.get('promo_token'):
+        if order['order_id'].startswith('promo_'):
+            raise ValueError('У скидочного заказа нет сохранённого промо.')
+        return base_value
+    if not order['order_id'].startswith(f'promo_{category}_{order["user_id"]}_'):
+        raise ValueError('Категория скидочного заказа не соответствует продукту.')
+    if category=='music_card' and order['tariff']!='direct':
+        raise ValueError('Скидка музыкальной открытки не применяется к апгрейду.')
+    base=(order['promo_base_amount_kopecks'],order['promo_base_product_name'])
+    if not isinstance(base[0],int) or base[0]<=0 or not isinstance(base[1],str):
+        raise ValueError('Некорректные данные скидочного заказа.')
+    if creation and base!=base_value:
+        raise ValueError('Для нового счёта нужен действующий тариф.')
+    return repeat_discount(base[0]),base[1]+REPEAT_SUFFIX
+
+
+async def validate_repeat_invoice(order,category):
+    if not order.get('promo_token'):
+        return
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        promo=await _active_promo_row(db,order['user_id'],category)
+        await db.commit()
+    if not promo or promo['token']!=order['promo_token'] or promo['reserved_order_id']!=order['order_id']:
+        raise PromoUnavailableError('Срок действия скидки истёк или она уже использована.')
+
+
+def repeat_sale_counter(kind,order):
+    if not order.get('promo_token'):
+        return None
+    if kind=='musical':
+        return 'promo_buy_music_card'
+    if kind=='cartoon':
+        return 'promo_buy_cartoon_'+('590' if order['tariff']=='short' else '1290')
+    if kind=='photo':
+        return f"promo_buy_photo_{order['tariff']}"
+    return None
+
+
+def sale_counter_keys(kind,order):
+    keys=_base_sale_counter_keys(kind,order)
+    key=repeat_sale_counter(kind,order)
+    return keys+((key,) if key else ())
+
+
+async def _consume_repeat_promo(db,order,category):
+    token=order.get('promo_token')
+    if not token:
+        return
+    await db.execute("""INSERT INTO promo_redemptions(token,order_id,user_id,category) VALUES (?,?,?,?)
+        ON CONFLICT(token) DO NOTHING""",(token,order['order_id'],order['user_id'],category))
+    async with db.execute('SELECT order_id FROM promo_redemptions WHERE token=?',(token,)) as cursor:
+        used=await cursor.fetchone()
+    if used[0]!=order['order_id']:
+        raise ValueError('Скидка уже использована в другом заказе.')
+    await clear_promo(order['user_id'],category,connection=db,token=token)
+
+
+async def grant_repeat_offer(user_id,category,delivery_key):
+    _promo_input(user_id,category)
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        await db.execute('BEGIN IMMEDIATE')
+        db.row_factory=aiosqlite.Row
+        if category=='photo':
+            if not delivery_key.startswith('photo:'):
+                raise ValueError('Не указан фотопакет для промо.')
+            order_id=delivery_key.removeprefix('photo:')
+            async with db.execute("SELECT tariff FROM photo_orders WHERE order_id=? AND user_id=? AND status='paid'",(order_id,user_id)) as cursor:
+                order=await cursor.fetchone()
+            async with db.execute('SELECT COUNT(*) FROM photo_results WHERE order_id=? AND delivered=1',(order_id,)) as cursor:
+                delivered=(await cursor.fetchone())[0]
+            if not order or delivered!=PHOTO_PACKAGE_SIZES[order['tariff']]:
+                await db.commit()
+                return False
+        async with db.execute('SELECT * FROM promo_offers WHERE delivery_key=?',(delivery_key,)) as cursor:
+            existing=await cursor.fetchone()
+        if existing:
+            if existing['user_id']!=user_id or existing['category']!=category:
+                raise ValueError('Результат уже связан с другим промо.')
+        else:
+            expires=await set_promo(user_id,category,connection=db)
+            promo=await _active_promo_row(db,user_id,category)
+            await db.execute('INSERT INTO promo_offers(delivery_key,user_id,category,expires_at,token) VALUES (?,?,?,?,?)',
+                             (delivery_key,user_id,category,expires,promo['token']))
+        await db.commit()
+        return True
+
+
+async def pending_repeat_offers():
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        db.row_factory=aiosqlite.Row
+        async with db.execute("""SELECT o.* FROM promo_offers o JOIN active_promos p
+            ON p.user_id=o.user_id AND p.category=o.category AND p.token=o.token
+            WHERE o.notified=0 AND p.expires_at>? AND o.lease_until<=?""",(_now_ts(),_now_ts())) as cursor:
+            return [dict(row) for row in await cursor.fetchall()]
+
+
+async def mark_repeat_offer_sent(delivery_key):
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        await db.execute('UPDATE promo_offers SET notified=1,lease_until=0 WHERE delivery_key=?',(delivery_key,))
+        await db.commit()
+
+
+async def repeat_offers_due(admin_id=None):
+    result=[]
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        for table,category,prefix,condition in (
+            ('musical_orders','music_card','music',"status='paid' AND delivered=1"),
+            ('cartoon_orders','cartoon','cartoon',"status='completed'"),
+            ('photo_orders','photo','photo',"status='paid' AND generation_status='completed'")):
+            async with db.execute(f"""SELECT user_id,order_id FROM {table}
+                WHERE promo_due=1 AND {condition} AND (? IS NULL OR user_id!=?)
+                AND NOT EXISTS(SELECT 1 FROM promo_offers WHERE delivery_key=?||':'||{table}.order_id)""",
+                (admin_id,admin_id,prefix)) as cursor:
+                result.extend((row[0],category,prefix+':'+row[1]) for row in await cursor.fetchall())
+    return result
+
+
+async def get_photo_results(order_id):
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        db.row_factory=aiosqlite.Row
+        async with db.execute('SELECT * FROM photo_results WHERE order_id=? ORDER BY slot',(order_id,)) as cursor:
+            return [dict(row) for row in await cursor.fetchall()]
+
+
+async def get_photo_package_balance(order_id):
+    order=await get_photo_order(order_id)
+    if not order or order['status']!='paid':
+        raise ValueError('Оплаченный фотопакет не найден.')
+    return PHOTO_PACKAGE_SIZES[order['tariff']]-len(await get_photo_results(order_id))
+
+
+async def save_photo_result(order_id,slot,image_url):
+    if isinstance(slot,bool) or not isinstance(slot,int) or not isinstance(image_url,str):
+        raise ValueError('Некорректный кадр фотосессии.')
+    parsed=urlsplit(image_url)
+    if parsed.scheme!='https' or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError('Кадру фотосессии нужна HTTPS-ссылка.')
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        await db.execute('BEGIN IMMEDIATE')
+        async with db.execute("SELECT tariff FROM photo_orders WHERE order_id=? AND status='paid'",(order_id,)) as cursor:
+            order=await cursor.fetchone()
+        if not order or not 1<=slot<=PHOTO_PACKAGE_SIZES[order[0]]:
+            raise ValueError('В фотопакете нет такого кадра.')
+        async with db.execute('SELECT image_url,delivered FROM photo_results WHERE order_id=? AND slot=?',(order_id,slot)) as cursor:
+            old=await cursor.fetchone()
+        if old and old[0]!=image_url:
+            if old[1]:
+                raise ValueError('Кадр уже отправлен; повторно списывать фото нельзя.')
+            await db.execute('UPDATE photo_results SET image_url=? WHERE order_id=? AND slot=? AND delivered=0',
+                             (image_url,order_id,slot))
+        await db.execute('INSERT INTO photo_results(order_id,slot,image_url) VALUES (?,?,?) ON CONFLICT(order_id,slot) DO NOTHING',
+                         (order_id,slot,image_url))
+        await db.commit()
+
+
+async def mark_photo_result_delivered(order_id,slot):
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        await db.execute('BEGIN IMMEDIATE')
+        async with db.execute("SELECT tariff FROM photo_orders WHERE order_id=? AND status='paid'",(order_id,)) as cursor:
+            order=await cursor.fetchone()
+        if not order:
+            raise ValueError('Оплаченный фотопакет не найден.')
+        changed=await db.execute('UPDATE photo_results SET delivered=1 WHERE order_id=? AND slot=?',(order_id,slot))
+        if not changed.rowcount:
+            raise ValueError('Кадр не был сохранён.')
+        async with db.execute('SELECT COUNT(*) FROM photo_results WHERE order_id=? AND delivered=1',(order_id,)) as cursor:
+            count=(await cursor.fetchone())[0]
+        complete=count==PHOTO_PACKAGE_SIZES[order[0]]
+        if complete:
+            await db.execute("UPDATE photo_orders SET generation_status='completed',promo_due=1 WHERE order_id=?",(order_id,))
+        await db.commit()
+        return complete
+
+
+async def claim_repeat_offer(delivery_key):
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        now=_now_ts()
+        changed=await db.execute("""UPDATE promo_offers SET lease_until=?
+            WHERE delivery_key=? AND notified=0 AND lease_until<=?
+            AND EXISTS(SELECT 1 FROM active_promos p WHERE p.user_id=promo_offers.user_id
+                       AND p.category=promo_offers.category AND p.token=promo_offers.token AND p.expires_at>?)""",
+            (now+300,delivery_key,now,now))
+        await db.commit()
+        return changed.rowcount==1
+
+
+async def release_repeat_offer(delivery_key):
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        await db.execute('UPDATE promo_offers SET lease_until=0 WHERE delivery_key=? AND notified=0',(delivery_key,))
+        await db.commit()

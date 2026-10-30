@@ -3,11 +3,14 @@ import asyncio
 import logging
 import time
 
-from maxapi.types import LinkButton
+from maxapi.types import LinkButton, CallbackButton
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
 from audio_orders import SUPPORT_URL
-from database import get_pending_photo_jobs, update_photo_order
+from database import (get_pending_photo_jobs,update_photo_order,get_photo_order,get_photo_results,
+                      save_photo_result,mark_photo_result_delivered,PHOTO_PACKAGE_SIZES)
+from promo_service import send_repeat_offer
+from image_service import upload_image_for_max
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +26,10 @@ class PaidPhotoWorker:
         for order in jobs:
             try:
                 if not order['user_notified']:
-                    keyboard = InlineKeyboardBuilder().row(LinkButton(text='🆘 Поддержка',url=SUPPORT_URL)).as_markup()
+                    builder=InlineKeyboardBuilder()
+                    if order['tariff']==590 and order['style'] in (None,'photo_style_ny'):
+                        builder.row(CallbackButton(text='📸 Продолжить фотосессию',payload='photo_resume:'+order['order_id']))
+                    keyboard=builder.row(LinkButton(text='🆘 Поддержка',url=SUPPORT_URL)).as_markup()
                     sent = await self.bot.send_message(
                         user_id=order['user_id'],
                         text=f"✅ Оплата получена! Фотосессия за {order['amount_kopecks'] // 100} ₽ сохранена в очереди. "
@@ -56,3 +62,23 @@ class PaidPhotoWorker:
             except Exception:
                 logger.exception('Ошибка очереди оплаченных фотосессий:')
             await asyncio.sleep(self.poll_interval)
+
+
+async def deliver_photo_result(bot,order_id,slot,image_url,*,admin_user_id=None,uploader=None):
+    """A slot is charged once on generation; promo waits for every slot's delivery."""
+    order=await get_photo_order(order_id)
+    if not order or order['status']!='paid':
+        raise ValueError('Оплаченный фотопакет не найден.')
+    await save_photo_result(order_id,slot,image_url)
+    results=await get_photo_results(order_id)
+    result=next(row for row in results if row['slot']==slot)
+    if not result['delivered']:
+        attachment=await (uploader or upload_image_for_max)(bot,image_url)
+        sent=await bot.send_message(user_id=order['user_id'],
+            text=f"Фотография {slot} из {PHOTO_PACKAGE_SIZES[order['tariff']]}",attachments=[attachment])
+        if sent is None:
+            raise RuntimeError('MAX не подтвердил отправку фотографии.')
+    complete=await mark_photo_result_delivered(order_id,slot)
+    if complete:
+        await send_repeat_offer(bot,order['user_id'],'photo','photo:'+order_id,admin_user_id=admin_user_id)
+    return complete

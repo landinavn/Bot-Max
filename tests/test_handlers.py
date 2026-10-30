@@ -5565,7 +5565,7 @@ async def test_process_pending_videos_continues_after_failure_and_marks_only_del
     event = message_event('/process_pending_videos')
     await call_handler(create_router(admin_user_id=456, cartoon_video_generator=generate), 'process_pending_videos', event)
     assert generate.await_args_list == [call('https://images.example/a.png', 'https://audio.example/a.mp3'), call('https://images.example/b.png', 'https://audio.example/b.mp3')]
-    assert event.bot.send_message.await_count == 2
+    assert event.bot.send_message.await_count == 3
     assert event.bot.send_message.await_args.kwargs['user_id'] == 789
     assert [job['id'] for job in await credit_db.get_all_pending_videos()] == [first]
     assert 'Успешно: 1, Ошибок: 1' in event.message.answer.await_args.args[0]
@@ -5628,7 +5628,7 @@ async def test_process_pending_videos_serializes_repeated_admin_commands(credit_
     finally:
         release.set()
         await task
-    assert first.bot.send_message.await_count == 2
+    assert first.bot.send_message.await_count == 3
     second.bot.send_message.assert_not_awaited()
 
 
@@ -5721,7 +5721,7 @@ async def test_pending_processor_delivers_merged_result(credit_db, monkeypatch, 
     event = message_event('/process_pending_videos')
     await call_handler(create_router(admin_user_id=456), 'process_pending_videos', event)
     merger.assert_awaited_once_with('https://video.example/animated.mp4', 'https://audio.example/song.mp3')
-    assert 'https://cdn.example/pending-merged.mp4' in event.bot.send_message.await_args_list[-2].kwargs['text']
+    assert 'https://cdn.example/pending-merged.mp4' in event.bot.send_message.await_args_list[-3].kwargs['text']
     assert await credit_db.get_all_pending_videos() == []
 
 
@@ -7240,7 +7240,7 @@ async def test_short_cartoon_unavailable_notice_failure_still_sends_themes(credi
     assert await context.get_state() == PosterStates.waiting_for_cartoon_style
 
 
-async def test_stats_report_has_exact_six_blocks_unique_sources_and_admin_last(credit_db):
+async def test_stats_report_has_exact_seven_blocks_unique_sources_and_admin_last(credit_db):
     await credit_db.record_first_start(101,'yandex_newyear')
     await credit_db.record_first_start(456,'yandex_newyear')
     for _ in range(4):
@@ -7256,7 +7256,7 @@ async def test_stats_report_has_exact_six_blocks_unique_sources_and_admin_last(c
     event=message_event('/stats')
     await call_handler(create_router(admin_user_id=456),'stats',event)
     text=event.message.answer.await_args.args[0]
-    blocks=['📊 СТАТИСТИКА БОТА:', '💰 ПРОДАЖИ:', '📍 ИСТОЧНИКИ ТРАФИКА:',
+    blocks=['📊 СТАТИСТИКА БОТА:', '💰 ПРОДАЖИ:', '🔁 Повторные покупки со скидкой 20%:', '📍 ИСТОЧНИКИ ТРАФИКА:',
             '🖼 СГЕНЕРИРОВАНО КАРТИНОК:', '🖱 ИНТЕРЕС К КНОПКАМ (КЛИКИ):', '🛠 Админ (тесты):']
     assert [text.index(block) for block in blocks] == sorted(text.index(block) for block in blocks)
     assert all(text.count(block)==1 for block in blocks)

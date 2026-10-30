@@ -18,7 +18,7 @@ import aiohttp
 from yarl import URL
 
 from config import Config
-from database import get_photo_order, set_photo_payment_link, PHOTO_TARIFFS, get_cartoon_order, update_cartoon_order, CARTOON_TARIFFS, get_musical_order, update_musical_order, MUSICAL_TARIFFS, create_payment_order, get_payment_order, create_audio_order, get_audio_order, update_audio_order, SONG_PROMO_PRODUCT
+from database import repeat_order_value, validate_repeat_invoice, get_photo_order, set_photo_payment_link, PHOTO_TARIFFS, get_cartoon_order, update_cartoon_order, CARTOON_TARIFFS, get_musical_order, update_musical_order, MUSICAL_TARIFFS, create_payment_order, get_payment_order, create_audio_order, get_audio_order, update_audio_order, SONG_PROMO_PRODUCT
 
 PACKAGES = {
     1: (9900, "1 генерация (Открытка)"),
@@ -156,8 +156,13 @@ class ProdamusPayments:
         if order_id is not None:
             if credits is not None or promo:
                 raise ValueError('Нельзя смешивать мульт-заказ и пакет кредитов.')
-            if order_id.startswith('photo_'):
+            if order_id.startswith(('photo_','promo_photo_')):
                 return await self._create_photo_payment_link(user_id, order_id, amount, description)
+            if order_id.startswith(('music_','promo_music_card_')):
+                order=await get_musical_order(order_id)
+                if not order or order['user_id']!=user_id:
+                    raise ValueError('Музыкальный заказ недоступен.')
+                return await self.create_musical_payment_link(order_id=order_id,amount=amount,description=description)
             return await self._create_cartoon_payment_link(user_id, order_id, amount, description)
         if amount is not None or description is not None:
             raise ValueError('Для персональной оплаты нужен номер заказа.')
@@ -255,8 +260,9 @@ class ProdamusPayments:
             raise ValueError('Параметры оплаты не совпадают с фотозаказом.')
         if order['payment_link']:
             return order['payment_link']
-        if PHOTO_TARIFFS.get(order['tariff']) != (order['amount_kopecks'],order['product_name']):
+        if repeat_order_value(order,'photo',PHOTO_TARIFFS.get(order['tariff']),creation=True) != (order['amount_kopecks'],order['product_name']):
             raise ValueError('Для новой ссылки выберите действующий тариф.')
+        await validate_repeat_invoice(order,'photo')
         data = {
             'do': 'link', 'order_id': order_id,
             'products': [{'name': description, 'price': f'{amount}.00', 'quantity': '1'}],
@@ -279,8 +285,9 @@ class ProdamusPayments:
             raise ValueError('Параметры оплаты не совпадают с мульт-заказом.')
         if order['payment_link']:
             return order['payment_link']
-        if CARTOON_TARIFFS.get(order['tariff']) != (order['amount_kopecks'],order['product_name']):
+        if repeat_order_value(order,'cartoon',CARTOON_TARIFFS.get(order['tariff']),creation=True) != (order['amount_kopecks'],order['product_name']):
             raise ValueError('Для новой ссылки выберите действующий тариф.')
+        await validate_repeat_invoice(order,'cartoon')
         data = {
             'do': 'link', 'order_id': order_id,
             'products': [{'name': description, 'price': f'{amount}.00', 'quantity': '1'}],
@@ -300,8 +307,9 @@ class ProdamusPayments:
             raise ValueError('Параметры оплаты не совпадают с музыкальным заказом.')
         if order['payment_link']:
             return order['payment_link']
-        if MUSICAL_TARIFFS.get(order['tariff']) != (order['amount_kopecks'],order['product_name']):
+        if repeat_order_value(order,'music_card',MUSICAL_TARIFFS.get(order['tariff']),creation=True) != (order['amount_kopecks'],order['product_name']):
             raise ValueError('Для новой ссылки выберите действующий музыкальный тариф.')
+        await validate_repeat_invoice(order,'music_card')
         data = {
             'do': 'link', 'order_id': order_id,
             'products': [{'name': description, 'price': f'{amount}.00', 'quantity': '1'}],
@@ -322,8 +330,10 @@ class ProdamusPayments:
             raise ValueError("Нет номера заказа или платежа.")
         # A saved family identifies the product; identical prices are never dispatch keys.
         candidates = [await get_payment_order(order_id), await get_audio_order(order_id)]
-        for prefix, getter in (('photo_',get_photo_order),('cartoon_',get_cartoon_order),('music_',get_musical_order)):
-            if order_id.startswith(prefix):
+        for prefixes,getter in ((('photo_','promo_photo_'),get_photo_order),
+                                (('cartoon_','promo_cartoon_'),get_cartoon_order),
+                                (('music_','promo_music_card_'),get_musical_order)):
+            if order_id.startswith(prefixes):
                 candidates.append(await getter(order_id))
         orders = [dict(candidate) for candidate in candidates if candidate is not None]
         if len(orders) != 1:
@@ -368,7 +378,7 @@ class ProdamusPayments:
             if expected.get(order['package_id']) != (order['amount_kopecks'], order['product_name']):
                 raise ValueError('Неизвестный аудиотариф.')
         elif order.get('order_type') == 'photo':
-            if PHOTO_TARIFFS.get(order['tariff']) != (order['amount_kopecks'], order['product_name']):
+            if repeat_order_value(order,'photo',PHOTO_TARIFFS.get(order['tariff'])) != (order['amount_kopecks'], order['product_name']):
                 raise ValueError('Неизвестный фототариф.')
         elif order.get('order_type') == 'cartoon':
             # Сумма уже сверена с сохранённым заказом: ранее выданные счета
@@ -378,10 +388,13 @@ class ProdamusPayments:
             names = {tariff[1]} if tariff else set()
             if order['tariff'] == 'short':
                 names.add('Мульт-открытка (10-15 сек)')
-            if order['product_name'] not in names:
+            if order.get('promo_token'):
+                if repeat_order_value(order,'cartoon',tariff)!=(order['amount_kopecks'],order['product_name']):
+                    raise ValueError('Некорректная скидка мульт-тарифа.')
+            elif order['product_name'] not in names or order_id.startswith('promo_'):
                 raise ValueError('Неизвестный мульт-тариф.')
         elif order.get('order_type') == 'musical':
-            if MUSICAL_TARIFFS.get(order['tariff']) != (order['amount_kopecks'], order['product_name']):
+            if repeat_order_value(order,'music_card',MUSICAL_TARIFFS.get(order['tariff'])) != (order['amount_kopecks'], order['product_name']):
                 raise ValueError('Неизвестный музыкальный тариф.')
         elif order["credits"] not in PACKAGES or PACKAGES[order["credits"]][1] != order["product_name"]:
             raise ValueError("Неизвестный пакет.")

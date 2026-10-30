@@ -77,6 +77,19 @@ async def init_db() -> None:
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, paid_at TEXT
             )"""
         )
+        async with db.execute('PRAGMA table_info(photo_orders)') as cursor:
+            photo_columns = {row[1] for row in await cursor.fetchall()}
+        for column, definition in {
+            'generation_status': "TEXT NOT NULL DEFAULT 'awaiting_payment'",
+            'style': 'TEXT', 'template': 'TEXT',
+            'user_notified': 'INTEGER NOT NULL DEFAULT 0',
+            'admin_notified': 'INTEGER NOT NULL DEFAULT 0',
+            'next_attempt_at': 'INTEGER NOT NULL DEFAULT 0',
+        }.items():
+            if column not in photo_columns:
+                await db.execute(f'ALTER TABLE photo_orders ADD COLUMN {column} {definition}')
+        await db.execute("UPDATE photo_orders SET generation_status='queued' "
+                         "WHERE status='paid' AND generation_status='awaiting_payment'")
         await db.execute(
             """CREATE TABLE IF NOT EXISTS cartoon_orders (
                 order_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL,
@@ -835,7 +848,7 @@ async def latest_gift_preview(user_id: int) -> dict | None:
 
 
 async def song_checkout_order(order_id: str) -> dict:
-    """Проверить FIRST заново; выданные счета неизменны, для новой цены отдельный заказ.
+    """Новые подарочные счета — 490 ₽; старые счета неизменны, для новой цены отдельный заказ.
 
     Готовые треки/превью переносятся без повторного обращения к TTAPI.
     """
@@ -849,11 +862,7 @@ async def song_checkout_order(order_id: str) -> dict:
         order = dict(row)
         target_id = order_id
         if order['status'] != 'paid' and not order['free_access']:
-            async with db.execute("""SELECT 1 FROM users WHERE user_id = ? AND song_promo_expires_at > ?
-                AND NOT EXISTS (SELECT 1 FROM audio_orders WHERE user_id = ? AND audio_format = 'gift' AND status = 'paid')""",
-                                  (order['user_id'], _now_ts(), order['user_id'])) as cursor:
-                discount = await cursor.fetchone() is not None
-            amount = 39200 if discount else 49000
+            amount = 49000
             if order['amount_kopecks'] != amount:
                 if not order['preview_url'] or not order['tracks_json']:
                     raise ValueError('Сначала необходимо создать превью.')
@@ -865,7 +874,7 @@ async def song_checkout_order(order_id: str) -> dict:
                            lyrics,tracks_json,preview_url,job_id,submit_started,1
                     FROM audio_orders WHERE order_id = ?
                     ON CONFLICT(order_id) DO NOTHING""",
-                    (target_id, amount, SONG_PROMO_PRODUCT if discount else 'Песня в подарок', order_id))
+                    (target_id, amount, 'Песня в подарок', order_id))
         await db.commit()
     return await get_audio_order(target_id)
 
@@ -879,12 +888,7 @@ async def create_audio_order(order_id: str, user_id: int, audio_format: str, sce
         raise ValueError('Некорректные детали песни.')
     amount, product = (19900, 'Песня по фану') if audio_format == 'fun' else (49000, 'Песня в подарок')
     if song_discount:
-        if audio_format != 'gift':
-            raise ValueError('FIRST действует только на подарочную песню.')
-        existing = await get_audio_order(order_id)
-        if existing is None and not await check_song_promo(user_id):
-            raise PromoUnavailableError('Скидка FIRST недоступна.')
-        amount, product = 39200, SONG_PROMO_PRODUCT
+        raise PromoUnavailableError('Скидка FIRST больше не действует. Песня в подарок стоит 490 ₽.')
     values = (order_id, user_id, audio_format, scenario, details, style, prompt, tags, title, amount, product)
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         await db.execute('''INSERT INTO audio_orders
@@ -1313,10 +1317,32 @@ async def mark_photo_paid(order_id: str, payment_id: str) -> bool:
             async with db.execute(f'SELECT 1 FROM {table} WHERE provider_payment_id=?', (payment_id,)) as cursor:
                 if await cursor.fetchone():
                     raise ValueError('Платёж уже использован другим заказом.')
-        await db.execute("UPDATE photo_orders SET status='paid',provider_payment_id=?,paid_at=CURRENT_TIMESTAMP WHERE order_id=?",
+        await db.execute("UPDATE photo_orders SET status='paid',generation_status='queued',provider_payment_id=?,paid_at=CURRENT_TIMESTAMP WHERE order_id=?",
                          (payment_id,order_id))
         await db.execute('INSERT INTO users(user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING', (order['user_id'],))
         await increment_purchases(order['user_id'], connection=db)
         await _record_sale_counters(db, 'photo', dict(order))
         await db.commit()
     return True
+
+
+async def update_photo_order(order_id: str, **fields):
+    if not fields or not set(fields) <= {'style','template','generation_status','user_notified','admin_notified','next_attempt_at'}:
+        raise ValueError('Некорректные поля фотозаказа.')
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        await db.execute('UPDATE photo_orders SET '+','.join(key+'=?' for key in fields)+' WHERE order_id=?',
+                         (*fields.values(),order_id))
+        await db.commit()
+
+
+async def get_pending_photo_jobs(*, notifications=False, notify_admin=False) -> list[dict]:
+    """Paid photoshoots await fulfillment; no payment is acknowledged into a dead end."""
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        db.row_factory = aiosqlite.Row
+        query = "SELECT * FROM photo_orders WHERE status='paid' AND generation_status='queued'"
+        params = ()
+        if notifications:
+            query += " AND (user_notified=0 OR (? AND admin_notified=0)) AND next_attempt_at <= ?"
+            params = (int(notify_admin), _now_ts())
+        async with db.execute(query + ' ORDER BY paid_at,order_id', params) as cursor:
+            return [dict(row) for row in await cursor.fetchall()]

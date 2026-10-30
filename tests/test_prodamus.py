@@ -618,8 +618,16 @@ async def test_discounted_gift_payment_validated_and_accounted_once_even_after_e
     await credit_db.set_song_promo(456)
     await credit_db.record_first_start(456, 'yandex_newyear')
     await credit_db.create_audio_order('audio-test-gift-456', 456, 'gift', 'bday', 'Аня, любит горы',
-        'pop', '[Verse]\nАня', 'pop', 'Для Ани', song_discount=True)
-    data = await audio_notification(payments, 'gift')
+        'pop', '[Verse]\nАня', 'pop', 'Для Ани')
+    import aiosqlite
+    async with aiosqlite.connect(credit_db.DATABASE_PATH) as db:
+        await db.execute("UPDATE audio_orders SET amount_kopecks=39200,product_name=? WHERE order_id=?",
+                         (credit_db.SONG_PROMO_PRODUCT,'audio-test-gift-456'))
+        await db.commit()
+    data = {'order_num':'audio-test-gift-456','order_id':'historical-gift-provider',
+            'payment_status':'success','sum':'392.00','currency':'rub',
+            'products':[{'name':credit_db.SONG_PROMO_PRODUCT,'price':'392.00','quantity':'1'}],
+            '_param_user_id':'456','_param_credits':'0','_param_package_id':'audio_gift_first'}
     assert data['sum'] == '392.00'
     assert data['products'][0]['name'] == 'Песня в подарок (Скидка 20%)'
     assert data['_param_package_id'] == 'audio_gift_first'
@@ -776,11 +784,13 @@ async def test_cartoon_old_invoice_remains_payable_after_price_change(payments,c
     current=dict(credit_db.CARTOON_TARIFFS)
     old_amount=current[tariff][0]+(30000 if tariff=='short' else 40000)
     monkeypatch.setattr(credit_db,'CARTOON_TARIFFS',{**current,tariff:(old_amount,current[tariff][1])})
+    monkeypatch.setattr(prodamus,'CARTOON_TARIFFS',{**current,tariff:(old_amount,current[tariff][1])})
     order_id='cartoon_456_theme_ny_old'
     await credit_db.create_cartoon_order(order_id,456,'theme_ny',tariff)
     order=await credit_db.get_cartoon_order(order_id)
     link=await payments.create_payment_link(456,order_id=order_id,amount=old_amount//100,description=order['product_name'])
     monkeypatch.setattr(credit_db,'CARTOON_TARIFFS',current)
+    monkeypatch.setattr(prodamus,'CARTOON_TARIFFS',current)
     fields=parse_form_fields(parse_qsl(urlsplit(link).query))
     data={'order_num':order_id,'order_id':'old-cartoon-provider','payment_status':'success',
           'sum':str(old_amount//100),'products':fields['products'],'customer_extra':fields['customer_extra']}
@@ -793,10 +803,12 @@ async def test_cartoon_old_invoice_remains_payable_after_price_change(payments,c
 async def test_short_cartoon_product_name_invoice_remains_payable(payments, credit_db, monkeypatch, name):
     current = dict(credit_db.CARTOON_TARIFFS)
     monkeypatch.setattr(credit_db, 'CARTOON_TARIFFS', {**current, 'short': (59000, name)})
+    monkeypatch.setattr(prodamus, 'CARTOON_TARIFFS', {**current, 'short': (59000, name)})
     order_id = 'cartoon_456_theme_ny_old_name'
     await credit_db.create_cartoon_order(order_id, 456, 'theme_ny', 'short')
     link = await payments.create_payment_link(456, order_id=order_id, amount=590, description=name)
     monkeypatch.setattr(credit_db, 'CARTOON_TARIFFS', current)
+    monkeypatch.setattr(prodamus, 'CARTOON_TARIFFS', current)
     fields = parse_form_fields(parse_qsl(urlsplit(link).query))
     assert fields['products'] == [{'name': name, 'price': '590.00', 'quantity': '1'}]
     assert sign_link_payload({k: v for k, v in fields.items() if k != 'sign'}, SECRET) == fields['sign']

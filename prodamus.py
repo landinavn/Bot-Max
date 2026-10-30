@@ -7,6 +7,7 @@ prodamus-integration-expert/references (payform-protocol.md, hmac.md).
 import hashlib
 import hmac
 import json
+import logging
 import re
 from decimal import Decimal, InvalidOperation
 from html import unescape
@@ -25,6 +26,8 @@ PACKAGES = {
     5: (29900, "5 генераций"),
     15: (79900, "15 генераций"),
 }
+logger = logging.getLogger(__name__)
+
 SIGN_FIELDS = {"signature", "sign", "_payform_sign"}
 
 
@@ -158,7 +161,7 @@ class ProdamusPayments:
             return await self._create_cartoon_payment_link(user_id, order_id, amount, description)
         if amount is not None or description is not None:
             raise ValueError('Для персональной оплаты нужен номер заказа.')
-        if credits not in PACKAGES or isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
+        if isinstance(credits, bool) or credits not in PACKAGES or isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
             raise ValueError("Некорректный пользователь или пакет.")
         amount, title = PACKAGES[credits]
         if promo:
@@ -202,18 +205,34 @@ class ProdamusPayments:
             body = result.get("payment_link") or result.get("link")
         if not isinstance(body, str):
             raise ValueError("Prodamus не вернул платёжную ссылку.")
-        return _https_url(body.strip())
+        link = _https_url(body.strip())
+        product = data['products'][0]
+        description = product['name']
+        amount = format(Decimal(product['price']).normalize(), 'f')
+        order_id = data['order_id']
+        logger.info(f"Создан счет: {description}, сумма: {amount} ₽, order_id: {order_id}")
+        return link
 
     async def create_audio_payment_link(
         self, user_id: int, audio_format: str, scenario: str, details: str, style: str | None,
         prompt: str, tags: str, title: str, *, order_id: str,
     ) -> str:
+        if isinstance(user_id,bool) or not isinstance(user_id,int) or user_id <= 0:
+            raise ValueError('Некорректный пользователь аудиозаказа.')
         existing = await get_audio_order(order_id)
-        await create_audio_order(order_id, user_id, audio_format, scenario, details, style, prompt, tags, title,
-                                 song_discount=bool(existing and existing['amount_kopecks'] == 39200))
+        if existing is None:
+            await create_audio_order(order_id, user_id, audio_format, scenario, details, style, prompt, tags, title)
         order = await get_audio_order(order_id)
+        identity = ('user_id','audio_format','scenario','details','style','prompt','tags','title')
+        if tuple(order[key] for key in identity) != (user_id,audio_format,scenario,details,style,prompt,tags,title):
+            raise ValueError('Нельзя изменить сохранённый аудиозаказ.')
         if order['status'] != 'pending':
             raise ValueError('Аудиозаказ уже оплачен.')
+        expected = {'fun': (19900,'Песня по фану'), 'gift': (49000,'Песня в подарок')}.get(audio_format)
+        if expected != (order['amount_kopecks'],order['product_name']):
+            raise ValueError('Для новой ссылки выберите действующий аудиотариф.')
+        if order['payment_link']:
+            return order['payment_link']
         package_id = order['package_id']
         data = {
             'do': 'link', 'order_id': order_id,
@@ -236,6 +255,8 @@ class ProdamusPayments:
             raise ValueError('Параметры оплаты не совпадают с фотозаказом.')
         if order['payment_link']:
             return order['payment_link']
+        if PHOTO_TARIFFS.get(order['tariff']) != (order['amount_kopecks'],order['product_name']):
+            raise ValueError('Для новой ссылки выберите действующий тариф.')
         data = {
             'do': 'link', 'order_id': order_id,
             'products': [{'name': description, 'price': f'{amount}.00', 'quantity': '1'}],
@@ -258,6 +279,8 @@ class ProdamusPayments:
             raise ValueError('Параметры оплаты не совпадают с мульт-заказом.')
         if order['payment_link']:
             return order['payment_link']
+        if CARTOON_TARIFFS.get(order['tariff']) != (order['amount_kopecks'],order['product_name']):
+            raise ValueError('Для новой ссылки выберите действующий тариф.')
         data = {
             'do': 'link', 'order_id': order_id,
             'products': [{'name': description, 'price': f'{amount}.00', 'quantity': '1'}],
@@ -273,10 +296,12 @@ class ProdamusPayments:
 
     async def create_musical_payment_link(self, *, order_id: str, amount: int, description: str) -> str:
         order = await get_musical_order(order_id)
-        if not order or order['status'] != 'pending' or order['amount_kopecks'] != amount * 100 or order['product_name'] != description:
+        if isinstance(amount,bool) or not isinstance(amount,int) or not order or order['status'] != 'pending' or order['amount_kopecks'] != amount * 100 or order['product_name'] != description:
             raise ValueError('Параметры оплаты не совпадают с музыкальным заказом.')
         if order['payment_link']:
             return order['payment_link']
+        if MUSICAL_TARIFFS.get(order['tariff']) != (order['amount_kopecks'],order['product_name']):
+            raise ValueError('Для новой ссылки выберите действующий музыкальный тариф.')
         data = {
             'do': 'link', 'order_id': order_id,
             'products': [{'name': description, 'price': f'{amount}.00', 'quantity': '1'}],
@@ -295,18 +320,15 @@ class ProdamusPayments:
         payment_id = data.get("order_id")
         if not isinstance(order_id, str) or not isinstance(payment_id, str) or not payment_id or len(payment_id) > 200:
             raise ValueError("Нет номера заказа или платежа.")
-        order = await get_payment_order(order_id)
-        if order is None:
-            order = await get_audio_order(order_id)
-        if order is None and order_id.startswith('photo_'):
-            order = await get_photo_order(order_id)
-        if order is None and order_id.startswith('cartoon_'):
-            order = await get_cartoon_order(order_id)
-        if order is None and order_id.startswith('music_'):
-            order = await get_musical_order(order_id)
-        if order is None:
-            raise ValueError("Заказ не найден.")
-        order = dict(order)
+        # A saved family identifies the product; identical prices are never dispatch keys.
+        candidates = [await get_payment_order(order_id), await get_audio_order(order_id)]
+        for prefix, getter in (('photo_',get_photo_order),('cartoon_',get_cartoon_order),('music_',get_musical_order)):
+            if order_id.startswith(prefix):
+                candidates.append(await getter(order_id))
+        orders = [dict(candidate) for candidate in candidates if candidate is not None]
+        if len(orders) != 1:
+            raise ValueError("Заказ не найден или его тип неоднозначен.")
+        order = orders[0]
         if str(data.get("currency", "rub")).lower() != "rub":
             raise ValueError("Валюта не соответствует заказу.")
         if _kopecks(data.get("sum", data.get("amount"))) != order["amount_kopecks"]:

@@ -658,8 +658,10 @@ async def test_song_promo_migration_expiration_and_first_gift_purchase(credit_db
     assert not await credit_db.check_song_promo(456)
     await credit_db.set_song_promo(456, hours=1)
     assert await credit_db.check_song_promo(456)
-    await credit_db.create_audio_order('first-gift', 456, 'gift', 'bday', 'Аня', None, 'lyrics', 'pop', 'title', song_discount=True)
-    assert (await credit_db.get_audio_order('first-gift'))['amount_kopecks'] == 39200
+    with pytest.raises(credit_db.PromoUnavailableError):
+        await credit_db.create_audio_order('discount-disabled',456,'gift','bday','Аня',None,'lyrics','pop','title',song_discount=True)
+    await credit_db.create_audio_order('first-gift', 456, 'gift', 'bday', 'Аня', None, 'lyrics', 'pop', 'title')
+    assert (await credit_db.get_audio_order('first-gift'))['amount_kopecks'] == 49000
     await credit_db.mark_audio_paid('first-gift', 'provider-first')
     await credit_db.set_song_promo(456)
     assert not await credit_db.check_song_promo(456)

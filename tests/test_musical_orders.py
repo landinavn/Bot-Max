@@ -23,7 +23,7 @@ async def test_paid_music_survives_lost_fsm_and_delivers_only_once(credit_db):
     worker=PaidMusicalWorker(bot,renderer=render,uploader=upload)
     await asyncio.gather(worker.process('music_paid'),worker.process('music_paid'))
     render.assert_awaited_once_with('https://cdn.example/card.jpg','https://cdn.example/full.mp3')
-    assert bot.send_message.await_count == 3
+    assert bot.send_message.await_count == 4
     assert bot.send_message.await_args_list[0].kwargs['text'] == MUSICAL_VIDEO_WAIT_MESSAGE
     assert bot.send_message.await_args.kwargs['user_id'] == 456
     assert bot.send_message.await_args_list[1].kwargs['attachments'][0].type.value == 'video'

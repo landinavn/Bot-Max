@@ -35,6 +35,8 @@ from audio_service import create_audio_preview, song_audio_url, TEACHER_MUSIC_TA
 from metrika_service import extract_yclid, send_offline_conversion
 
 from database import (
+    get_active_promo,quote_repeat_price,get_promo_reservation,PromoReservedError,
+    PHOTO_TARIFFS,PHOTO_PACKAGE_SIZES,get_photo_results,get_photo_package_balance,save_photo_result,
     create_photo_order, get_photo_order, update_photo_order, CARTOON_TARIFFS, create_cartoon_order, get_cartoon_order, latest_paid_cartoon, finish_cartoon_order, update_cartoon_order,
     create_musical_order, get_musical_order,
     deduct_credit, get_user, grant_free_trial, get_global_stats, increment_generations,
@@ -52,6 +54,8 @@ from audio_service import generate_song, wait_for_song, wait_for_song_result, ma
 from audio_orders import PaidAudioWorker, SUPPORT_URL
 from max_client import log_max_error
 from video_delivery import send_video_share
+from promo_service import send_repeat_offer
+from photo_orders import deliver_photo_result
 from image_service import (
     count_people_in_photo, create_cartoon_avatar_preview, CARTOON_IMAGE_PROMPTS,
     GenerationLimitError,
@@ -951,44 +955,70 @@ def create_router(
                 and data.get("photo_tariff") == "photo_tariff_590"
                 and data.get("template") in NY_FAMILY_PHOTOSESSION_PROMPTS)
 
-    async def send_photo_trial_checkout(event, context):
-        user_id = event.get_ids()[1]
-        if user_id is not None and user_id == admin_user_id:
-            await _reply(event, '👑 Режим администратора: оплата не требуется. Выберите сюжет.',
+    async def send_photo_trial_checkout(event, context, tariff=590):
+        user_id=event.get_ids()[1]
+        if user_id is not None and user_id==admin_user_id:
+            await _reply(event,'👑 Режим администратора: оплата не требуется. Выберите сюжет.',
                          attachments=[navigation_keyboard((('Выбрать сюжет','photo_choose_template'),))])
             return
         if payments is None or user_id is None:
-            await _reply(event, 'Оплата временно недоступна. Попробуйте позже.',
+            await _reply(event,'Оплата временно недоступна. Попробуйте позже.',
                          attachments=[navigation_keyboard((('Выбрать сюжет','photo_choose_template'),('⬅️ Назад','photo_tariff_back')))])
             return
         try:
-            data = await context.get_data()
-            order = await get_photo_order(data.get('photo_order_id', ''))
-            if not order or order['user_id'] != user_id or order['tariff'] != 590:
-                order_id = f'photo_{user_id}_{time_ns()}'
-                await create_photo_order(order_id, user_id, 590)
-                order = await get_photo_order(order_id)
+            data=await context.get_data()
+            base,name=PHOTO_TARIFFS[tariff]
+            quoted,description=await quote_repeat_price(user_id,'photo',base,name)
+            order=await get_photo_order(data.get('photo_order_id',''))
+            if (not order or order['user_id']!=user_id or order['tariff']!=tariff
+                    or (order['status']=='pending' and (order['amount_kopecks'],order['product_name'])!=(quoted,description))):
+                if await resume_repeat_checkout(event,user_id,'photo'):
+                    return
+                order_id=await create_photo_order(f'photo_{user_id}_{time_ns()}',user_id,tariff)
+                order=await get_photo_order(order_id)
                 await context.update_data(photo_order_id=order_id)
-            await update_photo_order(order['order_id'], style=data.get('photo_style'), template=data.get('template'))
-            if order['status'] == 'paid':
-                await _reply(event, 'Оплата фотосессии уже подтверждена. Ваш заказ сохранён в очереди.')
+            await update_photo_order(order['order_id'],style=data.get('photo_style') or order.get('style'),
+                                     template=data.get('template') or order.get('template'))
+            if order['status']=='paid':
+                await _reply(event,'Оплата фотосессии уже подтверждена. Ваш заказ сохранён в очереди.',
+                             attachments=[navigation_keyboard((('Продолжить','photo_resume:'+order['order_id']),))])
                 return
-            link = await payments.create_payment_link(user_id, order_id=order['order_id'],
-                                                     amount=590, description=order['product_name'])
-            await _reply(event, PHOTO_TRIAL_CHECKOUT_TEXT, attachments=[photo_trial_payment_keyboard(link)])
+            link=await payments.create_payment_link(user_id,order_id=order['order_id'],
+                                                   amount=order['amount_kopecks']//100,description=order['product_name'])
+            amount=order['amount_kopecks']//100
+            await context.update_data(photo_amount_kopecks=order['amount_kopecks'],photo_product_name=order['product_name'])
+            text=(PHOTO_TRIAL_CHECKOUT_TEXT if amount==590 and tariff==590 else
+                  f"Вы выбрали {name} ({PHOTO_PACKAGE_SIZES[tariff]} фото). Стоимость: {amount} ₽. "+
+                  ("Скидка 20%. " if order.get('promo_token') else "")+
+                  "После оплаты вернитесь в бота.")
+            keyboard=(photo_trial_payment_keyboard(link) if tariff==590 else
+                      InlineKeyboardBuilder().row(LinkButton(text=f'Оплатить {amount} ₽',url=link)).as_markup())
+            if tariff==590 and amount!=590:
+                keyboard=InlineKeyboardBuilder().row(LinkButton(text=f'Оплатить {amount} ₽',url=link)).row(
+                    CallbackButton(text='Выбрать сюжет',payload='photo_choose_template')).as_markup()
+            await _reply(event,text,attachments=[keyboard])
+        except PromoReservedError:
+            await resume_repeat_checkout(event,user_id,'photo')
         except Exception:
             logger.exception('Не удалось создать персональный счёт фотосессии:')
-            await _reply(event, 'Не удалось создать ссылку на оплату. Попробуйте выбрать тариф ещё раз.')
+            await _reply(event,'Не удалось создать ссылку на оплату. Попробуйте выбрать тариф ещё раз.')
 
     async def run_family_photosession(event, context: MemoryContext) -> None:
         user_id = event.get_ids()[1]
         if user_id is None:
             await _reply(event, "Не удалось определить пользователя. Отправьте /start.")
             return
-        if admin_user_id is None or user_id != admin_user_id:
-            await context.set_state(PosterStates.waiting_for_mode)
-            await send_photo_trial_checkout(event, context)
-            return
+        paid_order=None
+        if user_id!=admin_user_id:
+            selected=await context.get_data()
+            candidate=await get_photo_order(selected.get('photo_order_id',''))
+            if (not candidate or candidate['user_id']!=user_id or candidate['status']!='paid'
+                    or candidate['tariff']!=590 or candidate['style'] not in (None,'photo_style_ny')
+                    or candidate['template']!=selected.get('template')):
+                await context.set_state(PosterStates.waiting_for_mode)
+                await send_photo_trial_checkout(event,context)
+                return
+            paid_order=candidate
         lock = generation_locks.setdefault(user_id, asyncio.Lock())
         if lock.locked():
             await _reply(event, "Фотографии уже создаются. Пожалуйста, подождите.")
@@ -999,6 +1029,9 @@ def create_router(
                 await _reply(event, "Выберите новогоднюю фотосессию, тариф 590 ₽ и семейный сюжет.")
                 return
             photo = data.get("photo")
+            saved_results=await get_photo_results(paid_order['order_id']) if paid_order else []
+            if paid_order and paid_order.get('reference_url') and (saved_results or not photo):
+                photo={'url':paid_order['reference_url']}
             if not isinstance(photo, dict) or not photo.get("url"):
                 await context.set_state(PosterStates.waiting_for_photosession_photo)
                 await _reply(event, photo_request(
@@ -1009,9 +1042,13 @@ def create_router(
                     "Отправьте одно общее фото семьи из 3 и более человек, где хорошо видны лица детей и родителей. /cancel — отмена."
                 ))
                 return
-            if data.get("photosession_complete"):
-                await _reply(event, "Все 3 фотографии уже отправлены.")
+            if (not paid_order and data.get("photosession_complete")) or (paid_order and len(saved_results)==3 and all(row['delivered'] for row in saved_results)):
+                if paid_order:
+                    await send_repeat_offer(event.bot,user_id,'photo','photo:'+paid_order['order_id'],admin_user_id=admin_user_id)
+                await _reply(event,"Все 3 фотографии уже отправлены.")
                 return
+            if paid_order:
+                await update_photo_order(paid_order['order_id'],reference_url=photo['url'])
             session_id = data.get("photosession_session_id") or uuid4().hex
             await context.update_data(photosession_session_id=session_id)
             await context.set_state(PosterStates.generating)
@@ -1022,6 +1059,12 @@ def create_router(
                 for index, prompt in enumerate(NY_FAMILY_PHOTOSESSION_PROMPTS[data["template"]]):
                     if (await context.get_data()).get("photosession_session_id") != session_id:
                         return
+                    cached=next((row for row in saved_results if row['slot']==index+1),None)
+                    if cached:
+                        if index>=len(urls):
+                            urls.append(cached['image_url'])
+                        else:
+                            urls[index]=cached['image_url']
                     if index >= len(urls):
                         await _reply(event, f"Генерирую кадр {index + 1} из 3... ⏳ Это может занять 3-5 минут. Пожалуйста, не закрывайте чат!")
                         url = await photosession_generator(reference_url, prompt)
@@ -1032,7 +1075,12 @@ def create_router(
                         urls.append(url)
                         await context.update_data(photosession_urls=list(urls))
                         await send_offline_conversion(user_id, goal_id="bot_generation")
-                    if index >= sent_count:
+                    if paid_order:
+                        await save_photo_result(paid_order['order_id'],index+1,urls[index])
+                        await deliver_photo_result(event.bot,paid_order['order_id'],index+1,urls[index],
+                                                   admin_user_id=admin_user_id,uploader=upload_image_for_max)
+                        await context.update_data(photosession_sent_count=index+1)
+                    elif index >= sent_count:
                         image = await upload_image_for_max(event.bot, urls[index])
                         sent = await event.bot.send_message(
                             **_recipient(event), text=f"Фотография {index + 1} из 3", attachments=[image],
@@ -1303,6 +1351,8 @@ def create_router(
                     if sent is None:
                         raise RuntimeError('MAX не подтвердил отправку видео.')
                     await mark_video_completed(job['id'])
+                    await send_repeat_offer(event.bot,job['user_id'],'music_card' if job.get('render_kind')=='musical' else 'cartoon',
+                                            'pending:'+str(job['id']),admin_user_id=admin_user_id)
                     success += 1
                     await send_video_share(event.bot, job['user_id'], bot_link=bot_link)
                 except Exception:
@@ -1354,6 +1404,13 @@ def create_router(
             f"- Мульт-открытка (590 ₽): {c('buy_cartoon_590')}\n"
             f"- Мульт-поздравление (1290 ₽): {c('buy_cartoon_1290')}\n\n"
             f"💰 Всего покупок: {data['total_purchases']}\n\n"
+            "🔁 Повторные покупки со скидкой 20%:\n"
+            f"- Музыкальные открытки: {c('promo_buy_music_card')}\n"
+            f"- Мульт-открытки (590): {c('promo_buy_cartoon_590')}\n"
+            f"- Мульт-открытки (1290): {c('promo_buy_cartoon_1290')}\n"
+            f"- Фотосессии (590): {c('promo_buy_photo_590')}\n"
+            f"- Фотосессии (990): {c('promo_buy_photo_990')}\n"
+            f"- Фотосессии (1490): {c('promo_buy_photo_1490')}\n\n"
             "📍 ИСТОЧНИКИ ТРАФИКА:\n" + sources_text + "\n\n"
             "🖼 СГЕНЕРИРОВАНО КАРТИНОК:\n"
             f"- Карта желаний: {c('gen_vision')}\n"
@@ -1721,43 +1778,47 @@ def create_router(
         await context.set_state(PosterStates.waiting_for_avatar_photo)
         await persist_cartoon_state(context)
 
-    async def send_cartoon_checkout(event, context, theme, product):
-        user_id = event.get_ids()[1]
-        data = await context.get_data()
-        order = await get_cartoon_order(data.get('cartoon_order_id', ''))
-        if (not order or order['user_id'] != user_id or order['theme'] != theme or order['tariff'] != product[0]
-                or (order['status'] == 'pending' and (
-                    order['amount_kopecks'] != product[1]
-                    or order['product_name'] != CARTOON_TARIFFS[product[0]][1]))):
-            order_id = f"cartoon_{user_id}_{theme}_{time_ns()}"
-            await create_cartoon_order(order_id, user_id, theme, product[0])
-            order = await get_cartoon_order(order_id)
-        await context.clear()
-        await context.update_data(cartoon_order_id=order['order_id'], cartoon_flow=product[0],
-                                  cartoon_amount_kopecks=product[1], cartoon_theme=theme)
-        await context.set_state(PosterStates.waiting_for_cartoon_payment)
-        if order['status'] == 'paid':
-            await activate_cartoon_order(context, order)
-            await _reply(event, CARTOON_PHOTO_PROMPT if await context.get_state() == PosterStates.waiting_for_avatar_photo
-                         else 'Оплата подтверждена. Продолжайте по последнему сообщению.')
-            return
-        if order['status'] != 'pending':
-            await _reply(event, 'Этот заказ уже завершён. Выберите новую мульт-открытку.', attachments=[main_keyboard()])
-            return
+    async def send_cartoon_checkout(event,context,theme,product):
+        user_id=event.get_ids()[1]
         try:
+            data=await context.get_data()
+            quoted,name=await quote_repeat_price(user_id,'cartoon',product[1],CARTOON_TARIFFS[product[0]][1])
+            order=await get_cartoon_order(data.get('cartoon_order_id',''))
+            if (not order or order['user_id']!=user_id or order['theme']!=theme or order['tariff']!=product[0]
+                    or (order['status']=='pending' and (order['amount_kopecks'],order['product_name'])!=(quoted,name))):
+                if await resume_repeat_checkout(event,user_id,'cartoon'):
+                    return
+                order_id=await create_cartoon_order(f'cartoon_{user_id}_{theme}_{time_ns()}',user_id,theme,product[0])
+                order=await get_cartoon_order(order_id)
+            await context.clear()
+            await context.update_data(cartoon_order_id=order['order_id'],cartoon_flow=product[0],
+                                      cartoon_amount_kopecks=order['amount_kopecks'],cartoon_theme=theme)
+            await context.set_state(PosterStates.waiting_for_cartoon_payment)
+            if order['status']=='paid':
+                await activate_cartoon_order(context,order)
+                await _reply(event,CARTOON_PHOTO_PROMPT if await context.get_state()==PosterStates.waiting_for_avatar_photo
+                             else 'Оплата подтверждена. Продолжайте по последнему сообщению.')
+                return
+            if order['status']!='pending':
+                await _reply(event,'Этот заказ уже завершён. Выберите новую мульт-открытку.',attachments=[main_keyboard()])
+                return
             if payments is None:
                 raise RuntimeError('Не настроена интеграция Prodamus.')
-            link = await payments.create_payment_link(user_id, order_id=order['order_id'], amount=product[1] // 100,
-                                                     description=order['product_name'])
-            text = ('🎬 Мульт-открытка стоит 590 ₽. Оплатите, чтобы начать создание.' if product[0] == 'short'
-                    else '🎬 Мульт-поздравление (до 30 сек) стоит 1290 ₽. Оплатите, чтобы начать создание.')
-            keyboard = InlineKeyboardBuilder().row(LinkButton(text=f"Оплатить {product[1] // 100} ₽", url=link)).row(
-                CallbackButton(text='Проверить оплату / продолжить', payload='cartoon_resume:' + order['order_id'])).as_markup()
-            await _reply(event, text, attachments=[keyboard])
+            amount=order['amount_kopecks']//100
+            link=await payments.create_payment_link(user_id,order_id=order['order_id'],amount=amount,description=order['product_name'])
+            text=(f"🎬 Мульт-открытка стоит {amount} ₽. Оплатите, чтобы начать создание." if product[0]=='short'
+                  else f"🎬 Мульт-поздравление (до 30 сек) стоит {amount} ₽. Оплатите, чтобы начать создание.")
+            if order.get('promo_token'):
+                text+=' Скидка 20%.'
+            keyboard=InlineKeyboardBuilder().row(LinkButton(text=f'Оплатить {amount} ₽',url=link)).row(
+                CallbackButton(text='Проверить оплату / продолжить',payload='cartoon_resume:'+order['order_id'])).as_markup()
+            await _reply(event,text,attachments=[keyboard])
+        except PromoReservedError:
+            await resume_repeat_checkout(event,user_id,'cartoon')
         except Exception:
-            logger.exception('Не удалось выставить счёт мульт-заказа %s:', order['order_id'])
-            await _reply(event, 'Не удалось создать платёжную ссылку. Попробуйте ещё раз; фото понадобится только после оплаты.',
-                         attachments=[navigation_keyboard((('Повторить оплату', theme), ('⬅️ Назад', 'back_to_main')))])
+            logger.exception('Не удалось выставить счёт мульт-заказа:')
+            await _reply(event,'Не удалось создать платёжную ссылку. Попробуйте ещё раз; фото понадобится только после оплаты.',
+                         attachments=[navigation_keyboard((('Повторить оплату',theme),('⬅️ Назад','back_to_main')))])
 
     @router.message_callback(F.callback.payload.startswith('cartoon_resume:'))
     async def resume_paid_cartoon(event: MessageCallback, context: MemoryContext):
@@ -1823,6 +1884,70 @@ def create_router(
         await _reply(event, 'Теперь выберите песню для вашего мультфильма:',
                      attachments=[navigation_keyboard((*buttons, ('⬅️ Назад', 'back_to_main')))])
 
+
+    async def resume_repeat_checkout(event,user_id,category):
+        reserved=await get_promo_reservation(user_id,category)
+        if not reserved:
+            return False
+        getter={'music_card':get_musical_order,'cartoon':get_cartoon_order,'photo':get_photo_order}[category]
+        order=await getter(reserved)
+        if not order or order['user_id']!=user_id or order['status']!='pending':
+            return False
+        if payments is None:
+            await _reply(event,'Оплата временно недоступна. Ваш скидочный заказ сохранён.')
+            return True
+        if category=='music_card':
+            link=await payments.create_musical_payment_link(order_id=reserved,amount=order['amount_kopecks']//100,
+                                                          description=order['product_name'])
+        else:
+            link=await payments.create_payment_link(user_id,order_id=reserved,amount=order['amount_kopecks']//100,
+                                                    description=order['product_name'])
+        await _reply(event,'Скидка уже закреплена за этим заказом. Завершите оплату:',
+            attachments=[InlineKeyboardBuilder().row(LinkButton(text=f"Оплатить {order['amount_kopecks']//100} ₽",url=link)).as_markup()])
+        return True
+
+    @router.message_callback(F.callback.payload.in_({'promo_music_card','promo_cartoon','promo_photo'}))
+    async def repeat_promo_entry(event: MessageCallback,context: MemoryContext):
+        await event.ack(notification='Открываю предложение…')
+        user_id=event.get_ids()[1]
+        if event.message is None or user_id is None:
+            return
+        if user_id==admin_user_id:
+            await _reply(event,'Для администратора доступен бесплатный режим в главном меню.',attachments=[main_keyboard()])
+            return
+        if await context.get_state() in (PosterStates.generating,PosterStates.cartoon_generating):
+            await _reply(event,'Текущая генерация ещё не завершена. Пожалуйста, подождите.')
+            return
+        category={'promo_music_card':'music_card','promo_cartoon':'cartoon','promo_photo':'photo'}[event.callback.payload]
+        if await get_active_promo(user_id,category) is None:
+            await _reply(event,'Срок действия скидки истёк. Доступны обычные цены.')
+        if await resume_repeat_checkout(event,user_id,category):
+            return
+        await context.clear()
+        await context.set_state(PosterStates.waiting_for_mode)
+        if category=='music_card':
+            await open_music_menu(event,context)
+        elif category=='cartoon':
+            await context.update_data(cartoon_flow='short',cartoon_amount_kopecks=59000,
+                                      cartoon_session_id=uuid4().hex,cartoon_promo_choose_tariff=True)
+            await context.set_state(PosterStates.waiting_for_cartoon_style)
+            await _reply(event,'🎬 Выберите тему следующей мульт-открытки:',attachments=[cartoon_style_keyboard()])
+        else:
+            await context.update_data(photo_promo_flow=True)
+            files,text,buttons=CATEGORY_MENUS['cat_photo']
+            await send_menu_examples(event,files)
+            await _reply(event,text,attachments=[navigation_keyboard(buttons)])
+
+    @router.message_callback(F.callback.payload.startswith('promo_cartoon_tariff:'))
+    async def repeat_cartoon_tariff(event: MessageCallback,context: MemoryContext):
+        await event.ack(notification='Готовлю счёт…')
+        data=await context.get_data()
+        tariff=event.callback.payload.removeprefix('promo_cartoon_tariff:')
+        if event.message is None or tariff not in {'short','long'} or not data.get('cartoon_promo_choose_tariff') or data.get('cartoon_theme') not in CARTOON_THEMES:
+            return
+        product=CARTOON_PRODUCTS['cat_cartoon' if tariff=='short' else 'cat_cartoon_long']
+        await send_cartoon_checkout(event,context,data['cartoon_theme'],product)
+
     @router.message_callback(F.callback.payload.in_(set(CARTOON_PRODUCTS)))
     async def cartoon_menu(event: MessageCallback, context: MemoryContext):
         user_id = event.get_ids()[1]
@@ -1869,6 +1994,15 @@ def create_router(
                 return
             await event.ack(notification='Готовлю оплату…')
             await increment_counter(target + '_click', user_id=user_id)
+            if data.get('cartoon_promo_choose_tariff'):
+                await context.update_data(cartoon_theme=target)
+                short,_=await quote_repeat_price(user_id,'cartoon',59000,CARTOON_TARIFFS['short'][1])
+                long,_=await quote_repeat_price(user_id,'cartoon',129000,CARTOON_TARIFFS['long'][1])
+                await _reply(event,'Выберите тариф:',attachments=[navigation_keyboard((
+                    (f'Мульт-открытка — {short//100} ₽','promo_cartoon_tariff:short'),
+                    (f'Мульт-поздравление — {long//100} ₽','promo_cartoon_tariff:long'),
+                    ('⬅️ Назад','promo_cartoon')))])
+                return
             await send_cartoon_checkout(event, context, target, product)
             return
         await event.ack(notification='Выбираю стиль…')
@@ -2270,6 +2404,7 @@ def create_router(
                     await finish_cartoon_order(data['cartoon_order_id'], user_id)
                 await increment_counter('video_success', user_id=user_id)
                 await context.set_state(PosterStates.waiting_for_mode)
+                await send_repeat_offer(event.bot,user_id,'cartoon','cartoon:'+str(data.get('cartoon_order_id') or session),admin_user_id=admin_user_id)
                 await send_video_share(event.bot, user_id, bot_link=bot_link)
         except Exception:
             logger.exception('Ошибка генерации тематической мульт-открытки:')
@@ -2427,6 +2562,9 @@ def create_router(
             await event.ack(notification='Отправьте /start, чтобы открыть меню.')
             return
         await event.ack(notification='Выберите стиль…')
+        await open_music_menu(event,context)
+
+    async def open_music_menu(event,context):
         user_id = event.get_ids()[1]
         if user_id is not None:
             await increment_counter('click_video_menu', user_id=user_id)
@@ -2733,6 +2871,11 @@ def create_router(
                     await context.update_data(**video_cache(video_data))
             return
         price = data['video_amount_kopecks'] // 100
+        if data.get('video_product')=='direct':
+            if await resume_repeat_checkout(event,event.get_ids()[1],'music_card'):
+                return
+            quoted,_=await quote_repeat_price(event.get_ids()[1],'music_card',29900,'Музыкальная открытка')
+            price=quoted//100
         text = (f'Стоимость музыкальной открытки — {price} ₽. '
                 'Вы получите готовый MP4-файл с вашей открыткой и персональной песней, который можно отправить в мессенджере.')
         if payments is None:
@@ -2749,9 +2892,12 @@ def create_router(
                 return
             audio_url = await prepare_video_song(checkout, checkout['video_song_scenario'])
             tariff = 'direct' if checkout['video_product'] == 'direct' else 'upsell'
-            key = [image_url, audio_url, tariff]
-            order_id = checkout.get('music_checkout_id') if checkout.get('music_checkout_source') == key else None
-            order = await get_musical_order(order_id) if order_id else None
+            key = [image_url, audio_url, tariff,price]
+            previous=checkout.get('music_checkout_source')
+            order_id=checkout.get('music_checkout_id') if isinstance(previous,list) and previous[:3]==key[:3] else None
+            order=await get_musical_order(order_id) if order_id else None
+            if order and order['status']!='paid' and order['amount_kopecks']!=price*100:
+                order=None
             if (await context.get_data()).get('music_checkout_session') != token:
                 return
             if order and order['status'] == 'paid':
@@ -2762,11 +2908,15 @@ def create_router(
                 return
             if not order:
                 order_id = f'music_{event.get_ids()[1]}_{uuid4().hex}'
-                await create_musical_order(order_id, event.get_ids()[1], image_url, audio_url, tariff)
+                order_id=await create_musical_order(order_id,event.get_ids()[1],image_url,audio_url,tariff)
                 order = await get_musical_order(order_id)
             if (await context.get_data()).get('music_checkout_session') != token:
                 return
             await context.update_data(music_checkout_id=order_id, music_checkout_source=key)
+            price=order['amount_kopecks']//100
+            text=(f'Стоимость музыкальной открытки — {price} ₽. Вы получите готовый MP4-файл с вашей открыткой и персональной песней, который можно отправить в мессенджере.')
+            if order.get('promo_token'):
+                text+=' Скидка 20%.'
             link = await payments.create_musical_payment_link(order_id=order_id, amount=price, description=order['product_name'])
             if (await context.get_data()).get('music_checkout_session') != token:
                 return
@@ -3406,15 +3556,23 @@ def create_router(
                      attachments=[audio_fun_result_keyboard(can_regenerate=False)])
 
     async def show_photo_tariffs(event: MessageCallback, context: MemoryContext, style: str) -> None:
+        promo_flow=(await context.get_data()).get('photo_promo_flow')
         await context.clear()
+        if promo_flow:
+            await context.update_data(photo_promo_flow=True)
         await context.set_state(PosterStates.waiting_for_mode)
         await context.update_data(photo_style=style)
         if style == "photo_style_ny":
             await send_menu_examples(event, PHOTO_FAMILY_EXAMPLE_FILES)
-        await _reply(
-            event, PHOTO_TARIFF_TEXT.format(style_name=PHOTO_STYLES[style]),
-            attachments=[navigation_keyboard(PHOTO_TARIFF_BUTTONS)],
-        )
+        if promo_flow and event.get_ids()[1]!=admin_user_id:
+            buttons=[]
+            for tariff,(base,name) in PHOTO_TARIFFS.items():
+                amount,_=await quote_repeat_price(event.get_ids()[1],'photo',base,name)
+                buttons.append((f'{name} — {amount//100} ₽',f'photo_tariff_{tariff}'))
+            await _reply(event,'Выберите фотопакет:',attachments=[navigation_keyboard((*buttons,('⬅️ Назад','promo_photo')))])
+        else:
+            await _reply(event,PHOTO_TARIFF_TEXT.format(style_name=PHOTO_STYLES[style]),
+                         attachments=[navigation_keyboard(PHOTO_TARIFF_BUTTONS)])
 
     @router.message_callback(F.callback.payload.in_(set(PHOTO_STYLES)))
     async def photo_style_menu(event: MessageCallback, context: MemoryContext) -> None:
@@ -3443,6 +3601,15 @@ def create_router(
             await event.ack(notification="Меню недоступно. Отправьте /start.")
             return
         data = await context.get_data()
+        if data.get('photo_promo_flow') and data.get('photo_style') in PHOTO_STYLES:
+            await event.ack(notification='Готовлю счёт…')
+            tariff=int(event.callback.payload.removeprefix('photo_tariff_'))
+            await increment_counter(PHOTO_CLICK_EVENTS[event.callback.payload],user_id=event.get_ids()[1])
+            await context.update_data(photo_tariff=f'photo_tariff_{tariff}',tariff=f'package_{tariff}')
+            await send_photo_trial_checkout(event,context,tariff)
+            if tariff==590 and data['photo_style']=='photo_style_ny':
+                await show_photo_template_options(event,with_intro=False)
+            return
         ny_trial = data.get("photo_style") == "photo_style_ny" and event.callback.payload == "photo_tariff_590"
         await event.ack(notification="Показываю ссылку…" if ny_trial else "Скоро будет доступно…")
         user_id = event.get_ids()[1]
@@ -3462,6 +3629,61 @@ def create_router(
             event, PHOTO_TARIFF_SOON_TEXT,
             attachments=[navigation_keyboard((("⬅️ Назад", "cat_photo"),))],
         )
+
+
+    @router.message_callback(F.callback.payload.startswith('photo_resume:'))
+    async def resume_paid_photo(event: MessageCallback,context: MemoryContext):
+        await event.ack(notification='Проверяю фотопакет…')
+        user_id=event.get_ids()[1]
+        order=await get_photo_order(event.callback.payload.removeprefix('photo_resume:'))
+        if event.message is None or not order or order['user_id']!=user_id or order['status']!='paid':
+            await _reply(event,'Оплаченный фотопакет недоступен.')
+            return
+        lock=generation_locks.setdefault(user_id,asyncio.Lock())
+        if lock.locked():
+            await _reply(event,'Фотосессия уже создаётся. Пожалуйста, подождите.')
+            return
+        if order['tariff']!=590 or order['style'] not in (None,'photo_style_ny'):
+            await _reply(event,'Ваш оплаченный фотопакет сохранён в очереди. Мы сообщим о готовности.')
+            return
+        await context.clear()
+        await context.update_data(photo_order_id=order['order_id'],photo_style='photo_style_ny',
+                                  photo_tariff='photo_tariff_590',tariff='trial_590',template=order['template'],photosession=True)
+        if order['reference_url']:
+            await context.update_data(photo={'url':order['reference_url']})
+        if order['template'] not in NY_FAMILY_PHOTOSESSION_PROMPTS:
+            await context.set_state(PosterStates.waiting_for_mode)
+            await show_photo_template_options(event)
+            return
+        await context.set_state(PosterStates.waiting_for_photosession_photo)
+        await run_family_photosession(event,context)
+
+    @router.message_created(Command('deliver_photo'))
+    async def deliver_paid_photo(event: MessageCreated):
+        if admin_user_id is None or event.get_ids()[1]!=admin_user_id or is_bot_message(event):
+            return
+        text=event.message.body.text if event.message and event.message.body else ''
+        parts=(text or '').split()
+        if len(parts)!=4 or not parts[2].isdigit():
+            await _reply(event,'Формат: /deliver_photo order_id номер_кадра https://ссылка-на-фото')
+            return
+        order=await get_photo_order(parts[1])
+        if not order or order['status']!='paid':
+            await _reply(event,'Оплаченный фотопакет не найден.')
+            return
+        lock=generation_locks.setdefault(order['user_id'],asyncio.Lock())
+        if lock.locked():
+            await _reply(event,'Эта фотосессия уже обрабатывается. Подождите.')
+            return
+        async with lock:
+            try:
+                await deliver_photo_result(event.bot,order['order_id'],int(parts[2]),parts[3],
+                                           admin_user_id=admin_user_id,uploader=upload_image_for_max)
+                remaining=await get_photo_package_balance(order['order_id'])
+                await _reply(event,f'Кадр отправлен. Осталось фото в пакете: {remaining}.')
+            except Exception:
+                logger.exception('Не удалось выдать кадр фотопакета %s:',order['order_id'])
+                await _reply(event,'Не удалось отправить кадр. Данные сохранены, повторите команду.')
 
     @router.message_callback(F.callback.payload == "photo_choose_template")
     async def photo_choose_template(event: MessageCallback, context: MemoryContext) -> None:
@@ -3537,6 +3759,19 @@ def create_router(
                 if template == "toddlers" else
                 "👑 Режим администратора: Оплата пропущена. Пожалуйста, загрузите общее фото семьи (3 и более человек) для генерации."
             )
+            return
+        paid=await get_photo_order(data.get('photo_order_id',''))
+        if paid and paid['user_id']==event.get_ids()[1] and paid['status']=='paid' and template in NY_FAMILY_PHOTOSESSION_PROMPTS:
+            results=await get_photo_results(paid['order_id'])
+            if results and paid['template']!=template:
+                await context.update_data(template=paid['template'])
+                await _reply(event,'В этом пакете уже создан кадр другого сюжета. Продолжите исходную фотосессию.',
+                    attachments=[navigation_keyboard((('Продолжить','photo_resume:'+paid['order_id']),))])
+                return
+            await update_photo_order(paid['order_id'],style='photo_style_ny',template=template)
+            await context.update_data(photosession=True)
+            await context.set_state(PosterStates.waiting_for_photosession_photo)
+            await run_family_photosession(event,context)
             return
         # Подтверждение платежа учитывается как фотозаказ, без начисления кредитов.
         await send_photo_trial_checkout(event, context)

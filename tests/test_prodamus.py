@@ -190,7 +190,7 @@ async def test_webhook_credits_paid_order_once(client, payments, credit_db, cred
     response = await post_notification(client, data, encoding=encoding)
     assert response.status == 200 and await response.text() == "OK"
     assert (await credit_db.get_user(456))["balance"] == credits + 1
-    assert await credit_db.get_all_counters() == {f"buy_{credits}": 1}
+    assert await credit_db.get_all_counters() == {f"buy_{credits}": 1, {1:"buy_credit_99",3:"buy_credit_199",5:"buy_credit_299",15:"buy_credit_799"}[credits]: 1}
     assert (await credit_db.get_user(456))["total_purchases"] == 1
     assert (await credit_db.get_global_stats())["total_revenue_credits"] == credits
     assert await credit_db.get_all_counters(admin_id=456) == {"gen_unclassified": 0}
@@ -200,7 +200,7 @@ async def test_webhook_credits_paid_order_once(client, payments, credit_db, cred
     await credit_db.init_db()  # Повтор после перезапуска и с новым attempt.
     data["attempt"] = "2"
     assert (await post_notification(client, data, encoding=encoding)).status == 200
-    assert await credit_db.get_all_counters() == {f"buy_{credits}": 1}
+    assert await credit_db.get_all_counters() == {f"buy_{credits}": 1, {1:"buy_credit_99",3:"buy_credit_199",5:"buy_credit_299",15:"buy_credit_799"}[credits]: 1}
     assert (await credit_db.get_user(456))["balance"] == credits + 1
     assert (await credit_db.get_user(456))["total_purchases"] == 1
     assert (await credit_db.get_global_stats())["total_revenue_credits"] == credits
@@ -446,7 +446,7 @@ async def test_package_counter_failure_rolls_back_payment_and_retry_counts_once(
     assert await credit_db.get_all_counters() == {}
     assert (await post_notification(client, data)).status == 200
     assert (await post_notification(client, data)).status == 200
-    assert await credit_db.get_all_counters() == {"buy_15": 1}
+    assert await credit_db.get_all_counters() == {"buy_15": 1, "buy_credit_799": 1}
 
 
 async def test_discount_link_has_149_price_but_credits_three_and_is_single_use(client, payments, credit_db):

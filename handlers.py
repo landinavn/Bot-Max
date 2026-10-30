@@ -35,7 +35,7 @@ from audio_service import create_audio_preview, song_audio_url, TEACHER_MUSIC_TA
 from metrika_service import extract_yclid, send_offline_conversion
 
 from database import (
-    CARTOON_TARIFFS, create_cartoon_order, get_cartoon_order, latest_paid_cartoon, finish_cartoon_order, update_cartoon_order,
+    create_photo_order, get_photo_order, CARTOON_TARIFFS, create_cartoon_order, get_cartoon_order, latest_paid_cartoon, finish_cartoon_order, update_cartoon_order,
     create_musical_order, get_musical_order,
     deduct_credit, get_user, grant_free_trial, get_global_stats, increment_generations,
     record_first_start, save_yclid, get_source_stats, get_stats_by_source, register_shared_image, get_shared_image,
@@ -765,9 +765,9 @@ def main_keyboard():
     ))
 
 
-def photo_trial_payment_keyboard():
+def photo_trial_payment_keyboard(url=PHOTO_TRIAL_PAYMENT_URL):
     return InlineKeyboardBuilder().row(
-        LinkButton(text="Оплатить 590 ₽", url=PHOTO_TRIAL_PAYMENT_URL)
+        LinkButton(text="Оплатить 590 ₽", url=url)
     ).row(CallbackButton(text="Выбрать сюжет", payload="photo_choose_template")).row(
         CallbackButton(text="⬅️ Назад", payload="photo_tariff_back")
     ).as_markup()
@@ -953,6 +953,30 @@ def create_router(
                 and data.get("photo_tariff") == "photo_tariff_590"
                 and data.get("template") in NY_FAMILY_PHOTOSESSION_PROMPTS)
 
+    async def send_photo_trial_checkout(event, context):
+        user_id = event.get_ids()[1]
+        # Preserve the existing static checkout when Prodamus is not configured.
+        if payments is None or user_id is None or user_id == admin_user_id:
+            await _reply(event, PHOTO_TRIAL_CHECKOUT_TEXT, attachments=[photo_trial_payment_keyboard()])
+            return
+        try:
+            data = await context.get_data()
+            order = await get_photo_order(data.get('photo_order_id', ''))
+            if not order or order['user_id'] != user_id or order['tariff'] != 590:
+                order_id = f'photo_{user_id}_{time_ns()}'
+                await create_photo_order(order_id, user_id, 590)
+                order = await get_photo_order(order_id)
+                await context.update_data(photo_order_id=order_id)
+            if order['status'] == 'paid':
+                await _reply(event, 'Оплата фотосессии уже подтверждена. Ваш заказ сохранён.')
+                return
+            link = await payments.create_payment_link(user_id, order_id=order['order_id'],
+                                                     amount=590, description=order['product_name'])
+            await _reply(event, PHOTO_TRIAL_CHECKOUT_TEXT, attachments=[photo_trial_payment_keyboard(link)])
+        except Exception:
+            logger.exception('Не удалось создать персональный счёт фотосессии:')
+            await _reply(event, 'Не удалось создать ссылку на оплату. Попробуйте выбрать тариф ещё раз.')
+
     async def run_family_photosession(event, context: MemoryContext) -> None:
         user_id = event.get_ids()[1]
         if user_id is None:
@@ -960,7 +984,7 @@ def create_router(
             return
         if admin_user_id is None or user_id != admin_user_id:
             await context.set_state(PosterStates.waiting_for_mode)
-            await _reply(event, PHOTO_TRIAL_CHECKOUT_TEXT, attachments=[photo_trial_payment_keyboard()])
+            await send_photo_trial_checkout(event, context)
             return
         lock = generation_locks.setdefault(user_id, asyncio.Lock())
         if lock.locked():
@@ -1293,127 +1317,57 @@ def create_router(
         activity = await get_advanced_stats(admin_id=admin_user_id)
         counters = await get_all_counters(admin_id=admin_user_id)
         sources = await get_source_stats(admin_id=admin_user_id)
-        yandex = await get_stats_by_source("yandex_newyear", admin_id=admin_user_id)
-        campaign_text = (
-            "\n\n📍 Статистика по кампании «Yandex New Year»:\n"
-            f"👥 Новые пользователи: {yandex['total_users']}\n"
-            f"🖼 Сгенерировали: {yandex['total_generated']}\n"
-            f"💳 Покупатели: {yandex['total_buyers']}\n"
-            f"💰 Оплат: {yandex['total_revenue']:.2f} ₽".replace(".", ",")
-        )
-        cartoon_labels = [
-            *((key + '_click', label) for key, label in CARTOON_THEMES.items()),
-            ('avatar_ok_1', 'Первый персонаж — да'), ('avatar_bad_1', 'Первый персонаж — нет'),
-            ('avatar_ok_2', 'Второй персонаж — да'), ('avatar_bad_2', 'Второй персонаж — нет'),
-            ('song_ok', 'Музыка одобрена'), ('song_bad', 'Изменить текст песни'),
-            ('video_success', 'Видео выдано'), ('video_fail', 'Ошибки видео'),
-        ]
-        all_cartoon_counts = await get_all_counters()
-        cartoon_counts = {key: max(0, all_cartoon_counts.get(key, 0) - counters.get(key, 0)) for key, _ in cartoon_labels}
-        cartoon_test_text = (
-            "\n\n🎬 Мульт-открытки — клиенты:\n"
-            + "\n".join(f"- {label}: {counters.get(key, 0)}" for key, label in cartoon_labels)
-            + f"\n- Покупок за 590 ₽: {counters.get('buy_cartoon_short', 0)}"
-            + f"\n- Покупок за 1290 ₽: {counters.get('buy_cartoon_long', 0)}"
-            + "\n\n🛠 Мульт-открытки — тесты администратора:\n"
-            + "\n".join(f"- {label}: {cartoon_counts.get(key, 0)}" for key, label in cartoon_labels)
-        )
         admin = await get_user(admin_user_id)
-        admin_text = (
-            "\n\n🛠 Тестовая активность (Админ):\n"
-            f"- Сгенерировано: {admin['total_generations'] if admin else 0}\n"
-            f"- Покупок: {admin['total_purchases'] if admin else 0}"
+        c = lambda key: counters.get(key, 0)
+        new_year = sum(c(key) for key in ('gen_ny', 'gen_ny_cozy', 'gen_ny_fairytale', 'gen_ny_elegant', 'gen_ny_family'))
+        sources_text = "\n".join(
+            f"- {row['label']}: {row['total_users']} польз. / {row['buyers']} покуп. / "
+            f"{row['revenue_kopecks'] // 100},{row['revenue_kopecks'] % 100:02d} ₽"
+            for row in sources
         )
-        source_text = "\n\n📍 Источники первого запуска (весь период):"
-        for source in sources:
-            amount = source["revenue_kopecks"]
-            revenue = f"{amount // 100:,}".replace(",", " ") + f",{amount % 100:02d} ₽"
-            source_text += (
-                f"\n\n{source['label']}\n"
-                f"👥 Новые пользователи: {source['new_users']}\n"
-                f"🖼 Пользователи с генерацией: {source['users_with_generation']}\n"
-                f"💳 Покупатели: {source['buyers']}\n"
-                f"💰 Сумма оплат: {revenue}"
-            )
-            if source["source"] == "legacy":
-                source_text += f"\nРанее зарегистрированы, дата и источник неизвестны: {source['total_users']}"
         await _reply(event,
-            "📊 Статистика бота:\n\n"
+            "📊 СТАТИСТИКА БОТА:\n\n"
             f"👥 Всего запускали: {activity['total_all']}\n"
-            f"🟢 Доступны для сообщений: {activity['total_active']}\n"
-            f"🔴 Заблокировали/Удалили: {activity['total_blocked']}\n"
-            f"🔄 Вернулись после 1-го дня: {activity['total_returned']}\n\n"
-            f"👥 Всего пользователей: {data['total_users']}\n"
-            f"💳 Покупателей: {data['total_paid_users']}\n"
-            "\n🛍 Проданные пакеты:\n"
-            f"- 1 генерация (99 ₽): {counters.get('buy_1', 0)}\n"
-            f"- 3 генерации (199 ₽; по акции 149 ₽): {counters.get('buy_3', 0)}\n"
-            f"- Из них по акции: {counters.get('buy_3_promo', 0)}\n"
-            f"- 5 генераций (299 ₽): {counters.get('buy_5', 0)}\n"
-            f"- 15 генераций (799 ₽): {counters.get('buy_15', 0)}\n"
-            "\n🖼 Сгенерировано картинок:\n"
-            f"- Карта желаний: {counters.get('gen_vision', 0)}\n"
-            f"- Новый год: {counters.get('gen_ny', 0)}\n"
-            f"- Семейный НГ: {counters.get('gen_ny_family', 0)}\n"
-            f"- ДР (Молодым): {counters.get('gen_bday_young', 0)}\n"
-            f"- ДР (Старшим): {counters.get('gen_bday_old', 0)}\n"
-            f"- Доброе утро: {counters.get('gen_goodmorning', 0)}\n"
-            f"- Уютный НГ: {counters.get('gen_ny_cozy', 0)}\n"
-            f"- Зимняя сказка: {counters.get('gen_ny_fairytale', 0)}\n"
-            f"- Элегантный НГ: {counters.get('gen_ny_elegant', 0)}\n"
-            f"- ДР Старшим 2: {counters.get('gen_bday_old_elegant', 0)}\n"
-            f"- Хэллоуин: {counters.get('gen_halloween', 0)}\n"
-            f"- Скрапбукинг: {counters.get('gen_scrapbook', 0)}\n"
-            f"- Учителям: {counters.get('gen_teacher', 0)}\n"
-            f"- Тренерам: {counters.get('gen_coach', 0)}\n\n"
-            f"Без разбивки по шаблонам (раньше): {counters.get('gen_unclassified', 0)}\n"
-            f"🖼 Всего сгенерировано картинок: {data['total_generated']}\n"
-            "\n📸 Выбор шаблонов Фотосессий:\n"
-            f"- Семейная 3+: {counters.get('select_photo_fam3', 0)}\n"
-            f"- Семейная 4+: {counters.get('select_photo_fam4', 0)}\n"
-            f"- Семейная с малышами: {counters.get('select_photo_toddlers', 0)}\n"
-            "\n🎵 Активность Аудиопесен:\n"
-            f"- Нажали «Не то, ещё раз» (регенерация): {counters.get('audio_regenerate_click', 0)}\n"
-            f"- Скачали MP3: {counters.get('audio_download_mp3', 0)}\n"
-            f"- Скачали минусовку: {counters.get('audio_download_inst', 0)}\n"
-            "\n🖱 Интерес к новым разделам:\n"
-            f"- Фотосессия (клики): {counters.get('click_photo', 0)}\n"
-            f"- Аудиопесни (клики): {counters.get('click_audio', 0)}\n"
-            f"- Песня по фану (199 ₽): {counters.get('click_audio_fun', 0)}\n"
-            f"- Песня в подарок (490 ₽): {counters.get('click_audio_gift', 0)}\n"
-            f"- Медитации (клики): {counters.get('click_meditation', 0)}\n"
-            f"- Видео — вход в меню: {counters.get('click_video_menu', 0)}\n"
-            f"- Старая кнопка анимации (клики): {counters.get('click_video_animate_199', 0)}\n"
-            f"- Старая кнопка видео (клики): {counters.get('click_video_full_249', 0)}\n"
-            f"- Музыкальный апселл за 149 ₽ (клики): {counters.get('click_music_upsell_149', 0)}\n\n"
-            "🎵 Интерес к Аудиопесням (сценарии):\n"
-            + "\n".join(
-                f"- {label}: {counters.get(AUDIO_FUN_COUNTERS[payload], 0)}"
-                for payload, (label, _) in AUDIO_FUN_SCENARIOS.items()
-            ) + "\n\n"
-            "🎁 Интерес к Аудиопесням (Подарочный формат):\n"
-            + "\n".join(
-                f"- {label}: {counters.get(AUDIO_GIFT_COUNTERS[payload], 0)}"
-                for payload, (label, _) in AUDIO_GIFT_SCENARIOS.items()
-            ) + "\n\n"
-            "🎵 Интерес к Аудиопесням (для видео):\n"
-            f"- 👨‍🏫 Для тренера / учителя: {counters.get('audio_scen_teacher_video', 0)}\n"
-            f"- 🎄 Новогодняя: {counters.get('audio_scen_ny_video', 0)}\n\n"
-            "🎬 Интерес к Мульт-услугам:\n"
-            f"- Мульт-открытка (клики): {counters.get('click_cartoon_short', 0)}\n"
-            f"- Мульт-поздравление (клики): {counters.get('click_cartoon_long', 0)}\n"
-            f"- Первый аватар — подошёл: {counters.get('avatar_ok_first', 0)}\n"
-            f"- Первый аватар — не похож: {counters.get('avatar_bad_first', 0)}\n"
-            f"- Второй аватар — подошёл: {counters.get('avatar_ok_second', 0)}\n"
-            f"- Второй аватар — не подошёл: {counters.get('avatar_bad_second', 0)}\n\n"
-            "📸 Интерес к Фотосессиям (клики):\n"
-            f"- Стиль: Студия: {counters.get('click_photo_studio', 0)}\n"
-            f"- Стиль: Прогулка: {counters.get('click_photo_walk', 0)}\n"
-            f"- Стиль: Новогодняя: {counters.get('click_photo_ny', 0)}\n\n"
-            f"- Тариф «Попробовать» (590): {counters.get('click_tariff_590', 0)}\n"
-            f"- Тариф «Фотосессия» (990): {counters.get('click_tariff_990', 0)}\n"
-            f"- Тариф «Премиум» (1490): {counters.get('click_tariff_1490', 0)}\n\n"
-            f"💰 Всего покупок: {data['total_purchases']}" + source_text + admin_text + cartoon_test_text + campaign_text
+            f"🟢 Доступны: {activity['total_active']} | 🔴 Заблокировали: {activity['total_blocked']}\n"
+            f"🔄 Вернулись на 2-й день: {activity['total_returned']}\n"
+            f"💳 Покупателей: {data['total_paid_users']}\n\n"
+            "💰 ПРОДАЖИ:\n"
+            "🛍 Пакеты кредитов:\n"
+            f"- 1 генерация (99 ₽): {c('buy_credit_99')}\n"
+            f"- 3 генерации (199 ₽ / 149 ₽): {c('buy_credit_199')} (из них по акции: {c('buy_credit_149')})\n"
+            f"- 5 генераций (299 ₽): {c('buy_credit_299')}\n"
+            f"- 15 генераций (799 ₽): {c('buy_credit_799')}\n\n"
+            "📸 Фотосессии:\n"
+            f"- Попробовать (590 ₽): {c('buy_photo_590')}\n"
+            f"- Стандарт (990 ₽): {c('buy_photo_990')}\n"
+            f"- Премиум (1490 ₽): {c('buy_photo_1490')}\n\n"
+            "🎵 Аудиопесни:\n"
+            f"- Песня по фану (199 ₽): {c('buy_song_199')}\n"
+            f"- Песня в подарок (490 ₽): {c('buy_song_490')}\n\n"
+            "💌 Музыкальные открытки:\n"
+            f"- Прямая покупка (299 ₽): {c('buy_music_direct')}\n"
+            f"- Апгрейд к открытке (доплата 149 ₽): {c('buy_music_upsell')}\n\n"
+            "🎬 Мульт-открытки:\n"
+            f"- Мульт-открытка (590 ₽): {c('buy_cartoon_590')}\n"
+            f"- Мульт-поздравление (1290 ₽): {c('buy_cartoon_1290')}\n\n"
+            f"💰 Всего покупок: {data['total_purchases']}\n\n"
+            "📍 ИСТОЧНИКИ ТРАФИКА:\n" + sources_text + "\n\n"
+            "🖼 СГЕНЕРИРОВАНО КАРТИНОК:\n"
+            f"- Карта желаний: {c('gen_vision')}\n"
+            f"- Новый год (все виды): {new_year}\n"
+            f"- ДР (Молодым): {c('gen_bday_young')} | ДР (Старшим): {c('gen_bday_old') + c('gen_bday_old_elegant')}\n"
+            f"- Доброе утро: {c('gen_goodmorning')}\n"
+            f"- Учителям: {c('gen_teacher')} | Тренерам: {c('gen_coach')}\n"
+            f"- Хэллоуин: {c('gen_halloween')}\n"
+            f"- Скрапбукинг: {c('gen_scrapbook')}\n"
+            f"- Всего сгенерировано: {data['total_generated']}\n\n"
+            "🖱 ИНТЕРЕС К КНОПКАМ (КЛИКИ):\n"
+            f"- Фотосессии: {c('click_photo')} (НГ: {c('click_photo_ny')} | Студия: {c('click_photo_studio')})\n"
+            f"- Аудиопесни: {c('click_audio')}\n"
+            f"- Мульт-услуги: {c('click_cartoon_short') + c('click_cartoon_long')}\n"
+            f"- Медитации: {c('click_meditation')}\n\n"
+            f"🛠 Админ (тесты): Сгенерировано {admin['total_generations'] if admin else 0}, "
+            f"Покупок {admin['total_purchases'] if admin else 0}."
         )
 
     @router.message_created(Command("broadcast"))
@@ -3499,7 +3453,7 @@ def create_router(
                 photo_style="photo_style_ny", photo_tariff="photo_tariff_590", tariff="trial_590",
                 photo_product_name="Фотосессия Попробовать", photo_amount_kopecks=59000,
             )
-            await _reply(event, PHOTO_TRIAL_CHECKOUT_TEXT, attachments=[photo_trial_payment_keyboard()])
+            await send_photo_trial_checkout(event, context)
             await show_photo_template_options(event, with_intro=False)
             return
         await _reply(
@@ -3582,9 +3536,8 @@ def create_router(
                 "👑 Режим администратора: Оплата пропущена. Пожалуйста, загрузите общее фото семьи (3 и более человек) для генерации."
             )
             return
-        # Готовая ссылка Prodamus используется без создания заказа пакета кредитов.
-        # Возврат и подтверждение оплаты фотосессии подключаются отдельно.
-        await _reply(event, PHOTO_TRIAL_CHECKOUT_TEXT, attachments=[photo_trial_payment_keyboard()])
+        # Подтверждение платежа учитывается как фотозаказ, без начисления кредитов.
+        await send_photo_trial_checkout(event, context)
 
     @router.message_callback(F.callback.payload.in_({"show_examples", "show_help"}))
     async def utility_menu(event: MessageCallback) -> None:

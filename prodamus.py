@@ -17,7 +17,7 @@ import aiohttp
 from yarl import URL
 
 from config import Config
-from database import get_cartoon_order, update_cartoon_order, CARTOON_TARIFFS, get_musical_order, update_musical_order, MUSICAL_TARIFFS, create_payment_order, get_payment_order, create_audio_order, get_audio_order, update_audio_order, SONG_PROMO_PRODUCT
+from database import get_photo_order, set_photo_payment_link, PHOTO_TARIFFS, get_cartoon_order, update_cartoon_order, CARTOON_TARIFFS, get_musical_order, update_musical_order, MUSICAL_TARIFFS, create_payment_order, get_payment_order, create_audio_order, get_audio_order, update_audio_order, SONG_PROMO_PRODUCT
 
 PACKAGES = {
     1: (9900, "1 генерация (Открытка)"),
@@ -153,6 +153,8 @@ class ProdamusPayments:
         if order_id is not None:
             if credits is not None or promo:
                 raise ValueError('Нельзя смешивать мульт-заказ и пакет кредитов.')
+            if order_id.startswith('photo_'):
+                return await self._create_photo_payment_link(user_id, order_id, amount, description)
             return await self._create_cartoon_payment_link(user_id, order_id, amount, description)
         if amount is not None or description is not None:
             raise ValueError('Для персональной оплаты нужен номер заказа.')
@@ -226,6 +228,27 @@ class ProdamusPayments:
         await update_audio_order(order_id, payment_link=link)
         return link
 
+    async def _create_photo_payment_link(self, user_id, order_id, amount, description) -> str:
+        order = await get_photo_order(order_id)
+        if (isinstance(amount, bool) or not isinstance(amount, int) or not order
+                or order['status'] != 'pending' or order['user_id'] != user_id
+                or order['amount_kopecks'] != amount * 100 or order['product_name'] != description):
+            raise ValueError('Параметры оплаты не совпадают с фотозаказом.')
+        if order['payment_link']:
+            return order['payment_link']
+        data = {
+            'do': 'link', 'order_id': order_id,
+            'products': [{'name': description, 'price': f'{amount}.00', 'quantity': '1'}],
+            'customer_extra': json.dumps({'user_id': user_id, 'credits': 0, 'package_id': order['package_id']}, separators=(',', ':')),
+            '_param_user_id': str(user_id), '_param_credits': '0', '_param_package_id': order['package_id'],
+            'urlReturn': self.return_url, 'urlSuccess': self.return_url, 'urlNotification': self.webhook_url,
+            'payments_limit': '1',
+        }
+        data['sign'] = sign_link_payload(data, self.secret)
+        link = await self._request_payment_link(data)
+        await set_photo_payment_link(order_id, link)
+        return link
+
     async def _create_cartoon_payment_link(self, user_id, order_id, amount, description) -> str:
         if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
             raise ValueError('Некорректная сумма мульт-заказа.')
@@ -275,6 +298,8 @@ class ProdamusPayments:
         order = await get_payment_order(order_id)
         if order is None:
             order = await get_audio_order(order_id)
+        if order is None and order_id.startswith('photo_'):
+            order = await get_photo_order(order_id)
         if order is None and order_id.startswith('cartoon_'):
             order = await get_cartoon_order(order_id)
         if order is None and order_id.startswith('music_'):
@@ -320,6 +345,9 @@ class ProdamusPayments:
                         'audio_gift_first': (39200, SONG_PROMO_PRODUCT)}
             if expected.get(order['package_id']) != (order['amount_kopecks'], order['product_name']):
                 raise ValueError('Неизвестный аудиотариф.')
+        elif order.get('order_type') == 'photo':
+            if PHOTO_TARIFFS.get(order['tariff']) != (order['amount_kopecks'], order['product_name']):
+                raise ValueError('Неизвестный фототариф.')
         elif order.get('order_type') == 'cartoon':
             # Сумма уже сверена с сохранённым заказом: ранее выданные счета
             # остаются действительными после изменения прайса.

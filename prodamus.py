@@ -19,6 +19,7 @@ from yarl import URL
 
 from config import Config
 from database import repeat_order_value, validate_repeat_invoice, get_photo_order, set_photo_payment_link, PHOTO_TARIFFS, get_cartoon_order, update_cartoon_order, CARTOON_TARIFFS, get_musical_order, update_musical_order, MUSICAL_TARIFFS, create_payment_order, get_payment_order, create_audio_order, get_audio_order, update_audio_order, SONG_PROMO_PRODUCT
+from database import get_animation_order, update_animation_order, ANIMATION_TARIFFS
 
 PACKAGES = {
     1: (9900, "1 генерация (Открытка)"),
@@ -156,6 +157,8 @@ class ProdamusPayments:
         if order_id is not None:
             if credits is not None or promo:
                 raise ValueError('Нельзя смешивать мульт-заказ и пакет кредитов.')
+            if order_id.startswith('animate_'):
+                return await self._create_animation_payment_link(user_id, order_id, amount, description)
             if order_id.startswith(('photo_','promo_photo_')):
                 return await self._create_photo_payment_link(user_id, order_id, amount, description)
             if order_id.startswith(('music_','promo_music_card_')):
@@ -252,6 +255,26 @@ class ProdamusPayments:
         await update_audio_order(order_id, payment_link=link)
         return link
 
+    async def _create_animation_payment_link(self, user_id, order_id, amount, description) -> str:
+        order = await get_animation_order(order_id)
+        tariff = ANIMATION_TARIFFS.get(order['tariff']) if order else None
+        if (isinstance(amount, bool) or not isinstance(amount, int) or not order
+                or order['status'] != 'pending' or order['is_admin'] or order['user_id'] != user_id
+                or tariff != (order['amount_kopecks'], order['quantity'], order['product_name'])
+                or amount * 100 != order['amount_kopecks'] or description != order['product_name']):
+            raise ValueError('Параметры оплаты не совпадают с заказом оживления фото.')
+        if order['payment_link']:
+            return order['payment_link']
+        data = {'do': 'link', 'order_id': order_id,
+            'products': [{'name': description, 'price': f'{amount}.00', 'quantity': '1'}],
+            '_param_user_id': str(user_id), '_param_credits': '0', '_param_package_id': order['package_id'],
+            'urlReturn': self.return_url, 'urlSuccess': self.return_url, 'urlNotification': self.webhook_url,
+            'payments_limit': '1'}
+        data['sign'] = sign_link_payload(data, self.secret)
+        link = await self._request_payment_link(data)
+        await update_animation_order(order_id, payment_link=link)
+        return link
+
     async def _create_photo_payment_link(self, user_id, order_id, amount, description) -> str:
         order = await get_photo_order(order_id)
         if (isinstance(amount, bool) or not isinstance(amount, int) or not order
@@ -332,7 +355,8 @@ class ProdamusPayments:
         candidates = [await get_payment_order(order_id), await get_audio_order(order_id)]
         for prefixes,getter in ((('photo_','promo_photo_'),get_photo_order),
                                 (('cartoon_','promo_cartoon_'),get_cartoon_order),
-                                (('music_','promo_music_card_'),get_musical_order)):
+                                (('music_','promo_music_card_'),get_musical_order),
+                                (('animate_',),get_animation_order)):
             if order_id.startswith(prefixes):
                 candidates.append(await getter(order_id))
         orders = [dict(candidate) for candidate in candidates if candidate is not None]
@@ -372,7 +396,11 @@ class ProdamusPayments:
                 raise ValueError("Метаданные пакета не соответствуют заказу.")
         # Сумма уже сверена с сохранённым заказом выше: смена прайса не должна
         # блокировать оплату ссылки, выданной до изменения цены.
-        if order.get('order_type') == 'audio':
+        if order.get('order_type') == 'animation':
+            if (order['is_admin'] or ANIMATION_TARIFFS.get(order['tariff']) !=
+                    (order['amount_kopecks'], order['quantity'], order['product_name'])):
+                raise ValueError('Неизвестный тариф оживления фото.')
+        elif order.get('order_type') == 'audio':
             expected = {'audio_fun': (19900, 'Песня по фану'), 'audio_gift': (49000, 'Песня в подарок'),
                         'audio_gift_first': (39200, SONG_PROMO_PRODUCT)}
             if expected.get(order['package_id']) != (order['amount_kopecks'], order['product_name']):

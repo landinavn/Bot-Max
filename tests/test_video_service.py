@@ -234,7 +234,7 @@ async def test_supplied_count_avoids_duplicate_vision_and_custom_prompt_cannot_a
 ])
 def test_cartoon_kling_prompt_uses_exact_short_themed_animation(theme,details):
     assert video.build_video_prompt(theme)==video.CARTOON_VIDEO_PROMPTS[theme]
-    assert video.CARTOON_VIDEO_PROMPTS[theme]=='The character is smiling, blinking naturally, and slightly moving their head from side to side. '+details
+    assert video.CARTOON_VIDEO_PROMPTS[theme]==video.CARTOON_ANIMATION_PROMPT+' '+details
 
 
 @pytest.mark.parametrize('response', [

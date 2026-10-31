@@ -17,17 +17,26 @@ TASK_URL = "https://api.piapi.ai/api/v1/task"
 POLL_INTERVAL = 15
 REQUEST_TIMEOUT = 30
 DEFAULT_ANIMATION_PROMPT = "The character is smiling, blinking naturally, and slightly moving their head from side to side."
+CARTOON_ANIMATION_PROMPT = (DEFAULT_ANIMATION_PROMPT +
+    ' The character makes small, natural hand gestures and subtle upper-body movements. '
+    'Keep hands anatomically correct; no exaggerated gestures.')
+PHOTO_ANIMATION_PROMPT = (
+    'Bring this real photograph gently to life. Preserve the exact identities, ages, clothing, and background. '
+    'If people are present, add natural blinking, a slight warm smile, subtle breathing and gentle head movement. '
+    'If hands are visible, add small natural hand movements. Keep the camera steady. '
+    'Photorealistic, no cartoon transformation, no new people, no distorted faces or extra limbs.'
+)
 
 
 CARTOON_VIDEO_PROMPTS = {
-    'theme_ny': DEFAULT_ANIMATION_PROMPT + ' Snow is falling, fairy lights are twinkling.',
-    'theme_bday': DEFAULT_ANIMATION_PROMPT + ' Balloons are floating, confetti is falling.',
-    'theme_bday_kid': DEFAULT_ANIMATION_PROMPT + ' Pastel balloons are bobbing, confetti is floating.',
-    'theme_valentine': DEFAULT_ANIMATION_PROMPT + ' Hearts are pulsing, rose petals are falling.',
-    'theme_feb23': DEFAULT_ANIMATION_PROMPT + ' The St. George ribbon is waving, snow is falling.',
-    'theme_mar8': DEFAULT_ANIMATION_PROMPT + ' Flowers are swaying, sunlight is shimmering.',
-    'theme_mother': DEFAULT_ANIMATION_PROMPT + ' Soft particles are floating.',
-    'theme_father': DEFAULT_ANIMATION_PROMPT + ' Warm light is flickering, dust motes are floating.',
+    'theme_ny': CARTOON_ANIMATION_PROMPT + ' Snow is falling, fairy lights are twinkling.',
+    'theme_bday': CARTOON_ANIMATION_PROMPT + ' Balloons are floating, confetti is falling.',
+    'theme_bday_kid': CARTOON_ANIMATION_PROMPT + ' Pastel balloons are bobbing, confetti is floating.',
+    'theme_valentine': CARTOON_ANIMATION_PROMPT + ' Hearts are pulsing, rose petals are falling.',
+    'theme_feb23': CARTOON_ANIMATION_PROMPT + ' The St. George ribbon is waving, snow is falling.',
+    'theme_mar8': CARTOON_ANIMATION_PROMPT + ' Flowers are swaying, sunlight is shimmering.',
+    'theme_mother': CARTOON_ANIMATION_PROMPT + ' Soft particles are floating.',
+    'theme_father': CARTOON_ANIMATION_PROMPT + ' Warm light is flickering, dust motes are floating.',
 }
 
 
@@ -63,6 +72,10 @@ class VideoServiceError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.http_status = http_status
+
+
+class VideoTaskFailed(VideoServiceError):
+    """PiAPI explicitly marked an accepted task as failed; polling cannot repair it."""
 
 
 def _api_key() -> str:
@@ -179,7 +192,7 @@ async def poll_video_task(task_id: str, timeout: int = 1200) -> str:
                         return video_url
                     if status == "failed":
                         detail = data.get("error") or data.get("message") or "Причина не указана"
-                        raise VideoServiceError(f"PiAPI: задача завершилась с ошибкой: {_safe_detail(detail, key)}")
+                        raise VideoTaskFailed(f"PiAPI: задача завершилась с ошибкой: {_safe_detail(detail, key)}")
     except TimeoutError:
         logger.error("PiAPI: таймаут ожидания задачи %s (%s секунд)", task_id, timeout)
         raise TimeoutError(f"Таймаут ожидания PiAPI ({timeout} секунд), task_id={task_id}") from None

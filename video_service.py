@@ -22,8 +22,11 @@ CARTOON_ANIMATION_PROMPT = (DEFAULT_ANIMATION_PROMPT +
     'Keep hands anatomically correct; no exaggerated gestures.')
 PHOTO_ANIMATION_PROMPT = (
     'Bring this real photograph gently to life. Preserve the exact identities, ages, clothing, and background. '
-    'If people are present, add natural blinking, a slight warm smile, subtle breathing and gentle head movement. '
-    'If hands are visible, add small natural hand movements. Keep the camera steady. '
+    'If people are present, add natural blinking and warm smiles. '
+    'If a person has a hand already visible in the photo, let them give a small, slow wave with ONLY ONE existing visible hand. '
+    'Keep their other hand and body still. If no hand is visible, animate only smiling and blinking; do not introduce a hand. '
+    'Preserve the original number of arms and hands and their anatomy. No extra, duplicated or newly appearing hands, arms or fingers. '
+    'Keep the camera steady. '
     'Photorealistic, no cartoon transformation, no new people, no distorted faces or extra limbs.'
 )
 

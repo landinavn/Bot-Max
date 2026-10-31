@@ -30,7 +30,7 @@ class PaidAnimationWorker:
         keyboard=InlineKeyboardBuilder().row(CallbackButton(text='📷 Загрузить фотографию',
             payload='animation_resume:'+order_id)).as_markup()
         sent=await self.bot.send_message(user_id=order['user_id'],
-            text=f"✅ Пакет оживления фото доступен: {order['quantity']} фото. Каждый ролик — 5 секунд. Нажмите кнопку и отправьте фото.",
+            text=f"✅ Пакет оживления фото доступен: {order['quantity']} фото. Каждый ролик — 5 секунд. Нажмите кнопку и отправьте фото, на котором не более 5 человек.",
             attachments=[keyboard])
         if sent is None: raise RuntimeError('MAX не подтвердил запрос фото.')
         await update_animation_order(order_id,notified=1)

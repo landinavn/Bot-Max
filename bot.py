@@ -18,6 +18,7 @@ from musical_orders import PaidMusicalWorker
 from cartoon_orders import PaidCartoonWorker
 from photo_orders import PaidPhotoWorker
 from promo_service import PromoOfferWorker
+from animation_orders import PaidAnimationWorker
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,7 @@ async def main() -> None:
         cartoon_task = None
         photo_task = None
         promo_task = None
+        animation_task = None
         musical_worker = PaidMusicalWorker(bot, bot_link=config.bot_link,admin_user_id=config.admin_user_id)
         audio_worker = PaidAudioWorker(bot, payments=payments, admin_user_id=config.admin_user_id)
         try:
@@ -68,10 +70,17 @@ async def main() -> None:
             cartoon_task = asyncio.create_task(PaidCartoonWorker(bot).run())
             photo_task = asyncio.create_task(PaidPhotoWorker(bot, admin_user_id=config.admin_user_id).run())
             promo_task = asyncio.create_task(PromoOfferWorker(bot,admin_user_id=config.admin_user_id).run())
+            animation_task = asyncio.create_task(PaidAnimationWorker(bot,admin_user_id=config.admin_user_id).run())
             logger.info("Запуск получения обновлений MAX.")
             await dispatcher.start_polling(bot)
         finally:
             try:
+                if animation_task is not None:
+                    animation_task.cancel()
+                    try:
+                        await animation_task
+                    except asyncio.CancelledError:
+                        pass
                 if promo_task is not None:
                     promo_task.cancel()
                     try:

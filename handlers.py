@@ -5,7 +5,7 @@ import logging
 import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from urllib.parse import unquote, urlencode, urlsplit
+from urllib.parse import unquote, urlencode, urlsplit, parse_qsl, urlunsplit
 from uuid import uuid4
 from time import time_ns
 from weakref import WeakValueDictionary
@@ -36,6 +36,8 @@ from audio_service import create_audio_preview, song_audio_url, TEACHER_MUSIC_TA
 from metrika_service import extract_yclid, send_offline_conversion
 
 from database import (
+    create_animation_order, get_animation_order, animation_orders_for_user, animation_first_price,
+    queue_animation_photo, update_animation_order,
     get_active_promo,quote_repeat_price,get_promo_reservation,PromoReservedError,
     PHOTO_TARIFFS,PHOTO_PACKAGE_SIZES,get_photo_results,get_photo_package_balance,save_photo_result,
     create_photo_order, get_photo_order, update_photo_order, CARTOON_TARIFFS, create_cartoon_order, get_cartoon_order, latest_paid_cartoon, finish_cartoon_order, update_cartoon_order,
@@ -279,6 +281,7 @@ CATEGORY_BUTTONS = (
     ("🎬 Мульт-открытка — Новинка 🔥", "cat_cartoon"),
     ("👑 Эксклюзив (ручная работа) — от 2 000 ₽", "custom_order"),
     ("📸 Нейрофотосессия", "cat_photo"),
+    ("✨ Оживление фотографий", "cat_animation"),
     ("🎵 Аудиопесни", "cat_audio"),
     ("🎁 Открытки", "cat_cards"),
     ("🔮 Карта Желаний", "cat_vision"),
@@ -703,6 +706,7 @@ async def purchase_keyboard(user_id: int | None):
 
 
 class PosterStates(StatesGroup):
+    waiting_for_animation_photo = State()
     waiting_for_custom_occasion = State()
     waiting_for_custom_contact = State()
     waiting_for_custom_names = State()
@@ -798,6 +802,13 @@ def main_keyboard():
     return navigation_keyboard(CATEGORY_BUTTONS, footer=(
         ("🖼 Примеры", "show_examples"), ("🆘 Помощь", "show_help"),
     ))
+
+
+def campaign_bot_link(bot_link, source):
+    parts = urlsplit(bot_link)
+    params = dict(parse_qsl(parts.query))
+    params['start'] = source
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(params), parts.fragment))
 
 
 def photo_trial_payment_keyboard(url):
@@ -1435,16 +1446,23 @@ def create_router(
             f"- Апгрейд к открытке (доплата 149 ₽): {c('buy_music_upsell')}\n\n"
             "🎬 Мульт-открытки:\n"
             f"- Мульт-открытка (590 ₽): {c('buy_cartoon_590')}\n"
-            f"- Мульт-поздравление (1290 ₽): {c('buy_cartoon_1290')}\n\n"
+            "\n"
+            "✨ Оживление фотографий:\n"
+            f"- Первый запуск (199 ₽): {c('buy_animation_intro')}\n"
+            f"- 1 фотография (249 ₽): {c('buy_animation_one')}\n"
+            f"- 3 фотографии (599 ₽): {c('buy_animation_three')}\n"
+            f"- 5 фотографий (899 ₽): {c('buy_animation_five')}\n"
+            f"- Создано роликов: {c('gen_animation')}\n\n"
             f"💰 Всего покупок: {data['total_purchases']}\n\n"
             "🔁 Повторные покупки со скидкой 20%:\n"
             f"- Музыкальные открытки: {c('promo_buy_music_card')}\n"
             f"- Мульт-открытки (590): {c('promo_buy_cartoon_590')}\n"
-            f"- Мульт-открытки (1290): {c('promo_buy_cartoon_1290')}\n"
             f"- Фотосессии (590): {c('promo_buy_photo_590')}\n"
             f"- Фотосессии (990): {c('promo_buy_photo_990')}\n"
             f"- Фотосессии (1490): {c('promo_buy_photo_1490')}\n\n"
             "📍 ИСТОЧНИКИ ТРАФИКА:\n" + sources_text + "\n\n"
+            f"🔗 Ссылка для постов ВК: {campaign_bot_link(bot_link, 'vk_posts')}\n"
+            f"🔗 Ссылка для Дзена: {campaign_bot_link(bot_link, 'dzen_posts')}\n\n"
             "🖼 СГЕНЕРИРОВАНО КАРТИНОК:\n"
             f"- Карта желаний: {c('gen_vision')}\n"
             f"- Новый год (все виды): {new_year}\n"
@@ -1457,7 +1475,9 @@ def create_router(
             "🖱 ИНТЕРЕС К КНОПКАМ (КЛИКИ):\n"
             f"- Фотосессии: {c('click_photo')} (НГ: {c('click_photo_ny')} | Студия: {c('click_photo_studio')})\n"
             f"- Аудиопесни: {c('click_audio')}\n"
-            f"- Мульт-услуги: {c('click_cartoon_short') + c('click_cartoon_long')}\n"
+            f"- Мульт-открытки: {c('click_cartoon_short')}\n"
+            f"- Эксклюзив (ручная работа): {c('click_custom_order')}\n"
+            f"- Оживление фотографий: {c('click_animation')}\n"
             f"- Медитации: {c('click_meditation')}\n\n"
             "👑 Эксклюзив (ручная работа):\n"
             f"- Клики по кнопке: {c('click_custom_order')}\n"
@@ -1989,6 +2009,96 @@ def create_router(
             return
         product=CARTOON_PRODUCTS['cat_cartoon']
         await send_cartoon_checkout(event,context,data['cartoon_theme'],product)
+
+    async def show_animation_photo_request(event, context, order):
+        rows = await animation_orders_for_user(order['user_id'])
+        remaining = next((row['remaining'] for row in rows if row['order_id'] == order['order_id']), 0)
+        if remaining <= 0:
+            await _reply(event, 'Все фотографии этого пакета уже приняты. Готовые видео придут в этот чат.',
+                attachments=[navigation_keyboard((('✨ Купить ещё оживление', 'cat_animation'), ('⬅️ Назад', 'back_to_main')))])
+            return
+        await context.clear()
+        await context.update_data(animation_order_id=order['order_id'])
+        await context.set_state(PosterStates.waiting_for_animation_photo)
+        await update_animation_order(order['order_id'], notified=1)
+        await _reply(event, f'📷 Отправьте одну фотографию как изображение. Осталось в пакете: {remaining}. '
+            'Мы бережно сохраним внешность и добавим естественные движения. Видео — 5 секунд. /cancel — отмена.',
+            attachments=[navigation_keyboard((('⬅️ Назад', 'back_to_main'),))])
+
+    @router.message_callback(F.callback.payload == 'cat_animation')
+    async def animation_menu(event: MessageCallback, context: MemoryContext):
+        await event.ack(notification='Открываю оживление фотографий…')
+        user_id = event.get_ids()[1]
+        if event.message is None or user_id is None:
+            return
+        if await context.get_state() in (PosterStates.generating, PosterStates.cartoon_generating,
+                                         PosterStates.waiting_for_audio_generation):
+            await _reply(event, 'Текущая генерация ещё не завершена. Пожалуйста, подождите.')
+            return
+        await increment_counter('click_animation', user_id=user_id)
+        await context.clear()
+        price = await animation_first_price(user_id)
+        choices = [(f'1 фотография — {price} ₽', 'animation_buy:one'),
+                   ('3 фотографии — 599 ₽', 'animation_buy:three'),
+                   ('5 фотографий — 899 ₽', 'animation_buy:five')]
+        for order in await animation_orders_for_user(user_id):
+            if order['remaining'] > 0:
+                choices.append((f"📷 Продолжить пакет (осталось {order['remaining']})", 'animation_resume:' + order['order_id']))
+        choices.append(('⬅️ Назад', 'back_to_main'))
+        await _reply(event, '✨ Оживление фотографий\n\n'
+            'Превратим вашу фотографию в живое видео: естественные улыбки, моргание и лёгкие движения. '
+            'Сохраняем лица и исходный стиль фотографии.\n\n'
+            '• 1 оживлённая фотография, 5 секунд видео — 249 ₽\n'
+            '• При первом запуске — 199 ₽ (один раз)\n'
+            '• 3 фотографии — 599 ₽\n• 5 фотографий — 899 ₽\n\n'
+            'Каждая фотография — отдельный ролик на 5 секунд. Выберите пакет:',
+            attachments=[navigation_keyboard(choices)])
+
+    @router.message_callback(F.callback.payload.startswith('animation_buy:'))
+    async def animation_buy(event: MessageCallback, context: MemoryContext):
+        await event.ack(notification='Готовлю пакет…')
+        user_id = event.get_ids()[1]
+        package = event.callback.payload.removeprefix('animation_buy:')
+        if event.message is None or user_id is None or package not in ('one', 'three', 'five'):
+            return
+        if await context.get_state() in (PosterStates.generating, PosterStates.cartoon_generating,
+                                         PosterStates.waiting_for_audio_generation):
+            await _reply(event, 'Текущая генерация ещё не завершена. Пожалуйста, подождите.')
+            return
+        if user_id != admin_user_id and payments is None:
+            await _reply(event, 'Оплата временно недоступна. Пожалуйста, попробуйте позже.')
+            return
+        try:
+            order = await create_animation_order(user_id, package, admin=user_id == admin_user_id)
+            if user_id == admin_user_id:
+                await _reply(event, '👑 Режим администратора: Оплата пропущена.')
+                await show_animation_photo_request(event, context, order)
+                return
+            link = await payments.create_payment_link(user_id, order_id=order['order_id'],
+                amount=order['amount_kopecks'] // 100, description=order['product_name'])
+            await _reply(event, f"Пакет: {order['quantity']} фото, по 5 секунд видео. Стоимость — {order['amount_kopecks'] // 100} ₽. "
+                'После оплаты вернитесь в бот — я пришлю кнопку загрузки фотографии.',
+                attachments=[InlineKeyboardBuilder().row(LinkButton(
+                    text=f"Оплатить {order['amount_kopecks'] // 100} ₽", url=link)).row(CallbackButton(
+                    text='📷 Продолжить после оплаты', payload='animation_resume:' + order['order_id'])).as_markup()])
+        except Exception:
+            logger.exception('Не удалось создать счёт оживления фото для %s:', user_id)
+            await _reply(event, 'Не удалось создать ссылку оплаты. Попробуйте ещё раз — сохранённый счёт будет использован повторно.')
+
+    @router.message_callback(F.callback.payload.startswith('animation_resume:'))
+    async def animation_resume(event: MessageCallback, context: MemoryContext):
+        await event.ack(notification='Проверяю пакет…')
+        if event.message is None:
+            return
+        order = await get_animation_order(event.callback.payload.removeprefix('animation_resume:'))
+        if not order or order['user_id'] != event.get_ids()[1] or order['status'] != 'paid':
+            await _reply(event, 'Оплата ещё не подтверждена или пакет недоступен. Дождитесь подтверждения и попробуйте снова.')
+            return
+        if await context.get_state() in (PosterStates.generating, PosterStates.cartoon_generating,
+                                         PosterStates.waiting_for_audio_generation):
+            await _reply(event, 'Текущая генерация ещё не завершена. Пожалуйста, подождите.')
+            return
+        await show_animation_photo_request(event, context, order)
 
     async def show_custom_order(event, context):
         if event.message is None or event.get_ids()[1] is None:
@@ -4309,6 +4419,33 @@ def create_router(
         if not is_bot_message(event):
             await _reply(event, "Плакат уже создаётся. Пожалуйста, подождите.")
 
+    @router.message_created(PosterStates.waiting_for_animation_photo)
+    async def collect_animation_photo(event: MessageCreated, context: MemoryContext):
+        if is_bot_message(event):
+            return
+        data = await context.get_data()
+        order = await get_animation_order(data.get('animation_order_id', ''))
+        if not order or order['user_id'] != event.get_ids()[1] or order['status'] != 'paid':
+            await _reply(event, 'Выберите оплаченный пакет в разделе «Оживление фотографий».')
+            return
+        body = event.message.body
+        photos = [a for a in (getattr(body, 'attachments', None) or []) if a.type == 'image'
+                  and isinstance(a.payload, PhotoAttachmentPayload) and a.payload.url]
+        if len(photos) != 1:
+            await _reply(event, 'Отправьте одну фотографию как изображение. Для пакета отправляйте фото по одному.')
+            return
+        try:
+            await queue_animation_photo(order['user_id'], order['order_id'], photos[0].payload.url,
+                getattr(body, 'mid', None) or uuid4().hex)
+        except ValueError as exc:
+            await _reply(event, str(exc), attachments=[navigation_keyboard((('✨ Оживление фотографий', 'cat_animation'),))])
+            return
+        rows = await animation_orders_for_user(order['user_id'])
+        remaining = next(row['remaining'] for row in rows if row['order_id'] == order['order_id'])
+        await _reply(event, '🎬 Фотография принята! Создаю 5-секундное видео. Это может занять 5–15 минут. '
+            'Я пришлю результат в этот чат.\n\n' + (f'Можно отправить следующее фото. Осталось: {remaining}.' if remaining
+            else 'Все фото пакета приняты.'))
+
     @router.message_created(PosterStates.waiting_for_custom_occasion)
     @router.message_created(PosterStates.waiting_for_custom_contact)
     @router.message_created(PosterStates.waiting_for_custom_names)
@@ -4354,6 +4491,9 @@ def create_router(
         if is_bot_message(event):
             return
         state = await context.get_state()
+        if state == PosterStates.waiting_for_animation_photo:
+            await collect_animation_photo(event, context)
+            return
         if state in tuple(step[0] for step in CUSTOM_FORM_STEPS) + (PosterStates.waiting_for_custom_deadline,):
             await collect_custom_form(event, context)
             return

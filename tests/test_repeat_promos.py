@@ -308,7 +308,8 @@ async def test_repeat_stats_block_after_sales_excludes_admin(credit_db):
     await call_handler(create_router(admin_user_id=999),'stats',event)
     text=event.message.answer.await_args.args[0]
     assert text.index('Всего покупок:')<text.index('🔁 Повторные покупки')<text.index('📍 ИСТОЧНИКИ')
-    for label in ('Музыкальные открытки','Мульт-открытки (590)','Мульт-открытки (1290)',
+    assert 'Мульт-открытки (1290)' not in text
+    for label in ('Музыкальные открытки','Мульт-открытки (590)',
                   'Фотосессии (590)','Фотосессии (990)','Фотосессии (1490)'):
         assert f'- {label}: 1' in text
 

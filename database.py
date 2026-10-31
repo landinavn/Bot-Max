@@ -24,6 +24,8 @@ def _now_ts() -> int:
 
 SOURCE_LABELS = {
     "vk_ads": "Реклама VK",
+    "vk_posts": "Посты ВК",
+    "dzen_posts": "Посты Дзена",
     "yandex_ads": "Реклама Яндекса",
     "yandex_newyear": "Yandex New Year",
     "unmarked": "Без метки",
@@ -271,6 +273,7 @@ async def init_db() -> None:
                    SELECT user_id, 'buy_3_promo', COUNT(*) FROM payment_orders
                    WHERE status = 'paid' AND package_id = 'promo_3' GROUP BY user_id"""
             )
+        await _init_animation_orders(db)
         await _init_repeat_promos(db)
         await _backfill_sale_counters(db, force=not counters_exist or not user_counters_exist)
         await db.commit()
@@ -467,6 +470,9 @@ async def add_credits(
             async with db.execute('SELECT 1 FROM photo_orders WHERE provider_payment_id=?', (provider_payment_id,)) as cursor:
                 if await cursor.fetchone():
                     raise ValueError('Платёж уже использован для фотосессии.')
+            async with db.execute('SELECT 1 FROM animation_orders WHERE provider_payment_id=?', (provider_payment_id,)) as cursor:
+                if await cursor.fetchone():
+                    raise ValueError('Платёж уже использован для оживления фото.')
             await db.execute(
                 """UPDATE payment_orders SET status = 'paid', provider_payment_id = ?,
                    paid_at = CURRENT_TIMESTAMP WHERE order_id = ?""",
@@ -693,11 +699,11 @@ async def record_first_start(user_id: int, payload: str | None = None, *, timest
     source = payload.strip() if isinstance(payload, str) else None
     if source and not source.startswith('share_'):
         campaign = unquote(source).split('?', 1)[0].split('&', 1)[0]
-        if campaign in {'vk_ads', 'yandex_ads', 'yandex_newyear'}:
+        if campaign in {'vk_ads', 'yandex_ads', 'yandex_newyear', 'vk_posts', 'dzen_posts'}:
             source = campaign
     if source and "yandex_newyear" in source and not source.startswith("share_"):
         source = "yandex_newyear"
-    if source not in {"vk_ads", "yandex_ads", "yandex_newyear"}:
+    if source not in {"vk_ads", "yandex_ads", "yandex_newyear", "vk_posts", "dzen_posts"}:
         source = "unmarked"
     started_at = (
         datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
@@ -756,6 +762,8 @@ async def get_source_stats(admin_id: int | None = None) -> list[dict]:
                    SELECT user_id, amount_kopecks FROM cartoon_orders WHERE status IN ('paid','completed','manual')
                    UNION ALL
                    SELECT user_id, amount_kopecks FROM photo_orders WHERE status = 'paid'
+                   UNION ALL
+                   SELECT user_id, amount_kopecks FROM animation_orders WHERE status = 'paid' AND is_admin=0
                  ) GROUP BY user_id
                ) p ON p.user_id = u.user_id
                WHERE (? IS NULL OR u.user_id != ?)
@@ -943,6 +951,9 @@ async def mark_audio_paid(order_id: str, payment_id: str) -> bool:
         async with db.execute('SELECT 1 FROM photo_orders WHERE provider_payment_id=?', (payment_id,)) as cursor:
             if await cursor.fetchone():
                 raise ValueError('Платёж уже использован для фотосессии.')
+        async with db.execute('SELECT 1 FROM animation_orders WHERE provider_payment_id=?', (payment_id,)) as cursor:
+            if await cursor.fetchone():
+                raise ValueError('Платёж уже использован для оживления фото.')
         await db.execute("UPDATE audio_orders SET status='paid', provider_payment_id=?, paid_at=CURRENT_TIMESTAMP WHERE order_id=?", (payment_id,order_id))
         await db.execute('INSERT INTO users(user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING', (order['user_id'],))
         await increment_purchases(order['user_id'], connection=db)
@@ -1074,7 +1085,7 @@ async def mark_musical_paid(order_id: str, payment_id: str) -> bool:
             if order['provider_payment_id'] != payment_id:
                 raise ValueError('Заказ уже оплачен другим платежом.')
             return False
-        for table in ('payment_orders', 'audio_orders', 'cartoon_orders', 'photo_orders'):
+        for table in ('payment_orders', 'audio_orders', 'cartoon_orders', 'photo_orders', 'animation_orders'):
             async with db.execute(f'SELECT 1 FROM {table} WHERE provider_payment_id=?', (payment_id,)) as cursor:
                 if await cursor.fetchone():
                     raise ValueError('Платёж уже использован другим заказом.')
@@ -1164,7 +1175,7 @@ async def mark_cartoon_paid(order_id: str, payment_id: str) -> bool:
             if order['provider_payment_id'] != payment_id:
                 raise ValueError('Заказ уже оплачен другим платежом.')
             return False
-        for table in ('payment_orders', 'audio_orders', 'musical_orders', 'photo_orders'):
+        for table in ('payment_orders', 'audio_orders', 'musical_orders', 'photo_orders', 'animation_orders'):
             async with db.execute(f'SELECT 1 FROM {table} WHERE provider_payment_id=?', (payment_id,)) as cursor:
                 if await cursor.fetchone():
                     raise ValueError('Платёж уже использован другим заказом.')
@@ -1221,6 +1232,8 @@ def _base_sale_counter_keys(kind: str, order: dict) -> tuple[str, ...]:
         return ('buy_cartoon_590' if order['tariff'] == 'short' else 'buy_cartoon_1290',)
     if kind == 'photo':
         return (f"buy_photo_{order['tariff']}",)
+    if kind == 'animation':
+        return (f"buy_animation_{order['tariff']}",)
     raise ValueError('Неизвестный тип продажи.')
 
 
@@ -1242,6 +1255,7 @@ async def _backfill_sale_counters(db, *, force=False) -> None:
         ('musical', 'musical_orders', 'tariff,promo_token', "status='paid'"),
         ('cartoon', 'cartoon_orders', 'tariff,promo_token', "status IN ('paid','completed','manual')"),
         ('photo', 'photo_orders', 'tariff,promo_token', "status='paid'"),
+        ('animation', 'animation_orders', 'tariff', "status='paid' AND is_admin=0"),
     ):
         async with db.execute(f'SELECT user_id,{fields},COUNT(*) FROM {table} WHERE {status} GROUP BY user_id,{fields}') as cursor:
             names = [column[0] for column in cursor.description]
@@ -1306,7 +1320,7 @@ async def mark_photo_paid(order_id: str, payment_id: str) -> bool:
             if order['provider_payment_id'] != payment_id:
                 raise ValueError('Заказ уже оплачен другим платежом.')
             return False
-        for table in ('payment_orders', 'audio_orders', 'musical_orders', 'cartoon_orders'):
+        for table in ('payment_orders', 'audio_orders', 'musical_orders', 'cartoon_orders', 'animation_orders'):
             async with db.execute(f'SELECT 1 FROM {table} WHERE provider_payment_id=?', (payment_id,)) as cursor:
                 if await cursor.fetchone():
                     raise ValueError('Платёж уже использован другим заказом.')
@@ -1678,3 +1692,166 @@ async def release_repeat_offer(delivery_key):
     async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
         await db.execute('UPDATE promo_offers SET lease_until=0 WHERE delivery_key=? AND notified=0',(delivery_key,))
         await db.commit()
+
+
+# Independent prepaid balance: one unit is one five-second animated photograph.
+ANIMATION_TARIFFS = {
+    'intro': (19900, 1, 'Оживление фотографии — первый запуск'),
+    'one': (24900, 1, 'Оживление 1 фотографии'),
+    'three': (59900, 3, 'Оживление 3 фотографий'),
+    'five': (89900, 5, 'Оживление 5 фотографий'),
+}
+
+
+async def _init_animation_orders(db):
+    await db.execute('''CREATE TABLE IF NOT EXISTS animation_orders (
+        order_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, tariff TEXT NOT NULL,
+        amount_kopecks INTEGER NOT NULL, quantity INTEGER NOT NULL, product_name TEXT NOT NULL,
+        package_id TEXT NOT NULL, credits INTEGER NOT NULL DEFAULT 0,
+        order_type TEXT NOT NULL DEFAULT 'animation', status TEXT NOT NULL DEFAULT 'pending',
+        provider_payment_id TEXT UNIQUE, payment_link TEXT, notified INTEGER NOT NULL DEFAULT 0,
+        is_admin INTEGER NOT NULL DEFAULT 0, notify_next_attempt_at INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        paid_at TIMESTAMP)''')
+    await db.execute('''CREATE TABLE IF NOT EXISTS animation_jobs (
+        job_id TEXT PRIMARY KEY, order_id TEXT NOT NULL, user_id INTEGER NOT NULL,
+        slot INTEGER NOT NULL, image_url TEXT NOT NULL, source_message_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'queued', task_id TEXT, video_url TEXT,
+        running INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at INTEGER NOT NULL DEFAULT 0, error TEXT,
+        UNIQUE(order_id,slot), UNIQUE(user_id,source_message_id))''')
+
+
+async def animation_first_price(user_id):
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        async with db.execute("SELECT 1 FROM animation_orders WHERE user_id=? AND status='paid' AND is_admin=0 LIMIT 1",(user_id,)) as cursor:
+            return 249 if await cursor.fetchone() else 199
+
+
+async def create_animation_order(user_id,package,*,admin=False):
+    if isinstance(user_id,bool) or not isinstance(user_id,int) or user_id<=0 or package not in ('one','three','five'):
+        raise ValueError('Неверный пакет оживления фото.')
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        await db.execute('BEGIN IMMEDIATE');db.row_factory=aiosqlite.Row
+        if not admin:
+            async with db.execute("SELECT * FROM animation_orders WHERE user_id=? AND status='pending' AND tariff IN (?,?) ORDER BY created_at LIMIT 1",
+                                  (user_id,package,'intro' if package=='one' else package)) as cursor:
+                row=await cursor.fetchone()
+            if row:
+                return dict(row)
+        tariff=package
+        if package=='one' and not admin:
+            async with db.execute("SELECT 1 FROM animation_orders WHERE user_id=? AND is_admin=0 AND status='paid' LIMIT 1",(user_id,)) as cursor:
+                if not await cursor.fetchone(): tariff='intro'
+        amount,quantity,title=ANIMATION_TARIFFS[tariff]
+        key=f'animate_{user_id}_{token_urlsafe(12)}'
+        await db.execute('''INSERT INTO animation_orders(order_id,user_id,tariff,amount_kopecks,quantity,product_name,package_id,status,is_admin)
+            VALUES (?,?,?,?,?,?,?,?,?)''',(key,user_id,tariff,amount,quantity,title,'animation_'+tariff,'paid' if admin else 'pending',int(admin)))
+        await db.commit()
+    return await get_animation_order(key)
+
+
+async def get_animation_order(order_id):
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        db.row_factory=aiosqlite.Row
+        async with db.execute('SELECT * FROM animation_orders WHERE order_id=?',(order_id,)) as cursor:
+            row=await cursor.fetchone()
+            return dict(row) if row else None
+
+
+async def update_animation_order(order_id,**fields):
+    if not fields or set(fields)-{'payment_link','notified','notify_next_attempt_at'}: raise ValueError('Неверное поле заказа.')
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        await db.execute('UPDATE animation_orders SET '+','.join(key+'=?' for key in fields)+' WHERE order_id=?',(*fields.values(),order_id))
+        await db.commit()
+
+
+async def mark_animation_paid(order_id,payment_id):
+    if not payment_id: raise ValueError('Не указан платёж.')
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        await db.execute('BEGIN IMMEDIATE');db.row_factory=aiosqlite.Row
+        async with db.execute('SELECT * FROM animation_orders WHERE order_id=?',(order_id,)) as cursor:
+            order=await cursor.fetchone()
+        if not order or order['is_admin']: raise ValueError('Заказ не найден.')
+        if order['status']=='paid':
+            if order['provider_payment_id']!=payment_id: raise ValueError('Другой платёж.')
+            return False
+        for table in ('payment_orders','audio_orders','musical_orders','cartoon_orders','photo_orders','animation_orders'):
+            async with db.execute(f'SELECT 1 FROM {table} WHERE provider_payment_id=?',(payment_id,)) as cursor:
+                if await cursor.fetchone(): raise ValueError('Платёж уже использован.')
+        await db.execute("UPDATE animation_orders SET status='paid',provider_payment_id=?,paid_at=CURRENT_TIMESTAMP WHERE order_id=?",(payment_id,order_id))
+        await db.execute('INSERT INTO users(user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING',(order['user_id'],))
+        await increment_purchases(order['user_id'],connection=db)
+        await _record_sale_counters(db,'animation',dict(order))
+        await db.commit()
+        return True
+
+
+async def animation_orders_for_user(user_id):
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        db.row_factory=aiosqlite.Row
+        async with db.execute('''SELECT o.*,o.quantity-COUNT(j.job_id) AS remaining
+            FROM animation_orders o LEFT JOIN animation_jobs j ON j.order_id=o.order_id
+            WHERE o.user_id=? AND o.status='paid' GROUP BY o.order_id ORDER BY o.created_at''',(user_id,)) as cursor:
+            return [dict(row) for row in await cursor.fetchall()]
+
+
+async def queue_animation_photo(user_id,order_id,image_url,message_id):
+    url=urlsplit(image_url)
+    if url.scheme!='https' or not url.hostname or url.username or url.password or not message_id:
+        raise ValueError('Нужна HTTPS-ссылка на фото.')
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        await db.execute('BEGIN IMMEDIATE');db.row_factory=aiosqlite.Row
+        async with db.execute('SELECT * FROM animation_orders WHERE order_id=? AND user_id=? AND status=\'paid\'',(order_id,user_id)) as cursor:
+            order=await cursor.fetchone()
+        if not order: raise ValueError('Оплаченный пакет не найден.')
+        async with db.execute('SELECT job_id FROM animation_jobs WHERE user_id=? AND source_message_id=?',(user_id,message_id)) as cursor:
+            existing=await cursor.fetchone()
+        if existing: return existing[0]
+        async with db.execute('SELECT COUNT(*) FROM animation_jobs WHERE order_id=?',(order_id,)) as cursor:
+            count=(await cursor.fetchone())[0]
+        if count>=order['quantity']: raise ValueError('Все фотографии пакета уже отправлены.')
+        key='animation_job_'+token_urlsafe(12)
+        await db.execute('INSERT INTO animation_jobs(job_id,order_id,user_id,slot,image_url,source_message_id) VALUES (?,?,?,?,?,?)',
+                         (key,order_id,user_id,count+1,image_url,message_id))
+        await db.commit()
+        return key
+
+
+async def get_animation_job(job_id):
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        db.row_factory=aiosqlite.Row
+        async with db.execute('SELECT * FROM animation_jobs WHERE job_id=?',(job_id,)) as cursor:
+            row=await cursor.fetchone()
+            return dict(row) if row else None
+
+
+async def update_animation_job(job_id,**fields):
+    if not fields or set(fields)-{'status','task_id','video_url','running','attempts','next_attempt_at','error'}:
+        raise ValueError('Неверное поле задачи.')
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        await db.execute('BEGIN IMMEDIATE')
+        if fields.get('video_url'):
+            async with db.execute('SELECT user_id,video_url FROM animation_jobs WHERE job_id=?',(job_id,)) as cursor:
+                old=await cursor.fetchone()
+            if old and not old[1]: await increment_counter('gen_animation',user_id=old[0],connection=db)
+        await db.execute('UPDATE animation_jobs SET '+','.join(key+'=?' for key in fields)+' WHERE job_id=?',(*fields.values(),job_id))
+        await db.commit()
+
+
+async def animation_work_items(*,reset=False):
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        if reset:
+            await db.execute('UPDATE animation_jobs SET running=0')
+            await db.commit()
+        async with db.execute("SELECT order_id FROM animation_orders WHERE status='paid' AND notified=0 AND notify_next_attempt_at<=? LIMIT 10",(_now_ts(),)) as cursor:
+            notices=[row[0] for row in await cursor.fetchall()]
+        async with db.execute("SELECT job_id FROM animation_jobs WHERE status IN ('queued','creating','processing','ready') AND running=0 AND next_attempt_at<=? LIMIT 2",(_now_ts(),)) as cursor:
+            return notices,[row[0] for row in await cursor.fetchall()]
+
+
+async def claim_animation_job(job_id):
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        cursor=await db.execute("UPDATE animation_jobs SET running=1 WHERE job_id=? AND running=0 AND status IN ('queued','creating','processing','ready') AND next_attempt_at<=?",(job_id,_now_ts()))
+        await db.commit()
+        return cursor.rowcount==1

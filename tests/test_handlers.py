@@ -4771,7 +4771,7 @@ async def test_cartoon_main_menu_order_and_names_are_exact():
         ('🎵 Музыкальная открытка — Новинка 🔥', 'cat_video'),
         ('🎬 Мульт-открытка — Новинка 🔥', 'cat_cartoon'),
         ('👑 Эксклюзив (ручная работа) — от 2 000 ₽', 'custom_order'),
-        ('📸 Нейрофотосессия', 'cat_photo'), ('🎵 Аудиопесни', 'cat_audio'), ('🎁 Открытки', 'cat_cards'),
+        ('📸 Нейрофотосессия', 'cat_photo'), ('✨ Оживление фотографий', 'cat_animation'), ('🎵 Аудиопесни', 'cat_audio'), ('🎁 Открытки', 'cat_cards'),
         ('🔮 Карта Желаний', 'cat_vision'), ('🧘 Медитации', 'cat_meditation'), ('🖼 Примеры', 'show_examples'), ('🆘 Помощь', 'show_help')]
 
 
@@ -4919,7 +4919,7 @@ async def test_cartoon_interest_stats_exclude_admin_and_do_not_count_old_buttons
     event.get_ids = lambda: (123, 999)
     await call_handler(router, 'stats', event)
     text = event.message.answer.await_args.args[0]
-    assert '- Мульт-услуги: 3' in text
+    assert '- Мульт-открытки: 3' in text
     filtered=await credit_db.get_all_counters(admin_id=999)
     assert filtered['click_cartoon_short']==3 and filtered.get('click_cartoon_long',0)==0
     assert not any(key.startswith('gen_') for key in await credit_db.get_all_counters())
@@ -6358,7 +6358,7 @@ async def test_themed_cartoon_admin_stats_show_theme_and_decisions(credit_db):
     await dispatch_callback(router,callback_event('cartoon_music_ok:'+token),context)
     event=message_event('/stats');await call_handler(router,'stats',event)
     text=event.message.answer.await_args.args[0]
-    assert '🛠 Админ (тесты):' in text and '- Мульт-услуги: 0' in text
+    assert '🛠 Админ (тесты):' in text and '- Мульт-открытки: 0' in text
     counters=await credit_db.get_all_counters()
     assert counters['theme_father_click']==counters['song_ok']==counters['video_success']==1
     assert (await credit_db.get_all_counters(admin_id=456)).get('video_success',0)==0
@@ -6794,7 +6794,7 @@ async def test_cartoon_stats_separate_customer_generation_from_admin_tests(credi
     event=message_event('/stats');event.get_ids=lambda:(123,999)
     await call_handler(router,'stats',event)
     text=event.message.answer.await_args.args[0]
-    assert '- Мульт-услуги: 0' in text
+    assert '- Мульт-открытки: 0' in text
     clients=await credit_db.get_all_counters(admin_id=999)
     all_counts=await credit_db.get_all_counters()
     assert clients['video_success']==1 and all_counts['video_success']==2
@@ -7265,7 +7265,7 @@ async def test_stats_report_has_eight_blocks_unique_sources_and_admin_last(credi
     assert 'Статистика по кампании' not in text
     assert '- Новый год (все виды): 5' in text
     assert '- ДР (Молодым): 0 | ДР (Старшим): 1' in text
-    assert '- Мульт-услуги: 2' in text
+    assert '- Мульт-открытки: 1' in text
     assert '- Всего сгенерировано: 6' in text
     assert '- 3 генерации (199 ₽ / 149 ₽): 1 (из них по акции: 0)' in text
     assert text.endswith('🛠 Админ (тесты): Сгенерировано 4, Покупок 0.')

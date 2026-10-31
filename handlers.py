@@ -2021,7 +2021,7 @@ def create_router(
         await context.update_data(animation_order_id=order['order_id'])
         await context.set_state(PosterStates.waiting_for_animation_photo)
         await update_animation_order(order['order_id'], notified=1)
-        await _reply(event, f'📷 Отправьте одну фотографию как изображение. Осталось в пакете: {remaining}. '
+        await _reply(event, f'📷 Отправьте одну фотографию как изображение. На фото должно быть не более 5 человек. Осталось в пакете: {remaining}. '
             'Мы бережно сохраним внешность и добавим естественные движения. Видео — 5 секунд. /cancel — отмена.',
             attachments=[navigation_keyboard((('⬅️ Назад', 'back_to_main'),))])
 
@@ -4432,7 +4432,7 @@ def create_router(
         photos = [a for a in (getattr(body, 'attachments', None) or []) if a.type == 'image'
                   and isinstance(a.payload, PhotoAttachmentPayload) and a.payload.url]
         if len(photos) != 1:
-            await _reply(event, 'Отправьте одну фотографию как изображение. Для пакета отправляйте фото по одному.')
+            await _reply(event, 'Отправьте одну фотографию как изображение. На фото должно быть не более 5 человек. Для пакета отправляйте фото по одному.')
             return
         try:
             await queue_animation_photo(order['user_id'], order['order_id'], photos[0].payload.url,

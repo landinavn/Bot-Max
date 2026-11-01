@@ -69,6 +69,7 @@ from image_service import (
     generate_vision_boards,
     generate_postcards,
     generate_cartoon_avatar, generate_photosession_frame, NY_FAMILY_THREE_PROMPTS, NY_FAMILY_PHOTOSESSION_PROMPTS,
+    NY_PHOTOSESSION_PROMPTS_BY_TARIFF,
     fix_text_with_ai,
     POSTCARD_PROMPTS,
     MAX_CARD_TEXT_LENGTH, MAX_THEME_INFO_LENGTH,
@@ -609,6 +610,10 @@ PHOTO_NY_TRIAL_TEMPLATES = {
     "photo_temp_mom_daughter": ("👩‍👧 Мама + дочка", "mom_daughter"),
     "photo_temp_rabbit": ("🐰 С кроликом", "rabbit"),
 }
+PHOTO_NY_STANDARD_TEMPLATES = {
+    "photo_temp_mom_daughter_5": ("👩‍👧 Мама + дочка", "mom_daughter_5"),
+}
+PHOTO_NY_ALL_TEMPLATES = {**PHOTO_NY_TRIAL_TEMPLATES, **PHOTO_NY_STANDARD_TEMPLATES}
 PHOTO_TRIAL_CHECKOUT_TEXT = (
     "Вы выбрали тариф «Попробовать» (3 фото) за 590 ₽.\n\n"
     "Для продолжения, пожалуйста, оплатите заказ по ссылке ниже. После оплаты обязательно вернитесь в бота!"
@@ -998,10 +1003,16 @@ def create_router(
     video_text_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
     video_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
 
+    def selected_photo_tariff(data):
+        return {'photo_tariff_590': 590, 'photo_tariff_990': 990}.get(data.get('photo_tariff'))
+
+    def selected_photo_prompts(data):
+        if data.get('photo_style') != 'photo_style_ny':
+            return None
+        return NY_PHOTOSESSION_PROMPTS_BY_TARIFF.get(selected_photo_tariff(data), {}).get(data.get('template'))
+
     def family_photosession_selected(data):
-        return (data.get("photo_style") == "photo_style_ny"
-                and data.get("photo_tariff") == "photo_tariff_590"
-                and data.get("template") in NY_FAMILY_PHOTOSESSION_PROMPTS)
+        return bool(selected_photo_prompts(data))
 
     async def send_photo_trial_checkout(event, context, tariff=590):
         user_id=event.get_ids()[1]
@@ -1024,7 +1035,16 @@ def create_router(
                     return
                 order_id=await create_photo_order(f'photo_{user_id}_{time_ns()}',user_id,tariff)
                 order=await get_photo_order(order_id)
-                await context.update_data(photo_order_id=order_id)
+                fresh=dict(data)
+                for key in ('photo','photosession_urls','photosession_sent_count','photosession_complete',
+                            'photosession_session_id','photosession_admin_bypass','photosession'):
+                    fresh.pop(key,None)
+                if fresh.get('photo_style')=='photo_style_ny' and fresh.get('template') not in NY_PHOTOSESSION_PROMPTS_BY_TARIFF.get(tariff,{}):
+                    fresh.pop('template',None)
+                fresh['photo_order_id']=order_id
+                fresh['photo_tariff']=f'photo_tariff_{tariff}'
+                await context.set_data(fresh)
+                data=fresh
             await update_photo_order(order['order_id'],style=data.get('photo_style') or order.get('style'),
                                      template=data.get('template') or order.get('template'))
             if order['status']=='paid':
@@ -1044,6 +1064,9 @@ def create_router(
             if tariff==590 and amount!=590:
                 keyboard=InlineKeyboardBuilder().row(LinkButton(text=f'Оплатить {amount} ₽',url=link)).row(
                     CallbackButton(text='Выбрать сюжет',payload='photo_choose_template')).as_markup()
+            if tariff==990 and data.get('photo_style')=='photo_style_ny':
+                keyboard=InlineKeyboardBuilder().row(LinkButton(text=f'Оплатить {amount} ₽',url=link)).row(
+                    CallbackButton(text='Выбрать сюжет',payload='photo_choose_template')).as_markup()
             await _reply(event,text,attachments=[keyboard])
         except PromoReservedError:
             await resume_repeat_checkout(event,user_id,'photo')
@@ -1057,14 +1080,15 @@ def create_router(
             await _reply(event, "Не удалось определить пользователя. Отправьте /start.")
             return
         paid_order=None
+        selected=await context.get_data()
+        tariff=selected_photo_tariff(selected)
         if user_id!=admin_user_id:
-            selected=await context.get_data()
             candidate=await get_photo_order(selected.get('photo_order_id',''))
             if (not candidate or candidate['user_id']!=user_id or candidate['status']!='paid'
-                    or candidate['tariff']!=590 or candidate['style'] not in (None,'photo_style_ny')
+                    or candidate['tariff']!=tariff or candidate['style'] not in (None,'photo_style_ny')
                     or candidate['template']!=selected.get('template')):
                 await context.set_state(PosterStates.waiting_for_mode)
-                await send_photo_trial_checkout(event,context)
+                await send_photo_trial_checkout(event,context,tariff or 590)
                 return
             paid_order=candidate
         lock = generation_locks.setdefault(user_id, asyncio.Lock())
@@ -1074,8 +1098,11 @@ def create_router(
         async with lock:
             data = await context.get_data()
             if not family_photosession_selected(data):
-                await _reply(event, "Выберите новогоднюю фотосессию, тариф 590 ₽ и семейный сюжет.")
+                await _reply(event, "Выберите новогоднюю фотосессию, тариф и подходящий семейный сюжет.")
                 return
+            prompts=selected_photo_prompts(data)
+            total=len(prompts)
+            photo_word='фотографии' if total==3 else 'фотографий'
             photo = data.get("photo")
             saved_results=await get_photo_results(paid_order['order_id']) if paid_order else []
             if paid_order and paid_order.get('reference_url') and (saved_results or not photo):
@@ -1090,16 +1117,20 @@ def create_router(
                     "Отправьте одно общее фото мамы и дочки (2 человека), где хорошо видны оба лица и по возможности фигуры. "
                     "В пакете: два совместных кадра и один кадр мамы в полный рост. /cancel — отмена."
                     if data["template"] == "mom_daughter" else
+                    "Отправьте одно общее фото мамы и дочки (2 человека), где хорошо видны лица и по возможности фигуры. "
+                    "В пакете 5 кадров: два совместных праздничных фото и три студийных кадра с леденцом-петушком. "
+                    "Головных уборов не будет. /cancel — отмена."
+                    if data['template']=='mom_daughter_5' else
                     "Отправьте одно общее фото мамы и сына (2 человека), где хорошо видны оба лица и по возможности фигуры. "
                     "Кролик на исходном фото не нужен. В пакете: мама с кроликом, сын с кроликом и совместный кадр у ёлки. /cancel — отмена."
                     if data["template"] == "rabbit" else
                     "Отправьте одно общее фото семьи из 3 и более человек, где хорошо видны лица детей и родителей. /cancel — отмена."
                 ))
                 return
-            if (not paid_order and data.get("photosession_complete")) or (paid_order and len(saved_results)==3 and all(row['delivered'] for row in saved_results)):
+            if (not paid_order and data.get("photosession_complete")) or (paid_order and len(saved_results)==total and all(row['delivered'] for row in saved_results)):
                 if paid_order:
                     await send_repeat_offer(event.bot,user_id,'photo','photo:'+paid_order['order_id'],admin_user_id=admin_user_id)
-                await _reply(event,"Все 3 фотографии уже отправлены.")
+                await _reply(event,f"Все {total} {photo_word} уже отправлены.")
                 return
             if paid_order:
                 await update_photo_order(paid_order['order_id'],reference_url=photo['url'])
@@ -1107,10 +1138,11 @@ def create_router(
             await context.update_data(photosession_session_id=session_id)
             await context.set_state(PosterStates.generating)
             try:
-                urls = list(data.get("photosession_urls", []))
+                # Paid results belong to this persisted order, never to an older FSM session.
+                urls = [] if paid_order else list(data.get("photosession_urls", []))
                 sent_count = data.get("photosession_sent_count", 0)
                 reference_url = photo["url"]
-                for index, prompt in enumerate(NY_FAMILY_PHOTOSESSION_PROMPTS[data["template"]]):
+                for index, prompt in enumerate(prompts):
                     if (await context.get_data()).get("photosession_session_id") != session_id:
                         return
                     cached=next((row for row in saved_results if row['slot']==index+1),None)
@@ -1120,17 +1152,26 @@ def create_router(
                         else:
                             urls[index]=cached['image_url']
                     if index >= len(urls):
-                        await _reply(event, f"Генерирую кадр {index + 1} из 3... ⏳ Это может занять 3-5 минут. Пожалуйста, не закрывайте чат!")
+                        await _reply(event, f"Генерирую кадр {index + 1} из {total}... ⏳ Это может занять 3-5 минут. Пожалуйста, не закрывайте чат!")
                         frame_kwargs = ({'style_reference_url': urls[0]}
                                         if data['template'] == 'mom_daughter' and index > 0 else {})
                         if data['template'] == 'rabbit' and index > 0:
                             frame_kwargs = {'style_reference_urls': tuple(urls[:index])}
+                        if data['template']=='mom_daughter_5':
+                            if index==0:
+                                frame_kwargs={'image_size':'1536x1024'}
+                            elif index==2:
+                                frame_kwargs={'style_reference_url':urls[0]}
+                            elif index in (3,4):
+                                frame_kwargs={'style_reference_url':urls[1]}
                         url = await photosession_generator(reference_url, prompt, **frame_kwargs)
                         if not isinstance(url, str) or not url.startswith("https://"):
                             raise RuntimeError("Генератор не вернул HTTPS-ссылку кадра.")
                         if (await context.get_data()).get("photosession_session_id") != session_id:
                             return
                         urls.append(url)
+                        if paid_order:
+                            await save_photo_result(paid_order['order_id'],index+1,url)
                         await context.update_data(photosession_urls=list(urls))
                         await send_offline_conversion(user_id, goal_id="bot_generation")
                     if paid_order:
@@ -1141,7 +1182,7 @@ def create_router(
                     elif index >= sent_count:
                         image = await upload_image_for_max(event.bot, urls[index])
                         sent = await event.bot.send_message(
-                            **_recipient(event), text=f"Фотография {index + 1} из 3", attachments=[image],
+                            **_recipient(event), text=f"Фотография {index + 1} из {total}", attachments=[image],
                         )
                         if sent is None:
                             raise RuntimeError("MAX не подтвердил отправку фотографии.")
@@ -1150,7 +1191,7 @@ def create_router(
                         await context.update_data(photosession_sent_count=index + 1)
                 await context.update_data(photosession_complete=True)
                 await context.set_state(PosterStates.waiting_for_mode)
-                await _reply(event, "Готово! Все 3 фотографии отправлены.", attachments=[main_keyboard()])
+                await _reply(event, f"Готово! Все {total} {photo_word} отправлены.", attachments=[main_keyboard()])
             except Exception as exc:
                 logger.error("Ошибка новогодней фотосессии для %s: %s", user_id, exc, exc_info=True)
                 await log_max_error(exc, logger)
@@ -1431,6 +1472,7 @@ def create_router(
         admin = await get_user(admin_user_id)
         mom_stats = await get_photo_template_stats('mom_daughter', admin_id=admin_user_id)
         rabbit_stats = await get_photo_template_stats('rabbit', admin_id=admin_user_id)
+        mom_five_stats = await get_photo_template_stats('mom_daughter_5', admin_id=admin_user_id)
         c = lambda key: counters.get(key, 0)
         new_year = sum(c(key) for key in ('gen_ny', 'gen_ny_cozy', 'gen_ny_fairytale', 'gen_ny_elegant', 'gen_ny_family'))
         sources_text = "\n".join(
@@ -1508,6 +1550,12 @@ def create_router(
             f"- Сгенерировано фото: {rabbit_stats['generated_photos']}\n"
             f"- Завершено фотосессий: {rabbit_stats['completed_packages']}\n"
             f"- Выручка: {rabbit_stats['revenue_kopecks'] // 100},{rabbit_stats['revenue_kopecks'] % 100:02d} ₽\n\n"
+            "👩‍👧 Мама + дочка — 990 ₽ / 5 фото:\n"
+            f"- Выбор сюжета (клики): {c('select_photo_mom_daughter_5')}\n"
+            f"- Оплачено пакетов: {mom_five_stats['paid_packages']}\n"
+            f"- Сгенерировано фото: {mom_five_stats['generated_photos']}\n"
+            f"- Завершено фотосессий: {mom_five_stats['completed_packages']}\n"
+            f"- Выручка: {mom_five_stats['revenue_kopecks'] // 100},{mom_five_stats['revenue_kopecks'] % 100:02d} ₽\n\n"
             "👑 Эксклюзив (ручная работа):\n"
             f"- Клики по кнопке: {c('click_custom_order')}\n"
             f"- Отправлено заявок: {c('submit_custom_order')}\n\n"
@@ -3844,11 +3892,13 @@ def create_router(
             await increment_counter(PHOTO_CLICK_EVENTS[event.callback.payload], user_id=user_id)
         await show_photo_tariffs(event, context, event.callback.payload)
 
-    async def show_photo_template_options(event: MessageCallback, *, with_intro: bool = True) -> None:
+    async def show_photo_template_options(event: MessageCallback, *, with_intro: bool = True, tariff: int = 590) -> None:
         if with_intro:
-            await _reply(event, "Выберите сюжет новогодней фотосессии (3 фото):")
-        await send_menu_examples(event, PHOTO_FAMILY_EXAMPLE_FILES)
-        buttons = tuple((label, payload) for payload, (label, _) in PHOTO_NY_TRIAL_TEMPLATES.items())
+            await _reply(event, f"Выберите сюжет новогодней фотосессии ({PHOTO_PACKAGE_SIZES[tariff]} фото):")
+        if tariff==590:
+            await send_menu_examples(event, PHOTO_FAMILY_EXAMPLE_FILES)
+        table=PHOTO_NY_STANDARD_TEMPLATES if tariff==990 else PHOTO_NY_TRIAL_TEMPLATES
+        buttons = tuple((label, payload) for payload, (label, _) in table.items())
         await _reply(
             event, "👇 Выберите подходящий сюжет:",
             attachments=[navigation_keyboard((*buttons, ("⬅️ Назад", "photo_tariff_back")))],
@@ -3866,10 +3916,11 @@ def create_router(
             await increment_counter(PHOTO_CLICK_EVENTS[event.callback.payload],user_id=event.get_ids()[1])
             await context.update_data(photo_tariff=f'photo_tariff_{tariff}',tariff=f'package_{tariff}')
             await send_photo_trial_checkout(event,context,tariff)
-            if tariff==590 and data['photo_style']=='photo_style_ny':
-                await show_photo_template_options(event,with_intro=False)
+            if tariff in NY_PHOTOSESSION_PROMPTS_BY_TARIFF and data['photo_style']=='photo_style_ny':
+                await show_photo_template_options(event,with_intro=False,tariff=tariff)
             return
-        ny_trial = data.get("photo_style") == "photo_style_ny" and event.callback.payload == "photo_tariff_590"
+        tariff=int(event.callback.payload.removeprefix('photo_tariff_'))
+        ny_trial = data.get("photo_style") == "photo_style_ny" and tariff in NY_PHOTOSESSION_PROMPTS_BY_TARIFF
         await event.ack(notification="Показываю ссылку…" if ny_trial else "Скоро будет доступно…")
         user_id = event.get_ids()[1]
         if user_id is not None:
@@ -3878,11 +3929,12 @@ def create_router(
             await context.clear()
             await context.set_state(PosterStates.waiting_for_mode)
             await context.update_data(
-                photo_style="photo_style_ny", photo_tariff="photo_tariff_590", tariff="trial_590",
-                photo_product_name="Фотосессия Попробовать", photo_amount_kopecks=59000,
+                photo_style="photo_style_ny", photo_tariff=f"photo_tariff_{tariff}",
+                tariff='trial_590' if tariff==590 else 'standard_990',
+                photo_product_name=PHOTO_TARIFFS[tariff][1], photo_amount_kopecks=PHOTO_TARIFFS[tariff][0],
             )
-            await send_photo_trial_checkout(event, context)
-            await show_photo_template_options(event, with_intro=False)
+            await send_photo_trial_checkout(event, context,tariff)
+            await show_photo_template_options(event, with_intro=False,tariff=tariff)
             return
         await _reply(
             event, PHOTO_TARIFF_SOON_TEXT,
@@ -3902,17 +3954,20 @@ def create_router(
         if lock.locked():
             await _reply(event,'Фотосессия уже создаётся. Пожалуйста, подождите.')
             return
-        if order['tariff']!=590 or order['style'] not in (None,'photo_style_ny'):
+        if (order['tariff'] not in NY_PHOTOSESSION_PROMPTS_BY_TARIFF or order['style'] not in (None,'photo_style_ny')
+                or (order['tariff']==990 and order['template'] not in (None,'mom_daughter_5'))):
             await _reply(event,'Ваш оплаченный фотопакет сохранён в очереди. Мы сообщим о готовности.')
             return
         await context.clear()
+        tariff=order['tariff']
         await context.update_data(photo_order_id=order['order_id'],photo_style='photo_style_ny',
-                                  photo_tariff='photo_tariff_590',tariff='trial_590',template=order['template'],photosession=True)
+                                  photo_tariff=f'photo_tariff_{tariff}',tariff='trial_590' if tariff==590 else 'standard_990',
+                                  template=order['template'],photosession=True)
         if order['reference_url']:
             await context.update_data(photo={'url':order['reference_url']})
-        if order['template'] not in NY_FAMILY_PHOTOSESSION_PROMPTS:
+        if order['template'] not in NY_PHOTOSESSION_PROMPTS_BY_TARIFF[tariff]:
             await context.set_state(PosterStates.waiting_for_mode)
-            await show_photo_template_options(event)
+            await show_photo_template_options(event,tariff=tariff)
             return
         await context.set_state(PosterStates.waiting_for_photosession_photo)
         await run_family_photosession(event,context)
@@ -3951,10 +4006,11 @@ def create_router(
             return
         await event.ack(notification="Выберите сюжет…")
         data = await context.get_data()
-        if data.get("photo_style") != "photo_style_ny" or data.get("photo_tariff") != "photo_tariff_590":
+        tariff=selected_photo_tariff(data)
+        if data.get("photo_style") != "photo_style_ny" or tariff not in NY_PHOTOSESSION_PROMPTS_BY_TARIFF:
             await _reply(event, "Выберите стиль и тариф фотосессии заново.", attachments=[navigation_keyboard((("Фотосессия", "cat_photo"),))])
             return
-        await show_photo_template_options(event)
+        await show_photo_template_options(event,tariff=tariff)
 
     @router.message_callback(F.callback.payload == "photo_tariff_back")
     async def photo_tariff_back(event: MessageCallback, context: MemoryContext) -> None:
@@ -3971,7 +4027,7 @@ def create_router(
             _, text, buttons = CATEGORY_MENUS["cat_photo"]
             await _reply(event, text=text, attachments=[navigation_keyboard(buttons)])
 
-    @router.message_callback(F.callback.payload.in_(set(PHOTO_NY_TRIAL_TEMPLATES)))
+    @router.message_callback(F.callback.payload.in_(set(PHOTO_NY_ALL_TEMPLATES)))
     async def photo_template_checkout(event: MessageCallback, context: MemoryContext) -> None:
         if event.message is None:
             await event.ack(notification="Меню недоступно. Отправьте /start.")
@@ -3981,17 +4037,19 @@ def create_router(
             return
         await event.ack(notification="Выбираю сюжет…")
         data = await context.get_data()
-        if PHOTO_NY_TRIAL_TEMPLATES[event.callback.payload][1] in NY_FAMILY_PHOTOSESSION_PROMPTS and data.get("photo_style") not in (None, "photo_style_ny"):
+        if data.get("photo_style") not in (None, "photo_style_ny"):
             await _reply(event, PHOTO_TARIFF_SOON_TEXT, attachments=[navigation_keyboard((("⬅️ Назад", "cat_photo"),))])
             return
-        if data.get("photo_style") != "photo_style_ny" or data.get("photo_tariff") != "photo_tariff_590":
+        tariff=990 if event.callback.payload in PHOTO_NY_STANDARD_TEMPLATES else 590
+        prompts_by_template=NY_PHOTOSESSION_PROMPTS_BY_TARIFF[tariff]
+        if data.get("photo_style") != "photo_style_ny" or data.get("photo_tariff") != f"photo_tariff_{tariff}":
             await _reply(
                 event, "Выберите стиль и тариф фотосессии заново.",
                 attachments=[navigation_keyboard((("📸 Фотосессия", "cat_photo"),))],
             )
             return
-        template = PHOTO_NY_TRIAL_TEMPLATES[event.callback.payload][1]
-        if template in NY_FAMILY_PHOTOSESSION_PROMPTS:
+        template = PHOTO_NY_ALL_TEMPLATES[event.callback.payload][1]
+        if template in prompts_by_template:
             user_id = event.get_ids()[1]
             if user_id is not None:
                 await increment_counter("select_photo_" + template, user_id=user_id)
@@ -4004,13 +4062,13 @@ def create_router(
                     attachments=[navigation_keyboard((('Продолжить', 'photo_resume:' + paid['order_id']),))])
                 return
         await context.update_data(
-            template=template, photo_product_name="Фотосессия Попробовать", photo_amount_kopecks=59000,
+            template=template, photo_product_name=PHOTO_TARIFFS[tariff][1], photo_amount_kopecks=PHOTO_TARIFFS[tariff][0],
         )
         if template == 'mom_daughter':
             await send_menu_examples(event, (MOM_DAUGHTER_EXAMPLE_FILE,))
         elif template == 'rabbit':
             await send_menu_examples(event, (RABBIT_EXAMPLE_FILE,))
-        if template in NY_FAMILY_PHOTOSESSION_PROMPTS and admin_user_id is not None and event.get_ids()[1] == admin_user_id:
+        if template in prompts_by_template and admin_user_id is not None and event.get_ids()[1] == admin_user_id:
             if (data.get("template") == template and data.get("photosession_admin_bypass")
                     and data.get("photosession_session_id")):
                 await run_family_photosession(event, context)
@@ -4018,9 +4076,9 @@ def create_router(
             # Новый запуск администратора всегда запрашивает свежее общее фото.
             await context.clear()
             await context.update_data(
-                photo_style="photo_style_ny", photo_tariff="photo_tariff_590", tariff="trial_590",
+                photo_style="photo_style_ny", photo_tariff=f"photo_tariff_{tariff}", tariff="trial_590" if tariff==590 else 'standard_990',
                 template=template, photosession=True, photosession_admin_bypass=True,
-                photo_product_name="Фотосессия Попробовать", photo_amount_kopecks=59000,
+                photo_product_name=PHOTO_TARIFFS[tariff][1], photo_amount_kopecks=PHOTO_TARIFFS[tariff][0],
             )
             await context.set_state(PosterStates.waiting_for_photosession_photo)
             await _reply(
@@ -4031,20 +4089,23 @@ def create_router(
                 "👑 Режим администратора: Оплата пропущена. Загрузите одно общее фото мамы и дочки (2 человека). "
                 "В пакете: два совместных кадра и один кадр мамы в полный рост."
                 if template == "mom_daughter" else
+                "👑 Режим администратора: Оплата пропущена. Загрузите одно общее фото мамы и дочки (2 человека). "
+                "Создадим пять кадров: праздничные фото и студийные портреты с леденцом-петушком, без головных уборов."
+                if template=='mom_daughter_5' else
                 "👑 Режим администратора: Оплата пропущена. Загрузите одно общее фото мамы и сына (2 человека). "
                 "Кролик на исходном фото не нужен. Создадим маму с кроликом, сына с кроликом и совместный кадр у ёлки."
                 if template == "rabbit" else
                 "👑 Режим администратора: Оплата пропущена. Пожалуйста, загрузите общее фото семьи (3 и более человек) для генерации."
             )
             return
-        if paid and paid['user_id']==event.get_ids()[1] and paid['status']=='paid' and template in NY_FAMILY_PHOTOSESSION_PROMPTS:
+        if paid and paid['user_id']==event.get_ids()[1] and paid['status']=='paid' and paid['tariff']==tariff and template in prompts_by_template:
             await update_photo_order(paid['order_id'],style='photo_style_ny',template=template)
             await context.update_data(photosession=True)
             await context.set_state(PosterStates.waiting_for_photosession_photo)
             await run_family_photosession(event,context)
             return
         # Подтверждение платежа учитывается как фотозаказ, без начисления кредитов.
-        await send_photo_trial_checkout(event, context)
+        await send_photo_trial_checkout(event, context,tariff)
 
     @router.message_callback(F.callback.payload.in_({"show_examples", "show_help"}))
     async def utility_menu(event: MessageCallback) -> None:
@@ -4240,7 +4301,7 @@ def create_router(
                 "Нужно одно общее фото семьи с малышом или малышами, отправленное как изображение."
                 if data["template"] == "toddlers" else
                 "Нужно одно общее фото мамы и дочки (2 человека), отправленное как изображение."
-                if data["template"] == "mom_daughter" else
+                if data["template"] in ("mom_daughter",'mom_daughter_5') else
                 "Нужно одно общее фото мамы и сына (2 человека), отправленное как изображение. Кролик на фото не нужен."
                 if data["template"] == "rabbit" else
                 "Нужно одно общее фото семьи из 3 и более человек, отправленное как изображение."

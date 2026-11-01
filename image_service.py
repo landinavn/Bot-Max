@@ -487,8 +487,11 @@ def _photosession_style_references(style_reference_url=None, style_reference_url
 
 async def _generate_image_bytes(
     photo_url: str, sphere: str, config: Config, count: int = 1, *, prompt_override: str | None = None,
-    style_reference_url: str | None = None, style_reference_urls: tuple[str, ...] | None = None
+    style_reference_url: str | None = None, style_reference_urls: tuple[str, ...] | None = None,
+    image_size: str = '1024x1536'
 ) -> list[bytes]:
+    if image_size not in ('1024x1536', '1536x1024'):
+        raise ValueError('Неподдерживаемый формат кадра.')
     if not config.image_api_key or not config.image_model:
         raise GenerationNotConfigured("Задайте IMAGE_API_KEY и IMAGE_MODEL.")
     prompt = (
@@ -569,7 +572,7 @@ async def _generate_image_bytes(
         async with _image_api_client(config) as client:
             raw = await client.images.with_raw_response.edit(
                 model=config.image_model, quality=config.image_quality,
-                prompt=prompt, size="1024x1536",
+                prompt=prompt, size=image_size,
                 image=image_input,
             )
             response = raw.http_response
@@ -677,10 +680,13 @@ def _store_image(client, config: Config, image_path: Path) -> str:
 async def _generate_and_store(
     photo_url: str, sphere: str, count: int = 1, *, prompt_override: str | None = None,
     postcard_text: str | None = None, postcard_mode: str | None = None, preview_watermark: bool = False,
-    style_reference_url: str | None = None, style_reference_urls: tuple[str, ...] | None = None
+    style_reference_url: str | None = None, style_reference_urls: tuple[str, ...] | None = None,
+    image_size: str | None = None
 ) -> list[str]:
     _validate_inputs(photo_url, sphere if prompt_override is None else "Открытка")
     _photosession_style_references(style_reference_url, style_reference_urls)
+    if image_size is not None and image_size not in ('1024x1536', '1536x1024'):
+        raise ValueError('Неподдерживаемый формат кадра.')
     config = Config.from_env()
     if not config.image_api_key or not config.image_model:
         raise GenerationNotConfigured("Задайте IMAGE_API_KEY и IMAGE_MODEL.")
@@ -696,6 +702,8 @@ async def _generate_and_store(
             kwargs['style_reference_url'] = style_reference_url
         if style_reference_urls is not None:
             kwargs['style_reference_urls'] = tuple(style_reference_urls)
+        if image_size is not None:
+            kwargs['image_size'] = image_size
         images = await _generate_image_bytes(photo_url, sphere, config, count=count, **kwargs)
         result_urls = []
         for image_bytes in images:
@@ -1026,6 +1034,99 @@ NY_FAMILY_PHOTOSESSION_PROMPTS = {
     "rabbit": NY_RABBIT_PROMPTS,
 }
 
+FIVE_MOM_IDENTITY = (
+    "Create a highly realistic professional fashion photograph of the mother and daughter from the client's "
+    "uploaded photo. Use ONLY their exact identities, natural ages, facial features, skin tones, hair colors, "
+    "body types, weight and proportions. Do not slim, elongate, idealize, age or de-age them. "
+    "IGNORE the client's original clothes and background. Keep children age-appropriate. "
+    "NO HEADWEAR on anyone: no hats, kokoshniks, crowns, headbands, bows, horns or costume ears. "
+    "Preserve their own hair color and length. All visible eyes are naturally open, never closed. "
+)
+FIVE_MOM_ROOM = (
+    "SETTING & COLOR: A classic Christmas studio with warm ivory-grey wall panels, shallow curved steps, "
+    "a large dark-green wreath high behind the people, two natural fir trees framing them, tiny warm lights, "
+    "silver tinsel, red and gold baubles, wrapped white/red/gold gifts with red ribbons, red velvet curtains "
+    "at the sides and a pale floor. Consistent rich festive red, ivory and deep green palette, soft frontal "
+    "photographic light, natural skin texture and realistic contrast. Same location and lighting in frames 1 and 3. "
+)
+FIVE_MOM_ROOM_CLOTHES = (
+    "MATCHING OUTFITS FOR FRAMES 1 AND 3: Mother wears an ivory textured long-sleeved knit top, "
+    "high-waisted bright-red wide-leg floor-length trousers and pale gold low heels. Daughter wears a rich-red "
+    "velvet short puff-sleeved blouse with large round silver buttons, flowing cream satin wide-leg trousers "
+    "and dark burgundy Mary Jane flats. Keep every fabric, color and accessory identical across frames 1 and 3. "
+)
+FIVE_MOM_PINK_STUDIO = (
+    "SETTING & COLOR: Smooth seamless coral/rose-red studio backdrop and floor, soft even frontal studio "
+    "light with natural skin texture, photographic realism and no Christmas-tree scenery in these candy portraits. "
+    "Keep the same backdrop color and candy appearance in frames 2, 4 and 5. "
+)
+FIVE_MOM_GIRL_CANDY_CLOTHES = (
+    "DAUGHTER'S EXACT OUTFIT FOR FRAMES 2 AND 5: A modest opaque ivory-white blouse with a high standing "
+    "lace collar, delicate lace bib/trim, long sleeves and small pale buttons, with long glossy red bead necklaces. "
+    "Where the lower body is visible, age-appropriate black tailored shorts, opaque red tights and black lace-up ankle boots. "
+    "No leather jacket over the blouse. Keep her blouse, collar, sleeves, beads and colors identical in frames 2 and 5. "
+)
+FIVE_MOM_ROOSTER = (
+    "PROP: EXACTLY ONE large translucent ruby-red caramel lollipop sculpted in the recognizable shape of a "
+    "traditional ROOSTER, including its comb and curved tail, on a straight wooden stick. Not a round or heart-shaped candy. "
+    "Keep the same red rooster design, color and size in frames 2, 4 and 5. The candy may occlude an eye as "
+    "specified, but never deform or replace the face or eyeball. "
+)
+FIVE_MOM_ANATOMY = (
+    PHOTOSESSION_BODY_ANATOMY_REQUIREMENT +
+    " Each person's hands and wrists must remain distinct, correctly attached to their own arms and shoulders. "
+    "No merged hands, duplicated fingers, extra limbs, disconnected wrists or twisted feet. "
+    "Do not invent visible limbs where they are naturally occluded. DO NOT ADD ANY TEXT."
+)
+NY_MOM_DAUGHTER_FIVE_PROMPTS = (
+    FIVE_MOM_IDENTITY + FIVE_MOM_ROOM + FIVE_MOM_ROOM_CLOTHES +
+    "PEOPLE: EXACTLY TWO people, only mother and daughter. POSE & CAMERA: Horizontal wide environmental "
+    "portrait at seated eye level, their complete seated bodies and feet visible between both trees. "
+    "They sit close together on the pale floor, legs folded naturally to the side, mother to frame-right and "
+    "daughter to frame-left. Mother gently holds her daughter near the shoulder with one hand; other hands "
+    "rest naturally on their own laps. BOTH turn their faces forward, look directly at the CAMERA and smile warmly. "
+    "Do not turn them toward each other, do not kiss, and do not close their eyes. No lollipop in this frame. "
+    + FIVE_MOM_ANATOMY,
+    FIVE_MOM_IDENTITY + FIVE_MOM_PINK_STUDIO + FIVE_MOM_GIRL_CANDY_CLOTHES + FIVE_MOM_ROOSTER +
+    "PEOPLE: EXACTLY ONE person, only the daughter. POSE & CAMERA: Tight vertical frontal portrait from chest "
+    "to above the head, at eye level. She looks directly into the camera with a calm natural expression. "
+    "Her hand holds the wooden stick below the candy; the large red rooster occupies frame-left and covers "
+    "one eye, while the OTHER eye stays naturally open and clearly visible. Keep her facial features intact. "
+    "Show the white high lace collar, red beads and natural uncovered hair. "
+    + FIVE_MOM_ANATOMY,
+    FIVE_MOM_IDENTITY + FIVE_MOM_ROOM + FIVE_MOM_ROOM_CLOTHES +
+    "PEOPLE: EXACTLY TWO people, only mother and daughter. POSE & CAMERA: Vertical full-length portrait, "
+    "both complete bodies from head to shoes visible. They stand close together in a gentle side embrace "
+    "between the Christmas trees, mother to frame-right and daughter to frame-left, daughter leaning slightly "
+    "toward her mother. Their arms wrap naturally around each other's back and waist with distinct hands. "
+    "Both look toward the camera with relaxed warm expressions and naturally open eyes. The wreath, steps "
+    "and red-ribbon gifts are clearly visible. Use exactly the outfits established in frame 1. No lollipop here. "
+    + FIVE_MOM_ANATOMY,
+    FIVE_MOM_IDENTITY + FIVE_MOM_PINK_STUDIO + FIVE_MOM_ROOSTER +
+    "MOTHER'S OUTFIT: A plain opaque white long-sleeved blouse/top, natural uncovered hair, no headwear. "
+    "PEOPLE: EXACTLY ONE person, only the mother. POSE & CAMERA: Tight vertical frontal portrait, head and "
+    "upper torso visible. Mother looks directly at the camera with a soft natural expression, no exaggerated lips. "
+    "She holds the wooden stick with one hand below the large rooster candy. The candy occupies frame-right, "
+    "covering ONE eye; the other eye remains open and visible. Keep the same red rooster and coral backdrop as frame 2. "
+    + FIVE_MOM_ANATOMY,
+    FIVE_MOM_IDENTITY + FIVE_MOM_PINK_STUDIO + FIVE_MOM_GIRL_CANDY_CLOTHES + FIVE_MOM_ROOSTER +
+    "MOTHER'S OUTFIT: An opaque black long-sleeved top, long red gloves, red bead necklace, a white/ivory lace "
+    "midi skirt with an opaque lining and black ankle boots. No horns, headband or any other headwear. "
+    "PEOPLE: EXACTLY TWO people, only mother and daughter. POSE & CAMERA: Vertical full-body side-view "
+    "portrait. Mother crouches comfortably at frame-left so her face is near the daughter's height; daughter "
+    "stands at frame-right. They face each other with playful happy expressions, gently sticking out their "
+    "tongues toward opposite sides of the SAME single rooster lollipop between them. Daughter holds the "
+    "wooden stick with one hand; mother's gloved hand steadies it lower down, with clearly separate hands "
+    "and wrists. Their other hands rest naturally on their own knee or at their side. "
+    "Daughter wears EXACTLY her white lace-collar blouse and red beads from frame 2, with red tights, "
+    "black shorts and boots; do not replace this outfit with a black leather jacket. Show both complete bodies and feet. "
+    + FIVE_MOM_ANATOMY,
+)
+NY_PHOTOSESSION_PROMPTS_BY_TARIFF = {
+    590: NY_FAMILY_PHOTOSESSION_PROMPTS,
+    990: {"mom_daughter_5": NY_MOM_DAUGHTER_FIVE_PROMPTS},
+}
+
 
 CARTOON_THEME_IMAGE_BASE = (
     'Transform the person from the reference photo into a 3D animated movie character in the style of Pixar/Disney. '
@@ -1104,7 +1205,8 @@ async def generate_cartoon_avatar(photo_url: str, mode: str) -> str:
 
 
 async def generate_photosession_frame(photo_url: str, prompt: str, *, style_reference_url: str | None = None,
-                                      style_reference_urls: tuple[str, ...] | None = None) -> str:
+                                      style_reference_urls: tuple[str, ...] | None = None,
+                                      image_size: str | None = None) -> str:
     """Один /images/edits через общий клиент с OPENAI_PROXY_URL и таймаутом 300 с.
 
     Результат сохраняется отдельным файлом в S3, без надписи Pillow.
@@ -1112,6 +1214,10 @@ async def generate_photosession_frame(photo_url: str, prompt: str, *, style_refe
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("Не задан промпт фотосессии.")
     kwargs = {}
+    if image_size is not None:
+        if image_size not in ('1024x1536', '1536x1024'):
+            raise ValueError('Неподдерживаемый формат кадра.')
+        kwargs['image_size'] = image_size
     references = _photosession_style_references(style_reference_url, style_reference_urls)
     if style_reference_url is not None:
         kwargs['style_reference_url'] = style_reference_url

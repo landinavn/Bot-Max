@@ -472,7 +472,8 @@ async def _image_api_client(config: Config):
 
 
 async def _generate_image_bytes(
-    photo_url: str, sphere: str, config: Config, count: int = 1, *, prompt_override: str | None = None
+    photo_url: str, sphere: str, config: Config, count: int = 1, *, prompt_override: str | None = None,
+    style_reference_url: str | None = None
 ) -> list[bytes]:
     if not config.image_api_key or not config.image_model:
         raise GenerationNotConfigured("Задайте IMAGE_API_KEY и IMAGE_MODEL.")
@@ -535,7 +536,13 @@ async def _generate_image_bytes(
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
             photo_bytes = await _download_photo(session, photo_url)
+            if style_reference_url:
+                style_bytes = await _download_photo(session, style_reference_url)
         filename, mime_type = _photo_format(photo_bytes)
+        image_input = (filename, photo_bytes, mime_type)
+        if style_reference_url:
+            style_name, style_mime = _photo_format(style_bytes)
+            image_input = [image_input, ('style-' + style_name, style_bytes, style_mime)]
         logger.info("HTTP POST OpenAI Images API: генерация %d изображений.", count)
         logger.info(
             "Отправляю запрос с моделью: %s, качество: %s",
@@ -546,7 +553,7 @@ async def _generate_image_bytes(
             raw = await client.images.with_raw_response.edit(
                 model=config.image_model, quality=config.image_quality,
                 prompt=prompt, size="1024x1536",
-                image=(filename, photo_bytes, mime_type),
+                image=image_input,
             )
             response = raw.http_response
             if response.status_code != 200:
@@ -652,9 +659,12 @@ def _store_image(client, config: Config, image_path: Path) -> str:
 
 async def _generate_and_store(
     photo_url: str, sphere: str, count: int = 1, *, prompt_override: str | None = None,
-    postcard_text: str | None = None, postcard_mode: str | None = None, preview_watermark: bool = False
+    postcard_text: str | None = None, postcard_mode: str | None = None, preview_watermark: bool = False,
+    style_reference_url: str | None = None
 ) -> list[str]:
     _validate_inputs(photo_url, sphere if prompt_override is None else "Открытка")
+    if style_reference_url is not None:
+        _validate_inputs(style_reference_url, "Фотосессия")
     config = Config.from_env()
     if not config.image_api_key or not config.image_model:
         raise GenerationNotConfigured("Задайте IMAGE_API_KEY и IMAGE_MODEL.")
@@ -666,6 +676,8 @@ async def _generate_and_store(
     try:
         client = await asyncio.to_thread(_storage_client, config)
         kwargs = {"prompt_override": prompt_override} if prompt_override is not None else {}
+        if style_reference_url is not None:
+            kwargs['style_reference_url'] = style_reference_url
         images = await _generate_image_bytes(photo_url, sphere, config, count=count, **kwargs)
         result_urls = []
         for image_bytes in images:
@@ -859,10 +871,73 @@ NY_FAMILY_TODDLERS_PROMPTS = (
         + " DO NOT ADD ANY TEXT."
     ),
 )
+MOM_DAUGHTER_IDENTITY = (
+    "Create a highly realistic, professional editorial New Year photoshoot. Use the client's uploaded "
+    "reference photo ONLY for the identities and real body proportions of the mother and her daughter. "
+    "Preserve their exact facial features, skin tones, natural ages, hair colors and hairstyles, weight, "
+    "body types and relative height. Do NOT slim, elongate, beautify, age or de-age either person. "
+    "Do not transfer the appearance of any other model. IGNORE the client's original clothing, pose and background. "
+)
+MOM_DAUGHTER_SCENE = (
+    "STYLE & PALETTE: Fashion editorial Christmas photography, vertical portrait, natural skin texture, "
+    "crisp direct-flash highlights combined with cool window daylight and warm golden fairy-light bokeh. "
+    "A very large dark-green Christmas tree with gold and ivory baubles, warm tiny lights, muted grey walls, "
+    "tall windows, pale rug and terrazzo floor. Olive/chartreuse green, ivory, gold and neutral grey palette. "
+)
+MOM_DAUGHTER_MOTHER_CLOTHING = (
+    "MOTHER'S CLOTHING: An olive/chartreuse green satin floor-length halter-neck evening dress, "
+    "sleeveless with a high softly gathered neckline and natural fabric folds, silver earrings and stacked silver bracelets. "
+    "When feet are visible, delicate silver strappy heels. Use this exact outfit and color in every frame. "
+)
+MOM_DAUGHTER_DAUGHTER_CLOTHING = (
+    "DAUGHTER'S CLOTHING: An age-appropriate sleeveless ivory/white dress with soft feather-like fringe and "
+    "subtle iridescent texture. Preserve her real age and proportions; never give a child an adult body. "
+    "Use this exact outfit and color in each shared frame. "
+)
+MOM_DAUGHTER_ANATOMY = (
+    PHOTOSESSION_BODY_ANATOMY_REQUIREMENT +
+    " Check the anatomy of every visible person before finalizing: each arm must connect to its own shoulder, "
+    "each leg to its own hip, and each hand to its own wrist. Exactly two hands per person, five fingers per hand. "
+    "No merged hands, detached hands, duplicated fingers, extra arms or legs. Keep naturally occluded limbs "
+    "occluded; do not invent additional visible hands to explain an embrace. "
+)
+NY_MOM_DAUGHTER_PROMPTS = (
+    MOM_DAUGHTER_IDENTITY + MOM_DAUGHTER_SCENE + MOM_DAUGHTER_MOTHER_CLOTHING + MOM_DAUGHTER_DAUGHTER_CLOTHING +
+    "PEOPLE: EXACTLY TWO people, only the client's mother and daughter. "
+    "POSE & CAMERA: Intimate vertical medium portrait at eye level. The mother is seated in the foreground, "
+    "her daughter stands closely behind and gently embraces her shoulders, leaning her head toward her mother's head. "
+    "Both have peaceful soft smiles and naturally closed eyes. The daughter's two hands rest separately on the "
+    "mother's shoulders; the mother's hands remain naturally distinct from the daughter's. "
+    "Crop around the mother's waist, showing the daughter's upper body and white textured dress behind. "
+    "The illuminated tree fills the background with softly blurred golden lights. "
+    + MOM_DAUGHTER_ANATOMY + "DO NOT ADD ANY TEXT.",
+    MOM_DAUGHTER_IDENTITY + MOM_DAUGHTER_SCENE + MOM_DAUGHTER_MOTHER_CLOTHING + MOM_DAUGHTER_DAUGHTER_CLOTHING +
+    "PEOPLE: EXACTLY TWO people, only the client's mother and daughter. "
+    "POSE & CAMERA: Vertical seated environmental portrait from a low eye-level camera. "
+    "Both sit together on the pale rug in front of the tree, mother behind and to the left, daughter slightly "
+    "in front, sitting close beside her. The mother leans back on one supporting arm, with her other arm relaxed "
+    "along her own bent knee; the daughter supports herself naturally with her own hands. "
+    "The mother looks upward to frame-left in three-quarter profile with a gentle smile. The daughter looks "
+    "up at her mother, smiling. Include their seated bodies, the mother's flowing green skirt, the daughter's "
+    "white fringed dress and naturally positioned legs extending toward frame-left. Do not make limbs overlap impossibly. "
+    + MOM_DAUGHTER_ANATOMY + "DO NOT ADD ANY TEXT.",
+    MOM_DAUGHTER_IDENTITY + MOM_DAUGHTER_SCENE + MOM_DAUGHTER_MOTHER_CLOTHING +
+    "PEOPLE: EXACTLY ONE person: ONLY the mother from the client's reference. Do NOT include her daughter "
+    "or any other person in this frame. "
+    "POSE & CAMERA: Vertical full-length fashion portrait, entire body from head to shoes visible, "
+    "camera slightly below chest level. The mother stands beside a warm terracotta-orange wall on frame-right; "
+    "a tall Christmas tree and large cool-daylight windows are behind her on frame-left. "
+    "One arm is raised with that hand resting lightly on the top of her head and a clearly connected elbow; "
+    "the other arm hangs relaxed alongside her body. She looks upward to frame-left in three-quarter profile. "
+    "Her legs and feet are naturally balanced, one foot slightly in front of the other, no twisted ankles. "
+    "Show the full olive satin dress and silver heels on the terrazzo floor. Preserve her real build and leg length. "
+    + MOM_DAUGHTER_ANATOMY + "DO NOT ADD ANY TEXT.",
+)
 NY_FAMILY_PHOTOSESSION_PROMPTS = {
     "fam3": NY_FAMILY_THREE_PROMPTS,
     "fam4": NY_FAMILY_PLUS_PROMPTS,
     "toddlers": NY_FAMILY_TODDLERS_PROMPTS,
+    "mom_daughter": NY_MOM_DAUGHTER_PROMPTS,
 }
 
 
@@ -942,14 +1017,23 @@ async def generate_cartoon_avatar(photo_url: str, mode: str) -> str:
     return urls[0]
 
 
-async def generate_photosession_frame(photo_url: str, prompt: str) -> str:
+async def generate_photosession_frame(photo_url: str, prompt: str, *, style_reference_url: str | None = None) -> str:
     """Один /images/edits через общий клиент с OPENAI_PROXY_URL и таймаутом 300 с.
 
     Результат сохраняется отдельным файлом в S3, без надписи Pillow.
     """
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("Не задан промпт фотосессии.")
-    urls = await _generate_and_store(photo_url, "Фотосессия", count=1, prompt_override=prompt)
+    kwargs = {}
+    if style_reference_url is not None:
+        _validate_inputs(style_reference_url, "Фотосессия")
+        kwargs['style_reference_url'] = style_reference_url
+        prompt += (' INPUT ROLES: The FIRST image is the original client photo: use it as the authority for '
+                   'identity, age and body proportions. The SECOND image is the first generated frame: match '
+                   'its exact outfits, fabric colors, jewelry, lighting, color grading and location. '
+                   'Do not copy its pose or framing; follow the new frame instructions and the required '
+                   'number of people for this frame. DO NOT ADD ANY TEXT.')
+    urls = await _generate_and_store(photo_url, "Фотосессия", count=1, prompt_override=prompt, **kwargs)
     if len(urls) != 1:
         raise ImageGenerationError("Ожидался один кадр фотосессии.")
     return urls[0]

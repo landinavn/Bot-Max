@@ -42,7 +42,8 @@ from database import (
     get_active_promo,quote_repeat_price,get_promo_reservation,PromoReservedError,
     PHOTO_TARIFFS,PHOTO_PACKAGE_SIZES,get_photo_results,get_photo_package_balance,save_photo_result,
     create_photo_order, get_photo_order, update_photo_order, CARTOON_TARIFFS, create_cartoon_order, get_cartoon_order, latest_paid_cartoon, finish_cartoon_order, update_cartoon_order,
-    create_musical_order, get_musical_order,
+    create_musical_order, get_musical_order, create_prepaid_musical_order,
+    save_musical_draft, set_musical_inputs,
     deduct_credit, get_user, grant_free_trial, get_global_stats, increment_generations,
     record_first_start, save_yclid, get_source_stats, get_stats_by_source, register_shared_image, get_shared_image,
     get_all_counters, increment_counter,
@@ -262,6 +263,7 @@ PACKAGES_TEXT = (
 PAYMENT_PACKAGES_TEXT = PACKAGES_TEXT
 NO_CREDITS_TEXT = "У вас закончились кредиты. Пожалуйста, выберите пакет для продолжения:"
 EXAMPLES_DIR = Path(__file__).resolve().parent / "examples"
+MUSICAL_EXAMPLE_FILE = 'musical-card.mp4'
 RABBIT_EXAMPLE_FILE = r"кролик.png"
 NEW_PHOTO_EXAMPLE_FILES = (
     r"Леденец.webp", r"кролик1.webp", r"мама+дочка.webp",
@@ -918,7 +920,7 @@ def create_router(
     default_cartoon_video = cartoon_video_generator is None
     cartoon_video_generator = cartoon_video_generator or generate_video
 
-    async def prepare_video_song(data, scenario):
+    async def prepare_video_song(data, scenario, *, checkpoint=None):
         custom_song = data.get('video_flow') and data.get('video_product') == 'direct'
         details = (data.get('song_custom_text') if custom_song else
                    data.get('video_song_phrase') or data.get('video_teacher_details') or data.get('song_details') or data.get('card_text')
@@ -944,11 +946,13 @@ def create_router(
             validate_song_arguments(lyrics, tags, title)
             data.update(video_song_job_source=source, video_song_lyrics=lyrics, video_song_job_id=None)
             data['video_song_job_id'] = await song_generator(lyrics, tags, title)
+            if checkpoint is not None:
+                await checkpoint()
         result = await song_waiter(data['video_song_job_id'])
         audio_url = song_audio_url(result)
         if is_video_placeholder(audio_url):
             raise ValueError('TTAPI вернул тестовую ссылку вместо песни.')
-        data.update(video_song_source=source, video_song_url=audio_url)
+        data.update(video_song_source=source, video_song_url=audio_url, audio_url=audio_url)
         return audio_url
 
     async def render_video_with_song(data, image_url, scenario):
@@ -2864,6 +2868,8 @@ def create_router(
         await _reply(event, photo_request('Теперь загрузите фото для открытки. Затем напишите поздравление. /cancel — отмена.'))
 
     async def generate_role_video_preview(event, context):
+        if not await ensure_music_access(event,context):
+            return
         user_id = event.get_ids()[1]
         if user_id is None:
             return
@@ -2908,6 +2914,7 @@ def create_router(
                 logger.exception('Ошибка создания или отправки предметного превью для видео:')
                 if (await context.get_data()).get('card_role_session') == session:
                     await context.set_state(PosterStates.waiting_for_card_text)
+                    await persist_music_draft(event,context,'text')
                     await _reply(event, 'Не удалось создать или отправить превью. Отправьте поздравление ещё раз или /cancel; готовое превью будет использовано повторно.')
 
     def video_style_keyboard(screen):
@@ -2921,6 +2928,7 @@ def create_router(
     async def show_video_songs(event, context):
         await context.update_data(video_teacher_session_id=None, video_audio_delivery_session=None)
         await context.set_state(PosterStates.waiting_for_video_song)
+        await persist_music_draft(event,context,'song')
         data = await context.get_data()
         scenarios = VIDEO_SHORT_SCENARIOS if data.get('video_product') in {'animate', 'upsell'} else VIDEO_SONG_SCENARIOS
         buttons = [(label, key if key == 'audio_video_teacher' else 'video_song:' + key) for key, (label, _) in scenarios.items()]
@@ -2942,8 +2950,117 @@ def create_router(
         await context.clear()
         await context.update_data(video_flow=True, video_amount_kopecks=29900, video_product='direct')
         await context.set_state(PosterStates.waiting_for_mode)
+        try:
+            video=await event.bot.upload_media(InputMedia(path=str(EXAMPLES_DIR/MUSICAL_EXAMPLE_FILE),type=UploadType.VIDEO))
+            if not isinstance(video.payload.token,str) or not video.payload.token.strip():
+                raise RuntimeError('MAX не вернул токен видео-примера.')
+            await _reply(event,'🎵 Пример музыкальной открытки:',attachments=[video])
+        except Exception:
+            logger.exception('Не удалось отправить пример музыкальной открытки:')
+            await _reply(event,'Видео-пример временно недоступен.')
         await _reply(event, '🎵 Создаем музыкальную открытку! Выберите стиль открытки:',
                      attachments=[video_style_keyboard('cat_cards')])
+
+    async def persist_music_draft(event,context,stage):
+        data=await context.get_data()
+        if data.get('music_prepaid_id'):
+            await save_musical_draft(data['music_prepaid_id'],event.get_ids()[1],data,stage)
+
+    async def music_upfront_checkout(event,context,mode):
+        user_id=event.get_ids()[1]
+        if user_id is None or mode not in POSTCARD_PROMPTS:
+            await _reply(event,'Выберите сюжет музыкальной открытки заново.',attachments=[main_keyboard()])
+            return
+        if user_id==admin_user_id:
+            await start_mode_photo(event,context,mode,video=True)
+            return
+        if payments is None:
+            await _reply(event,'Оплата временно недоступна. Попробуйте позже.')
+            return
+        try:
+            data=await context.get_data()
+            order=await get_musical_order(data.get('music_prepaid_id',''))
+            if not order or order['user_id']!=user_id or not order['prepaid'] or order['mode']!=mode:
+                if await resume_repeat_checkout(event,user_id,'music_card'):
+                    return
+                key=await create_prepaid_musical_order(f'music_{user_id}_{uuid4().hex}',user_id,mode)
+                order=await get_musical_order(key)
+            if order['status']=='paid':
+                await resume_music_inputs(event,context,order)
+                return
+            await context.clear()
+            await context.update_data(video_flow=True,video_product='direct',mode=mode,
+                                      video_amount_kopecks=order['amount_kopecks'],music_prepaid_id=order['order_id'])
+            await context.set_state(PosterStates.waiting_for_video_payment)
+            link=await payments.create_musical_payment_link(order_id=order['order_id'],
+                amount=order['amount_kopecks']//100,description=order['product_name'])
+            await _reply(event,f"Стоимость музыкальной открытки — {order['amount_kopecks']//100} ₽. "
+                         'После оплаты загрузите фото, напишите поздравление и выберите песню. '
+                         'Вы получите готовый MP4-файл.',attachments=[InlineKeyboardBuilder().row(
+                             LinkButton(text=f"Оплатить {order['amount_kopecks']//100} ₽",url=link)).row(
+                             CallbackButton(text='✅ Продолжить после оплаты',payload='music_resume:'+order['order_id'])).as_markup()])
+        except Exception:
+            logger.exception('Не удалось создать предварительный счёт музыкальной открытки:')
+            await _reply(event,'Не удалось создать ссылку на оплату. Выберите сюжет ещё раз.')
+
+    async def ensure_music_access(event,context):
+        data=await context.get_data()
+        if data.get('video_product')!='direct' or event.get_ids()[1]==admin_user_id:
+            return True
+        order=await get_musical_order(data.get('music_prepaid_id',''))
+        if not order and data.get('music_checkout_id'):
+            legacy=await get_musical_order(data['music_checkout_id'])
+            if legacy and legacy['user_id']==event.get_ids()[1] and not legacy['prepaid']:
+                if legacy['status']=='paid':
+                    await _reply(event,'Этот заказ уже оплачен. Музыкальная открытка будет отправлена автоматически.')
+                elif payments:
+                    link=await payments.create_musical_payment_link(order_id=legacy['order_id'],
+                        amount=legacy['amount_kopecks']//100,description=legacy['product_name'])
+                    await _reply(event,'Продолжите оплату сохранённого заказа.',attachments=[InlineKeyboardBuilder().row(
+                        LinkButton(text=f"Оплатить {legacy['amount_kopecks']//100} ₽",url=link)).as_markup()])
+                return False
+        if (order and order['user_id']==event.get_ids()[1] and order['status']=='paid'
+                and order['prepaid'] and order['mode']==data.get('mode') and not order['input_ready']):
+            return True
+        if order and order['user_id']==event.get_ids()[1] and order['status']=='paid' and order['input_ready']:
+            await _reply(event,'Этот заказ уже передан в сборку. Готовая музыкальная открытка придёт автоматически.')
+            return False
+        await music_upfront_checkout(event,context,data.get('mode'))
+        return False
+
+    async def resume_music_inputs(event,context,order):
+        if order['input_ready']:
+            await _reply(event,'Музыкальная открытка уже в очереди на создание или отправлена.')
+            return
+        draft=json.loads(order['draft'])
+        if order['input_stage']=='photo' or not draft.get('photo'):
+            await start_mode_photo(event,context,order['mode'],video=True,music_order_id=order['order_id'])
+            return
+        draft.update(music_prepaid_id=order['order_id'],video_flow=True,video_product='direct',mode=order['mode'])
+        await context.set_data(draft)
+        if order['input_stage']=='text':
+            await context.set_state(PosterStates.waiting_for_card_text)
+            await _reply(event,CARD_TEXT_PROMPT)
+        elif order['input_stage']=='phrase' and draft.get('video_song_scenario') in VIDEO_SONG_SCENARIOS:
+            await context.set_state(PosterStates.waiting_for_video_song_phrase)
+            await _reply(event,VIDEO_SONG_CUSTOM_TEXT_PROMPT)
+        else:
+            await show_video_songs(event,context)
+
+    @router.message_callback(F.callback.payload.startswith('music_resume:'))
+    async def music_resume(event: MessageCallback,context: MemoryContext):
+        await event.ack(notification='Проверяю оплату…')
+        order=await get_musical_order(event.callback.payload.removeprefix('music_resume:'))
+        if not order or order['user_id']!=event.get_ids()[1] or not order['prepaid']:
+            await _reply(event,'Музыкальный заказ недоступен.')
+            return
+        if order['status']!='paid':
+            await _reply(event,'Оплата ещё не подтверждена. После оплаты нажмите «Продолжить после оплаты».')
+            return
+        if await context.get_state() in (PosterStates.generating,PosterStates.generating_video_teacher):
+            await _reply(event,'Создание уже выполняется. Пожалуйста, подождите.')
+            return
+        await resume_music_inputs(event,context,order)
 
     @router.message_callback(F.callback.payload.startswith('video_style:'))
     async def video_style(event: MessageCallback, context: MemoryContext):
@@ -2958,7 +3075,7 @@ def create_router(
             return
         await event.ack(notification='Выбираю стиль…')
         if target in POSTCARD_PROMPTS:
-            await start_mode_photo(event, context, target, video=True)
+            await music_upfront_checkout(event, context, target)
         else:
             await context.clear()
             await context.update_data(video_flow=True, video_amount_kopecks=29900, video_product='direct')
@@ -2996,6 +3113,12 @@ def create_router(
             await event.ack(notification='Отправьте /start, чтобы открыть меню.')
             return
         data = await context.get_data()
+        if data.get('video_product')=='direct' and event.get_ids()[1]!=admin_user_id:
+            order=await get_musical_order(data.get('music_prepaid_id',''))
+            if not order or order['user_id']!=event.get_ids()[1] or order['status']!='paid' or order['input_ready']:
+                await event.ack(notification='Проверяю оплату…')
+                await ensure_music_access(event,context)
+                return
         scenario = event.callback.payload.removeprefix('video_song:')
         scenarios = VIDEO_SHORT_SCENARIOS if data.get('video_product') in {'animate', 'upsell'} else VIDEO_SONG_SCENARIOS
         expected_price = {'direct': 29900, 'upsell': 14900, 'animate': 14900}.get(data.get('video_product'))
@@ -3015,6 +3138,7 @@ def create_router(
                                       video_teacher_details=None, video_song_lyrics=None, video_teacher_session_id=None,
                                       video_teacher_lyrics_source=None, video_song_tags=None, video_song_title=None)
             await context.set_state(PosterStates.waiting_for_video_song_phrase)
+            await persist_music_draft(event,context,'phrase')
             await _reply(event, VIDEO_SONG_CUSTOM_TEXT_PROMPT)
             return
         if scenario == 'audio_video_teacher':
@@ -3077,6 +3201,8 @@ def create_router(
                     changes['chosen_song_url'] = None
                 changes['chosen_song_phrase'] = phrase
             await context.update_data(**changes)
+            if not cartoon:
+                await persist_music_draft(event,context,'phrase')
             if cartoon:
                 await prepare_cartoon_music_preview(event, context)
             else:
@@ -3085,6 +3211,8 @@ def create_router(
     async def collect_video_teacher_details(event: MessageCreated, context: MemoryContext):
         user_id = event.get_ids()[1]
         if is_bot_message(event) or user_id is None:
+            return
+        if not await ensure_music_access(event,context):
             return
         lock = video_text_locks.setdefault(user_id, asyncio.Lock())
         if lock.locked():
@@ -3128,57 +3256,7 @@ def create_router(
             await _reply(event, 'Видео уже создаётся. Пожалуйста, подождите.')
             return
         async with lock:
-            data = await context.get_data()
-            if data.get('video_product') == 'direct' or data.get('video_song_scenario') == 'audio_video_teacher':
-                if not await deliver_video_song_audio(event, context):
-                    return
             await run_selected_video(event, context)
-
-    async def deliver_video_song_audio(event, context):
-        token = uuid4().hex
-        await context.update_data(video_audio_delivery_session=token)
-        await context.set_state(PosterStates.generating)
-        data = dict(await context.get_data())
-        scenario = data['video_song_scenario']
-        try:
-            audio_url = await prepare_video_song(data, scenario)
-            if (await context.get_data()).get('video_audio_delivery_session') != token:
-                return False
-            data['audio_url'] = audio_url
-            # Сохранить ссылку до ответа MAX и перехода к склейке/оплате.
-            await context.update_data(**video_cache(data))
-            listen_url = audio_url
-            direct = data.get('video_product') == 'direct'
-            if direct:
-                if data.get('video_song_preview_source') != audio_url or not data.get('video_song_preview_url'):
-                    preview_url = await create_audio_preview(audio_url)
-                    if (await context.get_data()).get('video_audio_delivery_session') != token:
-                        return False
-                    data.update(video_song_preview_source=audio_url, video_song_preview_url=preview_url)
-                    await context.update_data(**video_cache(data))
-                listen_url = data['video_song_preview_url']
-            if data.get('video_song_delivered_url') != listen_url:
-                text = ('🎧 Вот короткий фрагмент вашей песни. Если всё нравится, переходите к созданию видео!' if direct else
-                        '🎧 Ваша песня готова! Прослушайте фрагмент и переходите к созданию видео.')
-                sent = await _reply(event, text,
-                    attachments=[InlineKeyboardBuilder().row(LinkButton(
-                        text='🎵 Прослушать фрагмент (MP3)' if direct else '🎵 Прослушать песню (MP3)', url=listen_url)).as_markup()])
-                if sent is None:
-                    raise RuntimeError('MAX не подтвердил отправку аудиоссылки.')
-                if (await context.get_data()).get('video_audio_delivery_session') != token:
-                    return False
-                await context.update_data(video_song_delivered_url=listen_url)
-            return True
-        except Exception:
-            logger.exception('Ошибка получения или отправки аудио для видео:')
-            if (await context.get_data()).get('video_audio_delivery_session') == token:
-                await context.set_state(PosterStates.waiting_for_video_song)
-                await _reply(event, 'Не удалось получить или отправить аудио. Данные сохранены. Повторите отправку песни или /cancel.',
-                    attachments=[navigation_keyboard((('Повторить отправку песни', 'retry_video_song_audio'),))])
-            return False
-        finally:
-            if (await context.get_data()).get('video_audio_delivery_session') == token:
-                await context.update_data(**video_cache(data))
 
     @router.message_callback(F.callback.payload == 'retry_video_song_audio')
     async def retry_video_song_audio(event: MessageCallback, context: MemoryContext):
@@ -3187,10 +3265,12 @@ def create_router(
                 or await context.get_state() != PosterStates.waiting_for_video_song):
             await event.ack(notification='Откройте раздел видео заново.')
             return
-        await event.ack(notification='Повторяю отправку аудио…')
+        await event.ack(notification='Продолжаю создание открытки…')
         await finish_video_selection(event, context)
 
     async def run_selected_video(event, context):
+        if not await ensure_music_access(event,context):
+            return
         data = await context.get_data()
         scenario = data['video_song_scenario']
         scenarios = VIDEO_SHORT_SCENARIOS if data.get('video_product') in {'animate', 'upsell'} else VIDEO_SONG_SCENARIOS
@@ -3205,6 +3285,10 @@ def create_router(
                     result = await generate_card_video(video_data, progress=lambda: _reply(event, MUSICAL_VIDEO_WAIT_MESSAGE))
                 else:
                     await _reply(event, MUSICAL_VIDEO_WAIT_MESSAGE)
+                    if video_data.get('video_product') == 'direct' or scenario == 'audio_video_teacher':
+                        await prepare_video_song(video_data, scenario)
+                    if (await context.get_data()).get('video_generation_id') != generation_id:
+                        return
                     result = await video_generator(video_data)
                 if (await context.get_data()).get('video_generation_id') != generation_id:
                     return
@@ -3241,12 +3325,42 @@ def create_router(
                 if (await context.get_data()).get('video_generation_id') == generation_id:
                     await context.update_data(**video_cache(video_data))
             return
-        price = data['video_amount_kopecks'] // 100
         if data.get('video_product')=='direct':
-            if await resume_repeat_checkout(event,event.get_ids()[1],'music_card'):
-                return
-            quoted,_=await quote_repeat_price(event.get_ids()[1],'music_card',29900,'Музыкальная открытка')
-            price=quoted//100
+            await context.set_state(PosterStates.generating)
+            token=uuid4().hex
+            await context.update_data(music_material_session=token)
+            await _reply(event,MUSICAL_VIDEO_WAIT_MESSAGE)
+            try:
+                image_url=await prepare_card_video_image(data)
+                if (await context.get_data()).get('music_material_session')!=token:
+                    await save_musical_draft(data['music_prepaid_id'],event.get_ids()[1],data,'phrase')
+                    return
+                async def checkpoint():
+                    await save_musical_draft(data['music_prepaid_id'],event.get_ids()[1],data,'phrase')
+                await checkpoint()
+                audio_url=await prepare_video_song(data,scenario,checkpoint=checkpoint)
+                if (await context.get_data()).get('music_material_session')!=token:
+                    await save_musical_draft(data['music_prepaid_id'],event.get_ids()[1],data,'phrase')
+                    return
+                await set_musical_inputs(data['music_prepaid_id'],event.get_ids()[1],image_url,audio_url)
+                await context.update_data(video_source_image=image_url,**video_cache(data))
+                await context.set_state(PosterStates.waiting_for_mode)
+            except asyncio.CancelledError:
+                await asyncio.shield(save_musical_draft(data['music_prepaid_id'],event.get_ids()[1],data,'phrase'))
+                raise
+            except Exception:
+                logger.exception('Не удалось подготовить материалы оплаченной музыкальной открытки:')
+                await save_musical_draft(data['music_prepaid_id'],event.get_ids()[1],data,'phrase')
+                if (await context.get_data()).get('music_material_session')!=token:
+                    return
+                await context.update_data(video_source_image=data.get('video_source_image'),**video_cache(data))
+                await context.set_state(PosterStates.waiting_for_video_song_phrase)
+                await persist_music_draft(event,context,'phrase')
+                await _reply(event,'Не удалось завершить создание. Оплата и материалы сохранены. '
+                             'Продолжите заказ по кнопке.',attachments=[navigation_keyboard((
+                                 ('Продолжить','music_resume:'+data['music_prepaid_id']),))])
+            return
+        price = data['video_amount_kopecks'] // 100
         text = (f'Стоимость музыкальной открытки — {price} ₽. '
                 'Вы получите готовый MP4-файл с вашей открыткой и персональной песней, который можно отправить в мессенджере.')
         if payments is None:
@@ -4272,11 +4386,14 @@ def create_router(
             mode = "mode_bday_young"
         await start_mode_photo(event, context, mode)
 
-    async def start_mode_photo(event, context, mode, *, video=False):
+    async def start_mode_photo(event, context, mode, *, video=False, music_order_id=None):
         await context.clear()
         await context.update_data(mode=mode)
         if video:
             await context.update_data(video_flow=True, video_amount_kopecks=29900, video_product='direct')
+            if music_order_id:
+                await context.update_data(music_prepaid_id=music_order_id)
+                await persist_music_draft(event,context,'photo')
         if mode in ROLE_CARD_FIELDS:
             await context.update_data(card_role_session=uuid4().hex)
             if not video:
@@ -4382,6 +4499,8 @@ def create_router(
         if is_bot_message(event):
             return
         data = await context.get_data()
+        if data.get('video_flow') and not await ensure_music_access(event,context):
+            return
         if not data.get('video_flow') and data.get('mode') in ROLE_CARD_FIELDS and not data.get(ROLE_CARD_FIELDS[data['mode']]):
             await context.set_state(PosterStates.waiting_for_card_role_info)
             await _reply(event, ROLE_CARD_QUESTIONS[data['mode']])
@@ -4403,6 +4522,7 @@ def create_router(
         if data.get("mode") in POSTCARD_PROMPTS:
             await context.update_data(sphere=data["mode"], card_text=None)
             await context.set_state(PosterStates.waiting_for_card_text)
+            await persist_music_draft(event,context,'text')
             await _reply(event, CARD_TEXT_PROMPT)
             return
         await context.set_state(PosterStates.waiting_for_prompt)
@@ -4481,6 +4601,8 @@ def create_router(
         if is_bot_message(event):
             return
         data = await context.get_data()
+        if data.get('video_flow') and not await ensure_music_access(event,context):
+            return
         if data.get("mode") not in POSTCARD_PROMPTS:
             await context.set_state(PosterStates.waiting_for_mode)
             await _reply(event, "Выберите открытку в меню.", attachments=[main_keyboard()])
@@ -4506,6 +4628,7 @@ def create_router(
             )
         await context.update_data(card_text=text, sphere=data["mode"])
         if data.get('video_flow'):
+            await persist_music_draft(event,context,'text')
             if data['mode'] in ROLE_CARD_FIELDS:
                 # Тематика берётся из уже введённого поздравления, без отдельного вопроса.
                 await context.update_data(**{ROLE_CARD_FIELDS[data['mode']]: text})

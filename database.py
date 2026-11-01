@@ -1,6 +1,7 @@
 """Постоянный баланс пользователей. Все изменения фиксируются в SQLite."""
 
 import logging
+import json
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -1063,8 +1064,54 @@ async def get_musical_order(order_id: str):
     return order
 
 
+async def create_prepaid_musical_order(order_id: str, user_id: int, mode: str):
+    if (not isinstance(order_id,str) or not order_id.startswith('music_') or len(order_id)>200
+            or isinstance(user_id,bool) or not isinstance(user_id,int) or user_id<=0
+            or not isinstance(mode,str) or not mode.startswith('mode_') or len(mode)>100):
+        raise ValueError('Некорректный предварительный музыкальный заказ.')
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        await db.execute('BEGIN IMMEDIATE')
+        result=await _create_repeat_order(db,'musical_orders',order_id,
+            {'user_id':user_id,'image_url':'','audio_url':'','tariff':'direct','mode':mode,
+             'prepaid':1,'input_ready':0},*MUSICAL_TARIFFS['direct'],category='music_card')
+        await db.commit()
+        return result
+
+
+async def save_musical_draft(order_id: str, user_id: int, data: dict, stage: str):
+    if stage not in ('photo','text','song','phrase'):
+        raise ValueError('Некорректный этап музыкальной открытки.')
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        await db.execute("UPDATE musical_orders SET draft=?,input_stage=? WHERE order_id=? AND user_id=? "
+                         "AND status='paid' AND prepaid=1 AND input_ready=0",
+                         (json.dumps(data,ensure_ascii=False),stage,order_id,user_id))
+        await db.commit()
+
+
+async def set_musical_inputs(order_id: str, user_id: int, image_url: str, audio_url: str):
+    for url in (image_url,audio_url):
+        parsed=urlsplit(url)
+        if parsed.scheme!='https' or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError('Нужны HTTPS-ссылки на готовые материалы.')
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        await db.execute('BEGIN IMMEDIATE')
+        db.row_factory=aiosqlite.Row
+        async with db.execute('SELECT * FROM musical_orders WHERE order_id=?',(order_id,)) as cursor:
+            order=await cursor.fetchone()
+        if not order or order['user_id']!=user_id or order['status']!='paid' or not order['prepaid']:
+            raise ValueError('Музыкальный заказ не оплачен или принадлежит другому пользователю.')
+        if order['input_ready']:
+            if (order['image_url'],order['audio_url'])!=(image_url,audio_url):
+                raise ValueError('Материалы этого заказа уже переданы в сборку.')
+            return False
+        await db.execute('UPDATE musical_orders SET image_url=?,audio_url=?,input_ready=1,next_attempt_at=0 WHERE order_id=?',
+                         (image_url,audio_url,order_id))
+        await db.commit()
+        return True
+
+
 async def update_musical_order(order_id: str, **fields):
-    allowed = {'payment_link','result_url','delivered','running','attempts','failed','next_attempt_at','error','promo_due'}
+    allowed = {'payment_link','result_url','delivered','running','attempts','failed','next_attempt_at','error','promo_due','user_notified'}
     if not fields or not set(fields) <= allowed:
         raise ValueError('Некорректные поля музыкального заказа.')
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
@@ -1101,14 +1148,14 @@ async def mark_musical_paid(order_id: str, payment_id: str) -> bool:
 
 async def claim_musical_order(order_id: str) -> bool:
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
-        cursor = await db.execute("UPDATE musical_orders SET running=1 WHERE order_id=? AND status='paid' AND delivered=0 AND failed=0 AND running=0 AND next_attempt_at<=?", (order_id,_now_ts()))
+        cursor = await db.execute("UPDATE musical_orders SET running=1 WHERE order_id=? AND status='paid' AND input_ready=1 AND delivered=0 AND failed=0 AND running=0 AND next_attempt_at<=?", (order_id,_now_ts()))
         await db.commit()
         return cursor.rowcount == 1
 
 
 async def pending_musical_orders():
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
-        async with db.execute("SELECT order_id FROM musical_orders WHERE status='paid' AND delivered=0 AND failed=0 AND running=0 AND next_attempt_at<=? ORDER BY created_at LIMIT 2", (_now_ts(),)) as cursor:
+        async with db.execute("SELECT order_id FROM musical_orders WHERE status='paid' AND delivered=0 AND failed=0 AND running=0 AND next_attempt_at<=? AND (input_ready=1 OR (prepaid=1 AND user_notified=0)) ORDER BY created_at LIMIT 2", (_now_ts(),)) as cursor:
             return [row[0] for row in await cursor.fetchall()]
 
 
@@ -1403,6 +1450,10 @@ async def _init_repeat_promos(db):
                 'promo_base_product_name':'TEXT','promo_due':'INTEGER NOT NULL DEFAULT 0'}
         if table=='photo_orders':
             fields['reference_url']='TEXT'
+        if table=='musical_orders':
+            fields.update(prepaid='INTEGER NOT NULL DEFAULT 0',input_ready='INTEGER NOT NULL DEFAULT 1',
+                          user_notified='INTEGER NOT NULL DEFAULT 0',mode="TEXT NOT NULL DEFAULT ''",
+                          draft="TEXT NOT NULL DEFAULT '{}'",input_stage="TEXT NOT NULL DEFAULT 'photo'")
         for column,definition in fields.items():
             if column not in columns:
                 await db.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')

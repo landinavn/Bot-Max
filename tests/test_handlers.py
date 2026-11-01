@@ -4422,41 +4422,6 @@ async def test_gift_handler_directly_calls_ttapi_with_all_arguments(credit_db, c
     assert saved['preview_delivered'] == 1
 
 
-@pytest.mark.parametrize('mode', ['mode_ny', 'mode_ny_family', 'mode_ny_cozy', 'mode_ny_fairytale', 'mode_ny_elegant',
-    'mode_bday_young', 'mode_bday_old', 'mode_bday_old_elegant', 'mode_modern_card', 'mode_halloween', 'mode_goodmorning'])
-async def test_video_299_keeps_photo_text_steps_and_delivers_song_before_payment(credit_db, mode):
-    await credit_db.grant_free_trial(456)
-    cards, visions, songs = AsyncMock(), AsyncMock(), AsyncMock()
-    router = create_router(visions, postcard_generator=cards, song_generator=songs)
-    context = await ready_context()
-    await dispatch_callback_and_phrase(router, callback_event('cat_video'), context)
-    await dispatch_callback_and_phrase(router, callback_event('video_style:' + mode), context)
-    assert await context.get_state() == PosterStates.waiting_for_photo
-    assert (await context.get_data())['mode'] == mode
-    await call_handler(router, 'collect_photo', photo_event(), context)
-    assert await context.get_state() == PosterStates.waiting_for_card_text
-    text = message_event('Аня, с праздником!')
-    await call_handler(router, 'collect_card_text', text, context)
-    assert await context.get_state() == PosterStates.waiting_for_video_song
-    scenario_buttons = text.message.answer.await_args.kwargs['attachments'][0].payload.buttons
-    assert any(row[0].text == '🎤 Начальник года' for row in scenario_buttons)
-    assert any(row[0].text == '🎂 День рождения' for row in scenario_buttons)
-    pay = callback_event('video_song:gift_scen_bday')
-    await dispatch_callback_and_phrase(router, pay, context)
-    data = await context.get_data()
-    assert data['mode'] == mode and data['photo']['url'] and data['card_text'] == 'Аня, с праздником!'
-    assert data['video_song_scenario'] == 'gift_scen_bday' and data['video_amount_kopecks'] == 29900
-    assert await context.get_state() == PosterStates.waiting_for_video_payment
-    assert pay.send.await_args.args[0].startswith('Стоимость музыкальной открытки — 299 ₽. Вы получите готовый MP4-файл')
-    button = pay.send.await_args.kwargs['attachments'][0].payload.buttons[0][0]
-    assert button.payload == 'retry_music_checkout' and '299 ₽' in button.text
-    cards.assert_not_awaited()
-    visions.assert_not_awaited()
-    songs.assert_awaited_once()
-    assert data['audio_url'] == data['video_song_url'] == 'https://audio.example/1.mp3'
-    handlers.send_offline_conversion.assert_not_awaited()
-    assert (await credit_db.get_user(456))['balance'] == 1
-    assert (await credit_db.get_user(456))['total_generations'] == 0
 
 
 async def test_video_menu_first_and_matches_existing_style_labels(credit_db, example_photos):
@@ -4668,7 +4633,7 @@ async def test_new_year_audio_scenarios_use_correct_fsm_prompt_and_stats(credit_
     assert (await credit_db.get_all_counters(admin_id=999))[counter] == 1
 
 
-@pytest.mark.parametrize('entry,price', [('cat_video', 299), ('upsell_video', 149), ('upsell_animate', 149)])
+@pytest.mark.parametrize('entry,price', [('upsell_video', 149), ('upsell_animate', 149)])
 @pytest.mark.parametrize('admin_id,actor,bypass', [(456, 456, True), (456, 789, False), (None, 456, False)])
 async def test_video_admin_bypass_only_after_data_and_song_and_never_for_regular_users(credit_db, entry, price, admin_id, actor, bypass):
     stub = AsyncMock(return_value='https://video.example/result.mp4')
@@ -5015,12 +4980,24 @@ async def test_cartoon_cancel_during_avatar_generation_does_not_restore_cleared_
 TEACHER_TEST_LYRICS = '[Verse 1]\nВаш труд согревает сердца\n[Chorus]\nСпасибо Вам\n[Verse 2]\nИрина Петровна, Вы дарите знания\n[Chorus]\nСпасибо Вам\n[Bridge]\nЗа терпение и поддержку\n[Chorus]\nСпасибо Вам'
 
 
+async def open_paid_music_style(router, context, mode):
+    """Content tests start from a paid order; billing itself has end-to-end tests."""
+    import database
+    from uuid import uuid4
+    await dispatch_callback(router, callback_event('video_style:' + mode), context)
+    if await context.get_state() != PosterStates.waiting_for_photo:
+        key = await database.create_prepaid_musical_order('music_fixture_' + uuid4().hex, 456, mode)
+        await database.mark_musical_paid(key, 'fixture-payment-' + key)
+        await dispatch_callback(router, callback_event('music_resume:' + key), context)
+
+
 async def prepare_teacher_video(router, context, entry):
     if entry == 'cat_video':
         await dispatch_callback(router, callback_event(entry), context)
-        await dispatch_callback(router, callback_event('video_style:mode_ny'), context)
+        await open_paid_music_style(router, context, 'mode_ny')
         await call_handler(router, 'collect_photo', photo_event(), context)
         await call_handler(router, 'collect_card_text', message_event('С праздником, Ирина Петровна!'), context)
+        await context.update_data(video_source_image='https://cdn.example/card.png')
     else:
         await context.update_data(mode='mode_ny', last_image_url='https://cdn.example/card.png',
                                   photo={'url': 'https://photos.example.com/source.png'}, card_text='С праздником, Ирина Петровна!')
@@ -5051,7 +5028,7 @@ async def test_video_teacher_collects_details_creates_formal_text_and_keeps_card
         assert data['photo'] == original['photo'] and data['card_text'] == original['card_text']
         assert data['song_custom_text'] == phrase
         assert data['audio_url'] == 'https://audio.example/1.mp3'
-        assert await context.get_state() == (PosterStates.waiting_for_mode if admin else PosterStates.waiting_for_video_payment)
+        assert await context.get_state() == PosterStates.waiting_for_mode
         return
 
     assert chosen.send.await_args.args[0] == 'Напишите имя тренера/учителя и фразу для припева (например: «Иван, лучший тренер по футболу»).'
@@ -5067,8 +5044,11 @@ async def test_video_teacher_collects_details_creates_formal_text_and_keeps_card
     assert data['video_amount_kopecks'] == price * 100 and data['video_product'] == original['video_product']
     assert data['video_song_lyrics'] == TEACHER_TEST_LYRICS and data['video_song_scenario'] == 'audio_video_teacher'
     assert not any(call.args and TEACHER_TEST_LYRICS in call.args[0] for call in event.message.answer.await_args_list)
-    assert data['audio_url'] == data['video_song_url'] == 'https://audio.example/1.mp3'
-    assert any(call.args and call.args[0].startswith('🎧 Ваша песня готова!') for call in event.message.answer.await_args_list)
+    if admin:
+        assert data['audio_url'] == data['video_song_url'] == 'https://audio.example/1.mp3'
+    else:
+        assert not data.get('audio_url')  # No payment provider: do not start paid music.
+    assert not any(call.args and call.args[0].startswith('🎧') for call in event.message.answer.await_args_list)
     if admin:
         video.assert_awaited_once()
         assert video.await_args.args[0]['video_song_lyrics'] == TEACHER_TEST_LYRICS
@@ -5077,7 +5057,10 @@ async def test_video_teacher_collects_details_creates_formal_text_and_keeps_card
         video.assert_not_awaited()
         pay = event.message.answer.await_args.kwargs['attachments'][0].payload.buttons[0][0]
         assert f'{price} ₽' in pay.text and pay.payload == 'retry_music_checkout'
-    handlers.generate_song.assert_awaited_once()
+    if admin:
+        handlers.generate_song.assert_awaited_once()
+    else:
+        handlers.generate_song.assert_not_awaited()
 
 
 async def test_gift_teacher_uses_formal_prompt_and_existing_paid_gift_preview(credit_db):
@@ -5100,7 +5083,7 @@ async def test_gift_teacher_uses_formal_prompt_and_existing_paid_gift_preview(cr
 
 
 @pytest.mark.parametrize('entry', ['cat_video', 'upsell_animate', 'upsell_video'])
-async def test_video_menus_include_all_eight_required_scenarios(entry):
+async def test_video_menus_include_all_eight_required_scenarios(credit_db, entry):
     router, context = create_router(), await ready_context()
     await prepare_teacher_video(router, context, entry)
     # Повторяем показ без очистки выбранного шаблона.
@@ -5278,7 +5261,7 @@ async def test_video_role_card_generates_marked_preview_before_music_without_spe
     card = AsyncMock(return_value=['https://cdn.example/preview.png'])
     router, context = create_router(postcard_generator=card), await ready_context()
     await dispatch_callback_and_phrase(router, callback_event('cat_video'), context)
-    await dispatch_callback_and_phrase(router, callback_event('video_style:' + mode), context)
+    await open_paid_music_style(router, context, mode)
     assert await context.get_state() == PosterStates.waiting_for_photo
     await call_handler(router, 'collect_photo', photo_event(), context)
     greeting = info + ', спасибо за Ваш труд!'
@@ -5296,17 +5279,18 @@ async def test_video_role_card_generates_marked_preview_before_music_without_spe
     assert (await credit_db.get_all_counters())[event_name] == 1
     handlers.send_offline_conversion.assert_awaited_once_with(456, goal_id='bot_generation')
     await dispatch_callback_and_phrase(router, callback_event('video_song:audio_fun_ny'), context)
-    assert await context.get_state() == PosterStates.waiting_for_video_payment
+    assert await context.get_state() == PosterStates.waiting_for_mode
     assert (await context.get_data())[field] == greeting
     handlers.generate_song.assert_awaited_once()
     assert (await context.get_data())['audio_url'] == 'https://audio.example/1.mp3'
+
 
 
 async def test_role_video_preview_retry_keeps_image_and_counts_once(credit_db, max_image_upload):
     card = AsyncMock(return_value=['https://cdn.example/preview.png'])
     router, context = create_router(postcard_generator=card), await ready_context()
     await dispatch_callback(router, callback_event('cat_video'), context)
-    await dispatch_callback(router, callback_event('video_style:mode_teacher'), context)
+    await open_paid_music_style(router, context, 'mode_teacher')
     await call_handler(router, 'collect_photo', photo_event(), context)
     max_image_upload.side_effect = [RuntimeError('MAX upload failed'), AttachmentUpload(type='image', payload={'token': 'retry'})]
     await call_handler(router, 'echo', message_event('Спасибо!'), context)
@@ -5319,11 +5303,12 @@ async def test_role_video_preview_retry_keeps_image_and_counts_once(credit_db, m
     handlers.send_offline_conversion.assert_awaited_once()
 
 
+
 @pytest.mark.parametrize('video', [False, True])
 @pytest.mark.parametrize('info', ['', ' ', 'а'*501])
 async def test_missing_or_oversized_role_info_never_generates(video, info):
     card = AsyncMock()
-    router, context = create_router(postcard_generator=card), await ready_context()
+    router, context = create_router(admin_user_id=456 if video else None, postcard_generator=card), await ready_context()
     if video:
         await dispatch_callback(router, callback_event('cat_video'), context)
     await dispatch_callback(router, callback_event('video_style:mode_coach' if video else 'mode_coach'), context)
@@ -5337,7 +5322,7 @@ async def test_role_preview_generation_failure_does_not_increment_or_lose_contex
     card = AsyncMock(side_effect=RuntimeError('OpenAI failed'))
     router, context = create_router(postcard_generator=card), await ready_context()
     await dispatch_callback(router, callback_event('cat_video'), context)
-    await dispatch_callback(router, callback_event('video_style:mode_coach'), context)
+    await open_paid_music_style(router, context, 'mode_coach')
     await call_handler(router, 'collect_photo', photo_event(), context)
     await call_handler(router, 'echo', message_event('Спасибо!'), context)
     data = await context.get_data()
@@ -5345,6 +5330,7 @@ async def test_role_preview_generation_failure_does_not_increment_or_lose_contex
     assert await context.get_state() == PosterStates.waiting_for_card_text
     assert (await credit_db.get_all_counters()).get('gen_coach', 0) == 0
     handlers.send_offline_conversion.assert_not_awaited()
+
 
 
 async def test_cancel_during_role_preview_drops_late_result(credit_db):
@@ -5358,7 +5344,7 @@ async def test_cancel_during_role_preview_drops_late_result(credit_db):
 
     router, context = create_router(postcard_generator=generate), await ready_context()
     await dispatch_callback(router, callback_event('cat_video'), context)
-    await dispatch_callback(router, callback_event('video_style:mode_teacher'), context)
+    await open_paid_music_style(router, context, 'mode_teacher')
     await call_handler(router, 'collect_photo', photo_event(), context)
     text = message_event('Спасибо!')
     task = asyncio.create_task(call_handler(router, 'echo', text, context))
@@ -5373,6 +5359,7 @@ async def test_cancel_during_role_preview_drops_late_result(credit_db):
     assert (await credit_db.get_all_counters()).get('gen_teacher', 0) == 0
     handlers.send_offline_conversion.assert_not_awaited()
     assert not any(call.args and 'PREVIEW' in call.args[0] for call in text.message.answer.await_args_list)
+
 
 
 @pytest.fixture(autouse=True)
@@ -5747,53 +5734,6 @@ async def test_old_short_merge_cache_is_rebuilt_without_new_kling_or_ttapi_reque
     assert 'https://cdn.example/full-song.mp4' in event.send.await_args.args[0]
 
 
-@pytest.mark.parametrize('admin', [False, True])
-@pytest.mark.parametrize('audio_key', ['audioUrl', 'audio_url'])
-async def test_cat_video_sends_only_preview_but_merges_full_song(credit_db, monkeypatch, admin, audio_key):
-    url, lyrics = 'https://cdn.example/selected-song.mp3', 'PRIVATE LYRICS DO NOT SEND'
-    submit = AsyncMock(return_value='selected-song-job')
-    waiter = AsyncMock(return_value={'status': 'SUCCESS', 'data': [{audio_key: url, 'lyrics': lyrics}]})
-    writer = AsyncMock(return_value=lyrics)
-    merge = AsyncMock(return_value='https://cdn.example/merged-selected-song.mp4')
-    monkeypatch.setattr(handlers, 'create_musical_video', merge)
-    router = create_router(admin_user_id=456 if admin else 999, song_generator=submit, song_waiter=waiter,
-        lyric_writer=writer, postcard_generator=AsyncMock(return_value=['https://cdn.example/card.png']))
-    context = await ready_context()
-    await dispatch_callback_and_phrase(router, callback_event('cat_video'), context)
-    await dispatch_callback_and_phrase(router, callback_event('video_style:mode_ny'), context)
-    assert await context.get_state() == PosterStates.waiting_for_photo
-    await call_handler(router, 'collect_photo', photo_event(), context)
-    assert await context.get_state() == PosterStates.waiting_for_card_text
-    await call_handler(router, 'collect_card_text', message_event('С Новым годом, Аня!'), context)
-    assert await context.get_state() == PosterStates.waiting_for_video_song
-    event = callback_event('video_song:audio_fun_ny')
-    async def reply(text=None, **kwargs):
-        if text and text.startswith('🎧 Вот короткий фрагмент'):
-            assert (await context.get_data())['audio_url'] == url  # Сохранено до отправки MAX.
-        return object()
-    event.send.side_effect = reply
-    await dispatch_callback_and_phrase(router, event, context)
-    data = await context.get_data()
-    assert data['audio_url'] == data['video_song_url'] == url
-    assert data['photo']['url'] == 'https://photos.example.com/source.png'
-    assert data['card_text'] == 'С Новым годом, Аня!' and data['video_song_scenario'] == 'audio_fun_ny'
-    sent = event.send.await_args_list
-    audio = next(c for c in sent if c.args and c.args[0].startswith('🎧 Вот короткий фрагмент'))
-    assert audio.args[0] == '🎧 Вот короткий фрагмент вашей песни. Если всё нравится, переходите к созданию видео!'
-    handlers.create_audio_preview.assert_awaited_once_with(url)
-    assert url not in str(sent)
-    assert audio.kwargs['attachments'][0].payload.buttons[0][0].url == 'https://preview.example/video-clip.mp3'
-    assert lyrics not in str(sent)
-    submit.assert_awaited_once()
-    waiter.assert_awaited_once_with('selected-song-job')
-    if admin:
-        merge.assert_awaited_once_with('https://cdn.example/card.png', url)
-        assert await context.get_state() == PosterStates.waiting_for_mode
-        assert sent.index(audio) < next(i for i, c in enumerate(sent) if c.args and c.args[0].startswith('🎵 Ваша музыкальная открытка'))
-    else:
-        merge.assert_not_awaited()
-        assert await context.get_state() == PosterStates.waiting_for_video_payment
-        assert 'Повторить оплату 299' in str(sent[-1])
 
 
 async def test_cat_video_lyrics_only_response_is_not_delivered_and_retry_reuses_job(credit_db):
@@ -5804,31 +5744,18 @@ async def test_cat_video_lyrics_only_response_is_not_delivered_and_retry_reuses_
     await prepare_teacher_video(router, context, 'cat_video')
     event = callback_event('video_song:audio_fun_ny')
     await dispatch_callback_and_phrase(router, event, context)
-    assert await context.get_state() == PosterStates.waiting_for_video_song
+    assert await context.get_state() == PosterStates.waiting_for_video_song_phrase
     assert 'PRIVATE LYRICS' not in str(event.send.await_args_list)
     assert 'audio_url' not in await context.get_data()
     render.assert_not_awaited()
-    await dispatch_callback_and_phrase(router, callback_event('retry_video_song_audio'), context)
+    await call_handler(router, 'collect_video_song_phrase', message_event('С Новым годом, друзья!'), context)
     submit.assert_awaited_once()
     assert waiter.await_args_list == [call('recoverable-job'), call('recoverable-job')]
     assert (await context.get_data())['audio_url'] == 'https://cdn.example/recovered.mp3'
-    assert await context.get_state() == PosterStates.waiting_for_video_payment
+    assert await context.get_state() == PosterStates.waiting_for_mode
 
 
-async def test_cat_video_failed_audio_delivery_keeps_link_and_retries_without_ttapi(credit_db):
-    router, context = create_router(admin_user_id=999), await ready_context()
-    await prepare_teacher_video(router, context, 'cat_video')
-    event = callback_event('video_song:audio_fun_ny')
-    event.send.return_value = None
-    await dispatch_callback_and_phrase(router, event, context)
-    assert await context.get_state() == PosterStates.waiting_for_video_song
-    assert (await context.get_data())['audio_url'] == 'https://audio.example/1.mp3'
-    retry = callback_event('retry_video_song_audio')
-    await dispatch_callback_and_phrase(router, retry, context)
-    handlers.generate_song.assert_awaited_once()
-    handlers.wait_for_song.assert_awaited_once()
-    assert await context.get_state() == PosterStates.waiting_for_video_payment
-    assert any(c.args and c.args[0].startswith('🎧 Вот короткий фрагмент') for c in retry.send.await_args_list)
+
 
 
 async def test_cancel_during_cat_video_audio_wait_does_not_deliver_or_restore_state(credit_db):
@@ -5872,12 +5799,13 @@ async def test_cat_video_scenario_waits_for_separate_song_input(credit_db, scena
     data = await context.get_data()
     assert data['song_custom_text'] == data['video_song_phrase'] == phrase
     assert data['card_text'] == original['card_text']
-    assert await context.get_state() == PosterStates.waiting_for_video_payment
+    assert await context.get_state() == PosterStates.waiting_for_mode
     writer.assert_awaited_once()
     assert writer.await_args.kwargs == {}
     assert phrase in writer.await_args.args[0]
     assert original['card_text'] not in writer.await_args.args[0]
     assert data['audio_url'] == 'https://audio.example/1.mp3'
+
 
 
 @pytest.mark.parametrize('scenario', list(handlers.AUDIO_FUN_SCENARIOS))
@@ -5923,6 +5851,9 @@ async def test_cat_video_role_real_dispatcher_separates_card_and_song_text(credi
         await click('cat_video')
         await click('video_style:' + mode)
         context = dp.fsm.get_context(chat_id=123, user_id=456)
+        key = await credit_db.create_prepaid_musical_order('music_dispatcher_' + mode, 456, mode)
+        await credit_db.mark_musical_paid(key, 'paid-' + mode)
+        await click('music_resume:' + key)
         assert await context.get_state() == PosterStates.waiting_for_photo
         assert 'Отправьте одно фото' in bot.send_message.await_args.kwargs['text']
         await dp.handle(MessageCreated(timestamp=2, bot=bot, message=message(attachments=[{
@@ -5936,7 +5867,7 @@ async def test_cat_video_role_real_dispatcher_separates_card_and_song_text(credi
         writer.assert_not_awaited()
         phrase = 'Иван, лучший тренер по футболу!'
         await dp.handle(MessageCreated(timestamp=4, bot=bot, message=message(phrase)))
-        assert await context.get_state() == PosterStates.waiting_for_video_payment
+        assert await context.get_state() == PosterStates.waiting_for_mode
         writer.assert_awaited_once()
         assert phrase in writer.await_args.args[0] and greeting not in writer.await_args.args[0]
         assert writer.await_args.kwargs == {}
@@ -5954,7 +5885,7 @@ async def test_coach_video_card_keeps_dynamic_music_style_even_for_newyear_song(
     router, context = create_router(admin_user_id=999, lyric_writer=writer,
         postcard_generator=AsyncMock(return_value=['https://cdn.example/coach.png'])), await ready_context()
     await dispatch_callback(router, callback_event('cat_video'), context)
-    await dispatch_callback(router, callback_event('video_style:mode_coach'), context)
+    await open_paid_music_style(router, context, 'mode_coach')
     assert await context.get_state() == PosterStates.waiting_for_photo
     await call_handler(router, 'collect_photo', photo_event(), context)
     greeting = 'Иван, с Новым годом! Спасибо за тренировки и веру в нашу команду!'
@@ -5965,6 +5896,7 @@ async def test_coach_video_card_keeps_dynamic_music_style_even_for_newyear_song(
     assert 'Новогодняя' in title and 'Иван, лучший тренер!' in notes and greeting not in notes
     assert all(word in notes.lower() for word in ('победа', 'сила', 'команда', 'вперед'))
     assert writer.await_args.kwargs == {}
+
 
 
 @pytest.mark.parametrize('count', [5, 6])
@@ -6018,10 +5950,11 @@ async def test_cat_video_rejects_missing_or_oversized_song_phrase(credit_db, inv
 async def test_cat_video_new_phrase_invalidates_previous_song_and_keeps_card(credit_db):
     submit = AsyncMock(side_effect=['first-job', 'second-job'])
     waiter = AsyncMock(side_effect=['https://audio.example/first.mp3', 'https://audio.example/second.mp3'])
-    router, context = create_router(admin_user_id=999, song_generator=submit, song_waiter=waiter), await ready_context()
+    router, context = create_router(admin_user_id=456, song_generator=submit, song_waiter=waiter), await ready_context()
     await prepare_teacher_video(router, context, 'cat_video')
     original = await context.get_data()
     for phrase in ['Маша, будь счастлива!', 'Анна, ты лучше всех!']:
+        await context.set_state(PosterStates.waiting_for_video_song)
         await dispatch_callback(router, callback_event('video_song:audio_fun_ny'), context)
         assert await context.get_state() == PosterStates.waiting_for_video_song_phrase
         await call_handler(router, 'echo', message_event(phrase), context)
@@ -6043,62 +5976,13 @@ async def test_cat_video_cancel_while_waiting_for_song_phrase_skips_music(credit
     assert await context.get_state() == PosterStates.waiting_for_mode
 
 
-async def test_cat_video_preview_failure_retains_full_song_for_retry_without_new_music(credit_db, monkeypatch):
-    preview = AsyncMock(side_effect=[RuntimeError('ffmpeg unavailable'), 'https://cdn.example/short.mp3'])
-    monkeypatch.setattr(handlers, 'create_audio_preview', preview)
-    router, context = create_router(admin_user_id=999), await ready_context()
-    await prepare_teacher_video(router, context, 'cat_video')
-    event = callback_event('video_song:audio_fun_ny')
-    await dispatch_callback_and_phrase(router, event, context)
-    assert await context.get_state() == PosterStates.waiting_for_video_song
-    assert (await context.get_data())['audio_url'] == 'https://audio.example/1.mp3'
-    assert 'https://audio.example/1.mp3' not in str(event.send.await_args_list)
-    retry = callback_event('retry_video_song_audio')
-    await dispatch_callback(router, retry, context)
-    assert await context.get_state() == PosterStates.waiting_for_video_payment
-    assert preview.await_count == 2
-    handlers.generate_song.assert_awaited_once()
-    handlers.wait_for_song.assert_awaited_once()
-    assert 'https://cdn.example/short.mp3' in str(retry.send.await_args_list)
-    assert 'https://audio.example/1.mp3' not in str(retry.send.await_args_list)
 
 
-async def test_cat_video_preview_is_reused_when_max_delivery_fails(credit_db):
-    router, context = create_router(admin_user_id=999), await ready_context()
-    await prepare_teacher_video(router, context, 'cat_video')
-    event = callback_event('video_song:audio_fun_ny')
-    event.send.return_value = None
-    await dispatch_callback_and_phrase(router, event, context)
-    assert await context.get_state() == PosterStates.waiting_for_video_song
-    await dispatch_callback(router, callback_event('retry_video_song_audio'), context)
-    handlers.create_audio_preview.assert_awaited_once_with('https://audio.example/1.mp3')
-    handlers.generate_song.assert_awaited_once()
 
 
-async def test_cat_video_cancel_during_clipping_does_not_deliver_preview_or_restore_fsm(credit_db, monkeypatch):
-    import asyncio
-    entered, release = asyncio.Event(), asyncio.Event()
-    async def clip(url):
-        entered.set()
-        await release.wait()
-        return 'https://preview.example/late.mp3'
-    monkeypatch.setattr(handlers, 'create_audio_preview', clip)
-    router, context = create_router(admin_user_id=999), await ready_context()
-    await prepare_teacher_video(router, context, 'cat_video')
-    event = callback_event('video_song:audio_fun_ny')
-    task = asyncio.create_task(dispatch_callback_and_phrase(router, event, context))
-    try:
-        await asyncio.wait_for(entered.wait(), timeout=5)
-        await call_handler(router, 'cancel', message_event('/cancel'), context)
-    finally:
-        release.set()
-        await task
-    assert await context.get_state() == PosterStates.waiting_for_mode
-    assert await context.get_data() == {}
-    assert 'https://preview.example/late.mp3' not in str(event.send.await_args_list)
 
 
-@pytest.mark.parametrize('entry,amount',[('cat_video',299),('upsell_music',149),('upsell_video',149),('upsell_animate',149)])
+@pytest.mark.parametrize('entry,amount',[('upsell_music',149),('upsell_video',149),('upsell_animate',149)])
 async def test_musical_checkout_persists_personal_order_and_uses_full_song(credit_db, entry, amount):
     payments=SimpleNamespace(create_musical_payment_link=AsyncMock(return_value='https://shop.payform.ru/personal-order'))
     cards=AsyncMock(return_value=['https://cdn.example/clean-card.jpg'])
@@ -6121,17 +6005,17 @@ async def test_musical_checkout_persists_personal_order_and_uses_full_song(credi
     assert await context.get_state()==PosterStates.waiting_for_video_payment
 
 
-async def test_musical_payment_link_retry_reuses_saved_order_image_and_song(credit_db):
+async def test_musical_upfront_link_retry_reuses_order_without_generating(credit_db):
     payments=SimpleNamespace(create_musical_payment_link=AsyncMock(side_effect=[RuntimeError('provider down'),'https://shop.payform.ru/retried']))
-    cards=AsyncMock(return_value=['https://cdn.example/clean-card.jpg'])
+    cards=AsyncMock()
     router,context=create_router(admin_user_id=999,payments=payments,postcard_generator=cards),await ready_context()
-    await prepare_teacher_video(router,context,'cat_video')
-    await dispatch_callback_and_phrase(router,callback_event('video_song:audio_fun_ny'),context)
-    first=payments.create_musical_payment_link.await_args.kwargs['order_id']
-    await dispatch_callback(router,callback_event('retry_music_checkout'),context)
+    await dispatch_callback(router,callback_event('cat_video'),context)
+    await dispatch_callback(router,callback_event('video_style:mode_ny'),context)
+    first=(await context.get_data())['music_prepaid_id']
+    await dispatch_callback(router,callback_event('video_style:mode_ny'),context)
     assert payments.create_musical_payment_link.await_args.kwargs['order_id']==first
-    cards.assert_awaited_once(); handlers.generate_song.assert_awaited_once()
-    assert (await context.get_data())['music_checkout_id']==first
+    cards.assert_not_awaited();handlers.generate_song.assert_not_awaited()
+    assert await context.get_state()==PosterStates.waiting_for_video_payment
 
 
 @pytest.mark.parametrize('entry',['cat_cartoon'])

@@ -2588,11 +2588,15 @@ async def test_photo_style_tariff_preview_has_no_payment_or_generation(credit_db
     assert await context.get_state() == PosterStates.waiting_for_mode
     selected_tariff = callback_event(tariff)
     await dispatch_callback(router, selected_tariff, context)
-    ny_trial = style == "photo_style_ny" and tariff == "photo_tariff_590"
+    ny_trial = style == "photo_style_ny" and tariff in ("photo_tariff_590", "photo_tariff_990")
     selected_tariff.ack.assert_awaited_once_with(notification="Показываю ссылку…" if ny_trial else "Скоро будет доступно…")
     if ny_trial:
-        assert selected_tariff.send.await_args_list[0].args[0] == handlers.PHOTO_TRIAL_CHECKOUT_TEXT
-        assert (await context.get_data())["tariff"] == "trial_590"
+        if tariff == "photo_tariff_590":
+            assert selected_tariff.send.await_args_list[0].args[0] == handlers.PHOTO_TRIAL_CHECKOUT_TEXT
+            assert (await context.get_data())["tariff"] == "trial_590"
+        else:
+            assert "990 ₽" in selected_tariff.send.await_args_list[0].args[0]
+            assert (await context.get_data())["tariff"] == "standard_990"
     else:
         assert selected_tariff.send.await_args.args[0] == (
             "🚀 Отличный выбор! Этот тариф скоро будет доступен. Мы уже заканчиваем настройку фотосессий, "

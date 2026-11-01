@@ -27,7 +27,8 @@ class PaidPhotoWorker:
             try:
                 if not order['user_notified']:
                     builder=InlineKeyboardBuilder()
-                    if order['tariff']==590 and order['style'] in (None,'photo_style_ny'):
+                    if (order['style'] in (None,'photo_style_ny') and (order['tariff']==590
+                            or (order['tariff']==990 and order['template'] in (None,'mom_daughter_5')))):
                         builder.row(CallbackButton(text='📸 Продолжить фотосессию',payload='photo_resume:'+order['order_id']))
                     keyboard=builder.row(LinkButton(text='🆘 Поддержка',url=SUPPORT_URL)).as_markup()
                     sent = await self.bot.send_message(

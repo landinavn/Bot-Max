@@ -63,6 +63,7 @@ from photo_orders import deliver_photo_result
 from image_service import (
     count_people_in_photo, create_cartoon_avatar_preview, CARTOON_IMAGE_PROMPTS,
     GenerationLimitError,
+    ImageModerationError,
     GenerationNotConfigured,
     GenerationTimeoutError,
     UnsupportedPhotoFormatError,
@@ -1215,6 +1216,16 @@ def create_router(
                 if (await context.get_data()).get("photosession_session_id") != session_id:
                     return
                 await context.set_state(PosterStates.waiting_for_mode)
+                if isinstance(exc, ImageModerationError):
+                    await _reply(
+                        event, "Сервис генерации отклонил содержание этого кадра. Готовые фотографии сохранены. "
+                        "Повтор того же запроса может снова завершиться отказом. "
+                        "Обратитесь в поддержку, чтобы согласовать другой вариант сцены.",
+                        attachments=[InlineKeyboardBuilder().row(
+                            LinkButton(text='🆘 Написать в поддержку', url=SUPPORT_URL)
+                        ).as_markup()],
+                    )
+                    return
                 await _reply(
                     event, "Не удалось завершить фотосессию. Готовые кадры сохранены. Нажмите «Продолжить», чтобы повторить с места остановки.",
                     attachments=[navigation_keyboard((("Продолжить", f"photo_temp_{data['template']}"), ("⬅️ Назад", "cat_photo")))],

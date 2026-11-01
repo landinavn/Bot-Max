@@ -82,21 +82,23 @@ async def test_paid_red_webhook_notification_resume_and_five_slot_delivery(credi
         await credit_db.save_photo_result(key, 6, 'https://cdn.example/extra.jpg')
 
 
-async def test_resume_after_fourth_frame_failure_uses_persisted_third_dress(credit_db, sales_payments):
+@pytest.mark.parametrize('failed_frame', [3,4])
+async def test_resume_after_failure_keeps_completed_frames_and_uses_third_dress(credit_db, sales_payments, failed_frame):
     key = await credit_db.create_photo_order('photo_red_recovery', 456, 990)
     await credit_db.update_photo_order(key, style='photo_style_ny', template='woman_red')
     await deliver_webhook(sales_payments, await credit_db.get_photo_order(key))
-    frames = AsyncMock(side_effect=[*[f'https://cdn.example/red-{i}.jpg' for i in range(1, 4)], RuntimeError('down')])
+    frames = AsyncMock(side_effect=[*[f'https://cdn.example/red-{i}.jpg' for i in range(1, failed_frame)], RuntimeError('down')])
     router = create_router(admin_user_id=999, photosession_generator=frames)
     context = await ready_context()
     await dispatch_callback(router, callback_event('photo_resume:' + key), context)
     await call_handler(router, 'collect_photosession_photo', photo_event(), context)
-    assert len(await credit_db.get_photo_results(key)) == 3
+    assert len(await credit_db.get_photo_results(key)) == failed_frame - 1
     assert await credit_db.get_active_promo(456, 'photo') is None
     await context.clear()
-    frames.side_effect = ['https://cdn.example/red-4.jpg', 'https://cdn.example/red-5.jpg']
+    frames.side_effect = [f'https://cdn.example/red-{i}.jpg' for i in range(failed_frame,6)]
     await dispatch_callback(router, callback_event('photo_resume:' + key), context)
     assert frames.await_count == 6
+    assert [c.args[1] for c in frames.await_args_list[-(6-failed_frame):]] == list(images.NY_RED_WOMAN_PROMPTS[failed_frame-1:])
     assert frames.await_args_list[-2].kwargs == {
         'style_reference_url': 'https://cdn.example/red-3.jpg', 'style_reference_scope': 'wardrobe',
         'pose_instruction': images.NY_RED_WOMAN_HEAD_POSES[3]}
@@ -116,6 +118,29 @@ async def test_red_generation_requires_owned_paid_correct_tariff(credit_db, sale
     await dispatch_callback(router, callback_event('photo_resume:' + key), context)
     await call_handler(router, 'collect_photosession_photo', photo_event(), context)
     frames.assert_not_awaited()
+
+
+async def test_moderation_on_third_frame_keeps_two_results_and_offers_support(credit_db, sales_payments):
+    key = await credit_db.create_photo_order('photo_red_moderation', 456, 990)
+    await credit_db.update_photo_order(key, style='photo_style_ny', template='woman_red')
+    await deliver_webhook(sales_payments, await credit_db.get_photo_order(key))
+    frames = AsyncMock(side_effect=['https://cdn.example/red-1.jpg', 'https://cdn.example/red-2.jpg',
+                                   images.ImageModerationError('Сервис генерации отклонил содержание кадра.')])
+    router = create_router(admin_user_id=999, photosession_generator=frames)
+    context = await ready_context()
+    await dispatch_callback(router, callback_event('photo_resume:' + key), context)
+    event = photo_event()
+    await call_handler(router, 'collect_photosession_photo', event, context)
+    assert frames.await_count == 3
+    results = await credit_db.get_photo_results(key)
+    assert len(results) == 2 and all(row['delivered'] for row in results)
+    assert await credit_db.get_photo_package_balance(key) == 3
+    assert await credit_db.get_active_promo(456, 'photo') is None
+    reply = event.message.answer.await_args
+    assert 'отклонил содержание' in reply.args[0] and 'фотографии сохранены' in reply.args[0]
+    buttons = reply.kwargs['attachments'][0].payload.buttons
+    assert len(buttons) == 1 and buttons[0][0].text == '🆘 Написать в поддержку'
+    assert buttons[0][0].type == 'link'
 
 
 @pytest.mark.parametrize('style,tariff', [('photo_style_ny','photo_tariff_590'), ('photo_style_studio','photo_tariff_990')])

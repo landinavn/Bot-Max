@@ -297,6 +297,10 @@ class ImageGenerationError(RuntimeError):
     """Ошибка загрузки исходного фото или API генерации."""
 
 
+class ImageModerationError(ImageGenerationError):
+    """Сервис отклонил сцену; повторять тот же запрос автоматически не следует."""
+
+
 class GenerationTimeoutError(ImageGenerationError):
     """API или хранилище не ответило за отведённое время."""
 
@@ -329,6 +333,8 @@ def _raise_api_error(response: httpx.Response) -> None:
             code = raw_code if isinstance(raw_code, str) else ""
     except ValueError:
         pass
+    if code == 'moderation_blocked':
+        raise ImageModerationError('Сервис генерации отклонил содержание кадра.')
     quota_exhausted = code in {
         "insufficient_quota", "quota_exceeded", "billing_hard_limit_reached",
         "billing_limit_reached", "usage_limit_reached",
@@ -1239,22 +1245,25 @@ NY_RED_WOMAN_PROMPTS = (
     "neck. Large wreath above, "
     "Christmas tree at frame-right, gifts around the steps. Match the exact outfit established in frame 1. "
     + RED_WOMAN_ANATOMY,
-    RED_WOMAN_IDENTITY + RED_WOMAN_CURTAIN + RED_WOMAN_SATIN_DRESS +
-    "POSE & CAMERA: Vertical three-quarter fashion portrait of the adult woman. Choose the pose from "
-    "her actual build in the ORIGINAL client photo. If she is slim, she is CROUCHING elegantly, not "
-    "sitting on furniture: knees bent comfortably, weight realistically balanced over her feet and "
-    "heels, knees angled toward frame-left and torso lifted with a gentle turn toward the camera. "
-    "Make it graceful and subtly sensual like a tasteful adult fashion editorial, never explicit; "
-    "keep the mini dress covering her naturally. No chair or stool for this slim-figure pose. If she "
-    "has a fuller figure or crouching would be uncomfortable, seat her naturally on a stable low dark "
-    "stool in the floor-length gown, knees angled toward frame-left and relaxed upright torso. Do not "
-    "change body size or proportions to achieve either pose. HEAD & GAZE: Face the lens with a small "
-    "natural tilt toward frame-left, chin slightly lowered, open eyes meeting the camera and a soft "
-    "playful smile. Avoid duplicating the sideways gaze of frames 1 or 2. "
-    "One hand raised near her head holds silver tinsel and a violet Christmas bauble; "
-    "other hand rests naturally near her hip holding the other end of the SAME tinsel with a violet "
-    "bauble. Tinsel drapes loosely along her arms and lap, never replaces fingers or limbs. "
-    + RED_WOMAN_ANATOMY,
+    "Create ONE vertical realistic Christmas fashion photograph of the adult woman in the original "
+    "client photo. Preserve her recognizable face, age, skin tone, hair color and real body proportions. "
+    "Use light natural makeup and gentle skin retouch, keeping skin texture. Do NOT add red lipstick unless "
+    "it is already present in the client photo. Style loose hair with modest volume or soft curls; "
+    "if the hair is arranged, keep that hairstyle and tidy it. "
+    "OUTFIT & POSE: A crimson-red satin dress with thin silver jeweled straps, a softly draped neckline, "
+    "silver necklace and red heels. Use the client's actual build: for a slim woman, a mid-thigh mini dress "
+    "and a balanced low crouch, knees angled left, torso upright — CROUCHING elegantly on her feet, "
+    "without furniture. For a fuller figure or uncertain build, a floor-length gown and a comfortable "
+    "seated pose on a stable low dark stool. Keep her real figure unchanged and the dress naturally fitted "
+    "and covering her in either pose. This satin outfit will also be used in frame 4. "
+    "HANDS: Hold silver Christmas tinsel with two violet baubles loosely across her arms and lap; "
+    "one hand near her shoulder, the other near her hip. "
+    "BACKGROUND: Deep burgundy fabric, almost smooth, with only a FEW broad shallow folds and sparse "
+    "falling artificial snow. LIGHTING FOR EVERY FRAME: Slightly darkened professional studio exposure, "
+    "soft directional light, gentle shadows, rich colors and clearly visible face and dress details. "
+    "HEAD & GAZE: Face the lens with a slight tilt left and chin gently lowered, open eyes, relaxed smile. "
+    "Natural anatomy: exactly two arms and two legs, correctly attached hands, five fingers per hand, "
+    "no duplicated or fused limbs. No text.",
     RED_WOMAN_IDENTITY + RED_WOMAN_SATIN_DRESS +
     "SETTING: An upscale contemporary cocktail BAR decorated for Christmas, not a home. At frame-left "
     "is a solid waist-high black marble BAR COUNTER with fine white/gray veining, a polished horizontal "

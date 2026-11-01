@@ -268,11 +268,12 @@ START_EXAMPLE_FILES = (
     r"i (21).webp",
 )
 
+MOM_DAUGHTER_EXAMPLE_FILE = r"Мама+дочка3.png"
 PHOTO_MAIN_EXAMPLE_FILES = (
-    r"photo_main_1.webp", r"photo_main_2.webp", r"photo_main_3.webp",
+    r"photo_main_1.webp", r"photo_main_3.webp", MOM_DAUGHTER_EXAMPLE_FILE,
 )
 PHOTO_FAMILY_EXAMPLE_FILES = (
-    r"photo_fam_1.webp", r"photo_fam_2.webp", r"photo_fam_3.webp",
+    r"photo_fam_1.webp", r"photo_fam_3.webp", MOM_DAUGHTER_EXAMPLE_FILE,
 )
 
 SONG_PROMO_EXPIRED_TEXT = 'К сожалению, 48 часов уже прошли. Вы можете приобрести песню по обычной цене 490 ₽.'
@@ -3992,6 +3993,8 @@ def create_router(
         await context.update_data(
             template=template, photo_product_name="Фотосессия Попробовать", photo_amount_kopecks=59000,
         )
+        if template == 'mom_daughter':
+            await send_menu_examples(event, (MOM_DAUGHTER_EXAMPLE_FILE,))
         if template in NY_FAMILY_PHOTOSESSION_PROMPTS and admin_user_id is not None and event.get_ids()[1] == admin_user_id:
             if (data.get("template") == template and data.get("photosession_admin_bypass")
                     and data.get("photosession_session_id")):

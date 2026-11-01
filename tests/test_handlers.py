@@ -2244,7 +2244,7 @@ CATEGORY_EXPECTATIONS = {
     "sub_bday": ([29, 27, 21], ["mode_bday_young", "mode_bday_old", "mode_bday_old_elegant", "mode_modern_card", "back_to_cards"]),
     "sub_halloween": ([26], ["mode_halloween", "back_to_cards"]),
     "sub_goodmorning": ([20], ["mode_goodmorning", "back_to_cards"]),
-    "cat_photo": (["photo_main_1.webp", "photo_main_2.webp", "photo_main_3.webp"], ["photo_style_ny", "photo_style_studio", "photo_style_walk", "back_to_main"]),
+    "cat_photo": (["photo_main_1.webp", "photo_main_3.webp", "Мама+дочка3.png"], ["photo_style_ny", "photo_style_studio", "photo_style_walk", "back_to_main"]),
     "cat_meditation": ([], ["back_to_main"]),
     "cat_audio": ([], ["audio_tariff_fun", "audio_tariff_gift", "back_to_main"]),
 }
@@ -3152,8 +3152,8 @@ async def test_switch_to_toddlers_requires_new_reference(old_template):
 
 
 @pytest.mark.parametrize("payload,filenames", [
-    ("cat_photo", ["photo_main_1.webp", "photo_main_2.webp", "photo_main_3.webp"]),
-    ("photo_style_ny", ["photo_fam_1.webp", "photo_fam_2.webp", "photo_fam_3.webp"]),
+    ("cat_photo", ["photo_main_1.webp", "photo_main_3.webp", "Мама+дочка3.png"]),
+    ("photo_style_ny", ["photo_fam_1.webp", "photo_fam_3.webp", "Мама+дочка3.png"]),
 ])
 async def test_photosession_album_precedes_text_and_buttons(credit_db, example_photos, payload, filenames):
     event = callback_event(payload)
@@ -3180,7 +3180,7 @@ async def test_family_album_between_text_and_template_buttons(credit_db, example
     assert len(replies[1].kwargs["attachments"]) == 3
     buttons = replies[2].kwargs["attachments"][0].payload.buttons
     assert [row[0].payload for row in buttons] == [p for _, p, _ in NY_TRIAL_TEMPLATES] + ["photo_tariff_back"]
-    assert [Path(c.args[0].path).name for c in event.bot.upload_media.await_args_list] == ["photo_fam_1.webp", "photo_fam_2.webp", "photo_fam_3.webp"]
+    assert [Path(c.args[0].path).name for c in event.bot.upload_media.await_args_list] == ["photo_fam_1.webp", "photo_fam_3.webp", "Мама+дочка3.png"]
     assert (await context.get_data())["photo_style"] == "photo_style_ny"
 
 
@@ -7288,3 +7288,25 @@ async def test_photo_checkout_personal_order_is_reused_for_template(credit_db):
     assert (await context.get_data())['photo_order_id']==order_id
     assert template.send.await_args.kwargs['attachments'][0].payload.buttons[0][0].url=='https://shop.payform.ru/photo-personal'
     assert (await credit_db.get_all_counters()).get('buy_photo_590',0)==0
+
+
+@pytest.mark.parametrize('is_admin', [False, True])
+async def test_mom_daughter_collage_precedes_checkout_or_photo_prompt(credit_db, example_photos, is_admin):
+    context = await ready_context()
+    await context.update_data(photo_style='photo_style_ny', photo_tariff='photo_tariff_590')
+    payments = SimpleNamespace(create_payment_link=AsyncMock(return_value='https://shop.payform.ru/mom'))
+    router = create_router(admin_user_id=456 if is_admin else 999, payments=payments)
+    event = callback_event('photo_temp_mom_daughter')
+    await dispatch_callback(router, event, context)
+    assert [Path(c.args[0].path).name for c in event.bot.upload_media.await_args_list] == ['Мама+дочка3.png']
+    replies = event.send.await_args_list
+    assert replies[0].kwargs['text'] == 'Примеры работ:'
+    assert len(replies[0].kwargs['attachments']) == 1
+    if is_admin:
+        assert 'Оплата пропущена' in replies[-1].args[0]
+        assert await context.get_state() == PosterStates.waiting_for_photosession_photo
+        payments.create_payment_link.assert_not_awaited()
+    else:
+        assert replies[-1].kwargs['attachments'][0].payload.buttons[0][0].text == 'Оплатить 590 ₽'
+        payments.create_payment_link.assert_awaited_once()
+    assert (await context.get_data())['template'] == 'mom_daughter'

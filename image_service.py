@@ -793,7 +793,12 @@ PHOTOSESSION_BODY_ANATOMY_REQUIREMENT = (
     "people as seen in the reference photo. Do NOT slim or idealize their figures.  - If the reference "
     "photo is a selfie (only showing the face/upper body), generate the lower body naturally and "
     "proportionally to the visible upper body.  - Ensure each person has exactly 2 arms, 2 legs, and "
-    "exactly 5 fingers on each hand. No extra or missing limbs."
+    "exactly 5 fingers on each hand. No extra or missing limbs. "
+    "HEAD POSITION: You may naturally change the head turn, tilt and gaze from the reference photo to suit "
+    "the scene, pose, camera angle and interaction. Follow any explicit gaze direction specified for this frame. "
+    "Keep the person recognizable, preserving their facial features, age and proportions. Maintain a realistic "
+    "head-to-neck connection, natural neck rotation and alignment with the shoulders. No extreme twists, "
+    "unnatural head angles, stretched necks or distorted faces."
 )
 
 NY_FAMILY_THREE_PROMPTS = (

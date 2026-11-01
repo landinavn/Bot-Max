@@ -8,7 +8,7 @@ from handlers import create_router, PosterStates
 from photo_orders import PaidPhotoWorker
 from test_handlers import (callback_event, ready_context, dispatch_callback, call_handler,
                            photo_event, message_event, event_replies, max_image_upload,
-                           isolated_example_directory, text_correction)
+                           isolated_example_directory, example_photos, text_correction)
 from test_sales_stats import sales_payments, deliver_webhook
 from test_image_service import (config, storage, api, PHOTO_URL, IMAGE_EDIT_URL, PNG,
                                ENCODED_PNG, PUBLIC_URL, post_requests, multipart_fields)
@@ -219,3 +219,8 @@ async def test_every_red_frame_sends_final_head_direction_after_style_instructio
         assert 'BAR COUNTER' in prompt and 'NO fireplace opening' in prompt
     if index in (2,4):
         assert 'only a FEW broad' in prompt
+
+
+@pytest.fixture(autouse=True)
+def photosession_examples(example_photos):
+    return example_photos

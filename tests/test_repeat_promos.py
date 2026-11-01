@@ -16,7 +16,7 @@ from photo_orders import deliver_photo_result
 from promo_service import send_repeat_offer,PromoOfferWorker,REPEAT_TEXTS
 from test_sales_stats import sales_payments,deliver_webhook
 from test_handlers import (callback_event,ready_context,dispatch_callback,call_handler,photo_event,
-                           message_event,confirm_second_song_context,event_replies,max_image_upload,isolated_example_directory,text_correction)
+                           message_event,confirm_second_song_context,event_replies,max_image_upload,isolated_example_directory, example_photos,text_correction)
 
 
 RATES=[
@@ -296,6 +296,11 @@ async def test_promo_photo_style_then_tariff_checkout(credit_db,sales_payments,t
     await dispatch_callback(router,callback_event('promo_photo'),context)
     await dispatch_callback(router,callback_event('photo_style_ny'),context)
     await dispatch_callback(router,callback_event(f'photo_tariff_{tariff}'),context)
+    sales_payments._request_payment_link.assert_not_awaited()
+    assert 'photo_order_id' not in await context.get_data()
+    if tariff==1490:
+        return  # No published plots: no invoice before a plot preview.
+    await dispatch_callback(router,callback_event('photo_temp_fam3' if tariff==590 else 'photo_temp_mom_daughter_5'),context)
     order=await credit_db.get_photo_order((await context.get_data())['photo_order_id'])
     assert order['amount_kopecks']==amount*100 and order['style']=='photo_style_ny'
 
@@ -466,3 +471,8 @@ async def test_abandoned_offer_claim_retries_after_lease_without_extending(credi
     await PromoOfferWorker(bot).process()
     assert bot.send_message.await_count==1
     assert await credit_db.get_active_promo(101,'music_card')==expires
+
+
+@pytest.fixture(autouse=True)
+def photosession_examples(example_photos):
+    return example_photos

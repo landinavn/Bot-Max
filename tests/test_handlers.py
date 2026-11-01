@@ -236,7 +236,7 @@ def isolated_example_directory(tmp_path, monkeypatch):
 def example_photos(tmp_path, monkeypatch):
     directory = tmp_path / "project" / "examples"
     directory.mkdir(parents=True)
-    for filename in {"before.jpg", "after.jpg", *handlers.START_EXAMPLE_FILES, *handlers.BROADCAST_EXAMPLE_FILES, *handlers.PHOTO_FAMILY_EXAMPLE_FILES, *handlers.PHOTO_NY_TARIFF_EXAMPLE_FILES, *handlers.PHOTO_NY_STANDARD_EXAMPLE_FILES,
+    for filename in {"before.jpg", "after.jpg", *handlers.START_EXAMPLE_FILES, *handlers.BROADCAST_EXAMPLE_FILES, *handlers.PHOTO_FAMILY_EXAMPLE_FILES, *handlers.PHOTO_NY_TARIFF_EXAMPLE_FILES, *handlers.PHOTO_NY_STANDARD_EXAMPLE_FILES, *handlers.PHOTO_TEMPLATE_EXAMPLE_FILES.values(),
                      *(f for files, _, _ in handlers.CATEGORY_MENUS.values() for f in files)}:
         if not Path(filename).suffix:
             filename += ".webp"
@@ -2589,14 +2589,11 @@ async def test_photo_style_tariff_preview_has_no_payment_or_generation(credit_db
     selected_tariff = callback_event(tariff)
     await dispatch_callback(router, selected_tariff, context)
     ny_trial = style == "photo_style_ny" and tariff in ("photo_tariff_590", "photo_tariff_990")
-    selected_tariff.ack.assert_awaited_once_with(notification="Показываю ссылку…" if ny_trial else "Скоро будет доступно…")
+    selected_tariff.ack.assert_awaited_once_with(notification="Показываю сюжеты…" if ny_trial else "Скоро будет доступно…")
     if ny_trial:
-        if tariff == "photo_tariff_590":
-            assert selected_tariff.send.await_args_list[0].args[0] == handlers.PHOTO_TRIAL_CHECKOUT_TEXT
-            assert (await context.get_data())["tariff"] == "trial_590"
-        else:
-            assert "990 ₽" in selected_tariff.send.await_args_list[0].args[0]
-            assert (await context.get_data())["tariff"] == "standard_990"
+        assert 'Выберите сюжет' in selected_tariff.send.await_args_list[0].args[0]
+        assert (await context.get_data())["tariff"] == ("trial_590" if tariff == "photo_tariff_590" else "standard_990")
+        assert 'photo_order_id' not in await context.get_data()
     else:
         assert selected_tariff.send.await_args.args[0] == (
             "🚀 Отличный выбор! Этот тариф скоро будет доступен. Мы уже заканчиваем настройку фотосессий, "
@@ -2613,10 +2610,7 @@ async def test_photo_style_tariff_preview_has_no_payment_or_generation(credit_db
     assert (await credit_db.get_user(456))["balance"] == 1
     assert (await credit_db.get_user(456))["total_generations"] == 0
     assert (await credit_db.get_user(456))["total_purchases"] == 0
-    if ny_trial:
-        payments.create_payment_link.assert_awaited_once()
-    else:
-        payments.create_payment_link.assert_not_awaited()
+    payments.create_payment_link.assert_not_awaited()
     vision.assert_not_awaited()
     card.assert_not_awaited()
 
@@ -2701,7 +2695,7 @@ NY_TRIAL_TEMPLATES = [
 
 
 @pytest.mark.parametrize("label,payload,template", NY_TRIAL_TEMPLATES[1:])
-async def test_legacy_ny_template_buttons_use_real_checkout(credit_db, label, payload, template):
+async def test_legacy_ny_template_buttons_use_real_checkout(credit_db, example_photos, label, payload, template):
     await credit_db.grant_free_trial(456)
     payments = SimpleNamespace(create_payment_link=AsyncMock(return_value="https://shop.payform.ru/personal-photo"))
     generator = AsyncMock()
@@ -2710,8 +2704,9 @@ async def test_legacy_ny_template_buttons_use_real_checkout(credit_db, label, pa
     await dispatch_callback(router, callback_event("photo_style_ny"), context)
     tariff = callback_event("photo_tariff_590")
     await dispatch_callback(router, tariff, context)
-    tariff.ack.assert_awaited_once_with(notification="Показываю ссылку…")
-    assert tariff.send.await_args_list[0].args[0] == handlers.PHOTO_TRIAL_CHECKOUT_TEXT
+    tariff.ack.assert_awaited_once_with(notification="Показываю сюжеты…")
+    assert "Выберите сюжет" in tariff.send.await_args_list[0].args[0]
+    payments.create_payment_link.assert_not_awaited()
     assert (await context.get_data())["tariff"] == "trial_590"
     event = callback_event(payload)
     await dispatch_callback(router, event, context)
@@ -2787,35 +2782,24 @@ async def test_ny_trial_deleted_message_does_not_change_context(credit_db, paylo
     assert await credit_db.get_all_counters() == {}
 
 
-async def test_ny_trial_tariff_immediately_offers_real_payment_link(credit_db):
-    await credit_db.grant_free_trial(456)
+async def test_ny_trial_tariff_opens_plots_before_real_payment_link(credit_db, example_photos):
     payments = SimpleNamespace(create_payment_link=AsyncMock(return_value="https://shop.payform.ru/personal-photo"))
-    generator = AsyncMock()
-    router = create_router(generator, postcard_generator=generator, payments=payments)
+    router = create_router(payments=payments)
     context = await ready_context()
     await dispatch_callback(router, callback_event("photo_style_ny"), context)
     event = callback_event("photo_tariff_590")
     await dispatch_callback(router, event, context)
-    event.ack.assert_awaited_once_with(notification="Показываю ссылку…")
-    assert event.send.await_args_list[0].args[0] == (
-        "Вы выбрали тариф «Попробовать» (3 фото) за 590 ₽.\n\n"
-        "Для продолжения, пожалуйста, оплатите заказ по ссылке ниже. После оплаты обязательно вернитесь в бота!"
-    )
-    data = await context.get_data()
-    assert data["tariff"] == "trial_590"
-    assert data["photo_tariff"] == "photo_tariff_590"
-    assert data["photo_style"] == "photo_style_ny"
-    assert await context.get_state() == PosterStates.waiting_for_mode
-    button = event.send.await_args_list[0].kwargs["attachments"][0].model_dump()["payload"]["buttons"][0][0]
-    assert button["text"] == "Оплатить 590 ₽"
-    assert button["type"] == "link"
-    assert button["url"] == "https://shop.payform.ru/personal-photo"
-    assert "payload" not in button
-    assert (await credit_db.get_user(456))["balance"] == 1
-    assert (await credit_db.get_user(456))["total_purchases"] == 0
-    assert (await credit_db.get_user(456))["total_generations"] == 0
-    payments.create_payment_link.assert_awaited()
-    generator.assert_not_awaited()
+    event.ack.assert_awaited_once_with(notification="Показываю сюжеты…")
+    assert 'Выберите сюжет' in event.send.await_args_list[0].args[0]
+    assert 'photo_order_id' not in await context.get_data()
+    payments.create_payment_link.assert_not_awaited()
+    event = callback_event("photo_temp_fam3")
+    await dispatch_callback(router, event, context)
+    assert event.send.await_args_list[0].kwargs['text'] == 'Примеры работ:'
+    assert event.send.await_args.args[0] == handlers.PHOTO_TRIAL_CHECKOUT_TEXT
+    button = event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0]
+    assert button.text == 'Оплатить 590 ₽' and button.url == 'https://shop.payform.ru/personal-photo'
+    payments.create_payment_link.assert_awaited_once()
 
 
 async def family_context(with_photo=True):
@@ -2909,16 +2893,13 @@ async def test_family_three_only_runs_for_new_year_trial(style, tariff):
     event.bot.send_message.assert_not_awaited()
 
 
-async def test_family_templates_reachable_from_payment_screen():
+async def test_family_templates_reachable_from_tariff_before_payment():
     router = create_router()
     context = await family_context(False)
     tariff = callback_event("photo_tariff_590")
     await dispatch_callback(router, tariff, context)
-    buttons = tariff.send.await_args_list[0].kwargs["attachments"][0].payload.buttons
-    choose = next(b for row in buttons for b in row if getattr(b, "payload", None) == "photo_choose_template")
-    event = callback_event(choose.payload)
-    await dispatch_callback(router, event, context)
-    payloads = [r[0].payload for r in event.send.await_args.kwargs["attachments"][0].payload.buttons]
+    assert 'photo_order_id' not in await context.get_data()
+    payloads = [r[0].payload for r in tariff.send.await_args.kwargs['attachments'][0].payload.buttons]
     assert payloads == [p for _, p, _ in NY_TRIAL_TEMPLATES] + ["photo_tariff_back"]
 
 
@@ -2987,7 +2968,7 @@ async def test_admin_family_template_requests_fresh_photo_without_payment(credit
 
 
 @pytest.mark.parametrize("admin_id", [None, 999])
-async def test_nonadmin_family_template_only_receives_payment_link(credit_db, admin_id):
+async def test_nonadmin_family_template_only_receives_payment_link(credit_db, example_photos, admin_id):
     frames = AsyncMock()
     router = create_router(admin_user_id=admin_id, photosession_generator=frames)
     context = await family_context()
@@ -3007,7 +2988,7 @@ async def test_nonadmin_cannot_generate_from_stale_admin_photo_state():
     event = photo_event()
     await call_handler(create_router(admin_user_id=999, photosession_generator=frames), "collect_photosession_photo", event, context)
     frames.assert_not_awaited()
-    assert event.message.answer.await_args.args[0] == 'Оплата временно недоступна. Попробуйте позже.'
+    assert event.message.answer.await_args.args[0] == 'Сначала выберите сюжет и посмотрите пример фотосессии.'
     assert await context.get_state() == PosterStates.waiting_for_mode
 
 
@@ -3132,7 +3113,7 @@ async def test_toddlers_resume_preserves_saved_frames(failure):
     (None, "photo_style_ny", "photo_tariff_590"), (999, "photo_style_ny", "photo_tariff_590"),
     (456, "photo_style_walk", "photo_tariff_590"), (456, "photo_style_ny", "photo_tariff_990"),
 ])
-async def test_toddlers_keeps_existing_access_and_style_restrictions(admin_id, style, tariff):
+async def test_toddlers_keeps_existing_access_and_style_restrictions(example_photos, admin_id, style, tariff):
     frames = AsyncMock()
     context = await family_context()
     await context.update_data(photo_style=style, photo_tariff=tariff)
@@ -7278,18 +7259,18 @@ async def test_stats_report_has_eight_blocks_unique_sources_and_admin_last(credi
     assert text.endswith('🛠 Админ (тесты): Сгенерировано 4, Покупок 0.')
 
 
-async def test_photo_checkout_personal_order_is_reused_for_template(credit_db):
+async def test_photo_checkout_personal_order_is_reused_for_template(credit_db, example_photos):
     payments=SimpleNamespace(create_payment_link=AsyncMock(return_value='https://shop.payform.ru/photo-personal'))
     router,context=create_router(admin_user_id=999,payments=payments),await ready_context()
     await context.update_data(photo_style='photo_style_ny')
-    tariff=callback_event('photo_tariff_590')
-    await dispatch_callback(router,tariff,context)
+    await dispatch_callback(router,callback_event('photo_tariff_590'),context)
+    assert 'photo_order_id' not in await context.get_data()
+    payments.create_payment_link.assert_not_awaited()
+    template=callback_event('photo_temp_fam3')
+    await dispatch_callback(router,template,context)
     order_id=(await context.get_data())['photo_order_id']
     order=await credit_db.get_photo_order(order_id)
-    assert order['user_id']==456 and order['amount_kopecks']==59000
-    assert order['status']=='pending'
-    payments.create_payment_link.assert_awaited_with(456,order_id=order_id,amount=590,description='Фотосессия Попробовать')
-    template=callback_event('photo_temp_fam3')
+    assert order['template']=='fam3' and order['amount_kopecks']==59000 and order['status']=='pending'
     await dispatch_callback(router,template,context)
     assert (await context.get_data())['photo_order_id']==order_id
     assert template.send.await_args.kwargs['attachments'][0].payload.buttons[0][0].url=='https://shop.payform.ru/photo-personal'

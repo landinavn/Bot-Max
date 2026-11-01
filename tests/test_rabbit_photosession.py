@@ -12,7 +12,7 @@ import handlers
 import image_service as images
 from handlers import create_router,PosterStates
 from test_handlers import (callback_event,ready_context,dispatch_callback,call_handler,photo_event,message_event,
-    event_replies,max_image_upload,isolated_example_directory,text_correction)
+    event_replies,max_image_upload,isolated_example_directory, example_photos,text_correction)
 from test_sales_stats import sales_payments,deliver_webhook
 from test_image_service import config,storage,api,PHOTO_URL,IMAGE_EDIT_URL,PNG,ENCODED_PNG,PUBLIC_URL,post_requests
 
@@ -176,3 +176,8 @@ async def test_rabbit_stats_exclude_admin_and_count_payments_once(credit_db,sale
     block=event.message.answer.await_args.args[0].split('🐰 Фотосессия «С кроликом»:',1)[1].split('👑 Эксклюзив',1)[0]
     assert '- Выбор сюжета (клики): 1' in block and '- Оплачено пакетов: 1' in block
     assert '- Выручка: 590,00 ₽' in block and '- Сгенерировано фото: 0' in block
+
+
+@pytest.fixture(autouse=True)
+def photosession_examples(example_photos):
+    return example_photos

@@ -70,6 +70,7 @@ from image_service import (
     generate_postcards,
     generate_cartoon_avatar, generate_photosession_frame, NY_FAMILY_THREE_PROMPTS, NY_FAMILY_PHOTOSESSION_PROMPTS,
     NY_PHOTOSESSION_PROMPTS_BY_TARIFF,
+    NY_RED_WOMAN_HEAD_POSES,
     fix_text_with_ai,
     POSTCARD_PROMPTS,
     MAX_CARD_TEXT_LENGTH, MAX_THEME_INFO_LENGTH,
@@ -1179,6 +1180,7 @@ def create_router(
                             elif index in (3,4):
                                 frame_kwargs={'style_reference_url':urls[2],
                                               'style_reference_scope':'wardrobe' if index==3 else 'setting'}
+                            frame_kwargs['pose_instruction']=NY_RED_WOMAN_HEAD_POSES[index]
                         url = await photosession_generator(reference_url, prompt, **frame_kwargs)
                         if not isinstance(url, str) or not url.startswith("https://"):
                             raise RuntimeError("Генератор не вернул HTTPS-ссылку кадра.")

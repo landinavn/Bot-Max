@@ -1139,7 +1139,9 @@ RED_WOMAN_IDENTITY = (
     "hair and makeup across the entire set. For a fuller figure, gently smooth skin folds and use flattering "
     "fabric drape and natural lighting, while preserving her actual body size, weight distribution and "
     "proportions; do not make her thin or reshape her body. No invented tattoos, no extra people. "
-    "HEAD MOVEMENT: You may change the head position from the original client photo. Follow the distinct "
+    "HEAD MOVEMENT IS REQUIRED: Reconstruct her recognizable face at the NEW head angle specified for "
+    "this frame. Preserve facial identity, not the original photo's head orientation or expression. "
+    "Do not paste a fixed frontal face onto a rotated body. Follow the distinct "
     "head turn, chin angle and gaze specified for EACH frame, with a relaxed neck, realistic rotation "
     "and natural alignment with the shoulders; keep her recognizable in every angle. Do not force all "
     "five portraits into the same frontal head position. PHOTOGRAPHIC REALISM: Lifelike candid editorial "
@@ -1195,6 +1197,29 @@ RED_WOMAN_ANATOMY = (
     "five fingers per hand, natural shoulders, wrists, knees and ankles. No duplicated, fused or detached "
     "limbs, no invented fingers or visible limbs behind occlusions. Keep all requested poses comfortable "
     "and physically possible for her real body. DO NOT ADD ANY TEXT. "
+)
+NY_RED_WOMAN_HEAD_POSES = (
+    "FRAME 1 — STANDING, LOOKING LEFT: Turn the HEAD itself about 35–45 degrees toward the LEFT EDGE "
+    "OF THE FINAL IMAGE. Nose points left of the lens; the far cheek is visibly foreshortened. Chin "
+    "nearly level, eyes looking left, relaxed closed-lip half-smile. This is a three-quarter LEFT face "
+    "view, not a frontal face with eyes shifted sideways. Keep a relaxed anatomically aligned neck.",
+    "FRAME 2 — SEATED ON STEPS, LOOKING UP RIGHT: Turn the HEAD itself about 45–55 degrees toward "
+    "the RIGHT EDGE OF THE FINAL IMAGE and lift the chin gently about 15–20 degrees. Nose points "
+    "up-right, gaze follows above-right, warm spontaneous smile. Show a clear three-quarter right "
+    "head silhouette, with a relaxed neck and no extreme backward bend. Do not look at the lens.",
+    "FRAME 3 — CROUCH OR STOOL, LOOKING AT LENS: Turn the face back toward the camera while the "
+    "torso and knees angle left; keep a slight three-quarter turn and a small head tilt toward the "
+    "LEFT EDGE OF THE FINAL IMAGE, chin gently lowered. Eyes meet the lens with a soft playful smile. "
+    "Maintain a natural head-to-neck connection; this is the direct-gaze portrait of the set.",
+    "FRAME 4 — STANDING AT BAR, LOOKING RIGHT: Turn the HEAD itself about 55–65 degrees toward the "
+    "RIGHT EDGE OF THE FINAL IMAGE, close to a natural side view. Nose points right, chin level and "
+    "eyes looking horizontally off-camera to the right. The far side of the face is naturally less "
+    "visible. Keep shoulders relaxed; rotate the neck comfortably, not just the eyes. Do not look up "
+    "as in frame 2 and do not return the face to the lens.",
+    "FRAME 5 — SNOW IN PALMS, LOOKING UP LEFT: Turn the HEAD itself about 40–50 degrees toward the "
+    "LEFT EDGE OF THE FINAL IMAGE and raise the chin gently about 15–20 degrees. Nose points up-left, "
+    "eyes follow falling snow above the open palms, lively natural smile. Keep the neck relaxed. "
+    "Show an unmistakable upward three-quarter left face view, not a frontal face or eyes-only glance.",
 )
 NY_RED_WOMAN_PROMPTS = (
     RED_WOMAN_IDENTITY + RED_WOMAN_CHRISTMAS_ROOM + RED_WOMAN_TROUSERS +
@@ -1350,6 +1375,7 @@ async def generate_cartoon_avatar(photo_url: str, mode: str) -> str:
 async def generate_photosession_frame(photo_url: str, prompt: str, *, style_reference_url: str | None = None,
                                       style_reference_urls: tuple[str, ...] | None = None,
                                       style_reference_scope: str = 'all',
+                                      pose_instruction: str | None = None,
                                       image_size: str | None = None) -> str:
     """Один /images/edits через общий клиент с OPENAI_PROXY_URL и таймаутом 300 с.
 
@@ -1359,6 +1385,8 @@ async def generate_photosession_frame(photo_url: str, prompt: str, *, style_refe
         raise ValueError("Не задан промпт фотосессии.")
     if style_reference_scope not in ('all', 'wardrobe', 'setting'):
         raise ValueError('Неизвестная роль образца фотосессии.')
+    if pose_instruction is not None and (not isinstance(pose_instruction, str) or not pose_instruction.strip()):
+        raise ValueError('Не задан обязательный ракурс кадра.')
     kwargs = {}
     if image_size is not None:
         if image_size not in ('1024x1536', '1536x1024'):
@@ -1389,6 +1417,16 @@ async def generate_photosession_frame(photo_url: str, prompt: str, *, style_refe
                    'in this prompt; never put another person\'s clothes on them. '
                    'Do not copy previous poses or framing; follow the new frame instructions and the required '
                    'number of people for this frame. DO NOT ADD ANY TEXT.')
+    if pose_instruction is not None:
+        # Keep the actual shot direction after all shared/style instructions in the SDK request.
+        prompt += ('\n\nMANDATORY FINAL SHOT DIRECTION — HIGHEST PRIORITY FOR HEAD ORIENTATION:\n'
+                   'All input images supply identity, clothing or setting ONLY; do NOT inherit their '
+                   'head angle, eye direction, facial expression or pose. Reconstruct the SAME person '
+                   'at the requested angle, preserving her facial features, age and body proportions. '
+                   'A change of gaze alone is insufficient: rotate the head and facial planes in 3D. '
+                   'Left and right below always mean the viewer\'s left and right in the final image. '
+                   'Keep the rotation physically comfortable and anatomically natural.\n' + pose_instruction)
+        logger.info('Обязательный ракурс фотосессии: %s', pose_instruction)
     urls = await _generate_and_store(photo_url, "Фотосессия", count=1, prompt_override=prompt, **kwargs)
     if len(urls) != 1:
         raise ImageGenerationError("Ожидался один кадр фотосессии.")

@@ -236,7 +236,7 @@ def isolated_example_directory(tmp_path, monkeypatch):
 def example_photos(tmp_path, monkeypatch):
     directory = tmp_path / "project" / "examples"
     directory.mkdir(parents=True)
-    for filename in {"before.jpg", "after.jpg", *handlers.START_EXAMPLE_FILES, *handlers.BROADCAST_EXAMPLE_FILES, *handlers.PHOTO_FAMILY_EXAMPLE_FILES, *handlers.PHOTO_NY_TARIFF_EXAMPLE_FILES,
+    for filename in {"before.jpg", "after.jpg", *handlers.START_EXAMPLE_FILES, *handlers.BROADCAST_EXAMPLE_FILES, *handlers.PHOTO_FAMILY_EXAMPLE_FILES, *handlers.PHOTO_NY_TARIFF_EXAMPLE_FILES, *handlers.PHOTO_NY_STANDARD_EXAMPLE_FILES,
                      *(f for files, _, _ in handlers.CATEGORY_MENUS.values() for f in files)}:
         if not Path(filename).suffix:
             filename += ".webp"

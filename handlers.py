@@ -276,6 +276,8 @@ START_EXAMPLE_FILES = (
 
 MOM_DAUGHTER_EXAMPLE_FILE = r"Мама+дочка3.png"
 MOM_DAUGHTER_FIVE_EXAMPLE_FILE = r"Мама+дочка5.png"
+WOMAN_RED_EXAMPLE_FILE = r"Женщина в красном.png"
+PHOTO_NY_STANDARD_EXAMPLE_FILES = (MOM_DAUGHTER_FIVE_EXAMPLE_FILE, WOMAN_RED_EXAMPLE_FILE)
 PHOTO_MAIN_EXAMPLE_FILES = (
     r"photo_main_1.webp", r"photo_main_3.webp", MOM_DAUGHTER_EXAMPLE_FILE,
 )
@@ -3933,7 +3935,7 @@ def create_router(
         if tariff==590:
             await send_menu_examples(event, PHOTO_FAMILY_EXAMPLE_FILES)
         elif tariff==990:
-            await send_menu_examples(event, (MOM_DAUGHTER_FIVE_EXAMPLE_FILE,))
+            await send_menu_examples(event, PHOTO_NY_STANDARD_EXAMPLE_FILES)
         table=PHOTO_NY_STANDARD_TEMPLATES if tariff==990 else PHOTO_NY_TRIAL_TEMPLATES
         buttons = tuple((label, payload) for payload, (label, _) in table.items())
         await _reply(
@@ -4105,6 +4107,8 @@ def create_router(
             await send_menu_examples(event, (MOM_DAUGHTER_EXAMPLE_FILE,))
         elif template == 'mom_daughter_5':
             await send_menu_examples(event, (MOM_DAUGHTER_FIVE_EXAMPLE_FILE,))
+        elif template == 'woman_red':
+            await send_menu_examples(event, (WOMAN_RED_EXAMPLE_FILE,))
         elif template == 'rabbit':
             await send_menu_examples(event, (RABBIT_EXAMPLE_FILE,))
         if template in prompts_by_template and admin_user_id is not None and event.get_ids()[1] == admin_user_id:

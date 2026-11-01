@@ -26,6 +26,7 @@ SOURCE_LABELS = {
     "vk_ads": "Реклама VK",
     "vk_posts": "Посты ВК",
     "dzen_posts": "Посты Дзена",
+    "youtube": "YouTube",
     "yandex_ads": "Реклама Яндекса",
     "yandex_newyear": "Yandex New Year",
     "unmarked": "Без метки",
@@ -699,11 +700,11 @@ async def record_first_start(user_id: int, payload: str | None = None, *, timest
     source = payload.strip() if isinstance(payload, str) else None
     if source and not source.startswith('share_'):
         campaign = unquote(source).split('?', 1)[0].split('&', 1)[0]
-        if campaign in {'vk_ads', 'yandex_ads', 'yandex_newyear', 'vk_posts', 'dzen_posts'}:
+        if campaign in {'vk_ads', 'yandex_ads', 'yandex_newyear', 'vk_posts', 'dzen_posts', 'youtube'}:
             source = campaign
     if source and "yandex_newyear" in source and not source.startswith("share_"):
         source = "yandex_newyear"
-    if source not in {"vk_ads", "yandex_ads", "yandex_newyear", "vk_posts", "dzen_posts"}:
+    if source not in {"vk_ads", "yandex_ads", "yandex_newyear", "vk_posts", "dzen_posts", "youtube"}:
         source = "unmarked"
     started_at = (
         datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
@@ -1855,3 +1856,18 @@ async def claim_animation_job(job_id):
         cursor=await db.execute("UPDATE animation_jobs SET running=1 WHERE job_id=? AND running=0 AND status IN ('queued','creating','processing','ready') AND next_attempt_at<=?",(job_id,_now_ts()))
         await db.commit()
         return cursor.rowcount==1
+
+
+async def get_photo_template_stats(template, *, admin_id=None):
+    """Use paid orders and durable frame slots; selection after payment is attributed too."""
+    async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
+        async with db.execute('''SELECT COUNT(*),COALESCE(SUM(amount_kopecks),0),
+            COALESCE(SUM(CASE WHEN generation_status='completed' THEN 1 ELSE 0 END),0)
+            FROM photo_orders WHERE status='paid' AND template=? AND (? IS NULL OR user_id!=?)''',
+            (template,admin_id,admin_id)) as cursor:
+            paid,revenue,completed=await cursor.fetchone()
+        async with db.execute('''SELECT COUNT(*) FROM photo_results r JOIN photo_orders o ON o.order_id=r.order_id
+            WHERE o.status='paid' AND o.template=? AND (? IS NULL OR o.user_id!=?)''',
+            (template,admin_id,admin_id)) as cursor:
+            generated=(await cursor.fetchone())[0]
+    return {'paid_packages':paid,'revenue_kopecks':revenue,'generated_photos':generated,'completed_packages':completed}

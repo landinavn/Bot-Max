@@ -222,7 +222,7 @@ async def test_source_funnel_counts_users_once_and_sums_only_paid_amounts(credit
 
 async def test_empty_source_stats_include_zero_rows_for_all_ad_labels(credit_db):
     rows = await credit_db.get_source_stats()
-    assert [row["label"] for row in rows] == ["Реклама VK", "Посты ВК", "Посты Дзена", "Реклама Яндекса", "Yandex New Year", "Без метки"]
+    assert [row["label"] for row in rows] == ["Реклама VK", "Посты ВК", "Посты Дзена", "YouTube", "Реклама Яндекса", "Yandex New Year", "Без метки"]
     assert all(row["new_users"] == row["buyers"] == row["revenue_kopecks"] == 0 for row in rows)
 
 

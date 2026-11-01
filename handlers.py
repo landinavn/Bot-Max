@@ -37,6 +37,7 @@ from metrika_service import extract_yclid, send_offline_conversion
 
 from database import (
     create_animation_order, get_animation_order, animation_orders_for_user, animation_first_price,
+    get_photo_template_stats,
     queue_animation_photo, update_animation_order,
     get_active_promo,quote_repeat_price,get_promo_reservation,PromoReservedError,
     PHOTO_TARIFFS,PHOTO_PACKAGE_SIZES,get_photo_results,get_photo_package_balance,save_photo_result,
@@ -385,10 +386,11 @@ CATEGORY_MENUS = {
         (
             "📸 Ура! Новогодняя фотосессия уже доступна! 🎄\n\n"
             "Мы вовсю готовим для вас потрясающие образы, и вы уже можете попробовать наши новинки.\n\n"
-            "В тарифе «Попробовать» доступны три варианта семейных фотосессий:\n"
+            "В тарифе «Попробовать» доступны четыре варианта семейных фотосессий:\n"
             "• Семейная 3+ чел\n"
             "• Семейная 4+ чел\n"
-            "• Семейная с малышами\n\n"
+            "• Семейная с малышами\n"
+            "• Мама + дочка\n\n"
             "👇 Выбери стиль, который тебе интересен:"
         ),
         (
@@ -1083,6 +1085,9 @@ def create_router(
                     if data["template"] == "fam3" else
                     "Отправьте одно общее фото семьи с малышом или малышами, где хорошо видны лица всех участников. /cancel — отмена."
                     if data["template"] == "toddlers" else
+                    "Отправьте одно общее фото мамы и дочки (2 человека), где хорошо видны оба лица и по возможности фигуры. "
+                    "В пакете: два совместных кадра и один кадр мамы в полный рост. /cancel — отмена."
+                    if data["template"] == "mom_daughter" else
                     "Отправьте одно общее фото семьи из 3 и более человек, где хорошо видны лица детей и родителей. /cancel — отмена."
                 ))
                 return
@@ -1111,7 +1116,9 @@ def create_router(
                             urls[index]=cached['image_url']
                     if index >= len(urls):
                         await _reply(event, f"Генерирую кадр {index + 1} из 3... ⏳ Это может занять 3-5 минут. Пожалуйста, не закрывайте чат!")
-                        url = await photosession_generator(reference_url, prompt)
+                        frame_kwargs = ({'style_reference_url': urls[0]}
+                                        if data['template'] == 'mom_daughter' and index > 0 else {})
+                        url = await photosession_generator(reference_url, prompt, **frame_kwargs)
                         if not isinstance(url, str) or not url.startswith("https://"):
                             raise RuntimeError("Генератор не вернул HTTPS-ссылку кадра.")
                         if (await context.get_data()).get("photosession_session_id") != session_id:
@@ -1415,6 +1422,7 @@ def create_router(
         counters = await get_all_counters(admin_id=admin_user_id)
         sources = await get_source_stats(admin_id=admin_user_id)
         admin = await get_user(admin_user_id)
+        mom_stats = await get_photo_template_stats('mom_daughter', admin_id=admin_user_id)
         c = lambda key: counters.get(key, 0)
         new_year = sum(c(key) for key in ('gen_ny', 'gen_ny_cozy', 'gen_ny_fairytale', 'gen_ny_elegant', 'gen_ny_family'))
         sources_text = "\n".join(
@@ -1463,6 +1471,7 @@ def create_router(
             "📍 ИСТОЧНИКИ ТРАФИКА:\n" + sources_text + "\n\n"
             f"🔗 Ссылка для постов ВК: {campaign_bot_link(bot_link, 'vk_posts')}\n"
             f"🔗 Ссылка для Дзена: {campaign_bot_link(bot_link, 'dzen_posts')}\n\n"
+            f"🔗 Ссылка для YouTube: {campaign_bot_link(bot_link, 'youtube')}\n\n"
             "🖼 СГЕНЕРИРОВАНО КАРТИНОК:\n"
             f"- Карта желаний: {c('gen_vision')}\n"
             f"- Новый год (все виды): {new_year}\n"
@@ -1479,6 +1488,12 @@ def create_router(
             f"- Эксклюзив (ручная работа): {c('click_custom_order')}\n"
             f"- Оживление фотографий: {c('click_animation')}\n"
             f"- Медитации: {c('click_meditation')}\n\n"
+            "👩‍👧 Фотосессия «Мама + дочка»:\n"
+            f"- Выбор сюжета (клики): {c('select_photo_mom_daughter')}\n"
+            f"- Оплачено пакетов: {mom_stats['paid_packages']}\n"
+            f"- Сгенерировано фото: {mom_stats['generated_photos']}\n"
+            f"- Завершено фотосессий: {mom_stats['completed_packages']}\n"
+            f"- Выручка: {mom_stats['revenue_kopecks'] // 100},{mom_stats['revenue_kopecks'] % 100:02d} ₽\n\n"
             "👑 Эксклюзив (ручная работа):\n"
             f"- Клики по кнопке: {c('click_custom_order')}\n"
             f"- Отправлено заявок: {c('submit_custom_order')}\n\n"
@@ -3962,10 +3977,18 @@ def create_router(
             )
             return
         template = PHOTO_NY_TRIAL_TEMPLATES[event.callback.payload][1]
-        if template in {"fam3", "fam4", "toddlers"}:
+        if template in NY_FAMILY_PHOTOSESSION_PROMPTS:
             user_id = event.get_ids()[1]
             if user_id is not None:
                 await increment_counter("select_photo_" + template, user_id=user_id)
+        paid = await get_photo_order(data.get('photo_order_id', ''))
+        if paid and paid['user_id'] == event.get_ids()[1] and paid['status'] == 'paid':
+            results = await get_photo_results(paid['order_id'])
+            if results and paid['template'] != template:
+                await context.update_data(template=paid['template'])
+                await _reply(event, 'В этом пакете уже создан кадр другого сюжета. Продолжите исходную фотосессию.',
+                    attachments=[navigation_keyboard((('Продолжить', 'photo_resume:' + paid['order_id']),))])
+                return
         await context.update_data(
             template=template, photo_product_name="Фотосессия Попробовать", photo_amount_kopecks=59000,
         )
@@ -3987,17 +4010,13 @@ def create_router(
                 if template == "fam3" else
                 "👑 Режим администратора: Оплата пропущена. Пожалуйста, загрузите общее фото семьи с малышом или малышами для генерации."
                 if template == "toddlers" else
+                "👑 Режим администратора: Оплата пропущена. Загрузите одно общее фото мамы и дочки (2 человека). "
+                "В пакете: два совместных кадра и один кадр мамы в полный рост."
+                if template == "mom_daughter" else
                 "👑 Режим администратора: Оплата пропущена. Пожалуйста, загрузите общее фото семьи (3 и более человек) для генерации."
             )
             return
-        paid=await get_photo_order(data.get('photo_order_id',''))
         if paid and paid['user_id']==event.get_ids()[1] and paid['status']=='paid' and template in NY_FAMILY_PHOTOSESSION_PROMPTS:
-            results=await get_photo_results(paid['order_id'])
-            if results and paid['template']!=template:
-                await context.update_data(template=paid['template'])
-                await _reply(event,'В этом пакете уже создан кадр другого сюжета. Продолжите исходную фотосессию.',
-                    attachments=[navigation_keyboard((('Продолжить','photo_resume:'+paid['order_id']),))])
-                return
             await update_photo_order(paid['order_id'],style='photo_style_ny',template=template)
             await context.update_data(photosession=True)
             await context.set_state(PosterStates.waiting_for_photosession_photo)
@@ -4199,6 +4218,8 @@ def create_router(
                 if data["template"] == "fam3" else
                 "Нужно одно общее фото семьи с малышом или малышами, отправленное как изображение."
                 if data["template"] == "toddlers" else
+                "Нужно одно общее фото мамы и дочки (2 человека), отправленное как изображение."
+                if data["template"] == "mom_daughter" else
                 "Нужно одно общее фото семьи из 3 и более человек, отправленное как изображение."
             ))
             return

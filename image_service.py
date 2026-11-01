@@ -1176,16 +1176,13 @@ RED_WOMAN_TROUSERS = (
     "replace the one-sleeve top with a matching elegant ivory/champagne top with TWO long sleeves and "
     "covered shoulders. Keep whichever sleeve design is chosen IDENTICAL in frames 1 and 2. "
 )
-RED_WOMAN_SATIN_DRESS = (
-    "OUTFIT: A festive vivid crimson/cherry-red glossy satin evening dress, softly draped neckline, "
-    "thin silver jeweled straps and a natural thigh slit, silver crystal necklace, sparkly silver "
-    "accessories and red embellished heels. LENGTH BASED ONLY ON THE ORIGINAL CLIENT'S REAL BUILD: "
-    "If she is slim, make this a mini dress with a tasteful mid-thigh hem. If she has a fuller figure, "
-    "keep this a floor-length gown. For other or uncertain builds, keep the floor-length gown. Never "
-    "slim or reshape her body to choose the mini version; do not use the style model's build. The dress "
-    "must fit her comfortably, remain opaque and cover her appropriately in standing and crouching poses. "
-    "This exact same satin dress, chosen length, color, cut, straps and jewelry "
-    "must be used in frames 3 and 4. No jacket, trousers or white skirt. "
+RED_WOMAN_VELVET_DRESS = (
+    "OUTFIT: Rich red velvet dress with a wide off-shoulder neckline and two large sculptural puff "
+    "sleeves, like the dress in reference 5, with gold cuff bracelets and red heels. Choose the length "
+    "from the ORIGINAL client's real build: a tasteful mid-thigh mini dress for a slim woman; an elegant "
+    "floor-length gown for a fuller figure or uncertain build. Keep her actual body proportions unchanged. "
+    "Use exactly the SAME velvet fabric, red color, neckline, puff sleeves, chosen hem length and "
+    "accessories in frames 3, 4 and 5. The dress is opaque, comfortably fitted and naturally draped. "
 )
 RED_WOMAN_CURTAIN = (
     "SETTING: A rich deep burgundy-red fabric studio backdrop, hung almost smooth with only a FEW broad, "
@@ -1213,10 +1210,11 @@ NY_RED_WOMAN_HEAD_POSES = (
     "the RIGHT EDGE OF THE FINAL IMAGE and lift the chin gently about 15–20 degrees. Nose points "
     "up-right, gaze follows above-right, warm spontaneous smile. Show a clear three-quarter right "
     "head silhouette, with a relaxed neck and no extreme backward bend. Do not look at the lens.",
-    "FRAME 3 — CROUCH OR STOOL, LOOKING AT LENS: Turn the face back toward the camera while the "
-    "torso and knees angle left; keep a slight three-quarter turn and a small head tilt toward the "
-    "LEFT EDGE OF THE FINAL IMAGE, chin gently lowered. Eyes meet the lens with a soft playful smile. "
-    "Maintain a natural head-to-neck connection; this is the direct-gaze portrait of the set.",
+    "FRAME 3 — SEATED ON WHITE CUBE, LOOKING AT LENS: Sitting upright on the white display cube, "
+    "turn the face toward the camera while the torso angles slightly left. Keep a small natural "
+    "head tilt toward the LEFT EDGE OF THE FINAL IMAGE and the chin nearly level. Eyes meet the lens "
+    "with a relaxed smile. Maintain a natural head-to-neck connection; this is the direct-gaze "
+    "portrait of the set.",
     "FRAME 4 — STANDING AT BAR, LOOKING RIGHT: Turn the HEAD itself about 55–65 degrees toward the "
     "RIGHT EDGE OF THE FINAL IMAGE, close to a natural side view. Nose points right, chin level and "
     "eyes looking horizontally off-camera to the right. The far side of the face is naturally less "
@@ -1250,21 +1248,19 @@ NY_RED_WOMAN_PROMPTS = (
     "Use light natural makeup and gentle skin retouch, keeping skin texture. Do NOT add red lipstick unless "
     "it is already present in the client photo. Style loose hair with modest volume or soft curls; "
     "if the hair is arranged, keep that hairstyle and tidy it. "
-    "OUTFIT & POSE: A crimson-red satin dress with thin silver jeweled straps, a softly draped neckline, "
-    "silver necklace and red heels. Use the client's actual build: for a slim woman, a mid-thigh mini dress "
-    "and a balanced low crouch, knees angled left, torso upright — CROUCHING elegantly on her feet, "
-    "without furniture. For a fuller figure or uncertain build, a floor-length gown and a comfortable "
-    "seated pose on a stable low dark stool. Keep her real figure unchanged and the dress naturally fitted "
-    "and covering her in either pose. This satin outfit will also be used in frame 4. "
-    "HANDS: Hold silver Christmas tinsel with two violet baubles loosely across her arms and lap; "
-    "one hand near her shoulder, the other near her hip. "
-    "BACKGROUND: Deep burgundy fabric, almost smooth, with only a FEW broad shallow folds and sparse "
-    "falling artificial snow. LIGHTING FOR EVERY FRAME: Slightly darkened professional studio exposure, "
-    "soft directional light, gentle shadows, rich colors and clearly visible face and dress details. "
-    "HEAD & GAZE: Face the lens with a slight tilt left and chin gently lowered, open eyes, relaxed smile. "
+    + RED_WOMAN_VELVET_DRESS + RED_WOMAN_CURTAIN +
+    "POSE & CAMERA: Full-length vertical studio portrait matching the new seated reference. The woman "
+    "sits upright on a tall, stable WHITE rectangular display cube, slightly right of center. Her torso "
+    "angles gently left; legs are comfortably crossed at the knee or ankles with natural joint alignment. "
+    "Show both shoes and the full cube. Her hands rest separately on the cube edges or one on her lap, "
+    "fingers relaxed and correctly attached. Arrange several glossy red gift boxes with red satin bows "
+    "on the floor around the cube, without obscuring her figure. "
+    "LIGHTING FOR EVERY FRAME: Slightly darkened professional exposure, soft directional light and "
+    "gentle shadows, clear face and dress texture. HEAD & GAZE: Face the lens with a slight tilt left, "
+    "chin nearly level, open eyes and relaxed smile. "
     "Natural anatomy: exactly two arms and two legs, correctly attached hands, five fingers per hand, "
     "no duplicated or fused limbs. No text.",
-    RED_WOMAN_IDENTITY + RED_WOMAN_SATIN_DRESS +
+    RED_WOMAN_IDENTITY + RED_WOMAN_VELVET_DRESS +
     "SETTING: An upscale contemporary cocktail BAR decorated for Christmas, not a home. At frame-left "
     "is a solid waist-high black marble BAR COUNTER with fine white/gray veining, a polished horizontal "
     "countertop and a continuous vertical stone front all the way down to the floor. It is a functional "
@@ -1282,15 +1278,14 @@ NY_RED_WOMAN_PROMPTS = (
     "rests lightly on the horizontal black marble bar countertop at frame-left, other hand rests "
     "naturally at her hip; stance relaxed with a small natural shift of weight. HEAD & GAZE: A gentle "
     "three-quarter turn toward frame-right, chin neutral, eyes looking to the right at normal eye "
-    "level with a relaxed half-smile, unlike the upward gaze of frame 2. Wear EXACTLY the red satin "
+    "level with a relaxed half-smile, unlike the upward gaze of frame 2. Wear EXACTLY the red velvet "
     "dress, mini or floor-length according to the original client's build, and "
     "accessories established in frame 3; do not copy the gray jacket or white skirt of reference 4. "
     + RED_WOMAN_ANATOMY,
-    RED_WOMAN_IDENTITY + RED_WOMAN_CURTAIN +
-    "OUTFIT: The dress from reference 5: rich red velvet fitted short party dress with a wide "
-    "off-shoulder neckline and two large sculptural puff sleeves, plus broad polished gold cuff bracelets. "
-    "Do NOT use the thin-strapped satin dress from frame 3 in this frame. "
-    "POSE & CAMERA: Vertical seated three-quarter portrait, body angled toward frame-left. Both forearms "
+    RED_WOMAN_IDENTITY + RED_WOMAN_CURTAIN + RED_WOMAN_VELVET_DRESS +
+    "POSE & CAMERA: Vertical seated three-quarter portrait on a low black round stool, body angled "
+    "toward frame-left. Keep the burgundy backdrop and velvet outfit from frame 3, while the white "
+    "cube and gift boxes belong only to frame 3. This frame has no cube or gift boxes. Both forearms "
     "are raised naturally forward, two separate open palms face upward at chest level as she playfully "
     "blows or tosses artificial snow. HEAD & GAZE: Turn her head gently toward frame-left with her chin "
     "slightly raised and eyes following the snow above her open palms; a light spontaneous smile, "

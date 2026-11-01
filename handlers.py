@@ -259,13 +259,13 @@ PACKAGES_TEXT = (
 PAYMENT_PACKAGES_TEXT = PACKAGES_TEXT
 NO_CREDITS_TEXT = "У вас закончились кредиты. Пожалуйста, выберите пакет для продолжения:"
 EXAMPLES_DIR = Path(__file__).resolve().parent / "examples"
+RABBIT_EXAMPLE_FILE = r"кролик.png"
 START_EXAMPLE_FILES = (
     r"i (1).webp",
     r"i (29).webp",
     r"i (28).webp",
     r"i (27).webp",
-    r"i (26).webp",
-    r"i (21).webp",
+    RABBIT_EXAMPLE_FILE,
 )
 
 MOM_DAUGHTER_EXAMPLE_FILE = r"Мама+дочка3.png"
@@ -273,7 +273,7 @@ PHOTO_MAIN_EXAMPLE_FILES = (
     r"photo_main_1.webp", r"photo_main_3.webp", MOM_DAUGHTER_EXAMPLE_FILE,
 )
 PHOTO_FAMILY_EXAMPLE_FILES = (
-    r"photo_fam_1.webp", r"photo_fam_3.webp", MOM_DAUGHTER_EXAMPLE_FILE,
+    r"photo_fam_3.webp", MOM_DAUGHTER_EXAMPLE_FILE, RABBIT_EXAMPLE_FILE,
 )
 
 SONG_PROMO_EXPIRED_TEXT = 'К сожалению, 48 часов уже прошли. Вы можете приобрести песню по обычной цене 490 ₽.'
@@ -4008,6 +4008,8 @@ def create_router(
         )
         if template == 'mom_daughter':
             await send_menu_examples(event, (MOM_DAUGHTER_EXAMPLE_FILE,))
+        elif template == 'rabbit':
+            await send_menu_examples(event, (RABBIT_EXAMPLE_FILE,))
         if template in NY_FAMILY_PHOTOSESSION_PROMPTS and admin_user_id is not None and event.get_ids()[1] == admin_user_id:
             if (data.get("template") == template and data.get("photosession_admin_bypass")
                     and data.get("photosession_session_id")):

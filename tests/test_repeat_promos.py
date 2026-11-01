@@ -390,18 +390,19 @@ async def test_reserved_coupon_button_reopens_same_invoice(credit_db,sales_payme
 
 
 async def test_music_flow_prices_direct_card_at_239_with_active_promo(credit_db,sales_payments):
-    from test_handlers import prepare_teacher_video,dispatch_callback_and_phrase
     await credit_db.set_promo(456,'music_card')
-    router=create_router(admin_user_id=999,payments=sales_payments,
-                         postcard_generator=AsyncMock(return_value=['https://cdn.example/clean.jpg']))
+    cards=AsyncMock()
+    router=create_router(admin_user_id=999,payments=sales_payments,postcard_generator=cards)
     context=await ready_context()
-    await prepare_teacher_video(router,context,'cat_video')
-    event=callback_event('video_song:audio_fun_ny')
-    await dispatch_callback_and_phrase(router,event,context)
-    order=await credit_db.get_musical_order((await context.get_data())['music_checkout_id'])
+    await dispatch_callback(router,callback_event('cat_video'),context)
+    event=callback_event('video_style:mode_ny')
+    await dispatch_callback(router,event,context)
+    order=await credit_db.get_musical_order((await context.get_data())['music_prepaid_id'])
     assert order['amount_kopecks']==23900 and order['order_id'].startswith('promo_music_card_')
+    assert order['prepaid']==1 and order['input_ready']==0
     assert 'Оплатить 239 ₽' in str(event.send.await_args_list)
     assert await credit_db.get_active_promo(456,'music_card') is not None
+    cards.assert_not_awaited()
 
 
 @pytest.mark.parametrize('payload',['promo_music_card','promo_cartoon','promo_photo'])
@@ -414,24 +415,23 @@ async def test_admin_promo_buttons_do_not_create_or_show_offers(credit_db,payloa
 
 
 async def test_old_paid_music_retry_is_not_rebilled_when_new_promo_exists(credit_db,sales_payments):
-    from test_handlers import prepare_teacher_video,dispatch_callback_and_phrase
-    router=create_router(admin_user_id=999,payments=sales_payments,
-                         postcard_generator=AsyncMock(return_value=['https://cdn.example/clean.jpg']))
-    context=await ready_context()
-    await prepare_teacher_video(router,context,'cat_video')
-    await dispatch_callback_and_phrase(router,callback_event('video_song:audio_fun_ny'),context)
-    order_id=(await context.get_data())['music_checkout_id']
-    order=await credit_db.get_musical_order(order_id)
+    key='music_legacy_paid'
+    await credit_db.create_musical_order(key,456,'https://cdn.example/clean.jpg','https://audio.example/full.mp3','direct')
+    order=await credit_db.get_musical_order(key)
     await deliver_webhook(sales_payments,order)
     bot=SimpleNamespace(send_message=AsyncMock(return_value=object()))
     await PaidMusicalWorker(bot,admin_user_id=999,renderer=AsyncMock(return_value='https://cdn.example/final.mp4'),
-                            uploader=AsyncMock(return_value=object())).process(order_id)
+                            uploader=AsyncMock(return_value=object())).process(key)
     assert await credit_db.get_active_promo(456,'music_card') is not None
+    context=await ready_context()
+    await context.update_data(video_product='direct',video_flow=True,mode='mode_ny',
+                              video_song_scenario='audio_fun_ny',music_checkout_id=key)
+    await context.set_state(PosterStates.waiting_for_video_payment)
     retry=callback_event('retry_music_checkout')
-    await dispatch_callback(router,retry,context)
-    assert (await context.get_data())['music_checkout_id']==order_id
+    await dispatch_callback(create_router(admin_user_id=999,payments=sales_payments),retry,context)
+    assert (await context.get_data())['music_checkout_id']==key
     assert 'уже оплачен' in str(retry.send.await_args_list)
-    sales_payments._request_payment_link.assert_awaited_once()
+    sales_payments._request_payment_link.assert_not_awaited()
     assert await credit_db.get_promo_reservation(456,'music_card') is None
 
 

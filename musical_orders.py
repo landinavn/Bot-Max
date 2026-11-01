@@ -3,7 +3,7 @@ import asyncio
 import logging
 import time
 
-from maxapi.types import LinkButton
+from maxapi.types import LinkButton, CallbackButton
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
 from database import (get_musical_order, update_musical_order, claim_musical_order,
@@ -42,6 +42,21 @@ class PaidMusicalWorker:
             await asyncio.sleep(self.poll_interval)
 
     async def process(self, order_id):
+        waiting=await get_musical_order(order_id)
+        if waiting and waiting['status']=='paid' and waiting['prepaid'] and not waiting['input_ready']:
+            if not waiting['user_notified']:
+                try:
+                    sent=await self.bot.send_message(user_id=waiting['user_id'],
+                        text='✅ Оплата музыкальной открытки получена! Нажмите кнопку, чтобы загрузить фото и продолжить создание.',
+                        attachments=[InlineKeyboardBuilder().row(CallbackButton(
+                            text='🎵 Продолжить создание',payload='music_resume:'+order_id)).as_markup()])
+                    if sent is None:
+                        raise RuntimeError('MAX не подтвердил уведомление об оплате.')
+                    await update_musical_order(order_id,user_notified=1)
+                except Exception:
+                    logger.exception('Не удалось отправить уведомление о предоплате %s:',order_id)
+                    await update_musical_order(order_id,next_attempt_at=int(time.time())+60)
+            return
         if not await claim_musical_order(order_id):
             return
         order = None
@@ -49,10 +64,11 @@ class PaidMusicalWorker:
             order = await get_musical_order(order_id)
             result = order['result_url']
             if not result:
-                try:
-                    await self.bot.send_message(user_id=order['user_id'], text=MUSICAL_VIDEO_WAIT_MESSAGE)
-                except Exception:
-                    logger.warning('Не удалось отправить уведомление о сборке заказа %s.', order_id)
+                if not order['prepaid']:
+                    try:
+                        await self.bot.send_message(user_id=order['user_id'], text=MUSICAL_VIDEO_WAIT_MESSAGE)
+                    except Exception:
+                        logger.warning('Не удалось отправить уведомление о сборке заказа %s.', order_id)
                 result = await self.renderer(order['image_url'], order['audio_url'])
                 if not isinstance(result, str) or not result.startswith('https://'):
                     raise ValueError('Не получена HTTPS-ссылка на музыкальную открытку.')

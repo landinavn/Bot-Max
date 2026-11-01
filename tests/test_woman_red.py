@@ -34,11 +34,14 @@ async def test_admin_gets_solo_photo_request_and_five_portraits_without_payment(
     assert len(frames.await_args_list) == 5
     assert [c.args[1] for c in frames.await_args_list] == list(images.NY_RED_WOMAN_PROMPTS)
     assert all(c.args[0] == 'https://photos.example.com/source.png' for c in frames.await_args_list)
-    assert [c.kwargs for c in frames.await_args_list] == [
+    expected = [
         {}, {'style_reference_url': 'https://cdn.example/red-1.jpg'}, {},
         {'style_reference_url': 'https://cdn.example/red-3.jpg', 'style_reference_scope': 'wardrobe'},
         {'style_reference_url': 'https://cdn.example/red-3.jpg', 'style_reference_scope': 'setting'},
     ]
+    for index, kwargs in enumerate(expected):
+        kwargs['pose_instruction'] = images.NY_RED_WOMAN_HEAD_POSES[index]
+    assert [c.kwargs for c in frames.await_args_list] == expected
     payments.create_payment_link.assert_not_awaited()
     assert await credit_db.get_active_promo(456, 'photo') is None
 
@@ -95,7 +98,8 @@ async def test_resume_after_fourth_frame_failure_uses_persisted_third_dress(cred
     await dispatch_callback(router, callback_event('photo_resume:' + key), context)
     assert frames.await_count == 6
     assert frames.await_args_list[-2].kwargs == {
-        'style_reference_url': 'https://cdn.example/red-3.jpg', 'style_reference_scope': 'wardrobe'}
+        'style_reference_url': 'https://cdn.example/red-3.jpg', 'style_reference_scope': 'wardrobe',
+        'pose_instruction': images.NY_RED_WOMAN_HEAD_POSES[3]}
     assert frames.await_args.kwargs['style_reference_scope'] == 'setting'
     assert (await credit_db.get_photo_template_stats('woman_red'))['completed_packages'] == 1
 
@@ -153,3 +157,37 @@ async def test_real_image_request_keeps_original_identity_and_limited_style_role
     assert expected in prompt and 'FIRST image is the original client photo' in prompt
     assert 'Do NOT add red lipstick unless' in prompt
     assert fields['size'].get_content() == '1024x1536'
+
+
+@pytest.mark.parametrize('index', range(5))
+async def test_every_red_frame_sends_final_head_direction_after_style_instructions(config, storage, api, monkeypatch, index):
+    monkeypatch.setattr(images.Config, 'from_env', lambda: config)
+    api.get(PHOTO_URL, body=PNG, content_type='image/png')
+    kwargs = {}
+    if index in (1,3,4):
+        api.get('https://cdn.example/style.png', body=PNG, content_type='image/png')
+        kwargs['style_reference_url'] = 'https://cdn.example/style.png'
+        if index in (3,4):
+            kwargs['style_reference_scope'] = 'wardrobe' if index == 3 else 'setting'
+    api.post(IMAGE_EDIT_URL, payload={'data':[{'b64_json':ENCODED_PNG}]})
+    api.head(PUBLIC_URL, status=200, repeat=True)
+    await images.generate_photosession_frame(PHOTO_URL, images.NY_RED_WOMAN_PROMPTS[index],
+        pose_instruction=images.NY_RED_WOMAN_HEAD_POSES[index], **kwargs)
+    fields = await multipart_fields(post_requests(api)[0])
+    prompt = fields['prompt'].get_content()
+    assert prompt.endswith(images.NY_RED_WOMAN_HEAD_POSES[index])
+    assert prompt.count('MANDATORY FINAL SHOT DIRECTION') == 1
+    if index in (1,3,4):
+        assert prompt.index('MANDATORY FINAL SHOT DIRECTION') > prompt.index('INPUT ROLES:')
+    assert 'rotate the head and facial planes in 3D' in prompt
+    assert 'Keep the original head angle' not in prompt
+    assert 'HEAD MOVEMENT: You may' not in prompt
+    assert 'LIGHTING FOR EVERY FRAME:' in prompt
+    if index in (2,3):
+        assert 'mini dress' in prompt and 'floor-length gown' in prompt
+    if index == 2:
+        assert 'CROUCHING elegantly' in prompt and 'stable low dark stool' in prompt
+    if index == 3:
+        assert 'BAR COUNTER' in prompt and 'NO fireplace opening' in prompt
+    if index in (2,4):
+        assert 'only a FEW broad' in prompt

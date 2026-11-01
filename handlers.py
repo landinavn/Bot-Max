@@ -1180,7 +1180,7 @@ def create_router(
                                 frame_kwargs={'style_reference_url':urls[0]}
                             elif index in (3,4):
                                 frame_kwargs={'style_reference_url':urls[2],
-                                              'style_reference_scope':'wardrobe' if index==3 else 'setting'}
+                                              'style_reference_scope':'wardrobe' if index==3 else 'all'}
                             frame_kwargs['pose_instruction']=NY_RED_WOMAN_HEAD_POSES[index]
                         url = await photosession_generator(reference_url, prompt, **frame_kwargs)
                         if not isinstance(url, str) or not url.startswith("https://"):

@@ -37,7 +37,7 @@ async def test_admin_gets_solo_photo_request_and_five_portraits_without_payment(
     expected = [
         {}, {'style_reference_url': 'https://cdn.example/red-1.jpg'}, {},
         {'style_reference_url': 'https://cdn.example/red-3.jpg', 'style_reference_scope': 'wardrobe'},
-        {'style_reference_url': 'https://cdn.example/red-3.jpg', 'style_reference_scope': 'setting'},
+        {'style_reference_url': 'https://cdn.example/red-3.jpg', 'style_reference_scope': 'all'},
     ]
     for index, kwargs in enumerate(expected):
         kwargs['pose_instruction'] = images.NY_RED_WOMAN_HEAD_POSES[index]
@@ -102,7 +102,7 @@ async def test_resume_after_failure_keeps_completed_frames_and_uses_third_dress(
     assert frames.await_args_list[-2].kwargs == {
         'style_reference_url': 'https://cdn.example/red-3.jpg', 'style_reference_scope': 'wardrobe',
         'pose_instruction': images.NY_RED_WOMAN_HEAD_POSES[3]}
-    assert frames.await_args.kwargs['style_reference_scope'] == 'setting'
+    assert frames.await_args.kwargs['style_reference_scope'] == 'all'
     assert (await credit_db.get_photo_template_stats('woman_red'))['completed_packages'] == 1
 
 
@@ -167,8 +167,8 @@ async def test_stats_separate_red_from_other_990_template_and_admin(credit_db, s
     assert len(text) < 4000
 
 
-@pytest.mark.parametrize('scope,expected', [('wardrobe','match ONLY its exact outfit'), ('setting','match ONLY its background')])
-async def test_real_image_request_keeps_original_identity_and_limited_style_role(config, storage, api, monkeypatch, scope, expected):
+@pytest.mark.parametrize('scope,expected', [('wardrobe','match ONLY its exact outfit'), ('all','its exact outfits')])
+async def test_real_image_request_keeps_original_identity_and_selected_style_role(config, storage, api, monkeypatch, scope, expected):
     monkeypatch.setattr(images.Config, 'from_env', lambda: config)
     api.get(PHOTO_URL, body=PNG, content_type='image/png')
     api.get('https://cdn.example/style.png', body=PNG, content_type='image/png')
@@ -193,7 +193,7 @@ async def test_every_red_frame_sends_final_head_direction_after_style_instructio
         api.get('https://cdn.example/style.png', body=PNG, content_type='image/png')
         kwargs['style_reference_url'] = 'https://cdn.example/style.png'
         if index in (3,4):
-            kwargs['style_reference_scope'] = 'wardrobe' if index == 3 else 'setting'
+            kwargs['style_reference_scope'] = 'wardrobe' if index == 3 else 'all'
     api.post(IMAGE_EDIT_URL, payload={'data':[{'b64_json':ENCODED_PNG}]})
     api.head(PUBLIC_URL, status=200, repeat=True)
     await images.generate_photosession_frame(PHOTO_URL, images.NY_RED_WOMAN_PROMPTS[index],
@@ -208,10 +208,13 @@ async def test_every_red_frame_sends_final_head_direction_after_style_instructio
     assert 'Keep the original head angle' not in prompt
     assert 'HEAD MOVEMENT: You may' not in prompt
     assert 'LIGHTING FOR EVERY FRAME:' in prompt
-    if index in (2,3):
+    if index in (2,3,4):
         assert 'mini dress' in prompt and 'floor-length gown' in prompt
+        assert images.RED_WOMAN_VELVET_DRESS in prompt
+        assert 'thin silver jeweled straps' not in prompt
     if index == 2:
-        assert 'CROUCHING elegantly' in prompt and 'stable low dark stool' in prompt
+        assert 'WHITE rectangular display cube' in prompt and 'red gift boxes' in prompt
+        assert 'CROUCH' not in prompt and 'low crouch' not in prompt
     if index == 3:
         assert 'BAR COUNTER' in prompt and 'NO fireplace opening' in prompt
     if index in (2,4):

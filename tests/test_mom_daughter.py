@@ -12,7 +12,7 @@ import handlers
 import image_service as images
 from handlers import PosterStates,create_router
 from test_handlers import (callback_event,ready_context,dispatch_callback,call_handler,photo_event,message_event,
-                           event_replies,max_image_upload,isolated_example_directory,text_correction)
+                           event_replies,max_image_upload,isolated_example_directory, example_photos,text_correction)
 from test_sales_stats import sales_payments,deliver_webhook
 from test_image_service import config,storage,api,PHOTO_URL,IMAGE_EDIT_URL,PNG,ENCODED_PNG,PUBLIC_URL,post_requests
 
@@ -103,9 +103,13 @@ async def test_mom_trial_promo_price_and_selection_after_payment_are_counted(cre
     await dispatch_callback(router,callback_event('promo_photo'),context)
     await dispatch_callback(router,callback_event('photo_style_ny'),context)
     await dispatch_callback(router,callback_event('photo_tariff_590'),context)
-    order=await credit_db.get_photo_order((await context.get_data())['photo_order_id'])
+    assert 'photo_order_id' not in await context.get_data()
+    key=await credit_db.create_photo_order('photo_legacy_mom',456,590)
+    await credit_db.update_photo_order(key,style='photo_style_ny')
+    order=await credit_db.get_photo_order(key)
     assert order['amount_kopecks']==47200
     await deliver_webhook(sales_payments,order)
+    await context.update_data(photo_order_id=key)
     assert (await credit_db.get_photo_template_stats('mom_daughter'))['paid_packages']==0
     await dispatch_callback(router,callback_event('photo_temp_mom_daughter'),context)
     stats=await credit_db.get_photo_template_stats('mom_daughter')
@@ -208,3 +212,8 @@ async def test_started_mom_package_cannot_be_relabelled_by_old_other_template_bu
     assert 'Продолжите исходную фотосессию' in event.send.await_args.args[0]
     assert (await credit_db.get_photo_order(key))['template']=='mom_daughter'
     assert (await credit_db.get_photo_template_stats('mom_daughter'))['paid_packages']==1
+
+
+@pytest.fixture(autouse=True)
+def photosession_examples(example_photos):
+    return example_photos

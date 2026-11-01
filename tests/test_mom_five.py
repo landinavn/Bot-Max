@@ -8,7 +8,7 @@ import image_service as images
 from handlers import create_router,PosterStates
 from photo_orders import PaidPhotoWorker
 from test_handlers import (callback_event,ready_context,dispatch_callback,call_handler,message_event,photo_event,
-    event_replies,max_image_upload,isolated_example_directory,text_correction)
+    event_replies,max_image_upload,isolated_example_directory, example_photos,text_correction)
 from test_sales_stats import sales_payments,deliver_webhook
 from test_image_service import config,storage,api,PHOTO_URL,PNG,IMAGE_EDIT_URL,ENCODED_PNG,PUBLIC_URL,post_requests,multipart_fields
 
@@ -90,7 +90,11 @@ async def test_payment_before_plot_selection_has_working_notification_and_select
     router=create_router(admin_user_id=999,payments=sales_payments);context=await ready_context()
     await dispatch_callback(router,callback_event('photo_style_ny'),context)
     await dispatch_callback(router,callback_event('photo_tariff_990'),context)
-    key=(await context.get_data())['photo_order_id'];order=await credit_db.get_photo_order(key)
+    assert 'photo_order_id' not in await context.get_data()
+    sales_payments._request_payment_link.assert_not_awaited()
+    key=await credit_db.create_photo_order('photo_legacy_five',456,990)
+    await credit_db.update_photo_order(key,style='photo_style_ny')
+    order=await credit_db.get_photo_order(key)
     assert order['template'] is None
     await deliver_webhook(sales_payments,order)
     bot=SimpleNamespace(send_message=AsyncMock(return_value=object()))
@@ -143,7 +147,9 @@ async def test_new_invoice_drops_previous_package_fsm_images(credit_db,sales_pay
     await dispatch_callback(router,callback_event('photo_tariff_990'),context)
     data=await context.get_data()
     assert 'photosession_urls' not in data and 'photosession_complete' not in data and 'photo' not in data
-    assert (await credit_db.get_photo_order(data['photo_order_id']))['template'] is None
+    assert 'photo_order_id' not in data
+    await dispatch_callback(router,callback_event('photo_temp_mom_daughter_5'),context)
+    assert (await credit_db.get_photo_order((await context.get_data())['photo_order_id']))['template']=='mom_daughter_5'
 
 
 async def test_590_callback_and_other_styles_cannot_start_five(credit_db):
@@ -184,3 +190,8 @@ async def test_invalid_size_does_not_call_paid_pipeline(monkeypatch):
     backend=AsyncMock();monkeypatch.setattr(images,'_generate_and_store',backend)
     with pytest.raises(ValueError): await images.generate_photosession_frame(PHOTO_URL,'photo',image_size='invalid')
     backend.assert_not_awaited()
+
+
+@pytest.fixture(autouse=True)
+def photosession_examples(example_photos):
+    return example_photos

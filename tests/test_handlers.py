@@ -883,7 +883,7 @@ async def test_start_sends_album_before_welcome_and_menu(example_photos):
     assert await context.get_state() == PosterStates.waiting_for_mode
     assert await context.get_data() == {}
     assert [Path(c.args[0].path).name for c in event.bot.upload_media.await_args_list] == [
-        "i (1).webp", "i (29).webp", "i (28).webp", "i (27).webp", "леденец.webp", "кролик1.webp", "мама+дочка.webp",
+        "i (1).webp", "i (29).webp", "i (28).webp", "i (27).webp", "Леденец.webp", "кролик1.webp", "мама+дочка.webp",
     ]
     replies = event.message.answer.await_args_list
     assert len(replies) == 3
@@ -1510,11 +1510,11 @@ async def test_stats_displays_distinct_nonzero_values_for_each_event(credit_db):
 async def test_start_still_shows_menu_after_example_failures(example_photos, failure, caplog):
     event = message_event("/start")
     if failure == "missing":
-        (example_photos / "леденец.webp").unlink()
+        (example_photos / "Леденец.webp").unlink()
     elif failure == "upload":
         image = event.bot.upload_media.return_value
         async def upload(media):
-            if Path(media.path).name == "леденец.webp":
+            if Path(media.path).name == "Леденец.webp":
                 raise RuntimeError("upload failed")
             return image
         event.bot.upload_media.side_effect = upload
@@ -2489,7 +2489,7 @@ async def test_utility_sections_preserve_fsm_and_offer_back(credit_db, example_p
         assert replies[0].kwargs["text"] == "Примеры работ:"
         assert len(replies[0].kwargs["attachments"]) == 7
         assert [Path(c.args[0].path).name for c in event.bot.upload_media.await_args_list] == [
-            "i (1).webp", "i (29).webp", "i (28).webp", "i (27).webp", "леденец.webp", "кролик1.webp", "мама+дочка.webp",
+            "i (1).webp", "i (29).webp", "i (28).webp", "i (27).webp", "Леденец.webp", "кролик1.webp", "мама+дочка.webp",
         ]
     else:
         event.bot.upload_media.assert_not_awaited()
@@ -3159,7 +3159,7 @@ async def test_switch_to_toddlers_requires_new_reference(old_template):
 
 @pytest.mark.parametrize("payload,filenames", [
     ("cat_photo", ["photo_main_1.webp", "photo_main_3.webp", "Мама+дочка3.png"]),
-    ("photo_style_ny", ["photo_fam_3.webp", "леденец.webp", "кролик1.webp", "мама+дочка.webp"]),
+    ("photo_style_ny", ["photo_fam_3.webp", "Леденец.webp", "кролик1.webp", "мама+дочка.webp"]),
 ])
 async def test_photosession_album_precedes_text_and_buttons(credit_db, example_photos, payload, filenames):
     event = callback_event(payload)

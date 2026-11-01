@@ -262,7 +262,7 @@ NO_CREDITS_TEXT = "У вас закончились кредиты. Пожалу
 EXAMPLES_DIR = Path(__file__).resolve().parent / "examples"
 RABBIT_EXAMPLE_FILE = r"кролик.png"
 NEW_PHOTO_EXAMPLE_FILES = (
-    r"леденец.webp", r"кролик1.webp", r"мама+дочка.webp",
+    r"Леденец.webp", r"кролик1.webp", r"мама+дочка.webp",
 )
 START_EXAMPLE_FILES = (
     r"i (1).webp",

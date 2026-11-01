@@ -2551,11 +2551,12 @@ async def test_photo_style_tariff_preview_has_no_payment_or_generation(credit_db
     assert category.send.await_args.kwargs["text"] == (
         "📸 Ура! Новогодняя фотосессия уже доступна! 🎄\n\n"
         "Мы вовсю готовим для вас потрясающие образы, и вы уже можете попробовать наши новинки.\n\n"
-        "В тарифе «Попробовать» доступны четыре варианта семейных фотосессий:\n"
+        "В тарифе «Попробовать» доступны пять вариантов семейных фотосессий:\n"
         "• Семейная 3+ чел\n"
         "• Семейная 4+ чел\n"
         "• Семейная с малышами\n"
-        "• Мама + дочка\n\n"
+        "• Мама + дочка\n"
+        "• С кроликом (мама + сын)\n\n"
         "👇 Выбери стиль, который тебе интересен:"
     )
     buttons = category.send.await_args.kwargs["attachments"][0].payload.buttons
@@ -2736,6 +2737,7 @@ async def test_legacy_ny_template_buttons_use_real_checkout(credit_db, label, pa
     expected_counters = {"click_photo_ny": 1, "click_tariff_590": 1}
     if template in handlers.NY_FAMILY_PHOTOSESSION_PROMPTS:
         expected_counters["select_photo_" + template] = 1
+    expected_counters["select_photo_rabbit"] = expected_counters.get("select_photo_rabbit", 0) + 1
     assert await credit_db.get_all_counters() == expected_counters
     payments.create_payment_link.assert_awaited()
     generator.assert_not_awaited()

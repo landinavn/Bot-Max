@@ -387,11 +387,12 @@ CATEGORY_MENUS = {
         (
             "📸 Ура! Новогодняя фотосессия уже доступна! 🎄\n\n"
             "Мы вовсю готовим для вас потрясающие образы, и вы уже можете попробовать наши новинки.\n\n"
-            "В тарифе «Попробовать» доступны четыре варианта семейных фотосессий:\n"
+            "В тарифе «Попробовать» доступны пять вариантов семейных фотосессий:\n"
             "• Семейная 3+ чел\n"
             "• Семейная 4+ чел\n"
             "• Семейная с малышами\n"
-            "• Мама + дочка\n\n"
+            "• Мама + дочка\n"
+            "• С кроликом (мама + сын)\n\n"
             "👇 Выбери стиль, который тебе интересен:"
         ),
         (
@@ -1089,6 +1090,9 @@ def create_router(
                     "Отправьте одно общее фото мамы и дочки (2 человека), где хорошо видны оба лица и по возможности фигуры. "
                     "В пакете: два совместных кадра и один кадр мамы в полный рост. /cancel — отмена."
                     if data["template"] == "mom_daughter" else
+                    "Отправьте одно общее фото мамы и сына (2 человека), где хорошо видны оба лица и по возможности фигуры. "
+                    "Кролик на исходном фото не нужен. В пакете: мама с кроликом, сын с кроликом и совместный кадр у ёлки. /cancel — отмена."
+                    if data["template"] == "rabbit" else
                     "Отправьте одно общее фото семьи из 3 и более человек, где хорошо видны лица детей и родителей. /cancel — отмена."
                 ))
                 return
@@ -1119,6 +1123,8 @@ def create_router(
                         await _reply(event, f"Генерирую кадр {index + 1} из 3... ⏳ Это может занять 3-5 минут. Пожалуйста, не закрывайте чат!")
                         frame_kwargs = ({'style_reference_url': urls[0]}
                                         if data['template'] == 'mom_daughter' and index > 0 else {})
+                        if data['template'] == 'rabbit' and index > 0:
+                            frame_kwargs = {'style_reference_urls': tuple(urls[:index])}
                         url = await photosession_generator(reference_url, prompt, **frame_kwargs)
                         if not isinstance(url, str) or not url.startswith("https://"):
                             raise RuntimeError("Генератор не вернул HTTPS-ссылку кадра.")
@@ -1424,6 +1430,7 @@ def create_router(
         sources = await get_source_stats(admin_id=admin_user_id)
         admin = await get_user(admin_user_id)
         mom_stats = await get_photo_template_stats('mom_daughter', admin_id=admin_user_id)
+        rabbit_stats = await get_photo_template_stats('rabbit', admin_id=admin_user_id)
         c = lambda key: counters.get(key, 0)
         new_year = sum(c(key) for key in ('gen_ny', 'gen_ny_cozy', 'gen_ny_fairytale', 'gen_ny_elegant', 'gen_ny_family'))
         sources_text = "\n".join(
@@ -1495,6 +1502,12 @@ def create_router(
             f"- Сгенерировано фото: {mom_stats['generated_photos']}\n"
             f"- Завершено фотосессий: {mom_stats['completed_packages']}\n"
             f"- Выручка: {mom_stats['revenue_kopecks'] // 100},{mom_stats['revenue_kopecks'] % 100:02d} ₽\n\n"
+            "🐰 Фотосессия «С кроликом»:\n"
+            f"- Выбор сюжета (клики): {c('select_photo_rabbit')}\n"
+            f"- Оплачено пакетов: {rabbit_stats['paid_packages']}\n"
+            f"- Сгенерировано фото: {rabbit_stats['generated_photos']}\n"
+            f"- Завершено фотосессий: {rabbit_stats['completed_packages']}\n"
+            f"- Выручка: {rabbit_stats['revenue_kopecks'] // 100},{rabbit_stats['revenue_kopecks'] % 100:02d} ₽\n\n"
             "👑 Эксклюзив (ручная работа):\n"
             f"- Клики по кнопке: {c('click_custom_order')}\n"
             f"- Отправлено заявок: {c('submit_custom_order')}\n\n"
@@ -4016,6 +4029,9 @@ def create_router(
                 "👑 Режим администратора: Оплата пропущена. Загрузите одно общее фото мамы и дочки (2 человека). "
                 "В пакете: два совместных кадра и один кадр мамы в полный рост."
                 if template == "mom_daughter" else
+                "👑 Режим администратора: Оплата пропущена. Загрузите одно общее фото мамы и сына (2 человека). "
+                "Кролик на исходном фото не нужен. Создадим маму с кроликом, сына с кроликом и совместный кадр у ёлки."
+                if template == "rabbit" else
                 "👑 Режим администратора: Оплата пропущена. Пожалуйста, загрузите общее фото семьи (3 и более человек) для генерации."
             )
             return
@@ -4223,6 +4239,8 @@ def create_router(
                 if data["template"] == "toddlers" else
                 "Нужно одно общее фото мамы и дочки (2 человека), отправленное как изображение."
                 if data["template"] == "mom_daughter" else
+                "Нужно одно общее фото мамы и сына (2 человека), отправленное как изображение. Кролик на фото не нужен."
+                if data["template"] == "rabbit" else
                 "Нужно одно общее фото семьи из 3 и более человек, отправленное как изображение."
             ))
             return

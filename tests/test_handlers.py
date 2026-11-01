@@ -236,7 +236,7 @@ def isolated_example_directory(tmp_path, monkeypatch):
 def example_photos(tmp_path, monkeypatch):
     directory = tmp_path / "project" / "examples"
     directory.mkdir(parents=True)
-    for filename in {"before.jpg", "after.jpg", *handlers.START_EXAMPLE_FILES, *handlers.BROADCAST_EXAMPLE_FILES, *handlers.PHOTO_FAMILY_EXAMPLE_FILES,
+    for filename in {"before.jpg", "after.jpg", *handlers.START_EXAMPLE_FILES, *handlers.BROADCAST_EXAMPLE_FILES, *handlers.PHOTO_FAMILY_EXAMPLE_FILES, *handlers.PHOTO_NY_TARIFF_EXAMPLE_FILES,
                      *(f for files, _, _ in handlers.CATEGORY_MENUS.values() for f in files)}:
         if not Path(filename).suffix:
             filename += ".webp"
@@ -883,12 +883,12 @@ async def test_start_sends_album_before_welcome_and_menu(example_photos):
     assert await context.get_state() == PosterStates.waiting_for_mode
     assert await context.get_data() == {}
     assert [Path(c.args[0].path).name for c in event.bot.upload_media.await_args_list] == [
-        "i (1).webp", "i (29).webp", "i (28).webp", "i (27).webp", "кролик.png",
+        "i (1).webp", "i (29).webp", "i (28).webp", "i (27).webp", "леденец.webp", "кролик1.webp", "мама+дочка.webp",
     ]
     replies = event.message.answer.await_args_list
     assert len(replies) == 3
     assert replies[0].kwargs["text"] == "Примеры работ:"
-    assert len(replies[0].kwargs["attachments"]) == 5
+    assert len(replies[0].kwargs["attachments"]) == 7
     assert all(a.payload.token == "example-token" for a in replies[0].kwargs["attachments"])
     assert replies[1].kwargs["text"] == handlers.WELCOME_TEXT
     buttons = replies[1].kwargs["attachments"][0].model_dump()["payload"]["buttons"]
@@ -1153,11 +1153,11 @@ async def test_real_bot_started_event_tracks_source_and_shows_start(credit_db, e
     assert user["balance"] == 1 and user["free_trial_used"] == 1
     assert await context.get_state() == PosterStates.waiting_for_mode
     album, greeting = event.bot.send_message.await_args_list[:2]
-    assert len(album.kwargs["attachments"]) == 5
+    assert len(album.kwargs["attachments"]) == 7
     assert greeting.kwargs["user_id"] == 456 and "chat_id" not in greeting.kwargs
     assert greeting.kwargs["text"].startswith(handlers.WELCOME_TEXT)
     assert len(greeting.kwargs["attachments"]) == 1
-    assert event.bot.upload_media.await_count == 5
+    assert event.bot.upload_media.await_count == 7
     assert len(event.bot.send_message.await_args_list) == 3
 
 
@@ -1510,11 +1510,11 @@ async def test_stats_displays_distinct_nonzero_values_for_each_event(credit_db):
 async def test_start_still_shows_menu_after_example_failures(example_photos, failure, caplog):
     event = message_event("/start")
     if failure == "missing":
-        (example_photos / "кролик.png").unlink()
+        (example_photos / "леденец.webp").unlink()
     elif failure == "upload":
         image = event.bot.upload_media.return_value
         async def upload(media):
-            if Path(media.path).name == "кролик.png":
+            if Path(media.path).name == "леденец.webp":
                 raise RuntimeError("upload failed")
             return image
         event.bot.upload_media.side_effect = upload
@@ -1522,7 +1522,7 @@ async def test_start_still_shows_menu_after_example_failures(example_photos, fai
         event.message.answer.side_effect = [RuntimeError("album rejected"), None, None]
     await call_handler(create_router(), "start", event, await ready_context())
     replies = event.message.answer.await_args_list
-    assert len(replies[0].kwargs["attachments"]) == (5 if failure == "send" else 4)
+    assert len(replies[0].kwargs["attachments"]) == (7 if failure == "send" else 6)
     assert replies[1].kwargs["text"] == handlers.WELCOME_TEXT
     assert len(replies[1].kwargs["attachments"]) == 1
     assert "Не удалось" in caplog.text
@@ -1813,7 +1813,7 @@ async def test_start_album_does_not_split_on_unrelated_errors(example_photos, st
     await call_handler(create_router(), "start", event, await ready_context())
     replies = event.message.answer.await_args_list
     assert len(replies) == 3
-    assert len(replies[0].kwargs["attachments"]) == 5
+    assert len(replies[0].kwargs["attachments"]) == 7
     assert replies[1].kwargs["text"] == handlers.WELCOME_TEXT
 
 
@@ -2487,9 +2487,9 @@ async def test_utility_sections_preserve_fsm_and_offer_back(credit_db, example_p
     if payload == "show_examples":
         assert len(replies) == 2
         assert replies[0].kwargs["text"] == "Примеры работ:"
-        assert len(replies[0].kwargs["attachments"]) == 5
+        assert len(replies[0].kwargs["attachments"]) == 7
         assert [Path(c.args[0].path).name for c in event.bot.upload_media.await_args_list] == [
-            "i (1).webp", "i (29).webp", "i (28).webp", "i (27).webp", "кролик.png",
+            "i (1).webp", "i (29).webp", "i (28).webp", "i (27).webp", "леденец.webp", "кролик1.webp", "мама+дочка.webp",
         ]
     else:
         event.bot.upload_media.assert_not_awaited()
@@ -3159,7 +3159,7 @@ async def test_switch_to_toddlers_requires_new_reference(old_template):
 
 @pytest.mark.parametrize("payload,filenames", [
     ("cat_photo", ["photo_main_1.webp", "photo_main_3.webp", "Мама+дочка3.png"]),
-    ("photo_style_ny", ["photo_fam_3.webp", "Мама+дочка3.png", "кролик.png"]),
+    ("photo_style_ny", ["photo_fam_3.webp", "леденец.webp", "кролик1.webp", "мама+дочка.webp"]),
 ])
 async def test_photosession_album_precedes_text_and_buttons(credit_db, example_photos, payload, filenames):
     event = callback_event(payload)
@@ -3168,7 +3168,7 @@ async def test_photosession_album_precedes_text_and_buttons(credit_db, example_p
     replies = event.send.await_args_list
     assert len(replies) == 2
     assert replies[0].kwargs["text"] == "Примеры работ:"
-    assert len(replies[0].kwargs["attachments"]) == 3
+    assert len(replies[0].kwargs["attachments"]) == len(filenames)
     assert len(replies[1].kwargs["attachments"]) == 1
     assert [Path(c.args[0].path).name for c in event.bot.upload_media.await_args_list] == filenames
     event.ack.assert_awaited_once()

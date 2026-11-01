@@ -261,12 +261,15 @@ PAYMENT_PACKAGES_TEXT = PACKAGES_TEXT
 NO_CREDITS_TEXT = "У вас закончились кредиты. Пожалуйста, выберите пакет для продолжения:"
 EXAMPLES_DIR = Path(__file__).resolve().parent / "examples"
 RABBIT_EXAMPLE_FILE = r"кролик.png"
+NEW_PHOTO_EXAMPLE_FILES = (
+    r"леденец.webp", r"кролик1.webp", r"мама+дочка.webp",
+)
 START_EXAMPLE_FILES = (
     r"i (1).webp",
     r"i (29).webp",
     r"i (28).webp",
     r"i (27).webp",
-    RABBIT_EXAMPLE_FILE,
+    *NEW_PHOTO_EXAMPLE_FILES,
 )
 
 MOM_DAUGHTER_EXAMPLE_FILE = r"Мама+дочка3.png"
@@ -277,6 +280,7 @@ PHOTO_MAIN_EXAMPLE_FILES = (
 PHOTO_FAMILY_EXAMPLE_FILES = (
     r"photo_fam_3.webp", MOM_DAUGHTER_EXAMPLE_FILE, RABBIT_EXAMPLE_FILE,
 )
+PHOTO_NY_TARIFF_EXAMPLE_FILES = (r"photo_fam_3.webp", *NEW_PHOTO_EXAMPLE_FILES)
 
 SONG_PROMO_EXPIRED_TEXT = 'К сожалению, 48 часов уже прошли. Вы можете приобрести песню по обычной цене 490 ₽.'
 
@@ -3871,7 +3875,7 @@ def create_router(
         await context.set_state(PosterStates.waiting_for_mode)
         await context.update_data(photo_style=style)
         if style == "photo_style_ny":
-            await send_menu_examples(event, PHOTO_FAMILY_EXAMPLE_FILES)
+            await send_menu_examples(event, PHOTO_NY_TARIFF_EXAMPLE_FILES)
         if promo_flow and event.get_ids()[1]!=admin_user_id:
             buttons=[]
             for tariff,(base,name) in PHOTO_TARIFFS.items():

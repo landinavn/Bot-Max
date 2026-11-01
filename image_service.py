@@ -471,9 +471,23 @@ async def _image_api_client(config: Config):
             yield client
 
 
+def _photosession_style_references(style_reference_url=None, style_reference_urls=None):
+    if style_reference_url is not None and style_reference_urls is not None:
+        raise ValueError('Укажите один способ передачи образцов стиля.')
+    if style_reference_urls is not None:
+        if not isinstance(style_reference_urls, (list, tuple)) or not 1 <= len(style_reference_urls) <= 2:
+            raise ValueError('Нужны один или два предыдущих кадра.')
+        references = tuple(style_reference_urls)
+    else:
+        references = (style_reference_url,) if style_reference_url is not None else ()
+    for url in references:
+        _validate_inputs(url, 'Фотосессия')
+    return references
+
+
 async def _generate_image_bytes(
     photo_url: str, sphere: str, config: Config, count: int = 1, *, prompt_override: str | None = None,
-    style_reference_url: str | None = None
+    style_reference_url: str | None = None, style_reference_urls: tuple[str, ...] | None = None
 ) -> list[bytes]:
     if not config.image_api_key or not config.image_model:
         raise GenerationNotConfigured("Задайте IMAGE_API_KEY и IMAGE_MODEL.")
@@ -533,16 +547,19 @@ async def _generate_image_bytes(
     )
     if prompt_override is not None:
         prompt = prompt_override
+    references = _photosession_style_references(style_reference_url, style_reference_urls)
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
             photo_bytes = await _download_photo(session, photo_url)
-            if style_reference_url:
-                style_bytes = await _download_photo(session, style_reference_url)
+            style_images = [await _download_photo(session, url) for url in references]
         filename, mime_type = _photo_format(photo_bytes)
         image_input = (filename, photo_bytes, mime_type)
-        if style_reference_url:
-            style_name, style_mime = _photo_format(style_bytes)
-            image_input = [image_input, ('style-' + style_name, style_bytes, style_mime)]
+        if style_images:
+            style_files = []
+            for index, style_bytes in enumerate(style_images):
+                style_name, style_mime = _photo_format(style_bytes)
+                style_files.append((f'style-{index}-' + style_name, style_bytes, style_mime))
+            image_input = [image_input, *style_files]
         logger.info("HTTP POST OpenAI Images API: генерация %d изображений.", count)
         logger.info(
             "Отправляю запрос с моделью: %s, качество: %s",
@@ -660,11 +677,10 @@ def _store_image(client, config: Config, image_path: Path) -> str:
 async def _generate_and_store(
     photo_url: str, sphere: str, count: int = 1, *, prompt_override: str | None = None,
     postcard_text: str | None = None, postcard_mode: str | None = None, preview_watermark: bool = False,
-    style_reference_url: str | None = None
+    style_reference_url: str | None = None, style_reference_urls: tuple[str, ...] | None = None
 ) -> list[str]:
     _validate_inputs(photo_url, sphere if prompt_override is None else "Открытка")
-    if style_reference_url is not None:
-        _validate_inputs(style_reference_url, "Фотосессия")
+    _photosession_style_references(style_reference_url, style_reference_urls)
     config = Config.from_env()
     if not config.image_api_key or not config.image_model:
         raise GenerationNotConfigured("Задайте IMAGE_API_KEY и IMAGE_MODEL.")
@@ -678,6 +694,8 @@ async def _generate_and_store(
         kwargs = {"prompt_override": prompt_override} if prompt_override is not None else {}
         if style_reference_url is not None:
             kwargs['style_reference_url'] = style_reference_url
+        if style_reference_urls is not None:
+            kwargs['style_reference_urls'] = tuple(style_reference_urls)
         images = await _generate_image_bytes(photo_url, sphere, config, count=count, **kwargs)
         result_urls = []
         for image_bytes in images:
@@ -934,11 +952,78 @@ NY_MOM_DAUGHTER_PROMPTS = (
     "Show the full olive satin dress and silver heels on the terrazzo floor. Preserve her real build and leg length. "
     + MOM_DAUGHTER_ANATOMY + "DO NOT ADD ANY TEXT.",
 )
+RABBIT_IDENTITY = (
+    "Create a highly realistic professional New Year family photograph, vertical portrait. "
+    "Use the client's uploaded photo as the ONLY authority for the identities of the mother and her son. "
+    "Preserve each included person's exact facial features, skin tone, natural age, hair color and hairstyle, "
+    "real weight, body type and body proportions. Do not slim, elongate, beautify, age or de-age anyone. "
+    "IGNORE the original clothing and background. Do not copy the appearance of any other model. "
+)
+RABBIT_SCENE = (
+    "STYLE, LIGHTING & PALETTE: The same cozy Scandinavian Christmas interior throughout the photoshoot. "
+    "Large bright windows with sheer white curtains, soft winter daylight, warm tiny golden tree lights, "
+    "cream and ivory walls, wooden floor and a muted red-blue-beige patterned vintage rug with a pale knitted rug nearby. "
+    "A natural green Christmas tree with ivory and muted red ornaments, small wrapped presents and a soft blue-grey armchair. "
+    "Airy, gentle photographic light with detailed natural skin, soft shadows and shallow depth of field. "
+    "Keep identical cream, warm beige, pale ice-blue, muted grey, natural green and warm gold color grading in all frames. "
+)
+RABBIT_MOTHER_CLOTHING = (
+    "MOTHER'S OUTFIT: A cozy ivory-white fluffy long-sleeved knit sweater with a modest neckline, "
+    "cream relaxed trousers and neutral cream socks. Use exactly this same outfit, color and texture in every frame where she appears. "
+)
+RABBIT_SON_CLOTHING = (
+    "SON'S OUTFIT: A cream high-neck winter knit sweater with a clear pale ice-blue and muted grey Nordic "
+    "snowflake/Fair Isle pattern, light beige trousers and cream knitted socks. Preserve his real age and "
+    "body proportions, never give a child an adult body. Keep exactly the same outfit and pattern in frames 2 and 3. "
+)
+RABBIT_ANIMAL = (
+    "RABBIT: EXACTLY ONE calm, medium-sized domestic cinnamon-brown rabbit with a cream muzzle and chest, "
+    "long upright ears and dark eyes, a tiny loose dusty-pink ribbon at its neck. Keep this rabbit's exact "
+    "fur color, markings, size and ribbon identical in all three frames. No additional animals. "
+    "The rabbit must have natural rabbit anatomy: four paws, two ears, no human hands or fingers. "
+    "Support its body gently and securely; do not squeeze it or hold it by its ears. "
+)
+RABBIT_ANATOMY = (
+    PHOTOSESSION_BODY_ANATOMY_REQUIREMENT +
+    " Count HUMAN limbs separately from the rabbit's paws. Each human arm must connect to its own shoulder, "
+    "each hand to its own wrist, each leg to its own hip. No merged hands, detached limbs or duplicated fingers. "
+    "Keep naturally hidden limbs hidden, rather than inventing additional visible hands during contact with the rabbit. "
+)
+NY_RABBIT_PROMPTS = (
+    RABBIT_IDENTITY + RABBIT_SCENE + RABBIT_MOTHER_CLOTHING + RABBIT_ANIMAL +
+    "PEOPLE: EXACTLY ONE human, ONLY the mother from the client photo. Do NOT include her son or anyone else. "
+    "POSE & CAMERA: Low floor-level vertical medium portrait. The mother lies on her stomach on the rug "
+    "beside the Christmas tree, resting on her forearms. The single rabbit sits securely on the rug directly "
+    "in front of her. Her two hands gently support its body from either side without covering its face. "
+    "Her head is turned slightly toward frame-left in three-quarter profile, eyes naturally open and a soft smile. "
+    "The tree and wrapped presents occupy frame-left; a bright sheer-curtained window and blurred blue-grey armchair are behind. "
+    + RABBIT_ANATOMY + "DO NOT ADD ANY TEXT.",
+    RABBIT_IDENTITY + RABBIT_SCENE + RABBIT_SON_CLOTHING + RABBIT_ANIMAL +
+    "PEOPLE: EXACTLY ONE human, ONLY the son from the client photo. Do NOT include his mother or anyone else. "
+    "POSE & CAMERA: Vertical environmental portrait from the boy's seated chest level, side view. "
+    "He sits on the patterned rug beside the large bright window, legs naturally extended toward frame-left. "
+    "The rabbit rests securely across his lap and the rug. His two existing hands gently pet and support the rabbit, "
+    "one on its back and the other at its side, with distinct correctly connected wrists. "
+    "He looks down at the rabbit with naturally open eyes and a tender expression. Show his cream and pale-blue "
+    "Nordic sweater, beige trousers and socked feet; keep a few Christmas details at the edges of the bright window scene. "
+    + RABBIT_ANATOMY + "DO NOT ADD ANY TEXT.",
+    RABBIT_IDENTITY + RABBIT_SCENE + RABBIT_MOTHER_CLOTHING + RABBIT_SON_CLOTHING + RABBIT_ANIMAL +
+    "PEOPLE: EXACTLY TWO humans, ONLY the mother and son from the client photo. "
+    "POSE & CAMERA: Vertical wide seated family portrait at low eye level in front of the decorated Christmas tree. "
+    "Mother and son sit comfortably close together on the same patterned rug, their whole seated bodies and feet visible. "
+    "The SAME single brown rabbit rests between them on a supported lap. Mother supports its body with one hand "
+    "and rests her other hand on her own knee; the son gently pets its back with one hand and rests his other hand on his own knee. "
+    "Both people look toward the camera with naturally open eyes and warm smiles. Keep their hands spatially distinct "
+    "from each other and from the rabbit's paws. The tree, presents and softly lit window remain clearly visible behind them. "
+    "Use the mother's outfit from the earlier mother frame and the son's outfit from the earlier son frame, with identical fabrics and colors. "
+    + RABBIT_ANATOMY + "DO NOT ADD ANY TEXT.",
+)
 NY_FAMILY_PHOTOSESSION_PROMPTS = {
     "fam3": NY_FAMILY_THREE_PROMPTS,
     "fam4": NY_FAMILY_PLUS_PROMPTS,
     "toddlers": NY_FAMILY_TODDLERS_PROMPTS,
     "mom_daughter": NY_MOM_DAUGHTER_PROMPTS,
+    "rabbit": NY_RABBIT_PROMPTS,
 }
 
 
@@ -1018,7 +1103,8 @@ async def generate_cartoon_avatar(photo_url: str, mode: str) -> str:
     return urls[0]
 
 
-async def generate_photosession_frame(photo_url: str, prompt: str, *, style_reference_url: str | None = None) -> str:
+async def generate_photosession_frame(photo_url: str, prompt: str, *, style_reference_url: str | None = None,
+                                      style_reference_urls: tuple[str, ...] | None = None) -> str:
     """Один /images/edits через общий клиент с OPENAI_PROXY_URL и таймаутом 300 с.
 
     Результат сохраняется отдельным файлом в S3, без надписи Pillow.
@@ -1026,13 +1112,22 @@ async def generate_photosession_frame(photo_url: str, prompt: str, *, style_refe
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("Не задан промпт фотосессии.")
     kwargs = {}
+    references = _photosession_style_references(style_reference_url, style_reference_urls)
     if style_reference_url is not None:
-        _validate_inputs(style_reference_url, "Фотосессия")
         kwargs['style_reference_url'] = style_reference_url
+    if style_reference_urls is not None:
+        kwargs['style_reference_urls'] = tuple(style_reference_urls)
+    if references:
+        style_roles = ('The SECOND image is the first generated frame: match '
+                       'its exact outfits, fabric colors, jewelry, lighting, color grading and location. '
+                       if len(references) == 1 else
+                       'The SECOND and THIRD images are earlier generated frames: match each included person\'s '
+                       'corresponding outfit, colors and accessories, and the same animal, lighting and location. ')
         prompt += (' INPUT ROLES: The FIRST image is the original client photo: use it as the authority for '
-                   'identity, age and body proportions. The SECOND image is the first generated frame: match '
-                   'its exact outfits, fabric colors, jewelry, lighting, color grading and location. '
-                   'Do not copy its pose or framing; follow the new frame instructions and the required '
+                   'identity, age and body proportions. ' + style_roles +
+                   'If a person is absent from a style image, follow the outfit specified for that person '
+                   'in this prompt; never put another person\'s clothes on them. '
+                   'Do not copy previous poses or framing; follow the new frame instructions and the required '
                    'number of people for this frame. DO NOT ADD ANY TEXT.')
     urls = await _generate_and_store(photo_url, "Фотосессия", count=1, prompt_override=prompt, **kwargs)
     if len(urls) != 1:

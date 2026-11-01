@@ -617,6 +617,7 @@ PHOTO_NY_TRIAL_TEMPLATES = {
 }
 PHOTO_NY_STANDARD_TEMPLATES = {
     "photo_temp_mom_daughter_5": ("👩‍👧 Мама + дочка", "mom_daughter_5"),
+    "photo_temp_woman_red": ("💃 Женщина в красном", "woman_red"),
 }
 PHOTO_NY_ALL_TEMPLATES = {**PHOTO_NY_TRIAL_TEMPLATES, **PHOTO_NY_STANDARD_TEMPLATES}
 PHOTO_TRIAL_CHECKOUT_TEXT = (
@@ -1126,6 +1127,9 @@ def create_router(
                     "В пакете 5 кадров: два совместных праздничных фото и три студийных кадра с леденцом-петушком. "
                     "Головных уборов не будет. /cancel — отмена."
                     if data['template']=='mom_daughter_5' else
+                    "Отправьте одно фото женщины, где хорошо видны лицо и по возможности фигура. "
+                    "Создадим 5 праздничных кадров «Женщина в красном». /cancel — отмена."
+                    if data['template']=='woman_red' else
                     "Отправьте одно общее фото мамы и сына (2 человека), где хорошо видны оба лица и по возможности фигуры. "
                     "Кролик на исходном фото не нужен. В пакете: мама с кроликом, сын с кроликом и совместный кадр у ёлки. /cancel — отмена."
                     if data["template"] == "rabbit" else
@@ -1169,6 +1173,12 @@ def create_router(
                                 frame_kwargs={'style_reference_url':urls[0]}
                             elif index in (3,4):
                                 frame_kwargs={'style_reference_url':urls[1]}
+                        if data['template']=='woman_red':
+                            if index==1:
+                                frame_kwargs={'style_reference_url':urls[0]}
+                            elif index in (3,4):
+                                frame_kwargs={'style_reference_url':urls[2],
+                                              'style_reference_scope':'wardrobe' if index==3 else 'setting'}
                         url = await photosession_generator(reference_url, prompt, **frame_kwargs)
                         if not isinstance(url, str) or not url.startswith("https://"):
                             raise RuntimeError("Генератор не вернул HTTPS-ссылку кадра.")
@@ -1478,6 +1488,7 @@ def create_router(
         mom_stats = await get_photo_template_stats('mom_daughter', admin_id=admin_user_id)
         rabbit_stats = await get_photo_template_stats('rabbit', admin_id=admin_user_id)
         mom_five_stats = await get_photo_template_stats('mom_daughter_5', admin_id=admin_user_id)
+        woman_red_stats = await get_photo_template_stats('woman_red', admin_id=admin_user_id)
         c = lambda key: counters.get(key, 0)
         new_year = sum(c(key) for key in ('gen_ny', 'gen_ny_cozy', 'gen_ny_fairytale', 'gen_ny_elegant', 'gen_ny_family'))
         sources_text = "\n".join(
@@ -1561,6 +1572,12 @@ def create_router(
             f"- Сгенерировано фото: {mom_five_stats['generated_photos']}\n"
             f"- Завершено фотосессий: {mom_five_stats['completed_packages']}\n"
             f"- Выручка: {mom_five_stats['revenue_kopecks'] // 100},{mom_five_stats['revenue_kopecks'] % 100:02d} ₽\n\n"
+            "💃 Женщина в красном — 990 ₽ / 5 фото:\n"
+            f"- Выбор сюжета (клики): {c('select_photo_woman_red')}\n"
+            f"- Оплачено пакетов: {woman_red_stats['paid_packages']}\n"
+            f"- Сгенерировано фото: {woman_red_stats['generated_photos']}\n"
+            f"- Завершено фотосессий: {woman_red_stats['completed_packages']}\n"
+            f"- Выручка: {woman_red_stats['revenue_kopecks'] // 100},{woman_red_stats['revenue_kopecks'] % 100:02d} ₽\n\n"
             "👑 Эксклюзив (ручная работа):\n"
             f"- Клики по кнопке: {c('click_custom_order')}\n"
             f"- Отправлено заявок: {c('submit_custom_order')}\n\n"
@@ -3962,7 +3979,7 @@ def create_router(
             await _reply(event,'Фотосессия уже создаётся. Пожалуйста, подождите.')
             return
         if (order['tariff'] not in NY_PHOTOSESSION_PROMPTS_BY_TARIFF or order['style'] not in (None,'photo_style_ny')
-                or (order['tariff']==990 and order['template'] not in (None,'mom_daughter_5'))):
+                or (order['tariff']==990 and order['template'] not in (None,*NY_PHOTOSESSION_PROMPTS_BY_TARIFF[990]))):
             await _reply(event,'Ваш оплаченный фотопакет сохранён в очереди. Мы сообщим о готовности.')
             return
         await context.clear()
@@ -4101,6 +4118,9 @@ def create_router(
                 "👑 Режим администратора: Оплата пропущена. Загрузите одно общее фото мамы и дочки (2 человека). "
                 "Создадим пять кадров: праздничные фото и студийные портреты с леденцом-петушком, без головных уборов."
                 if template=='mom_daughter_5' else
+                "👑 Режим администратора: Оплата пропущена. Загрузите одно фото женщины, "
+                "где хорошо видны лицо и по возможности фигура. Создадим 5 кадров «Женщина в красном»."
+                if template=='woman_red' else
                 "👑 Режим администратора: Оплата пропущена. Загрузите одно общее фото мамы и сына (2 человека). "
                 "Кролик на исходном фото не нужен. Создадим маму с кроликом, сына с кроликом и совместный кадр у ёлки."
                 if template == "rabbit" else
@@ -4311,6 +4331,8 @@ def create_router(
                 if data["template"] == "toddlers" else
                 "Нужно одно общее фото мамы и дочки (2 человека), отправленное как изображение."
                 if data["template"] in ("mom_daughter",'mom_daughter_5') else
+                "Нужно одно фото женщины, отправленное как изображение."
+                if data['template']=='woman_red' else
                 "Нужно одно общее фото мамы и сына (2 человека), отправленное как изображение. Кролик на фото не нужен."
                 if data["template"] == "rabbit" else
                 "Нужно одно общее фото семьи из 3 и более человек, отправленное как изображение."

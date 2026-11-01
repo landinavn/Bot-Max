@@ -1127,9 +1127,95 @@ NY_MOM_DAUGHTER_FIVE_PROMPTS = (
     "black shorts and boots; do not replace this outfit with a black leather jacket. Show both complete bodies and feet. "
     + FIVE_MOM_ANATOMY,
 )
+RED_WOMAN_IDENTITY = (
+    "Create a photorealistic professional Christmas fashion portrait of EXACTLY ONE woman from the FIRST, "
+    "original client photo. Preserve her recognizable facial identity, facial structure, age, skin tone, "
+    "eye color, hair color, height, build and real body proportions. Never copy the reference model's face "
+    "or body. Apply light, tasteful festive makeup and a subtle fresh-looking skin retouch, retaining "
+    "natural skin texture and age. Do NOT add red lipstick unless red lipstick is already present in the "
+    "original client photo; otherwise keep natural lip color. If her hair is loose, give it modest festive "
+    "volume or soft curls without changing its length or color. If her hair is arranged in an updo or "
+    "another hairstyle, keep that hairstyle and make it neater and more polished. Keep the same finished "
+    "hair and makeup across the entire set. For a fuller figure, gently smooth skin folds and use flattering "
+    "fabric drape and natural lighting, while preserving her actual body size, weight distribution and "
+    "proportions; do not make her thin or reshape her body. No invented tattoos, no extra people. "
+)
+RED_WOMAN_CHRISTMAS_ROOM = (
+    "SETTING: Warm ivory/beige classical wall panels, a very large dark evergreen circular wreath centered "
+    "high on the wall with tiny warm fairy lights and red/gold ornaments, hanging fine silver garlands "
+    "and snowflakes, cream semicircular steps with narrow gold edging, dark green Christmas trees at the "
+    "sides, red, white and metallic-gold gift boxes with satin ribbons and large red baubles. "
+    "Palette: rich Christmas red, ivory, dark evergreen and muted warm gold; soft warm editorial lighting. "
+)
+RED_WOMAN_TROUSERS = (
+    "OUTFIT: High-waisted bright red tailored wide-leg palazzo trousers with front pleats, a tucked-in "
+    "shimmering ivory/champagne asymmetric knit top with one long sleeve and one bare shoulder, light "
+    "champagne pointed-toe heels, gold earrings and a gold wristwatch. If the woman has a very full figure, "
+    "replace the one-sleeve top with a matching elegant ivory/champagne top with TWO long sleeves and "
+    "covered shoulders. Keep whichever sleeve design is chosen IDENTICAL in frames 1 and 2. "
+)
+RED_WOMAN_SATIN_DRESS = (
+    "OUTFIT: A festive vivid crimson/cherry-red glossy satin evening dress, softly draped neckline, "
+    "thin silver jeweled straps and a natural thigh slit, silver crystal necklace, sparkly silver "
+    "accessories and red embellished heels. This exact same satin dress, color, cut, straps and jewelry "
+    "must be used in frames 3 and 4. No jacket, trousers or white skirt. "
+)
+RED_WOMAN_CURTAIN = (
+    "SETTING: A rich deep burgundy-red velvet curtain with vertical folds as the entire studio backdrop; "
+    "glamorous direct-flash editorial lighting, rich red and silver tones, gently falling white artificial "
+    "snow in the foreground without obscuring the face. No Christmas room, shelves, fireplace or trees. "
+)
+RED_WOMAN_ANATOMY = (
+    PHOTOSESSION_BODY_ANATOMY_REQUIREMENT +
+    " Exactly one head, two anatomically correct arms, two hands and two legs belonging to this woman; "
+    "five fingers per hand, natural shoulders, wrists, knees and ankles. No duplicated, fused or detached "
+    "limbs, no invented fingers or visible limbs behind occlusions. Keep all requested poses comfortable "
+    "and physically possible for her real body. DO NOT ADD ANY TEXT. "
+)
+NY_RED_WOMAN_PROMPTS = (
+    RED_WOMAN_IDENTITY + RED_WOMAN_CHRISTMAS_ROOM + RED_WOMAN_TROUSERS +
+    "POSE & CAMERA: Vertical three-quarter portrait from above the head to the lower legs, woman standing "
+    "in front of the wreath and steps. Her sleeved arm curves gently above her head, hand relaxed near "
+    "her hair; other hand rests on her hip. Body angled slightly, head turned naturally toward frame-left "
+    "with a soft confident expression and open eyes. Preserve the reference composition and camera height. "
+    + RED_WOMAN_ANATOMY,
+    RED_WOMAN_IDENTITY + RED_WOMAN_CHRISTMAS_ROOM + RED_WOMAN_TROUSERS +
+    "POSE & CAMERA: Vertical full-length environmental portrait. Woman sits sideways on the cream "
+    "semicircular steps with her red trouser legs extended diagonally toward the lower-right; both shoes "
+    "visible. One forearm rests on a white gift box with a red ribbon at frame-left; the other hand rests "
+    "on her thigh. She looks up naturally toward frame-right with a happy smile. Large wreath above, "
+    "Christmas tree at frame-right, gifts around the steps. Match the exact outfit established in frame 1. "
+    + RED_WOMAN_ANATOMY,
+    RED_WOMAN_IDENTITY + RED_WOMAN_CURTAIN + RED_WOMAN_SATIN_DRESS +
+    "POSE & CAMERA: Vertical seated fashion portrait, three-quarter body, the woman sitting on a low "
+    "dark stool, knees angled toward frame-left, torso gently turned toward the camera, open eyes and "
+    "a soft smile. One hand raised near her head holds silver tinsel and a violet Christmas bauble; "
+    "other hand rests naturally near her hip holding the other end of the SAME tinsel with a violet "
+    "bauble. Tinsel drapes loosely along her arms and lap, never replaces fingers or limbs. "
+    + RED_WOMAN_ANATOMY,
+    RED_WOMAN_IDENTITY + RED_WOMAN_SATIN_DRESS +
+    "SETTING: The modern dark Christmas living room from reference 4: charcoal walls, a black marble "
+    "mantel/fireplace at frame-left with fine pale veining, a tall Christmas tree decorated with dark red "
+    "and gold ornaments, illuminated horizontal shelves with small frames and candles, round crystal "
+    "ceiling lamp, dark upholstered seating and a small wreath at frame-right. Warm restrained lighting. "
+    "POSE & CAMERA: Vertical full-length standing portrait, complete figure and shoes visible. One hand "
+    "rests lightly on the black marble mantel at frame-left, other hand rests naturally at her hip; "
+    "head turns toward frame-right with a relaxed expression. Wear EXACTLY the red satin dress and "
+    "accessories established in frame 3; do not copy the gray jacket or white skirt of reference 4. "
+    + RED_WOMAN_ANATOMY,
+    RED_WOMAN_IDENTITY + RED_WOMAN_CURTAIN +
+    "OUTFIT: The dress from reference 5: rich red velvet fitted short party dress with a wide "
+    "off-shoulder neckline and two large sculptural puff sleeves, plus broad polished gold cuff bracelets. "
+    "Do NOT use the thin-strapped satin dress from frame 3 in this frame. "
+    "POSE & CAMERA: Vertical seated three-quarter portrait, body angled toward frame-left. Both forearms "
+    "are raised naturally forward, two separate open palms face upward at chest level as she playfully "
+    "blows or tosses artificial snow. She looks upward toward frame-left, smiling. Preserve the pose and "
+    "velvet dress from reference 5 but use EXACTLY the burgundy curtain setting from frame 3. "
+    + RED_WOMAN_ANATOMY,
+)
 NY_PHOTOSESSION_PROMPTS_BY_TARIFF = {
     590: NY_FAMILY_PHOTOSESSION_PROMPTS,
-    990: {"mom_daughter_5": NY_MOM_DAUGHTER_FIVE_PROMPTS},
+    990: {"mom_daughter_5": NY_MOM_DAUGHTER_FIVE_PROMPTS, "woman_red": NY_RED_WOMAN_PROMPTS},
 }
 
 
@@ -1211,6 +1297,7 @@ async def generate_cartoon_avatar(photo_url: str, mode: str) -> str:
 
 async def generate_photosession_frame(photo_url: str, prompt: str, *, style_reference_url: str | None = None,
                                       style_reference_urls: tuple[str, ...] | None = None,
+                                      style_reference_scope: str = 'all',
                                       image_size: str | None = None) -> str:
     """Один /images/edits через общий клиент с OPENAI_PROXY_URL и таймаутом 300 с.
 
@@ -1218,6 +1305,8 @@ async def generate_photosession_frame(photo_url: str, prompt: str, *, style_refe
     """
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("Не задан промпт фотосессии.")
+    if style_reference_scope not in ('all', 'wardrobe', 'setting'):
+        raise ValueError('Неизвестная роль образца фотосессии.')
     kwargs = {}
     if image_size is not None:
         if image_size not in ('1024x1536', '1536x1024'):
@@ -1234,6 +1323,14 @@ async def generate_photosession_frame(photo_url: str, prompt: str, *, style_refe
                        if len(references) == 1 else
                        'The SECOND and THIRD images are earlier generated frames: match each included person\'s '
                        'corresponding outfit, colors and accessories, and the same animal, lighting and location. ')
+        if style_reference_scope == 'wardrobe':
+            style_roles = ('The SECOND image is an earlier generated frame: match ONLY its exact outfit, '
+                           'fabric, color, accessories, finished hairstyle and makeup. Do NOT copy its '
+                           'background, lighting or pose; use the setting specified in this frame prompt. ')
+        elif style_reference_scope == 'setting':
+            style_roles = ('The SECOND image is an earlier generated frame: match ONLY its background, '
+                           'lighting, color grading, finished hairstyle and makeup. Do NOT copy its '
+                           'outfit or pose; use the new clothing specified in this frame prompt. ')
         prompt += (' INPUT ROLES: The FIRST image is the original client photo: use it as the authority for '
                    'identity, age and body proportions. ' + style_roles +
                    'If a person is absent from a style image, follow the outfit specified for that person '

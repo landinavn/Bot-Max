@@ -170,17 +170,27 @@ WELCOME_TEXT = (
     "👇 Выбери, что хочешь создать:"
 )
 BROADCAST_UPDATE_TEXT = (
-    '🎉 У нас большое обновление! Твой нейро-художник научился ещё большему! 🎨✨\n\n'
-    'Теперь в боте можно создавать:\n'
-    '🎵 Персональные песни — трогательную песню в подарок или весёлую песню по фану.\n'
-    '💌 Музыкальные открытки — поздравления, которые не только приятно смотреть, но и слушать!\n'
-    '🎄 Новогодние нейрофотосессии — волшебные праздничные фотографии с твоим лицом.\n'
-    '🎬 Ожившие открытки — поздравления в формате видео.\n\n'
-    'А скоро появятся мульт-открытки, настоящие мульт-поздравления и медитации! ✨\n\n'
-    '🏆 Кстати, 30 октября — День тренера! Успей создать необычный музыкальный подарок любимому тренеру!\n\n'
-    '👇 Нажми кнопку ниже, чтобы открыть обновлённое меню и посмотреть все новинки!\n\n'
+    '✨ У нас много красивых новинок!\n\n'
+    'Теперь твои фотографии могут стать частью особенного подарка ❤️\n\n'
+    '🎵 Музыкальные открытки — твоя фотография, тёплые слова и персональная песня '
+    'в одном готовом видео. Поздравление, которое хочется пересматривать!\n\n'
+    '🎬 Мульт-открытки — преврати себя или близкого человека в мультгероя '
+    'и создай яркое музыкальное поздравление.\n\n'
+    '📸 Новые новогодние фотосессии — праздничные кадры с леденцом, уютная съёмка '
+    'с кроликом, нежная «Мама + дочка» и эффектная «Женщина в красном». '
+    'Загрузи фото и примерь новый образ!\n\n'
+    'Прикрепили примеры, чтобы ты мог выбрать то, что понравится ✨\n\n'
+    '👇 Нажми «🚀 Старт», чтобы открыть обновлённое меню и посмотреть все новинки.\n\n'
     'Спасибо, что ты с нами! ❤️'
 )
+BROADCAST_UPDATE_PHOTOS = (
+    'Леденец.webp', 'кролик1.webp', 'мама+дочка.webp', 'Женщина в красном.png',
+)
+BROADCAST_UPDATE_VIDEOS = (
+    ('cartoon_example.mp4', '🎬 Пример мульт-открытки. Нажми «🚀 Старт», чтобы выбрать свою историю!'),
+    ('musical-card.mp4', '🎵 Пример музыкальной открытки. Нажми «🚀 Старт», чтобы создать своё поздравление!'),
+)
+
 
 
 MODE_BUTTONS = (
@@ -1667,6 +1677,39 @@ def create_router(
             await _reply(event, f"{title}. Отправлено: {sent}. "
                          f"Недоступны (403): {blocked}. Ошибок: {failed}.")
 
+    async def broadcast_update_messages(bot):
+        # Upload once before the first subscriber; keep image and video messages separate.
+        files = [(name, UploadType.IMAGE) for name in BROADCAST_UPDATE_PHOTOS]
+        files += [(name, UploadType.VIDEO) for name, _ in BROADCAST_UPDATE_VIDEOS]
+        for name, _ in files:
+            if not (EXAMPLES_DIR / name).is_file():
+                raise FileNotFoundError(name)
+        uploaded = []
+        for name, media_type in files:
+            media = await bot.upload_media(InputMedia(path=str(EXAMPLES_DIR / name), type=media_type))
+            if not isinstance(media.payload.token, str) or not media.payload.token.strip():
+                raise RuntimeError('MAX вернул пустой media token для ' + name)
+            uploaded.append(media)
+        keyboard = navigation_keyboard((('🚀 Старт', 'open_main_menu'),))
+        photo_count = len(BROADCAST_UPDATE_PHOTOS)
+        messages = [(BROADCAST_UPDATE_TEXT, [*uploaded[:photo_count], keyboard])]
+        for media, (_, caption) in zip(uploaded[photo_count:], BROADCAST_UPDATE_VIDEOS):
+            messages.append((caption, [media, keyboard]))
+        return messages
+
+    @router.message_created(Command('broadcast_update_preview'))
+    async def broadcast_update_preview(event: MessageCreated) -> None:
+        if is_bot_message(event) or admin_user_id is None or event.get_ids()[1] != admin_user_id:
+            return
+        try:
+            messages = await broadcast_update_messages(event.bot)
+            for text, attachments in messages:
+                if await _reply(event, text, attachments=attachments) is None:
+                    raise RuntimeError('MAX не подтвердил отправку примера рассылки.')
+        except Exception:
+            logger.exception('Не удалось подготовить пример рассылки:')
+            await _reply(event, 'Не удалось показать рассылку. Проверьте все 6 файлов в examples и логи.')
+
     @router.message_created(Command('broadcast_update'))
     async def broadcast_update(event: MessageCreated) -> None:
         if is_bot_message(event) or admin_user_id is None or event.get_ids()[1] != admin_user_id:
@@ -1676,28 +1719,45 @@ def create_router(
             return
         async with broadcast_lock:
             users = await get_active_user_ids()
+            if not users:
+                await _reply(event, '✅ Рассылка завершена! Успешно: 0, Ошибок: 0')
+                return
+            try:
+                messages = await broadcast_update_messages(event.bot)
+            except Exception:
+                logger.exception('Не удалось загрузить примеры обновления:')
+                await _reply(event, 'Рассылка отменена: не удалось загрузить все 6 примеров. '
+                             'Проверьте examples и логи. Подписчикам ничего не отправлено.')
+                return
             await _reply(event, f'🚀 Начинаю рассылку обновления для {len(users)} пользователей...')
-            keyboard = navigation_keyboard((('🚀 Открыть меню', 'back_to_main'),))
             success_count = failed_count = 0
+            stopped = False
             for user_id in users:
                 try:
                     user = await get_user(user_id)
                     if user is None or not user['is_active']:
                         continue
-                    sent = await event.bot.send_message(user_id=user_id, text=BROADCAST_UPDATE_TEXT, attachments=[keyboard])
-                    if sent is None:
-                        raise RuntimeError('MAX не подтвердил отправку анонса.')
+                    for text, attachments in messages:
+                        sent = await event.bot.send_message(user_id=user_id, text=text, attachments=attachments)
+                        if sent is None:
+                            raise RuntimeError('MAX не подтвердил отправку части анонса.')
+                        await asyncio.sleep(0.5)
                     success_count += 1
                 except Exception as exc:
                     failed_count += 1
                     logger.exception('Ошибка отправки обновления пользователю %s:', user_id)
-                    if max_error_status(exc) == 403:
+                    status = max_error_status(exc)
+                    if status == 403:
                         try:
                             await mark_user_inactive(user_id)
                         except Exception:
                             logger.exception('Не удалось отметить пользователя %s недоступным:', user_id)
-                await asyncio.sleep(0.5)
-            await _reply(event, f'✅ Рассылка завершена! Успешно: {success_count}, Ошибок: {failed_count}')
+                    elif status in {401, 429}:
+                        stopped = True
+                        break
+                    await asyncio.sleep(0.5)
+            title = '⏸ Рассылка остановлена' if stopped else '✅ Рассылка завершена'
+            await _reply(event, f'{title}! Успешно: {success_count}, Ошибок: {failed_count}')
 
     async def segmented_broadcast(event: MessageCreated, *, has_generated: bool) -> None:
         if is_bot_message(event) or admin_user_id is None or event.get_ids()[1] != admin_user_id:

@@ -11,6 +11,7 @@ from aiohttp import web
 from database import mark_photo_paid, mark_cartoon_paid, add_credits, mark_audio_paid, mark_musical_paid
 from database import mark_animation_paid
 from prodamus import ProdamusPayments, parse_form_fields, verify_signature
+from payment_incidents import record_payment_incident, resolve_payment_incident
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,11 @@ def create_webhook_app(payments: ProdamusPayments, *, audio_worker=None, musical
             "application/x-www-form-urlencoded", "multipart/form-data", "application/json",
         }:
             return web.Response(status=415, text="Unsupported content type")
+        signed_success = False
+        async def accepted_payment(payment_id):
+            await resolve_payment_incident(payment_id)
+            return web.Response(text='OK')
+
         try:
             if request.content_type == "application/json":
                 data = json.loads(await request.text(), object_pairs_hook=_unique_object)
@@ -66,27 +72,28 @@ def create_webhook_app(payments: ProdamusPayments, *, audio_worker=None, musical
             if data.get("payment_status") != "success":
                 logger.info("Prodamus: уведомление без успешной оплаты пропущено.")
                 return web.Response(text="OK")
+            signed_success = True
             order, payment_id = await payments.validate_payment(data)
             if order.get('order_type') == 'animation':
                 accepted = await mark_animation_paid(order['order_id'], payment_id)
                 logger.info('Prodamus: %s.', 'пакет оживления фото оплачен' if accepted else 'повтор оплаты оживления фото')
-                return web.Response(text='OK')
+                return await accepted_payment(payment_id)
             if order.get('order_type') == 'photo':
                 accepted = await mark_photo_paid(order['order_id'], payment_id)
                 logger.info('Prodamus: %s.', 'фотозаказ оплачен' if accepted else 'повтор оплаты фотозаказа')
-                return web.Response(text='OK')
+                return await accepted_payment(payment_id)
             if order.get('order_type') == 'cartoon':
                 accepted = await mark_cartoon_paid(order['order_id'], payment_id)
                 logger.info('Prodamus: %s.', 'мульт-заказ оплачен, запрос фото в очереди' if accepted else 'повтор оплаты мульт-заказа')
-                return web.Response(text='OK')
+                return await accepted_payment(payment_id)
             if order.get('order_type') == 'musical':
                 accepted = await mark_musical_paid(order['order_id'], payment_id)
                 logger.info('Prodamus: %s.', 'музыкальный заказ сохранён в очереди' if accepted else 'повтор оплаты музыкального заказа')
-                return web.Response(text='OK')
+                return await accepted_payment(payment_id)
             if order.get('order_type') == 'audio':
                 accepted = await mark_audio_paid(order['order_id'], payment_id)
                 logger.info('Prodamus: %s.', 'аудиозаказ сохранён в очереди' if accepted else 'повтор оплаты аудиозаказа')
-                return web.Response(text='OK')
+                return await accepted_payment(payment_id)
             # add_credits увеличивает total_purchases и buy_<credits> по проверенному
             # заказу в той же транзакции: повтор webhook не увеличивает счётчики.
             credited = await add_credits(
@@ -94,9 +101,18 @@ def create_webhook_app(payments: ProdamusPayments, *, audio_worker=None, musical
                 payment_order_id=order["order_id"], provider_payment_id=payment_id,
             )
             logger.info("Prodamus: %s.", "кредиты начислены" if credited else "повтор уведомления")
-            return web.Response(text="OK")
-        except (ValueError, TypeError, UnicodeError, RecursionError, sqlite3.IntegrityError):
-            logger.error("Prodamus: уведомление не соответствует сохранённому заказу или формату.")
+            return await accepted_payment(payment_id)
+        except (ValueError, TypeError, UnicodeError, RecursionError, sqlite3.IntegrityError) as exc:
+            if signed_success:
+                try:
+                    incident = await record_payment_incident(data, exc)
+                except sqlite3.Error:
+                    logger.error('Prodamus: не удалось сохранить проблему оплаты; требуется повтор уведомления.')
+                    return web.Response(status=503, text='Please retry')
+                logger.error('Prodamus: отклонено успешное уведомление; payment_id=%s order_id=%s reason=%s',
+                             incident['provider_payment_id'], incident['merchant_order_id'], incident['reason_code'])
+            else:
+                logger.error("Prodamus: уведомление не соответствует сохранённому заказу или формату.")
             return web.Response(status=400, text="Invalid payment data")
         except sqlite3.Error:
             logger.error("Prodamus: ошибка SQLite, уведомление необходимо повторить.")

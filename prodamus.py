@@ -281,7 +281,9 @@ class ProdamusPayments:
                 or order['status'] != 'pending' or order['user_id'] != user_id
                 or order['amount_kopecks'] != amount * 100 or order['product_name'] != description):
             raise ValueError('Параметры оплаты не совпадают с фотозаказом.')
-        if order['payment_link']:
+        # These published tariffs need a newly issued link on every checkout.
+        # A saved Prodamus URL may have expired or been disabled by the provider.
+        if order['payment_link'] and order['tariff'] not in (590, 990):
             return order['payment_link']
         if repeat_order_value(order,'photo',PHOTO_TARIFFS.get(order['tariff']),creation=True) != (order['amount_kopecks'],order['product_name']):
             raise ValueError('Для новой ссылки выберите действующий тариф.')

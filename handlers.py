@@ -146,14 +146,48 @@ def _recipient(event: MessageCreated | MessageCallback | BotStarted) -> dict[str
     return {"chat_id": chat_id}
 
 
+def single_keyboard_attachments(attachments):
+    """MAX accepts one inline keyboard; combine its rows without dropping media."""
+    def kind(attachment):
+        value = attachment.get('type') if isinstance(attachment, dict) else getattr(attachment, 'type', None)
+        return getattr(value, 'value', value)
+
+    if not attachments or sum(kind(item) == 'inline_keyboard' for item in attachments) < 2:
+        return attachments
+    combined = InlineKeyboardBuilder()
+    result = []
+    position = None
+    for item in attachments:
+        if kind(item) != 'inline_keyboard':
+            result.append(item)
+            continue
+        if position is None:
+            position = len(result)
+            result.append(None)
+        rows = item.get('payload', {}).get('buttons', []) if isinstance(item, dict) else item.payload.buttons
+        for row in rows:
+            if row:
+                combined.row(*row)
+    result[position] = combined.as_markup()
+    return result
+
+
 async def _reply(event: MessageCreated | MessageCallback | BotStarted, text=None, **kwargs):
     if event.bot is None:
         raise RuntimeError("Бот не привязан к событию.")
+    if 'attachments' in kwargs:
+        kwargs['attachments'] = single_keyboard_attachments(kwargs['attachments'])
     try:
         return await event.bot.send_message(**_recipient(event), text=text, **kwargs)
     except Exception as exc:
         await log_max_error(exc, logger)
         raise
+
+
+IMAGE_MODERATION_MESSAGE = (
+    "❌ К сожалению, ваше фото или описание не прошли проверку безопасности OpenAI. "
+    "Пожалуйста, загрузите другое фото (без откровенной одежды) и измените текст. Кредит не списан!"
+)
 
 
 PosterGenerator = Callable[[str, str], Awaitable[list[str]]]
@@ -1390,7 +1424,7 @@ def create_router(
                     sent = await bot.send_message(
                         **recipient,
                         text="Ваша открытка готова!" if is_postcard else "Ваш плакат готов!",
-                        attachments=[image, keyboard],
+                        attachments=single_keyboard_attachments([image, keyboard]),
                     )
                 except Exception as exc:
                     await log_max_error(exc, logger)
@@ -1429,6 +1463,17 @@ def create_router(
                         attachments=[await purchase_keyboard(credit_user_id)],
                     )
                     await context.update_data(package_offer_pending=False)
+        except ImageModerationError:
+            # Generation was rejected before deduct_credit: preserve balance and counters.
+            logger.warning("OpenAI отклонил фото или описание пользователя %s; кредит не списан.", credit_user_id)
+            await context.update_data(
+                photo=None, sphere=None, card_text=None, fixed_card_text=None,
+                fixed_card_text_source=None, variants=[], sent_count=0,
+                batch_id=None, new_batch_requested=False,
+            )
+            await context.set_state(PosterStates.waiting_for_photo)
+            await _reply(event, IMAGE_MODERATION_MESSAGE)
+            return
         except GenerationTimeoutError:
             logger.error("Таймаут API при создании или сохранении плаката.")
             await context.set_state(retry_state)

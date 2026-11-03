@@ -530,6 +530,8 @@ async def test_generation_classifies_api_errors(config, storage, api, status, co
         (401, '{"error":{"code":"invalid_api_key","message":"Incorrect API key"}}', service.ImageGenerationError),
         (429, '{"error":{"code":"insufficient_quota","message":"Quota exceeded"}}', service.GenerationLimitError),
         (400, '{"error":{"code":"moderation_blocked","message":"Request blocked by moderation"}}', service.ImageModerationError),
+        (400, '{"error":{"code":null,"message":"Request rejected: safety_violations=[sexual]"}}', service.ImageModerationError),
+        (400, 'Request rejected: SAFETY_VIOLATIONS=[sexual]', service.ImageModerationError),
         (502, "<html>Bad gateway</html>\nUpstream unavailable", service.ImageGenerationError),
     ],
 )

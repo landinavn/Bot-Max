@@ -333,7 +333,7 @@ def _raise_api_error(response: httpx.Response) -> None:
             code = raw_code if isinstance(raw_code, str) else ""
     except ValueError:
         pass
-    if code == 'moderation_blocked':
+    if code == 'moderation_blocked' or (response.status_code == 400 and 'safety_violations' in body.lower()):
         raise ImageModerationError('Сервис генерации отклонил содержание кадра.')
     quota_exhausted = code in {
         "insufficient_quota", "quota_exceeded", "billing_hard_limit_reached",

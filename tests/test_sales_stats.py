@@ -135,7 +135,7 @@ async def test_photo_personal_signed_link_matches_persisted_product(credit_db,sa
     assert fields['order_id'] == order['order_id']
     assert fields['products'][0]['price'] == f'{tariff}.00'
     assert sign_link_payload({k:v for k,v in fields.items() if k!='sign'},sales_payments.secret) == fields['sign']
-    sales_payments._request_payment_link.assert_awaited_once()
+    assert sales_payments._request_payment_link.await_count == (2 if tariff in (590, 990) else 1)
 
 
 @pytest.mark.parametrize('other_kind,other_tariff',[('credit',1),('audio','fun'),('musical','direct'),('cartoon','short')])

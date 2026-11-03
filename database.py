@@ -38,6 +38,15 @@ SOURCE_LABELS = {
 async def init_db() -> None:
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         await db.execute("BEGIN IMMEDIATE")
+        await db.execute("""CREATE TABLE IF NOT EXISTS payment_recoveries (
+            provider_payment_id TEXT PRIMARY KEY,
+            order_number TEXT NOT NULL UNIQUE,
+            user_id INTEGER NOT NULL,
+            photo_order_id TEXT NOT NULL UNIQUE,
+            bonus_credits INTEGER NOT NULL,
+            notified INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""")
         await db.execute(
             """CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,

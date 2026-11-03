@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import json
+import re
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from urllib.parse import unquote, urlencode, urlsplit, parse_qsl, urlunsplit
@@ -61,6 +62,10 @@ from max_client import log_max_error
 from video_delivery import send_video_share
 from promo_service import send_repeat_offer
 from photo_orders import deliver_photo_result
+from payment_recovery import (
+    RECOVERY_NUMBER, RecoveryUnavailable, claim_photo_recovery,
+    pending_recovery_notification, mark_recovery_notified,
+)
 from image_service import (
     count_people_in_photo, create_cartoon_avatar_preview, CARTOON_IMAGE_PROMPTS,
     GenerationLimitError,
@@ -93,6 +98,42 @@ class UserActivityMiddleware(BaseMiddleware):
             actor = event_object.message.sender
         if actor is not None and not actor.is_bot:
             await update_user_activity(actor.user_id, timestamp_ms=event_object.timestamp)
+        return await handler(event_object, data)
+
+
+async def notify_payment_recovery(event, recovery):
+    sent = await _reply(event,
+        'Екатерина, приносим извинения: из-за технической ошибки бот не учёл вашу оплату.\n\n'
+        '✅ Фотосессия за 590 ₽ восстановлена — вам доступны 3 фотографии без повторной оплаты.\n'
+        '🎁 В подарок начислена 1 бесплатная генерация открытки.\n\n'
+        'Нажмите «Продолжить фотосессию», чтобы выбрать сюжет и загрузить фото.',
+        attachments=[navigation_keyboard((
+            ('📸 Продолжить фотосессию', 'photo_resume:' + recovery['photo_order_id']),
+            ('🎁 Создать открытку', 'cat_cards'),
+        ))])
+    if sent is None:
+        raise RuntimeError('MAX не подтвердил уведомление о восстановлении заказа.')
+    await mark_recovery_notified(recovery['user_id'])
+
+
+class PaymentRecoveryNotificationMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event_object, data):
+        if isinstance(event_object, (BotStarted, MessageCreated, MessageCallback)):
+            message = getattr(event_object, 'message', None)
+            if message is not None:
+                chat_type = message.recipient.chat_type
+                if getattr(chat_type, 'value', chat_type) != 'dialog':
+                    return await handler(event_object, data)
+            actor = (event_object.user if isinstance(event_object, BotStarted) else
+                     event_object.callback.user if isinstance(event_object, MessageCallback) else
+                     event_object.message.sender)
+            if actor is not None and not actor.is_bot:
+                recovery = await pending_recovery_notification(actor.user_id)
+                if recovery:
+                    try:
+                        await notify_payment_recovery(event_object, recovery)
+                    except Exception:
+                        logger.exception('Не удалось уведомить о восстановлении заказа %s', RECOVERY_NUMBER)
         return await handler(event_object, data)
 
 
@@ -776,6 +817,7 @@ async def purchase_keyboard(user_id: int | None):
 
 
 class PosterStates(StatesGroup):
+    waiting_for_recovery_email = State()
     waiting_for_animation_photo = State()
     waiting_for_custom_occasion = State()
     waiting_for_custom_contact = State()
@@ -1057,6 +1099,53 @@ def create_router(
     bot_link = validate_bot_link(bot_link)
     router = Router()
     router.register_outer_middleware(UserActivityMiddleware())
+    router.register_outer_middleware(PaymentRecoveryNotificationMiddleware())
+
+    @router.message_created(F.message.body.text.contains(RECOVERY_NUMBER))
+    async def recover_paid_photo(event: MessageCreated, context: MemoryContext):
+        if is_bot_message(event):
+            return
+        chat_type = event.message.recipient.chat_type
+        if getattr(chat_type, 'value', chat_type) != 'dialog':
+            await _reply(event, 'Для восстановления заказа откройте личный диалог с ботом.')
+            return
+        await context.update_data(payment_recovery_number=RECOVERY_NUMBER)
+        await context.set_state(PosterStates.waiting_for_recovery_email)
+        await _reply(event, 'Для восстановления заказа укажите e-mail, который вы вводили при оплате. '
+                     'Отправьте его отдельным сообщением. Повторно оплачивать ничего не нужно.')
+
+    @router.message_created(PosterStates.waiting_for_recovery_email)
+    async def confirm_recovery_email(event: MessageCreated, context: MemoryContext):
+        if is_bot_message(event):
+            return
+        chat_type = event.message.recipient.chat_type
+        if getattr(chat_type, 'value', chat_type) != 'dialog':
+            return
+        email = (event.message.body.text or '').strip() if event.message.body else ''
+        if email.split(maxsplit=1)[:1] == ['/start']:
+            await send_welcome_message(event, context)
+            return
+        if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', email):
+            await _reply(event, 'Отправьте только e-mail из оплаты или /start для выхода.')
+            return
+        try:
+            recovery = await claim_photo_recovery(event.get_ids()[1], RECOVERY_NUMBER, email)
+        except RecoveryUnavailable:
+            await _reply(event, 'Для этого заказа нужна проверка поддержки. '
+                         'Сообщите нам номер заказа ' + RECOVERY_NUMBER + '. Повторная оплата не нужна.')
+            return
+        if recovery is None:
+            await _reply(event, 'E-mail не совпал с данными оплаты. Проверьте его или отправьте /start для выхода.')
+            return
+        await context.clear()
+        await context.set_state(PosterStates.waiting_for_mode)
+        if not recovery['notified']:
+            # The grant is already durable; failures here cannot repeat the bonus.
+            await notify_payment_recovery(event, recovery)
+        else:
+            await _reply(event, 'Этот заказ уже восстановлен. Фотопакет и подарок были начислены ранее.',
+                         attachments=[navigation_keyboard((('📸 Продолжить фотосессию',
+                             'photo_resume:' + recovery['photo_order_id']),))])
     broadcast_lock = asyncio.Lock()
     pending_video_lock = asyncio.Lock()
     # FSM изолирован по чату, а баланс общий для всех чатов пользователя.

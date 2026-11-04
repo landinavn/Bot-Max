@@ -1187,6 +1187,9 @@ def create_router(
         data=await context.get_data()
         template=data.get('template')
         birthday = is_studio_birthday_selection(data) and tariff == 590
+        if birthday:
+            await show_removed_birthday(event)
+            return
         style = data.get('photo_style')
         if ((not birthday and (style!='photo_style_ny'
                 or template not in NY_PHOTOSESSION_PROMPTS_BY_TARIFF.get(tariff,{})))
@@ -1283,6 +1286,9 @@ def create_router(
             return
         paid_order=None
         selected=await context.get_data()
+        if user_id == admin_user_id and is_studio_birthday_selection(selected):
+            await show_removed_birthday(event)
+            return
         tariff=selected_photo_tariff(selected)
         if user_id!=admin_user_id:
             candidate=await get_photo_order(selected.get('photo_order_id',''))
@@ -4413,43 +4419,24 @@ def create_router(
             attachments=[navigation_keyboard((*buttons, ("⬅️ Назад", "photo_tariff_back")))],
         )
 
-    async def show_studio_birthday_options(event):
-        await _reply(event, 'Выберите сюжет студийной фотосессии: тариф «Попробовать» — 3 фото за 590 ₽.',
-                     attachments=[navigation_keyboard((
-                         ('🎂 День рождения девочка', STUDIO_BIRTHDAY_CALLBACK),
-                         ('⬅️ Назад', 'photo_tariff_back'),
-                     ))])
+    async def show_removed_birthday(event):
+        await _reply(event, 'Эта фотосессия удалена из каталога. Выберите другой сюжет. '
+                     'Ранее оплаченный заказ можно продолжить из сообщения об оплате.',
+                     attachments=[navigation_keyboard((('📸 Фотосессии', 'cat_photo'),))])
 
     @router.message_callback(F.callback.payload == STUDIO_BIRTHDAY_CALLBACK)
     async def studio_birthday_choose(event: MessageCallback, context: MemoryContext):
         if event.message is None:
             await event.ack(notification='Отправьте /start, чтобы открыть меню.')
             return
-        await event.ack(notification='Показываю пример…')
+        await event.ack(notification='Проверяю фотосессию…')
         data = await context.get_data()
-        # Older error messages used the template button for continuation.
-        # Preserve an unfinished package instead of clearing its cached frames.
-        if (is_studio_birthday_selection(data) and data.get('photosession_urls')
-                and not data.get('photosession_complete')):
+        order = await get_photo_order(data.get('photo_order_id') or '')
+        if (is_studio_birthday_selection(data) and is_studio_birthday_order(order)
+                and order['user_id'] == event.get_ids()[1] and order['status'] == 'paid'):
             await run_family_photosession(event, context)
             return
-        if data.get('photo_style') != 'photo_style_studio' or data.get('photo_tariff') != 'photo_tariff_590':
-            await _reply(event, 'Выберите «Фотосессия → Студия → Попробовать».',
-                         attachments=[navigation_keyboard((('📸 Фотосессия', 'cat_photo'),))])
-            return
-        await increment_counter('select_photo_birthday_girl', user_id=event.get_ids()[1])
-        preview = await send_menu_examples(event, (STUDIO_BIRTHDAY_EXAMPLE,))
-        if not preview and event.get_ids()[1] != admin_user_id:
-            await _reply(event, 'Пример временно недоступен. Счёт не выставлен. Попробуйте выбрать сюжет позже.')
-            return
-        # This is a new selection, never silently reuse a different paid package.
-        await context.update_data(template=STUDIO_BIRTHDAY_TEMPLATE, birthday_number=None,
-                                  photo_preview_template=STUDIO_BIRTHDAY_TEMPLATE if preview else None,
-                                  photo_order_id=None, photo=None, photosession_urls=[],
-                                  photosession_session_id=None, photosession_complete=False,
-                                  photosession_sent_count=0, photosession_admin_bypass=False)
-        await context.set_state(PosterStates.waiting_for_birthday_number)
-        await _reply(event, BIRTHDAY_NUMBER_QUESTION)
+        await show_removed_birthday(event)
 
     @router.message_created(PosterStates.waiting_for_birthday_number)
     async def collect_birthday_number(event: MessageCreated, context: MemoryContext):
@@ -4465,12 +4452,14 @@ def create_router(
             await context.set_state(PosterStates.waiting_for_mode)
             await _reply(event, 'Выберите фотосессию заново.', attachments=[main_keyboard()])
             return
+        order = await get_photo_order(data.get('photo_order_id') or '')
+        if (not is_studio_birthday_order(order) or order['user_id'] != event.get_ids()[1]
+                or order['status'] != 'paid'):
+            await context.set_state(PosterStates.waiting_for_mode)
+            await show_removed_birthday(event)
+            return
         if not valid_birthday_number(text):
             await _reply(event, BIRTHDAY_NUMBER_QUESTION)
-            return
-        order = await get_photo_order(data.get('photo_order_id') or '')
-        if order and (order['user_id'] != event.get_ids()[1] or not is_studio_birthday_order(order)):
-            await _reply(event, 'Заказ не соответствует выбранной фотосессии. Откройте её заново.')
             return
         if order and await get_photo_results(order['order_id']):
             if order.get('birthday_number') != text:
@@ -4480,13 +4469,6 @@ def create_router(
         await context.update_data(birthday_number=text)
         if order:
             await update_photo_order(order['order_id'], birthday_number=text)
-        if event.get_ids()[1] == admin_user_id:
-            await context.update_data(photosession=True, photosession_admin_bypass=True,
-                                      photosession_session_id=uuid4().hex)
-            await context.set_state(PosterStates.waiting_for_photosession_photo)
-            await _reply(event, photo_request('👑 Режим администратора: оплата пропущена. '
-                         'Отправьте одно фото девочки с хорошо видимыми лицом и причёской. Создадим 3 студийных кадра.'))
-            return
         if order and order['status'] == 'paid':
             await context.set_state(PosterStates.waiting_for_photosession_photo)
             await run_family_photosession(event, context)
@@ -4502,18 +4484,10 @@ def create_router(
         data = await context.get_data()
         tariff=int(event.callback.payload.removeprefix('photo_tariff_'))
         ny_trial = data.get("photo_style") == "photo_style_ny" and tariff in NY_PHOTOSESSION_PROMPTS_BY_TARIFF
-        studio_trial = data.get('photo_style') == 'photo_style_studio' and tariff == 590
-        await event.ack(notification="Показываю сюжеты…" if ny_trial or studio_trial else "Скоро будет доступно…")
+        await event.ack(notification="Показываю сюжеты…" if ny_trial else "Скоро будет доступно…")
         user_id = event.get_ids()[1]
         if user_id is not None:
             await increment_counter(PHOTO_CLICK_EVENTS[event.callback.payload], user_id=user_id)
-        if studio_trial:
-            await context.clear()
-            await context.set_state(PosterStates.waiting_for_mode)
-            await context.update_data(photo_style='photo_style_studio', photo_tariff='photo_tariff_590',
-                                      tariff='trial_590', photo_promo_flow=data.get('photo_promo_flow', False))
-            await show_studio_birthday_options(event)
-            return
         if ny_trial:
             await context.clear()
             await context.set_state(PosterStates.waiting_for_mode)
@@ -4616,7 +4590,7 @@ def create_router(
         data = await context.get_data()
         tariff=selected_photo_tariff(data)
         if data.get('photo_style') == 'photo_style_studio' and tariff == 590:
-            await show_studio_birthday_options(event)
+            await show_removed_birthday(event)
             return
         if data.get("photo_style") != "photo_style_ny" or tariff not in NY_PHOTOSESSION_PROMPTS_BY_TARIFF:
             await _reply(event, "Выберите стиль и тариф фотосессии заново.", attachments=[navigation_keyboard((("Фотосессия", "cat_photo"),))])

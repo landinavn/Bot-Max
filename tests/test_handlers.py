@@ -2589,7 +2589,7 @@ async def test_photo_style_tariff_preview_has_no_payment_or_generation(credit_db
     selected_tariff = callback_event(tariff)
     await dispatch_callback(router, selected_tariff, context)
     ny_trial = style == "photo_style_ny" and tariff in ("photo_tariff_590", "photo_tariff_990")
-    available = ny_trial or (style == 'photo_style_studio' and tariff == 'photo_tariff_590')
+    available = ny_trial
     selected_tariff.ack.assert_awaited_once_with(notification="Показываю сюжеты…" if available else "Скоро будет доступно…")
     if available:
         assert 'Выберите сюжет' in selected_tariff.send.await_args_list[0].args[0]

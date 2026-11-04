@@ -121,7 +121,8 @@ async def test_unpaid_photo_does_not_generate(credit_db,sales_payments,example_p
     frames.assert_not_awaited()
 
 
-async def test_saved_partial_result_survives_resume_and_keeps_number(credit_db,sales_payments,example_photos):
+@pytest.mark.parametrize('legacy_button', [False, True])
+async def test_saved_partial_result_survives_resume_and_keeps_number(credit_db,sales_payments,example_photos,legacy_button):
     frames=AsyncMock(side_effect=['https://cdn.example/frame-1.png',RuntimeError('temporary failure')])
     router=handlers.create_router(payments=sales_payments,admin_user_id=999,photosession_generator=frames)
     context=await ready_context()
@@ -130,14 +131,51 @@ async def test_saved_partial_result_survives_resume_and_keeps_number(credit_db,s
     key=(await context.get_data())['photo_order_id']
     assert (await deliver_webhook(sales_payments,await credit_db.get_photo_order(key))).status==200
     await dispatch_callback(router,callback_event('photo_resume:'+key),context)
-    await call_handler(router,'collect_photosession_photo',photo_event(),context)
+    failed_event = photo_event()
+    await call_handler(router,'collect_photosession_photo',failed_event,context)
     assert len(await credit_db.get_photo_results(key))==1
-    await context.clear()
+    retry = failed_event.message.answer.await_args.kwargs['attachments'][0].payload.buttons[0][0].payload
+    assert retry == 'photo_resume:' + key
+    if legacy_button:
+        retry=studio.STUDIO_BIRTHDAY_CALLBACK
+    else:
+        await context.clear()
     frames.side_effect=['https://cdn.example/frame-2.png','https://cdn.example/frame-3.png']
-    await dispatch_callback(router,callback_event('photo_resume:'+key),context)
+    await dispatch_callback(router,callback_event(retry),context)
     assert frames.await_count==4  # successful first frame was not regenerated
     assert '"11"' in frames.await_args_list[-2].args[1]
     assert await credit_db.get_photo_package_balance(key)==0
+    sales_payments._request_payment_link.assert_awaited_once()
+
+
+@pytest.mark.parametrize('legacy_button', [False, True])
+async def test_admin_error_button_resumes_cached_frames_without_reset(credit_db,example_photos,legacy_button):
+    frames=AsyncMock(side_effect=['https://cdn.example/first.png',RuntimeError('temporary failure')])
+    router=handlers.create_router(admin_user_id=456,photosession_generator=frames)
+    context=await ready_context()
+    await choose_birthday(router,context)
+    await call_handler(router,'collect_birthday_number',message_event('12'),context)
+    event=photo_event()
+    await call_handler(router,'collect_photosession_photo',event,context)
+    retry=event.message.answer.await_args.kwargs['attachments'][0].payload.buttons[0][0].payload
+    assert retry=='photo_retry_current'
+    if legacy_button:
+        retry=studio.STUDIO_BIRTHDAY_CALLBACK
+    frames.side_effect=['https://cdn.example/second.png','https://cdn.example/third.png']
+    await dispatch_callback(router,callback_event(retry),context)
+    assert frames.await_count==4
+    assert '"12"' in frames.await_args_list[-2].args[1]
+    assert (await context.get_data())['photosession_complete'] is True
+
+
+async def test_admin_retry_button_cannot_bypass_customer_payment(credit_db):
+    frames=AsyncMock()
+    router=handlers.create_router(admin_user_id=999,photosession_generator=frames)
+    context=await ready_context()
+    await context.update_data(photo_style='photo_style_studio',photo_tariff='photo_tariff_590',
+                              template='birthday_girl',birthday_number='12',photosession_admin_bypass=True)
+    await dispatch_callback(router,callback_event('photo_retry_current'),context)
+    frames.assert_not_awaited()
 
 
 def test_prompts_preserve_customer_identity_and_reference_scenes():

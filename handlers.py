@@ -1431,7 +1431,8 @@ def create_router(
                     return
                 await _reply(
                     event, "Не удалось завершить фотосессию. Готовые кадры сохранены. Нажмите «Продолжить», чтобы повторить с места остановки.",
-                    attachments=[navigation_keyboard((("Продолжить", f"photo_temp_{data['template']}"), ("⬅️ Назад", "cat_photo")))],
+                    attachments=[navigation_keyboard((("Продолжить", 'photo_resume:' + paid_order['order_id']
+                        if paid_order else 'photo_retry_current'), ("⬅️ Назад", "cat_photo")))],
                 )
 
     async def generate_and_send(
@@ -4426,6 +4427,12 @@ def create_router(
             return
         await event.ack(notification='Показываю пример…')
         data = await context.get_data()
+        # Older error messages used the template button for continuation.
+        # Preserve an unfinished package instead of clearing its cached frames.
+        if (is_studio_birthday_selection(data) and data.get('photosession_urls')
+                and not data.get('photosession_complete')):
+            await run_family_photosession(event, context)
+            return
         if data.get('photo_style') != 'photo_style_studio' or data.get('photo_tariff') != 'photo_tariff_590':
             await _reply(event, 'Выберите «Фотосессия → Студия → Попробовать».',
                          attachments=[navigation_keyboard((('📸 Фотосессия', 'cat_photo'),))])
@@ -4524,6 +4531,16 @@ def create_router(
             attachments=[navigation_keyboard((("⬅️ Назад", "cat_photo"),))],
         )
 
+
+    @router.message_callback(F.callback.payload == 'photo_retry_current')
+    async def retry_current_photosession(event: MessageCallback, context: MemoryContext):
+        await event.ack(notification='Продолжаю фотосессию…')
+        data = await context.get_data()
+        if (event.message is None or event.get_ids()[1] != admin_user_id
+                or not data.get('photosession_admin_bypass') or not selected_photo_prompts(data)):
+            await _reply(event, 'Откройте сообщение об оплате и нажмите «Продолжить фотосессию».')
+            return
+        await run_family_photosession(event, context)
 
     @router.message_callback(F.callback.payload.startswith('photo_resume:'))
     async def resume_paid_photo(event: MessageCallback,context: MemoryContext):

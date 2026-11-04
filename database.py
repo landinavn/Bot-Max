@@ -116,6 +116,7 @@ async def init_db() -> None:
         async with db.execute('PRAGMA table_info(photo_orders)') as cursor:
             photo_columns = {row[1] for row in await cursor.fetchall()}
         for column, definition in {
+            'birthday_number': 'TEXT',
             'generation_status': "TEXT NOT NULL DEFAULT 'awaiting_payment'",
             'style': 'TEXT', 'template': 'TEXT',
             'user_notified': 'INTEGER NOT NULL DEFAULT 0',
@@ -1413,7 +1414,7 @@ async def mark_photo_paid(order_id: str, payment_id: str) -> bool:
 
 
 async def update_photo_order(order_id: str, **fields):
-    if not fields or not set(fields) <= {'style','template','generation_status','user_notified','admin_notified','next_attempt_at','reference_url','promo_due'}:
+    if not fields or not set(fields) <= {'style','template','birthday_number','generation_status','user_notified','admin_notified','next_attempt_at','reference_url','promo_due'}:
         raise ValueError('Некорректные поля фотозаказа.')
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         await db.execute('UPDATE photo_orders SET '+','.join(key+'=?' for key in fields)+' WHERE order_id=?',

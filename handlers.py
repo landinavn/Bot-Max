@@ -66,6 +66,12 @@ from payment_recovery import (
     RECOVERY_NUMBER, RecoveryUnavailable, claim_photo_recovery,
     pending_recovery_notification, mark_recovery_notified,
 )
+from generation_fix_notice import (
+    NOTICE_TEXT as GENERATION_FIX_TEXT, parse_audience as parse_fix_notice_audience,
+    prepare_audience as prepare_fix_notice_audience, selected_counts as fix_notice_counts,
+    pending_recipients as pending_fix_notice_recipients, claim_recipient as claim_fix_notice_recipient,
+    finish_recipient as finish_fix_notice_recipient,
+)
 from image_service import (
     count_people_in_photo, create_cartoon_avatar_preview, CARTOON_IMAGE_PROMPTS,
     GenerationLimitError,
@@ -1771,6 +1777,93 @@ def create_router(
             f"🛠 Админ (тесты): Сгенерировано {admin['total_generations'] if admin else 0}, "
             f"Покупок {admin['total_purchases'] if admin else 0}."
         )
+
+    def generation_fix_keyboard():
+        return InlineKeyboardBuilder().row(
+            CallbackButton(text='🚀 Старт', payload='open_main_menu')
+        ).row(LinkButton(text='Написать в поддержку', url=SUPPORT_URL)).as_markup()
+
+    @router.message_created(Command('broadcast_generation_fix'))
+    async def broadcast_generation_fix(event: MessageCreated):
+        if is_bot_message(event) or admin_user_id is None or event.get_ids()[1] != admin_user_id:
+            return
+        if broadcast_lock.locked():
+            await _reply(event, 'Рассылка уже выполняется. Дождитесь завершения.')
+            return
+        try:
+            ids = parse_fix_notice_audience(event.message.body.text or '')
+        except ValueError:
+            await _reply(event, 'Используйте /broadcast_generation_fix MAX_ID MAX_ID ... '
+                         '(до 500 получателей). Общая рассылка всем пользователям не запускается.')
+            return
+        async with broadcast_lock:
+            eligible = await prepare_fix_notice_audience(ids, admin_user_id=admin_user_id)
+            counts = await fix_notice_counts()
+            sent = await _reply(event, GENERATION_FIX_TEXT, attachments=[generation_fix_keyboard()])
+            if sent is None:
+                return
+            pending = counts.get('pending', 0)
+            text = (f'Предпросмотр рассылки об исправлениях. Выбрано ID: {len(ids)}. '
+                    f'Доступны по базе: {eligible}. Ожидают отправки: {pending}. '
+                    f'Уже отправлено: {counts.get("sent", 0)}. '
+                    f'Требуют проверки доставки: {counts.get("sending", 0) + counts.get("uncertain", 0)}.\n'
+                    'Этот предпросмотр не отправляет уведомления клиентам. '
+                    'Перед отправкой активность проверяется повторно.')
+            kwargs = {}
+            if pending:
+                kwargs['attachments'] = [InlineKeyboardBuilder().row(CallbackButton(
+                    text=f'Отправить уведомление ({pending})', payload='broadcast_generation_fix_send'
+                )).as_markup()]
+            await _reply(event, text, **kwargs)
+
+    @router.message_callback(F.callback.payload == 'broadcast_generation_fix_send')
+    async def broadcast_generation_fix_send(event: MessageCallback):
+        if (admin_user_id is None or event.get_ids()[1] != admin_user_id
+                or getattr(getattr(event.callback, 'user', None), 'is_bot', False)):
+            return
+        if event.message is None:
+            await event.ack(notification='Отправьте команду рассылки заново для предпросмотра.')
+            return
+        if broadcast_lock.locked():
+            await event.ack(notification='Рассылка уже выполняется.')
+            return
+        await event.ack(notification='Начинаю адресную рассылку…')
+        stopped = False
+        async with broadcast_lock:
+            for user_id in await pending_fix_notice_recipients():
+                if not await claim_fix_notice_recipient(user_id):
+                    continue
+                try:
+                    sent = await event.bot.send_message(user_id=user_id, text=GENERATION_FIX_TEXT,
+                                                        attachments=[generation_fix_keyboard()])
+                    if sent is None:
+                        await finish_fix_notice_recipient(user_id, 'uncertain')
+                    else:
+                        await finish_fix_notice_recipient(user_id, 'sent')
+                except asyncio.CancelledError:
+                    # 'sending' survives a restart; it is not silently resent.
+                    raise
+                except Exception as exc:
+                    await log_max_error(exc, logger)
+                    status = max_error_status(exc)
+                    if status == 403:
+                        await finish_fix_notice_recipient(user_id, 'inactive')
+                        try:
+                            await mark_user_inactive(user_id)
+                        except Exception:
+                            logger.exception('Не удалось отметить недоступность получателя уведомления %s', user_id)
+                    elif status in {401, 429}:
+                        await finish_fix_notice_recipient(user_id, 'pending')
+                        stopped = True
+                        break
+                    else:
+                        await finish_fix_notice_recipient(user_id, 'uncertain')
+                await asyncio.sleep(0.1)
+            counts = await fix_notice_counts()
+        title = 'Рассылка остановлена' if stopped else 'Рассылка завершена'
+        await _reply(event, f'{title}. Подтверждено отправлено всего: {counts.get("sent", 0)}. '
+                     f'Пропущены или недоступны: {counts.get("inactive", 0)}. Ожидают: {counts.get("pending", 0)}. '
+                     f'Требуют проверки доставки: {counts.get("sending", 0) + counts.get("uncertain", 0)}.')
 
     @router.message_created(Command("broadcast"))
     async def broadcast(event: MessageCreated) -> None:

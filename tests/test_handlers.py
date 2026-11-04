@@ -2589,8 +2589,9 @@ async def test_photo_style_tariff_preview_has_no_payment_or_generation(credit_db
     selected_tariff = callback_event(tariff)
     await dispatch_callback(router, selected_tariff, context)
     ny_trial = style == "photo_style_ny" and tariff in ("photo_tariff_590", "photo_tariff_990")
-    selected_tariff.ack.assert_awaited_once_with(notification="Показываю сюжеты…" if ny_trial else "Скоро будет доступно…")
-    if ny_trial:
+    available = ny_trial or (style == 'photo_style_studio' and tariff == 'photo_tariff_590')
+    selected_tariff.ack.assert_awaited_once_with(notification="Показываю сюжеты…" if available else "Скоро будет доступно…")
+    if available:
         assert 'Выберите сюжет' in selected_tariff.send.await_args_list[0].args[0]
         assert (await context.get_data())["tariff"] == ("trial_590" if tariff == "photo_tariff_590" else "standard_990")
         assert 'photo_order_id' not in await context.get_data()
@@ -2600,13 +2601,13 @@ async def test_photo_style_tariff_preview_has_no_payment_or_generation(credit_db
             "следите за обновлениями!"
         )
     back = selected_tariff.send.await_args.kwargs["attachments"][0].payload.buttons[-1][0]
-    assert (back.text, back.payload) == ("⬅️ Назад", "photo_tariff_back" if ny_trial else "cat_photo")
+    assert (back.text, back.payload) == ("⬅️ Назад", "photo_tariff_back" if available else "cat_photo")
     await dispatch_callback(router, callback_event(back.payload), context)
-    assert await context.get_data() == ({"photo_style": style} if ny_trial else {})
+    assert await context.get_data() == ({"photo_style": style} if available else {})
     assert await context.get_state() == PosterStates.waiting_for_mode
     style_event = {"photo_style_studio": "click_photo_studio", "photo_style_walk": "click_photo_walk", "photo_style_ny": "click_photo_ny"}[style]
     tariff_event = {"photo_tariff_590": "click_tariff_590", "photo_tariff_990": "click_tariff_990", "photo_tariff_1490": "click_tariff_1490"}[tariff]
-    assert await credit_db.get_all_counters() == {"click_photo": 1 if ny_trial else 2, style_event: 1, tariff_event: 1}
+    assert await credit_db.get_all_counters() == {"click_photo": 1 if available else 2, style_event: 1, tariff_event: 1}
     assert (await credit_db.get_user(456))["balance"] == 1
     assert (await credit_db.get_user(456))["total_generations"] == 0
     assert (await credit_db.get_user(456))["total_purchases"] == 0

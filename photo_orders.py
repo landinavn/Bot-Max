@@ -11,6 +11,7 @@ from database import (get_pending_photo_jobs,update_photo_order,get_photo_order,
                       save_photo_result,mark_photo_result_delivered,PHOTO_PACKAGE_SIZES)
 from promo_service import send_repeat_offer
 from image_service import upload_image_for_max, NY_PHOTOSESSION_PROMPTS_BY_TARIFF
+from studio_photosessions import is_studio_birthday_order
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +28,9 @@ class PaidPhotoWorker:
             try:
                 if not order['user_notified']:
                     builder=InlineKeyboardBuilder()
-                    if (order['style'] in (None,'photo_style_ny') and (order['tariff']==590
-                            or (order['tariff']==990 and order['template'] in (None,*NY_PHOTOSESSION_PROMPTS_BY_TARIFF[990])))):
+                    if (is_studio_birthday_order(order) or
+                            (order['style'] in (None,'photo_style_ny') and (order['tariff']==590
+                            or (order['tariff']==990 and order['template'] in (None,*NY_PHOTOSESSION_PROMPTS_BY_TARIFF[990]))))):
                         builder.row(CallbackButton(text='📸 Продолжить фотосессию',payload='photo_resume:'+order['order_id']))
                     keyboard=builder.row(LinkButton(text='🆘 Поддержка',url=SUPPORT_URL)).as_markup()
                     sent = await self.bot.send_message(

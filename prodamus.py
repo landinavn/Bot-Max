@@ -32,6 +32,38 @@ logger = logging.getLogger(__name__)
 SIGN_FIELDS = {"signature", "sign", "_payform_sign"}
 
 
+def _validate_customer_metadata(data, order, package_id):
+    """Optional provider text must not break an independently bound receipt.
+
+    Called after the signed receipt's order, amount, product and any _param_*
+    values have been checked. A malformed optional field can be ignored only
+    when ALL three independent binding fields are present and exactly match.
+    Readable metadata that contradicts the order is always rejected.
+    """
+    raw = data['customer_extra']
+    if isinstance(raw, dict):
+        extra = raw
+    else:
+        try:
+            extra = json.loads(raw)
+        except json.JSONDecodeError as original:
+            try:
+                extra = json.loads(unescape(raw))
+            except json.JSONDecodeError:
+                binding = {'_param_user_id': str(order['user_id']),
+                           '_param_credits': str(order['credits']),
+                           '_param_package_id': package_id}
+                if not all(key in data and data[key] == value for key, value in binding.items()):
+                    raise original
+                logger.warning('Prodamus: customer_extra не является JSON; '
+                               'использована полная привязка _param_* к заказу %s.', order['order_id'])
+                return
+    if not isinstance(extra, dict) or extra.get('user_id') != order['user_id'] or extra.get('credits') != order['credits']:
+        raise ValueError('Метаданные покупателя не соответствуют заказу.')
+    if 'package_id' in extra and extra['package_id'] != package_id:
+        raise ValueError('Метаданные пакета не соответствуют заказу.')
+
+
 def _prepare(value):
     if isinstance(value, dict):
         return {key: _prepare(value[key]) for key in sorted(value)}
@@ -391,11 +423,7 @@ class ProdamusPayments:
         if "_param_package_id" in data and data["_param_package_id"] != package_id:
             raise ValueError("Идентификатор пакета не соответствует заказу.")
         if "customer_extra" in data:
-            extra = json.loads(data["customer_extra"])
-            if not isinstance(extra, dict) or extra.get("user_id") != order["user_id"] or extra.get("credits") != order["credits"]:
-                raise ValueError("Метаданные покупателя не соответствуют заказу.")
-            if "package_id" in extra and extra["package_id"] != package_id:
-                raise ValueError("Метаданные пакета не соответствуют заказу.")
+            _validate_customer_metadata(data, order, package_id)
         # Сумма уже сверена с сохранённым заказом выше: смена прайса не должна
         # блокировать оплату ссылки, выданной до изменения цены.
         if order.get('order_type') == 'animation':

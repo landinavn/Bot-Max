@@ -244,7 +244,7 @@ def create_router(admin_id, settings, assets):
                 await context.set_state(StudioStates.input)
                 await tell(event,f'Сейчас речь начинается на {value:g} секунде сцены. '
                            'Пришлите новое время от 0 до 30 секунд. Например: 3. '
-                           'Изменится только монтаж; готовые картинки, видео и озвучка сохраняются.',[('Отмена','s:'+key)])
+                           'Изменится только монтаж; готовые картинки, видео и озвучка сохраняются.',[('Отмена','home')])
             elif action=='scene_settings':
                 key=parts[1]
                 row,_=await owner('scene',key)

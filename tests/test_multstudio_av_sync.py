@@ -195,6 +195,9 @@ async def test_scene_menu_has_independent_speech_start_editor(studio):
     await dispatch_callback(router,pressed,context)
     assert '3 секунде' in pressed.bot.send_message.await_args.kwargs['text']
     assert (await context.get_data())['studio_input']['action']=='speech_start'
+    await dispatch_callback(router,event('studio:home'),context)
+    assert await context.get_state() is None
+    assert not (await context.get_data()).get('studio_input')
     assert await repo.claim() is None
 
 

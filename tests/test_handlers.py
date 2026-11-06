@@ -3035,7 +3035,7 @@ async def test_family_plus_retry_keeps_template_prompts():
     event = callback_event("photo_temp_fam4")
     await dispatch_callback(router, event, context)
     button = event.send.await_args.kwargs["attachments"][0].payload.buttons[0][0]
-    assert button.payload == "photo_temp_fam4"
+    assert button.payload == "photo_retry_current"
     retry = callback_event(button.payload)
     await dispatch_callback(router, retry, context)
     prompts = handlers.NY_FAMILY_PHOTOSESSION_PROMPTS["fam4"]
@@ -3102,7 +3102,7 @@ async def test_toddlers_resume_preserves_saved_frames(failure):
         event.bot.send_message.side_effect = [object(), RuntimeError("MAX error")]
     await dispatch_callback(router, event, context)
     retry_button = event.send.await_args.kwargs["attachments"][0].payload.buttons[0][0]
-    assert retry_button.payload == "photo_temp_toddlers"
+    assert retry_button.payload == "photo_retry_current"
     retry = callback_event(retry_button.payload)
     await dispatch_callback(router, retry, context)
     assert frames.await_count == (4 if failure == "generate" else 3)

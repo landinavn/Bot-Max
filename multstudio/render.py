@@ -1,11 +1,13 @@
 """Offline FFmpeg editing. Source files and intermediate renders are retained."""
 import asyncio
+import hashlib
 import json
 import shutil
 from pathlib import Path
 from uuid import uuid4
 
 from PIL import Image, ImageDraw, ImageFont
+from . import repository as repo
 
 
 async def process(*args, cwd=None, timeout=900):
@@ -80,7 +82,12 @@ class Renderer:
             millis = int(seconds*1000)
             stamp = f'{millis//3600000:02}:{millis//60000%60:02}:{millis//1000%60:02},{millis%1000:03}'
             srt.write_text(f'1\n00:00:00,000 --> {stamp}\n{text}\n', encoding='utf-8')
-            filters += f';[base]subtitles={srt.name}:force_style=\'FontName=DejaVu Sans,FontSize=18,MarginV=35,Outline=1\'[sub]'
+            if all(k in scene for k in ('project_id','target','id','context_hash')):
+                await repo.add_asset(scene['project_id'],scene['target'],scene['id'],'subtitle',scene['context_hash'],
+                    srt.name,hashlib.sha256(srt.read_bytes()).hexdigest(),job_id=scene.get('assembly_job_id'),
+                    metadata=repo.encoded({'language':'ru','source':'scene.dialogue','white_text_black_outline':True}))
+            filters += (f';[base]subtitles={srt.name}:force_style=\'FontName=DejaVu Sans,FontSize=18,MarginV=35,'
+                        'PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0\'[sub]')
             current = 'sub'
         if ending:
             overlay = self.assets.path(uuid4().hex + '.png')
@@ -117,10 +124,25 @@ class Renderer:
 
     async def assemble(self, snapshot):
         self.ready()
-        paths = []
+        paths, cues, elapsed = [], [], 0.0
         for index, scene in enumerate(snapshot['scenes']):
             ending = snapshot['spec'].get('ending') if index == len(snapshot['scenes'])-1 else None
-            paths.append(await self.scene(scene, ending))
+            path=await self.scene(dict(scene,assembly_job_id=snapshot.get('job_id')), ending)
+            paths.append(path)
+            seconds=await duration(path)
+            text=self.subtitle_text(scene)
+            def stamp(value):
+                ms=int(round(value*1000))
+                return f'{ms//3600000:02}:{ms//60000%60:02}:{ms//1000%60:02},{ms%1000:03}'
+            if text:
+                cues.append(f'{len(cues)+1}\n{stamp(elapsed)} --> {stamp(elapsed+seconds)}\n{text}\n')
+            elapsed += seconds
+        episode_srt=self.assets.path(uuid4().hex+'.srt')
+        episode_srt.write_text('\n'.join(cues),encoding='utf-8')
+        if all(k in snapshot for k in ('project_id','target','id','context_hash')):
+            await repo.add_asset(snapshot['project_id'],snapshot['target'],snapshot['id'],'subtitle',snapshot['context_hash'],
+                episode_srt.name,hashlib.sha256(episode_srt.read_bytes()).hexdigest(),job_id=snapshot.get('job_id'),
+                metadata=repo.encoded({'language':'ru','timeline':'episode','duration':elapsed}))
         manifest = self.assets.path(uuid4().hex + '.ffconcat')
         manifest.write_text(''.join(f"file '{p.name}'\n" for p in paths))
         result = self.assets.path(uuid4().hex + '.mp4')

@@ -5,7 +5,7 @@ import logging
 import time
 
 from . import repository as repo
-from .adapters import TemporaryPollError
+from .adapters import TemporaryPollError, KlingTaskFailed
 from .render import Renderer
 
 logger = logging.getLogger(__name__)
@@ -84,7 +84,8 @@ class Worker:
                 await repo.update_job(key,status='polling',attempts=attempts,lease_until=0,
                     next_attempt=int(time.time())+min(300,15*2**attempts),error='temporary_poll_or_download')
             else:
-                state = 'preflight_failed' if current['status']=='preparing' else 'manual'
+                state = ('failed' if isinstance(exc,KlingTaskFailed) else
+                         'preflight_failed' if current['status']=='preparing' else 'manual')
                 await repo.update_job(key,status=state,error=type(exc).__name__,lease_until=0,notified=0)
             # Do not log exception contents: provider errors may contain credentials/personal text.
             logger.warning('Мультстудия: задание %s требует проверки (%s).',key,type(exc).__name__)
@@ -97,7 +98,7 @@ class Worker:
 
     async def notices(self):
         async with repo.connect() as db:
-            items = await repo.rows(db, "SELECT * FROM cartoon_jobs WHERE status IN ('done','manual','preflight_failed') AND notified=0 LIMIT 10")
+            items = await repo.rows(db, "SELECT * FROM cartoon_jobs WHERE status IN ('done','manual','failed','preflight_failed') AND notified=0 LIMIT 10")
         for item in items:
             text = f"Мультстудия: {item['kind']}, задание {item['id']}, статус {item['status']}. "
             if item['actual'] is None and item['status'] != 'preflight_failed':

@@ -222,8 +222,20 @@ def create_router(admin_id, settings, assets):
                 buttons=[('💰 Сверить фактический расход','cost:'+item['id'])] if item['status'] in ('done','manual','failed') else []
                 if item['status']=='manual' and item['provider_id']:
                     buttons.append(('Повторить только опрос Kling','poll:'+item['id']))
+                if item['status']=='manual' and item['kind']=='video':
+                    buttons.append(('Завершить ручную сверку Kling','resolve:'+item['id']))
                 await tell(event,json.dumps({k:item[k] for k in ('id','kind','status','provider_id','error','estimate','actual','attempts')},ensure_ascii=False,indent=2)
                            +'\nПри неизвестном результате платного запроса сначала сверьте расход в кабинете. Новый запрос — только с новым подтверждением.',buttons+[('Проект','p:'+item['project_id'])])
+            elif action=='resolve':
+                item=await repo.job(parts[1])
+                if not item: raise ValueError('Задание не найдено.')
+                await owner('project',item['project_id'])
+                await tell(event,'Подтвердите, что проверили кабинет PiAPI и эта задача больше НЕ выполняется. '
+                           'Это разблокирует следующую задачу очереди. Перед подтверждением сверьте фактический расход.',
+                           [('✅ Задача больше не выполняется','resolved:'+item['id']),('Отмена','job:'+item['id'])])
+            elif action=='resolved':
+                await repo.resolve_video(parts[1],admin_id)
+                await tell(event,'Ручная сверка завершена. Повторный POST не отправлен.',[('Проекты','home')])
             elif action=='export':
                 await owner('project',parts[1])
                 url=await export_project(parts[1],assets)

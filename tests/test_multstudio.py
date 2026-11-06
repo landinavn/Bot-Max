@@ -10,6 +10,7 @@ from PIL import Image
 
 from multstudio import repository as repo
 from multstudio.adapters import KlingAdapter, TemporaryPollError, Providers
+from multstudio.adapters import KlingTaskFailed
 from multstudio.assets import Assets, https_url, public_url
 from multstudio.render import Renderer, probe, process
 from multstudio.router import create_router, validate_spec
@@ -363,3 +364,124 @@ async def test_speech_waits_for_approved_keyframe(studio):
         await repo.quote('scene',scene['id'],'speech',settings)
     await add_image(assets,await repo.snapshot('scene',scene['id']))
     assert (await repo.quote('scene',scene['id'],'speech',settings))['status']=='quoted'
+
+
+async def seven_videos(studio):
+    project,settings,assets=studio
+    _,episode=await ready_scene(studio)
+    scenes=await repo.children('scene',episode['id'])
+    for scene in scenes:
+        await add_image(assets,await repo.snapshot('scene',scene['id']))
+    await repo.budget(project,10000000)
+    jobs=[]
+    for scene in scenes:
+        item=await repo.quote('scene',scene['id'],'video',settings)
+        await repo.confirm(item['id'],456)
+        jobs.append(item)
+    return jobs
+
+
+async def test_seven_piapi_jobs_are_strictly_serial_until_each_finishes(studio):
+    jobs=await seven_videos(studio)
+    for expected in jobs:
+        claims=await asyncio.gather(repo.claim(),repo.claim(),repo.claim())
+        started=[x for x in claims if x]
+        assert len(started)==1 and started[0]['id']==expected['id']
+        assert await repo.begin_submission(expected['id']) is True
+        await repo.update_job(expected['id'],status='polling',provider_id='task-'+expected['id'],
+                              lease_until=0,next_attempt=9999999999)
+        assert await repo.claim() is None  # No next POST while provider is rendering.
+        await repo.update_job(expected['id'],status='done',lease_until=0)
+
+
+async def test_unknown_piapi_outcome_blocks_queue_until_explicit_provider_review(studio):
+    jobs=await seven_videos(studio)
+    first=await repo.claim()
+    await repo.begin_submission(first['id'])
+    await repo.update_job(first['id'],status='manual',lease_until=0,error='unknown_submission')
+    assert await repo.claim() is None
+    with pytest.raises(ValueError,match='стоимость'):
+        await repo.resolve_video(first['id'],456)
+    await repo.reconcile(first['id'],456,0)
+    assert await repo.claim() is None  # Billing review alone does not prove rendering ended.
+    with pytest.raises(ValueError):
+        await repo.resolve_video(first['id'],999)
+    await repo.resolve_video(first['id'],456)
+    assert (await repo.claim())['id']==jobs[1]['id']
+
+
+async def test_explicit_terminal_kling_failure_releases_execution_slot(studio):
+    jobs=await seven_videos(studio)
+    await repo.claim()
+    await repo.update_job(jobs[0]['id'],status='polling',provider_id='failed-task',lease_until=0)
+    providers=SimpleNamespace(kling=SimpleNamespace(poll=AsyncMock(side_effect=KlingTaskFailed())))
+    worker=Worker(SimpleNamespace(),456,studio[1],providers,studio[2])
+    await worker.execute(await repo.claim())
+    assert (await repo.job(jobs[0]['id']))['status']=='failed'
+    assert (await repo.claim())['id']==jobs[1]['id']
+
+
+async def test_scene_image_reuses_canonical_references_via_real_edits_endpoint(studio,monkeypatch):
+    import base64
+    from pathlib import Path
+    from io import BytesIO
+    from aioresponses import aioresponses
+    import respx
+    from config import Config
+    project,settings,assets=studio
+    scene,_=await ready_scene(studio)
+    snap=await repo.snapshot('scene',scene['id'])
+    snap['quote']=settings.quote('image',snap)
+    assets.asset_url=AsyncMock(return_value='https://cdn.example/canonical-anya.png')
+    buffer=BytesIO(); Image.new('RGB',(16,24),'white').save(buffer,format='PNG'); png=buffer.getvalue()
+    config=Config(token='fake',photo_path=Path('unused'),image_api_key='fake-openai',image_model='image-test')
+    provider=Providers(settings,config,assets)
+    with aioresponses() as images,respx.mock() as api:
+        images.get('https://cdn.example/canonical-anya.png',body=png)
+        route=api.post('https://api.openai.com/v1/images/edits').mock(return_value=httpx.Response(200,
+            json={'data':[{'b64_json':base64.b64encode(png).decode()}]}))
+        output=await provider.image(snap)
+    assert output==png and route.call_count==1
+    assert b'filename=' in route.calls[0].request.content
+    assert png in route.calls[0].request.content
+    assert b'character reference images' in route.calls[0].request.content
+
+
+async def test_srt_is_saved_from_database_lines_with_explicit_white_black_style(studio,monkeypatch):
+    project,_,assets=studio
+    scene,_=await ready_scene(studio)
+    snap=await repo.snapshot('scene',scene['id'])
+    assets.root.mkdir(parents=True,exist_ok=True)
+    Image.new('RGB',(16,24),'white').save(assets.path('subtitle-test.png'))
+    snap['assets']={'image':{'kind':'image','path':'subtitle-test.png'}}
+    captured=[]
+    async def ffmpeg(*args,**kwargs): captured.append(args)
+    monkeypatch.setattr('multstudio.render.process',ffmpeg)
+    await Renderer(assets).scene(snap)
+    async with repo.connect() as db:
+        asset=await repo.one(db,"SELECT * FROM cartoon_assets WHERE kind='subtitle' AND target_id=?",(scene['id'],))
+    text=assets.path(asset['path']).read_text()
+    assert snap['spec']['dialogue'][0]['text'] in text and '00:00:00,000 --> 00:00:05,000' in text
+    command=' '.join(map(str,captured[0]))
+    assert 'PrimaryColour=&H00FFFFFF' in command
+    assert 'OutlineColour=&H00000000' in command and 'Outline=2' in command
+
+
+async def test_episode_srt_uses_actual_scene_durations_and_database_dialogue(studio,monkeypatch):
+    project,_,assets=studio
+    episode=(await repo.children('episode',project))[0]
+    snap=await repo.snapshot('episode',episode['id'])
+    assets.root.mkdir(parents=True,exist_ok=True)
+    renderer=Renderer(assets)
+    renderer.scene=AsyncMock(side_effect=[assets.path(f'clip-{i}.mp4') for i in range(7)])
+    monkeypatch.setattr('multstudio.render.duration',AsyncMock(side_effect=[5.2,6,6,7,7,6,3]))
+    monkeypatch.setattr('multstudio.render.process',AsyncMock(return_value=b''))
+    await renderer.assemble(snap)
+    async with repo.connect() as db:
+        asset=await repo.one(db,"SELECT * FROM cartoon_assets WHERE kind='subtitle' AND target='episode' AND target_id=?",(episode['id'],))
+    text=assets.path(asset['path']).read_text()
+    assert '00:00:00,000 --> 00:00:05,200' in text
+    assert '00:00:31,200 --> 00:00:37,200' in text
+    for scene in snap['scenes']:
+        for line in scene['spec']['dialogue']:
+            assert line['text'] in text

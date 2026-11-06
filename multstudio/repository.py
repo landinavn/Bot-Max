@@ -310,6 +310,11 @@ async def reconcile(key, actor, actual):
         await db.commit()
 
 
+async def video_busy(db, exclude):
+    return await one(db, '''SELECT id FROM cartoon_jobs WHERE kind='video' AND id!=? AND
+      (status IN ('preparing','submitting','polling') OR (status='manual' AND result_url IS NULL)) LIMIT 1''', (exclude,))
+
+
 async def claim():
     now = int(time.time())
     async with connect() as db:
@@ -318,6 +323,9 @@ async def claim():
         await db.execute("UPDATE cartoon_jobs SET status='queued',lease_until=0 WHERE status='preparing' AND lease_until<?", (now,))
         candidates = await rows(db, "SELECT * FROM cartoon_jobs WHERE status IN ('queued','polling') AND lease_until<? AND next_attempt<=? ORDER BY rowid LIMIT 20", (now, now))
         for item in candidates:
+            # One studio Kling task IN FLIGHT, not just one concurrent HTTP POST.
+            if item['kind']=='video' and item['status']=='queued' and await video_busy(db,item['id']):
+                continue
             project = await one(db, 'SELECT * FROM cartoon_projects WHERE id=?', (item['project_id'],))
             if item['status'] == 'queued' and item['estimate'] and await liability(db, project['id']) > project['budget']:
                 continue
@@ -335,6 +343,10 @@ async def begin_submission(key):
         if not item or item['status'] != 'preparing' or not item['approved_by']:
             raise ValueError('Нет подтверждения на платный запрос.')
         project = await one(db, 'SELECT * FROM cartoon_projects WHERE id=?', (item['project_id'],))
+        if item['kind']=='video' and await video_busy(db,key):
+            await db.execute("UPDATE cartoon_jobs SET status='queued',lease_until=0 WHERE id=?", (key,))
+            await db.commit()
+            return False
         if await liability(db, project['id']) > project['budget']:
             await db.execute("UPDATE cartoon_jobs SET status='queued',lease_until=0 WHERE id=?", (key,))
             await db.commit()
@@ -393,4 +405,19 @@ async def retry_poll(key, actor):
           AND project_id IN (SELECT id FROM cartoon_projects WHERE owner_id=?)''', (key,actor))
         if not result.rowcount:
             raise ValueError('Нет известной задачи Kling для безопасного опроса.')
+        await db.commit()
+
+
+async def resolve_video(key, actor):
+    async with connect() as db:
+        await db.execute('BEGIN IMMEDIATE')
+        item=await one(db, '''SELECT j.*,p.owner_id FROM cartoon_jobs j JOIN cartoon_projects p ON p.id=j.project_id
+          WHERE j.id=?''', (key,))
+        if not item or item['owner_id']!=actor or item['kind']!='video' or item['status']!='manual':
+            raise ValueError('Нет ручного задания Kling для сверки.')
+        if item['actual'] is None:
+            raise ValueError('Сначала сверьте фактическую стоимость задания.')
+        await db.execute("UPDATE cartoon_jobs SET status='failed',error='provider_reviewed_by_admin' WHERE id=?",(key,))
+        await db.execute('INSERT INTO cartoon_job_events(job_id,event,details) VALUES (?,?,?)',
+                         (key,'provider_resolved',encoded({'actor':actor,'provider_no_longer_running':True})))
         await db.commit()

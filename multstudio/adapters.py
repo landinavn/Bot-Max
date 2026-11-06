@@ -17,6 +17,10 @@ class ProviderFailed(Exception):
     pass
 
 
+class KlingTaskFailed(ProviderFailed):
+    """Provider explicitly reports a TERMINAL task status, unlike a transport error."""
+
+
 class KlingAdapter:
     ENDPOINT = 'https://api.piapi.ai/api/v1/task'
 
@@ -57,7 +61,7 @@ class KlingAdapter:
             raise ProviderFailed('Kling: HTTP ' + str(response.status_code))
         data = response.json().get('data', {})
         if data.get('status') == 'failed':
-            raise ProviderFailed('Kling отклонил или не завершил задачу.')
+            raise KlingTaskFailed('Kling подтвердил терминальный статус failed.')
         if data.get('status') != 'completed':
             return None
         url = data.get('output', {}).get('video')
@@ -109,7 +113,8 @@ class Providers:
         if refs:
             urls = [await self.assets.asset_url(a) for a in refs]
             images = await _generate_image_bytes(urls[0], 'Мультстудия', config, count=1,
-                prompt_override=prompt, style_reference_urls=tuple(urls[1:]), image_size='1024x1536')
+                prompt_override=prompt, image_size='1024x1536',
+                **({'style_reference_urls':tuple(urls[1:])} if len(urls)>1 else {}))
             return images[0]
         async with _image_api_client(config) as client:
             result = await client.images.generate(model=config.image_model, prompt=prompt, n=1,

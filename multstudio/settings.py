@@ -38,7 +38,7 @@ class Settings:
     image_quality: str = 'high'
     kling_key: str = field(default='', repr=False)
     tts_key: str = field(default='', repr=False)
-    tts_folder_id: str = field(default='', repr=False)
+    tts_folder_id: str = field(default='', repr=False)  # Legacy only; never sent with API-key auth.
     image_price: int = 0
     video_price: int = 0  # Estimate per 5 seconds; must be configured by owner.
     speech_price: int = 0  # Estimate per 1000 characters.

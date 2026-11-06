@@ -37,8 +37,7 @@ async def test_speechkit_v1_exact_form_auth_binary_and_safe_log(caplog,voice,emo
         assert req.headers['Authorization']=='Api-Key private-yandex-key'
         assert req.headers['Content-Type'].startswith('application/x-www-form-urlencoded')
         assert parse_qs(req.content.decode())=={
-            'text':[text],'lang':['ru-RU'],'voice':[voice],'emotion':[emotion],
-            'format':['mp3'],'folderId':['folder-id']}
+            'text':[text],'lang':['ru-RU'],'voice':[voice],'format':['mp3']}
         return httpx.Response(200,content=MP3,headers={'Content-Type':'audio/mpeg'})
     with caplog.at_level(logging.INFO,logger='multstudio.adapters'):
         result=await YandexTTSAdapter('private-yandex-key','folder-id',httpx.MockTransport(request)).synthesize(text,voice,emotion)
@@ -55,7 +54,33 @@ async def test_public_yandex_tts_function_reads_only_yandex_environment(monkeypa
     assert await yandex_tts('Привет!','alena')==MP3
     assert route.call_count==1
     assert route.calls[0].request.headers['Authorization']=='Api-Key new-yandex-key'
-    assert parse_qs(route.calls[0].request.content.decode())['folderId']==['new-folder']
+    assert parse_qs(route.calls[0].request.content.decode())=={
+        'text':['Привет!'],'lang':['ru-RU'],'voice':['alena'],'format':['mp3']}
+
+
+@pytest.mark.parametrize('folder',[None,'','wrong-old-folder'])
+async def test_api_key_request_does_not_require_or_send_folder_or_emotion(folder):
+    calls=[]
+    def reply(request):
+        calls.append(request)
+        assert request.headers['Authorization']=='Api-Key api-key-only'
+        assert not request.url.query
+        assert parse_qs(request.content.decode())=={
+            'text':['Русская речь'],'lang':['ru-RU'],'voice':['alena'],'format':['mp3']}
+        return httpx.Response(200,content=MP3)
+    result=await YandexTTSAdapter('api-key-only',folder,transport=httpx.MockTransport(reply)).synthesize(
+        'Русская речь','alena','good')
+    assert result==MP3 and len(calls)==1
+
+
+@respx.mock
+async def test_yandex_tts_works_without_folder_environment_or_parameter(monkeypatch):
+    monkeypatch.setenv('YANDEX_TTS_API_KEY','api-key-only')
+    monkeypatch.delenv('YANDEX_TTS_FOLDER_ID',raising=False)
+    route=respx.post(ENDPOINT).mock(return_value=httpx.Response(200,content=MP3))
+    assert await yandex_tts('Текст','filipp')==MP3
+    assert parse_qs(route.calls[0].request.content.decode())=={
+        'text':['Текст'],'lang':['ru-RU'],'voice':['filipp'],'format':['mp3']}
 
 
 @pytest.mark.parametrize('status',[400,401,403,429,500])
@@ -97,7 +122,7 @@ async def test_invalid_v1_input_stops_before_http(text,voice,emotion):
     request.assert_not_called()
 
 
-@pytest.mark.parametrize('key,folder,missing',[('', 'folder','YANDEX_TTS_API_KEY'),('key','','YANDEX_TTS_FOLDER_ID')])
+@pytest.mark.parametrize('key,folder,missing',[('', 'folder','YANDEX_TTS_API_KEY')])
 async def test_missing_config_fails_without_http(key,folder,missing):
     request=Mock(side_effect=AssertionError('HTTP must not run'))
     with pytest.raises(ValueError,match=missing):
@@ -131,8 +156,7 @@ async def test_full_yandex_error_body_is_logged_and_request_contract_remains_cor
         assert request.headers['Authorization']=='Api-Key test-key'
         assert not request.url.query
         assert parse_qs(request.content.decode())=={
-            'text':['Привет, мир!'],'lang':['ru-RU'],'voice':['alena'],
-            'emotion':['neutral'],'format':['mp3'],'folderId':['test-folder']}
+            'text':['Привет, мир!'],'lang':['ru-RU'],'voice':['alena'],'format':['mp3']}
         assert request.headers['content-type'].startswith('application/x-www-form-urlencoded')
         return httpx.Response(status,text=body)
     with pytest.raises(ProviderFailed):
@@ -274,8 +298,7 @@ def test_speech_preflight_needs_yandex_config_but_no_openai_key(tmp_path,monkeyp
     provider.preflight('speech')
     with pytest.raises(ValueError,match='YANDEX_TTS_API_KEY'):
         Providers(replace(settings,tts_key=''),config,Assets(tmp_path,config)).preflight('speech')
-    with pytest.raises(ValueError,match='YANDEX_TTS_FOLDER_ID'):
-        Providers(replace(settings,tts_folder_id=''),config,Assets(tmp_path,config)).preflight('speech')
+    Providers(replace(settings,tts_folder_id=''),config,Assets(tmp_path,config)).preflight('speech')
 
 
 @respx.mock

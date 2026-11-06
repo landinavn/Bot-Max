@@ -289,7 +289,7 @@ async def _scene_editing(db,key):
         JOIN cartoon_episodes e ON e.id=s.episode_id JOIN cartoon_projects p ON p.id=e.project_id
         LEFT JOIN cartoon_scene_editing t ON t.scene_id=s.id WHERE s.id=?''',(key,))
     if not row: raise ValueError('Сцена не найдена.')
-    default={2:3.0,3:3.0,5:1.0}.get(row['number'],0.0) if row['seed_key']=='anya-s1-v1' and row['episode_number']==1 else 0.0
+    default={2:3.0,3:5.0,5:1.0}.get(row['number'],0.0) if row['seed_key']=='anya-s1-v1' and row['episode_number']==1 else 0.0
     return dict(speech_start=row['speech_start'] if row['speech_start'] is not None else default,
                 video_start=row['video_start'] if row['video_start'] is not None else 0.0)
 
@@ -369,7 +369,7 @@ async def _apply_episode_timing_no_intro_v3(db):
     await db.execute('INSERT INTO cartoon_editing_migrations VALUES (?,?)',(name,scenes[0]['project_id']))
 
 
-async def _apply_episode_timings(db):
+async def _apply_episode_timing_delay_v4(db):
     await _apply_episode_timing_no_intro_v3(db)
     if not await one(db,"SELECT name FROM cartoon_editing_migrations WHERE name='anya-s1-e1-no-intro-20261107-v3'"):
         return
@@ -384,6 +384,22 @@ async def _apply_episode_timings(db):
         await db.execute('''INSERT INTO cartoon_scene_editing(scene_id,speech_start) VALUES (?,3)
             ON CONFLICT(scene_id) DO UPDATE SET speech_start=3''',(scene['id'],))
     await db.execute('INSERT INTO cartoon_editing_migrations VALUES (?,?)',(name,scenes[0]['project_id']))
+
+
+async def _apply_episode_timings(db):
+    await _apply_episode_timing_delay_v4(db)
+    if not await one(db,"SELECT name FROM cartoon_editing_migrations WHERE name='anya-s1-e1-delay-scenes-2-3-20261107-v4'"):
+        return
+    name='anya-s1-e1-delay-scene-3-20261107-v5'
+    if await one(db,'SELECT name FROM cartoon_editing_migrations WHERE name=?',(name,)):
+        return
+    scene=await one(db,'''SELECT s.id,p.id AS project_id FROM cartoon_scenes s
+        JOIN cartoon_episodes e ON e.id=s.episode_id JOIN cartoon_projects p ON p.id=e.project_id
+        WHERE p.seed_key='anya-s1-v1' AND e.number=1 AND s.number=3''')
+    if not scene: return
+    await db.execute('''INSERT INTO cartoon_scene_editing(scene_id,speech_start) VALUES (?,5)
+        ON CONFLICT(scene_id) DO UPDATE SET speech_start=5''',(scene['id'],))
+    await db.execute('INSERT INTO cartoon_editing_migrations VALUES (?,?)',(name,scene['project_id']))
 
 
 async def ensure_episode_timings():

@@ -31,13 +31,13 @@ async def test_one_time_upgrade_sets_requested_timings_and_preserves_media_ident
     else:
         # PR #191 already applied; keep its 4-second trim and update only speech.
         async with repo.connect() as db:
-            await db.execute("DELETE FROM cartoon_editing_migrations WHERE name='anya-s1-e1-no-intro-20261107-v3'")
+            await db.execute("DELETE FROM cartoon_editing_migrations WHERE name IN ('anya-s1-e1-no-intro-20261107-v3','anya-s1-e1-delay-scenes-2-3-20261107-v4')")
             await db.commit()
         await repo.set_scene_speech_start(shots[0]['id'],456,1)
         await repo.set_scene_speech_start(shots[2]['id'],456,2)
         await repo.set_scene_speech_start(shots[3]['id'],456,0.5)
     await repo.init()
-    expected={1:(0,0),2:(0,4),3:(2,0),4:(0,0),5:(1,0),6:(0,0),7:(0,0)}
+    expected={1:(0,0),2:(3,4),3:(3,0),4:(0,0),5:(1,0),6:(0,0),7:(0,0)}
     for shot in shots:
         settings=await repo.scene_editing(shot['id'])
         assert (settings['speech_start'],settings['video_start'])==expected[shot['number']]
@@ -49,7 +49,7 @@ async def test_one_time_upgrade_sets_requested_timings_and_preserves_media_ident
     assert (await repo.scene_editing(shots[0]['id']))['speech_start']==1.5
     assert (await repo.scene_editing(shots[1]['id']))['video_start']==3.5
     async with repo.connect() as db:
-        assert len(await repo.rows(db,'SELECT * FROM cartoon_editing_migrations'))==2
+        assert len(await repo.rows(db,'SELECT * FROM cartoon_editing_migrations'))==3
     assert await repo.claim() is None
 
 
@@ -128,4 +128,28 @@ async def test_trim_editor_menu_uses_separate_input_state(studio):
     assert (await context.get_data())['studio_input']['action']=='video_start'
     await dispatch_callback(router,event('studio:home'),context)
     assert await context.get_state() is None
+    assert await repo.claim() is None
+
+
+async def test_update_after_no_intro_keeps_cuts_and_other_scenes_and_runs_once(studio):
+    _,_,_=studio
+    _,episode=await ready_scene(studio)
+    shots=await repo.children('scene',episode['id'])
+    before=[await repo.snapshot('scene',s['id']) for s in shots]
+    async with repo.connect() as db:
+        await db.execute("DELETE FROM cartoon_editing_migrations WHERE name='anya-s1-e1-delay-scenes-2-3-20261107-v4'")
+        await db.commit()
+    await repo.set_scene_speech_start(shots[1]['id'],456,0)
+    await repo.set_scene_speech_start(shots[2]['id'],456,0)
+    await repo.set_scene_video_start(shots[2]['id'],456,0.5)
+    others={s['id']:await repo.scene_editing(s['id']) for s in shots if s['number'] not in (2,3)}
+    await repo.init()
+    assert await repo.scene_editing(shots[1]['id'])==dict(speech_start=3,video_start=4)
+    assert await repo.scene_editing(shots[2]['id'])==dict(speech_start=3,video_start=0.5)
+    assert others=={s['id']:await repo.scene_editing(s['id']) for s in shots if s['number'] not in (2,3)}
+    assert before==[await repo.snapshot('scene',s['id']) for s in shots]
+    await repo.set_scene_speech_start(shots[1]['id'],456,2.5)
+    await repo.init()
+    await seed(456)
+    assert (await repo.scene_editing(shots[1]['id']))['speech_start']==2.5
     assert await repo.claim() is None

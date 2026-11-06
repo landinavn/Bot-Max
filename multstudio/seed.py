@@ -63,4 +63,5 @@ async def seed(owner):
             dialogue=[dict(character_id=cast[name], text=text, direction=direction) for name,text,direction in dialogue]),
             episode_id=episode, number=number)
     await repo.ensure_masha_voice()
+    await repo.ensure_episode_timings()
     return project

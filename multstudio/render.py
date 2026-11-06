@@ -97,14 +97,20 @@ class Renderer:
         source = assets.get('video') or assets['image']
         voice = assets.get('speech')
         offset=repo.speech_start(scene.get('editing',{}).get('speech_start',0))
-        video_seconds=0.0 if source['kind']=='image' else await duration(self.assets.path(source['path']))
+        trim=repo.video_start(scene.get('editing',{}).get('video_start',0))
+        source_seconds=0.0 if source['kind']=='image' else await duration(self.assets.path(source['path']))
+        if trim and source['kind']=='image':
+            raise ValueError('Начало видео можно обрезать только у готового ролика, а не картинки.')
+        if trim and trim>=source_seconds:
+            raise ValueError('Начало видео находится за концом ролика. Укажите время меньше его длительности.')
+        video_seconds=max(0.0,source_seconds-trim)
         voice_seconds=await duration(self.assets.path(voice['path'])) if voice else 0.0
-        longest=max(float(scene['spec']['duration']),video_seconds,offset+voice_seconds+0.2 if voice else 0)
+        longest=max(max(0.0,float(scene['spec']['duration'])-trim),video_seconds,offset+voice_seconds+0.2 if voice else 0)
         # An integral video frame count also gives an integral 48 kHz sample count.
         seconds=math.ceil(longest*FPS-1e-9)/FPS
         extension=max(0.0,seconds-video_seconds) if source['kind']!='image' else 0.0
-        logger.info('Монтаж сцены %s: video=%.3f speech=%.3f start=%.3f output=%.3f freeze=%.3f',
-                    scene.get('number',scene.get('id','?')),video_seconds,voice_seconds,offset,seconds,extension)
+        logger.info('Монтаж сцены %s: video=%.3f speech=%.3f start=%.3f output=%.3f freeze=%.3f cut=%.3f',
+                    scene.get('number',scene.get('id','?')),video_seconds,voice_seconds,offset,seconds,extension,trim)
         result = self.assets.path(uuid4().hex + '.mp4')
         args = ['ffmpeg','-nostdin','-v','error','-y']
         if source['kind'] == 'image':
@@ -114,7 +120,7 @@ class Renderer:
             args += ['-i',str(self.assets.path(voice['path']))]
         else:
             args += ['-f','lavfi','-i','anullsrc=channel_layout=stereo:sample_rate=48000']
-        filters = (f'[0:v:0]setpts=PTS-STARTPTS,scale=1080:1920:force_original_aspect_ratio=increase,'
+        filters = (f'[0:v:0]setpts=PTS-STARTPTS,trim=start={trim:.9f},setpts=PTS-STARTPTS,scale=1080:1920:force_original_aspect_ratio=increase,'
                    f'crop=1080:1920,setsar=1,fps={FPS},tpad=stop_mode=clone:stop_duration={extension:.9f},'
                    f'trim=duration={seconds:.9f},setpts=PTS-STARTPTS[base]')
         current = 'base'

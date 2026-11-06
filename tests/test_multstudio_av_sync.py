@@ -162,9 +162,9 @@ async def test_editing_defaults_and_changes_preserve_all_scene_contexts(studio):
     _,episode=await ready_scene(studio)
     rows=await repo.children('scene',episode['id'])
     before=[await repo.snapshot('scene',s['id']) for s in rows]
-    assert (await repo.scene_editing(rows[0]['id']))['speech_start']==3
+    assert (await repo.scene_editing(rows[0]['id']))['speech_start']==1
     for s in rows[1:]:
-        assert (await repo.scene_editing(s['id']))['speech_start']==0
+        assert (await repo.scene_editing(s['id']))['speech_start']==(1 if s['number']==5 else 0)
     original=await repo.snapshot('episode',episode['id'])
     await repo.set_scene_speech_start(rows[0]['id'],456,'1,5')
     await repo.init()
@@ -189,11 +189,11 @@ async def test_scene_menu_has_independent_speech_start_editor(studio):
     pressed=event('studio:s:'+shot['id'])
     router=create_router(456,settings,assets)
     await dispatch_callback(router,pressed,await ready_context())
-    assert 'Начало речи: 3 с' in pressed.bot.send_message.await_args.kwargs['text']
+    assert 'Начало речи: 1 с' in pressed.bot.send_message.await_args.kwargs['text']
     pressed=event('studio:speech_start:'+shot['id'])
     context=await ready_context()
     await dispatch_callback(router,pressed,context)
-    assert '3 секунде' in pressed.bot.send_message.await_args.kwargs['text']
+    assert '1 секунде' in pressed.bot.send_message.await_args.kwargs['text']
     assert (await context.get_data())['studio_input']['action']=='speech_start'
     await dispatch_callback(router,event('studio:home'),context)
     assert await context.get_state() is None
@@ -235,7 +235,7 @@ async def test_new_assembly_quote_uses_saved_media_and_never_calls_paid_provider
     assert revised['id']!=initial['id'] and revised['estimate']==0
     import json
     snap=json.loads(revised['snapshot'])
-    assert snap['quote']['render_version']==2
+    assert snap['quote']['render_version']==3
     assert snap['scenes'][0]['editing']['speech_start']==3.5
     assert all(s['assets'].get('video') and s['assets'].get('speech') for s in snap['scenes'])
     # Confirming a stale free quote must not silently use previous timing.

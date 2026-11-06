@@ -7,6 +7,7 @@ import httpx
 
 from image_service import _image_api_client, _generate_image_bytes
 from .repository import encoded
+from .prompts import scene_image_prompt
 
 
 class TemporaryPollError(Exception):
@@ -101,13 +102,7 @@ class Providers:
                       'Neutral background, no text. ' + encoded(snap['world']) + '\n' + encoded(snap['spec']))
             refs = [snap['assets']['image']] if snap['assets'].get('image') else []
         else:
-            prompt = ('Create ONE vertical family 3D animated-film keyframe. Use character reference images '
-                      'as exact identity/outfit models, NOT as photographic humans. Consistent faces, ages, '
-                      'hair, clothing and body proportions. No subtitles, logos or advertising. '
-                      'The final reference, if supplied, is the apartment: preserve layout, furniture, props '
-                      'and lighting; change only camera and action. Scene and camera:\n' + encoded(snap['spec'])
-                      + '\nWORLD:\n' + encoded(snap['world']) + '\nCAST IN IMAGE ORDER:\n'
-                      + encoded([c['spec'] for c in snap['cast']]))
+            prompt = scene_image_prompt(snap)
             refs = [c['assets']['image'] for c in snap['cast']]
             if snap.get('location_reference'):
                 refs.append(snap['location_reference'])

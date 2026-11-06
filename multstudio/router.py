@@ -1,6 +1,7 @@
 """An isolated administrative router. No customer keyboards, tariffs or billing hooks."""
 import asyncio
 import json
+import logging
 import zipfile
 from uuid import uuid4
 
@@ -22,6 +23,7 @@ class StudioStates(StatesGroup):
 
 
 VOICES = {'alloy','nova','shimmer','echo','fable','onyx','coral','ash','sage'}
+logger = logging.getLogger(__name__)
 
 
 def validate_spec(entity, spec):
@@ -58,7 +60,12 @@ def create_router(admin_id, settings, assets):
 
     async def allowed(event):
         actor = event.get_ids()[1]
-        if actor is None or actor != admin_id or not settings.enabled or getattr(getattr(event,'message',None),'sender',None) and getattr(event.message.sender,'is_bot',False):
+        # In MessageCallback, message.sender is the BOT that posted the keyboard.
+        # The actor is callback.user; only incoming messages use message.sender.
+        callback = getattr(event,'callback',None)
+        sender = (getattr(callback,'user',None) if callback is not None else
+                  getattr(getattr(event,'message',None),'sender',None))
+        if actor is None or actor != admin_id or not settings.enabled or getattr(sender,'is_bot',False):
             return False
         return True
 
@@ -92,19 +99,20 @@ def create_router(admin_id, settings, assets):
         projects = [p for p in await repo.children('project') if p['owner_id']==admin_id]
         await tell(event,'🎬 Мультстудия — только для администратора. Все платные действия требуют отдельного подтверждения.\n'
                    'Расценки — оценки в USD, бюджет по умолчанию 0. /start — выйти в обычное меню.',
-                   [(p['title']+f" / сезон {p['season']}",'p:'+p['id']) for p in projects]
+                   [(p['title']+f" / сезон {p['season']}",'project:'+p['id']) for p in projects]
                    +[('➕ Создать мультсериал','new:project:root')])
 
     async def show(event,entity,key):
+        if entity=='project':
+            logger.info('Открываю проект %s', key)
         row,project = await owner(entity,key)
         if entity=='project':
             state = await repo.budget(key)
-            buttons = [(c['name'],'c:'+c['id']) for c in await repo.children('character',key)]
-            buttons += [(e['title'],'e:'+e['id']) for e in await repo.children('episode',key)]
-            buttons += [('➕ Персонаж','new:character:'+key),('➕ Серия','new:episode:'+key),
-                        ('✏️ Локация / стиль','edit:project:'+key),('💰 Бюджет','budget:'+key),
-                        ('📋 Задания и расходы','jobs:'+key),('📦 Архив исходников','export:'+key),('⬅️ Проекты','home')]
-            await tell(event,row['title']+f" / сезон {row['season']}\nБюджет: {dollars(state['limit'])}; расход + резервы: {dollars(state['committed'])}",buttons)
+            buttons = [('💰 Установить бюджет','budget:'+key),('👥 Персонажи','characters:'+key),
+                       ('🎬 Сцены','scenes:'+key),('⬅️ Назад','home')]
+            amount = dollars(state['limit']).removesuffix(' USD')
+            await tell(event,f"📁 Проект: {row['title']}\nБюджет: {amount}$\n"
+                       f"Расход + резервы: {dollars(state['committed'])}",buttons)
         elif entity=='character':
             await tell(event,row['name']+'\nID: '+key+'\n'+json.dumps(row['spec'],ensure_ascii=False,indent=2),[
                 ('✏️ Изменить персонажа / голос','edit:character:'+key),('📷 Загрузить референс','reference:'+key),
@@ -141,8 +149,24 @@ def create_router(admin_id, settings, assets):
         try:
             if action=='home':
                 await home(event,context)
+            elif action=='project':
+                await show(event,'project',parts[1])
             elif action in ('p','c','e','s'):
                 await show(event,{'p':'project','c':'character','e':'episode','s':'scene'}[action],parts[1])
+            elif action=='characters':
+                key=parts[1]
+                await owner('project',key)
+                buttons=[(c['name'],'c:'+c['id']) for c in await repo.children('character',key)]
+                await tell(event,'👥 Персонажи проекта',buttons+[
+                    ('➕ Добавить персонажа','new:character:'+key),('⬅️ Назад','project:'+key)])
+            elif action=='scenes':
+                key=parts[1]
+                await owner('project',key)
+                buttons=[(f"Серия {e['number']}: {e['title']}",'e:'+e['id']) for e in await repo.children('episode',key)]
+                await tell(event,'🎬 Сцены и серии проекта',buttons+[
+                    ('➕ Создать серию','new:episode:'+key),('✏️ Локация / стиль','edit:project:'+key),
+                    ('📋 Задания и расходы','jobs:'+key),('📦 Архив исходников','export:'+key),
+                    ('⬅️ Назад','project:'+key)])
             elif action in ('new','edit'):
                 entity,key=parts[1:3]
                 if action=='edit':

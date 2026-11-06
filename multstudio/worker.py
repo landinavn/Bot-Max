@@ -103,7 +103,7 @@ class Worker:
             text = f"Мультстудия: {item['kind']}, задание {item['id']}, статус {item['status']}. "
             if item['actual'] is None and item['status'] != 'preflight_failed':
                 text += 'Фактическую стоимость сверьте с провайдером; резерв бюджета сохранён. '
-            text += 'Откройте /multstudio → проект → Задания.'
+            text += 'Откройте /multstudio → проект → Сцены → Задания и расходы.'
             try:
                 sent = await self.bot.send_message(user_id=self.admin_id,text=text)
                 if sent is not None:

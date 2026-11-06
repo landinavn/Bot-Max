@@ -20,6 +20,7 @@ from photo_orders import PaidPhotoWorker
 from promo_service import PromoOfferWorker
 from animation_orders import PaidAnimationWorker
 from payment_incidents import PaymentIncidentWorker
+from multstudio.bootstrap import configure as configure_studio
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,11 @@ async def main() -> None:
             use_create_task=True,
             event_isolation=SimpleEventIsolation(),
         )
+        studio_worker = None
+        try:
+            studio_worker = await configure_studio(bot, dispatcher, config)
+        except Exception as exc:
+            logger.warning('Мультстудия отключена из-за ошибки настройки (%s); основной бот продолжает работу.', type(exc).__name__)
         dispatcher.include_routers(create_router(payments=payments, admin_user_id=config.admin_user_id, bot_link=config.bot_link))
         webhook_runner = None
         audio_task = None
@@ -59,9 +65,12 @@ async def main() -> None:
         promo_task = None
         animation_task = None
         payment_incident_task = None
+        studio_task = None
         musical_worker = PaidMusicalWorker(bot, bot_link=config.bot_link,admin_user_id=config.admin_user_id)
         audio_worker = PaidAudioWorker(bot, payments=payments, admin_user_id=config.admin_user_id)
         try:
+            if studio_worker is not None:
+                studio_task = asyncio.create_task(studio_worker.run())
             if payments is not None:
                 webhook_runner = await start_webhook_server(
                     payments, config.webhook_host, config.webhook_port, audio_worker=audio_worker, musical_worker=musical_worker,
@@ -78,6 +87,12 @@ async def main() -> None:
             await dispatcher.start_polling(bot)
         finally:
             try:
+                if studio_task is not None:
+                    studio_task.cancel()
+                    try:
+                        await studio_task
+                    except asyncio.CancelledError:
+                        pass
                 if payment_incident_task is not None:
                     payment_incident_task.cancel()
                     try:

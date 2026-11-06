@@ -1,5 +1,7 @@
 """One paid POST per confirmed job; polling is a separate, retryable operation."""
 import base64
+import logging
+import os
 from dataclasses import replace
 from urllib.parse import quote
 
@@ -8,6 +10,9 @@ import httpx
 from image_service import _image_api_client, _generate_image_bytes
 from .repository import encoded
 from .prompts import scene_image_prompt, validate_scene_image_references
+from .tts import voice_settings, validate_speech_snapshot, VOICES, EMOTIONS
+
+logger = logging.getLogger(__name__)
 
 
 class TemporaryPollError(Exception):
@@ -20,6 +25,52 @@ class ProviderFailed(Exception):
 
 class KlingTaskFailed(ProviderFailed):
     """Provider explicitly reports a TERMINAL task status, unlike a transport error."""
+
+
+class YandexTTSAdapter:
+    ENDPOINT = 'https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize'
+
+    def __init__(self, key, folder_id, transport=None):
+        self.key, self.folder_id, self.transport = key, folder_id, transport
+
+    def ready(self):
+        if not self.key:
+            raise ValueError('Задайте YANDEX_TTS_API_KEY для мультстудии.')
+        if not self.folder_id:
+            raise ValueError('Задайте YANDEX_TTS_FOLDER_ID для мультстудии.')
+
+    async def synthesize(self, text: str, voice: str, emotion: str = 'neutral') -> bytes:
+        self.ready()
+        if not isinstance(text, str) or not text.strip() or len(text) > 5000:
+            raise ValueError('Реплика SpeechKit должна содержать от 1 до 5000 символов.')
+        if voice not in VOICES or emotion not in EMOTIONS:
+            raise ValueError('Нужен поддерживаемый голос и эмоция SpeechKit v1.')
+        try:
+            async with httpx.AsyncClient(timeout=60, trust_env=False, follow_redirects=False,
+                                         transport=self.transport) as client:
+                result = await client.post(self.ENDPOINT, headers={'Authorization': 'Api-Key ' + self.key},
+                    data=dict(text=text, lang='ru-RU', voice=voice, emotion=emotion,
+                              format='mp3', folderId=self.folder_id))
+        except httpx.HTTPError as exc:
+            logger.warning('Yandex TTS: ошибка соединения (%s)',type(exc).__name__)
+            raise ProviderFailed('Ошибка соединения со SpeechKit. Новый платный запрос автоматически не отправляется.') from None
+        if result.status_code != 200:
+            # Never log the body: provider errors may echo API keys or dialogue.
+            logger.warning('Yandex TTS: запрос отклонён, HTTP %s',result.status_code)
+            raise ProviderFailed(f'SpeechKit отклонил запрос: HTTP {result.status_code}.')
+        data = result.content
+        if not (data.startswith(b'ID3') or (len(data)>1 and data[0]==255 and data[1]&224==224)):
+            logger.warning('Yandex TTS: вместо MP3 получен некорректный ответ, bytes=%s',len(data))
+            raise ProviderFailed('SpeechKit не вернул непустое MP3-аудио.')
+        logger.info('Yandex TTS: озвучено %s символов, голос %s',len(text),voice)
+        return data
+
+
+async def yandex_tts(text: str, voice: str, emotion: str = 'neutral', *,
+                     api_key=None, folder_id=None) -> bytes:
+    key=os.getenv('YANDEX_TTS_API_KEY','').strip() if api_key is None else api_key
+    folder=os.getenv('YANDEX_TTS_FOLDER_ID','').strip() if folder_id is None else folder_id
+    return await YandexTTSAdapter(key,folder).synthesize(text,voice,emotion)
 
 
 class KlingAdapter:
@@ -76,6 +127,7 @@ class Providers:
     def __init__(self, settings, config, assets):
         self.settings, self.config, self.assets = settings, config, assets
         self.kling = KlingAdapter(settings.kling_key)
+        self.tts = YandexTTSAdapter(settings.tts_key, settings.tts_folder_id)
 
     def preflight(self, kind):
         from image_service import _storage_client
@@ -85,12 +137,11 @@ class Providers:
         if kind=='image':
             self.assets.canonical_image_url('multstudio/preflight.png')
         if kind == 'speech':
+            self.tts.ready()
             from .render import Renderer
             Renderer(self.assets).ready()
         if kind == 'video':
             self.kling.ready()
-        elif kind == 'speech' and not self.settings.tts_key:
-            raise ValueError('Задайте STUDIO_TTS_API_KEY или IMAGE_API_KEY.')
         elif kind == 'image' and not self.config.image_api_key:
             raise ValueError('Задайте IMAGE_API_KEY.')
 
@@ -124,12 +175,10 @@ class Providers:
         return base64.b64decode(item.b64_json, validate=True)
 
     async def speech_line(self, snap, line):
+        validate_speech_snapshot(snap)
         character = next((c for c in snap['cast'] if c['id'] == line['character_id']), None)
         if character is None:
             raise ValueError('Говорящий персонаж отсутствует в сцене.')
-        config = replace(self.config, image_api_key=self.settings.tts_key)
-        async with _image_api_client(config) as client:
-            result = await client.audio.speech.create(model='gpt-4o-mini-tts', voice=character['spec']['voice'],
-                input=line['text'], response_format='mp3', instructions=character['spec'].get('voice_direction', '')
-                + ' ' + line.get('direction', '') + ' Speak naturally in Russian. Never artificially speed up.')
-            return result.content
+        voice, emotion = voice_settings(character['spec'])
+        return await yandex_tts(line['text'],voice,emotion,
+                                api_key=self.settings.tts_key,folder_id=self.settings.tts_folder_id)

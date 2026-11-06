@@ -16,13 +16,13 @@ from handlers import _reply
 from . import repository as repo
 from .seed import seed
 from .settings import dollars, money
+from .tts import VOICES, voice_settings
 
 
 class StudioStates(StatesGroup):
     input = State()
 
 
-VOICES = {'alloy','nova','shimmer','echo','fable','onyx','coral','ash','sage'}
 logger = logging.getLogger(__name__)
 DESCRIPTION_PROMPT = 'Пожалуйста, введите описание обычным текстом (без кавычек и фигурных скобок)'
 
@@ -31,8 +31,9 @@ def validate_spec(entity, spec):
     if not isinstance(spec, dict) or len(repo.encoded(spec)) > 30000:
         raise ValueError('Ожидается объект JSON до 30000 символов.')
     if entity == 'character':
-        if not isinstance(spec.get('description'), str) or not spec['description'].strip() or spec.get('voice') not in VOICES:
+        if not isinstance(spec.get('description'), str) or not spec['description'].strip():
             raise ValueError('Укажите description и постоянный voice: ' + ', '.join(sorted(VOICES)))
+        voice_settings(spec)
     if entity == 'scene':
         if not isinstance(spec.get('visual'),str) or not spec['visual'].strip():
             raise ValueError('Нужно описание visual.')
@@ -124,7 +125,9 @@ def create_router(admin_id, settings, assets):
             await tell(event,f"📁 Проект: {row['title']}\nБюджет: {amount}$\n"
                        f"Расход + резервы: {dollars(state['committed'])}",buttons)
         elif entity=='character':
-            await tell(event,row['name']+'\nID: '+key+'\n'+json.dumps(row['spec'],ensure_ascii=False,indent=2),[
+            voice,emotion=voice_settings(row['spec'])
+            await tell(event,row['name']+'\nID: '+key+f'\nSpeechKit v1: {voice}, emotion={emotion}\n'
+                       +json.dumps(dict(row['spec'],voice=voice,emotion=emotion),ensure_ascii=False,indent=2),[
                 ('✏️ Изменить описание','edit:character:'+key),
                 ('🎙 Настройки голоса (JSON)','character_settings:'+key),('📷 Загрузить референс','reference:'+key),
                 ('🎨 Создать / перегенерировать эталон','make:image:character:'+key),
@@ -216,8 +219,11 @@ def create_router(admin_id, settings, assets):
                 row,_=await owner('character',key)
                 await context.update_data(studio_input=dict(action='character_settings',entity='character',key=key))
                 await context.set_state(StudioStates.input)
-                await tell(event,'Расширенные настройки голоса: пришлите JSON. Чтобы изменить только описание, '
-                           'используйте кнопку «Изменить описание».\n'+json.dumps(row['spec'],ensure_ascii=False,indent=2),[('Отмена','home')])
+                voice,emotion=voice_settings(row['spec'])
+                await tell(event,'Настройки SpeechKit v1: пришлите JSON, voice='+', '.join(sorted(VOICES))
+                           +'; emotion=neutral/good/evil. Чтобы изменить только описание, '
+                           'используйте кнопку «Изменить описание».\n'
+                           +json.dumps(dict(row['spec'],voice=voice,emotion=emotion),ensure_ascii=False,indent=2),[('Отмена','home')])
             elif action in ('new','edit'):
                 entity,key=parts[1:3]
                 if action=='edit':
@@ -227,7 +233,7 @@ def create_router(admin_id, settings, assets):
                     if entity!='project':
                         await owner('episode' if entity=='scene' else 'project',key)
                     sample={'project':{'title':'Новый мультсериал','season':1,'style':'Семейная 3D-анимация','location':'Описание локации'},
-                            'character':{'name':'Имя','description':'Возраст, лицо, причёска, одежда, характер','voice':'nova','voice_direction':'Описание голоса'},
+                            'character':{'name':'Имя','description':'Возраст, лицо, причёска, одежда, характер','voice':'alena','emotion':'neutral','voice_direction':'Описание голоса'},
                             'episode':{'title':'Новая серия','ending':['Продолжение следует…']},
                             'scene':{'title':'Новая сцена','duration':5,'visual':'Действие и локация','camera':'Средний план',
                                      'characters':[],'dialogue':[],'approved':False}}[entity]

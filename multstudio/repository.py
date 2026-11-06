@@ -574,7 +574,7 @@ async def quote(target, key, kind, settings):
     if profiles is not None:
         cost['speech_profiles'] = profiles
     if kind=='assemble':
-        cost['render_version']=3
+        cost['render_version']=4
     snap['quote'] = cost
     fingerprint = digest(snap)
     async with connect() as db:

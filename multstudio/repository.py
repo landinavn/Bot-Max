@@ -136,6 +136,32 @@ async def edit(entity, key, spec):
         await db.commit()
 
 
+async def update_character_description(key, actor, description):
+    """Patch only description from current stored spec, atomically with its revision."""
+    if not isinstance(description,str) or not description.strip() or len(description)>10000:
+        raise ValueError('Описание должно содержать от 1 до 10000 символов обычного текста.')
+    async with connect() as db:
+        await db.execute('BEGIN IMMEDIATE')
+        row=await one(db,'''SELECT c.*,p.owner_id FROM cartoon_characters c
+            JOIN cartoon_projects p ON p.id=c.project_id WHERE c.id=?''',(key,))
+        if not row or row['owner_id']!=actor:
+            raise ValueError('Персонаж недоступен или нет доступа к проекту.')
+        try:
+            spec=json.loads(row['spec']) if isinstance(row['spec'],str) else row['spec']
+        except json.JSONDecodeError:
+            raise ValueError('Настройки персонажа в базе повреждены. Изменений нет.') from None
+        if not isinstance(spec,dict):
+            raise ValueError('Настройки персонажа в базе повреждены. Изменений нет.')
+        if spec.get('description')==description:
+            return
+        spec=dict(spec,description=description)
+        revision=row['revision']+1
+        await db.execute('UPDATE cartoon_characters SET spec=?,revision=? WHERE id=?',(encoded(spec),revision,key))
+        await db.execute('INSERT INTO cartoon_versions VALUES (?,?,?,?,CURRENT_TIMESTAMP)',
+                         ('character',key,revision,encoded(spec)))
+        await db.commit()
+
+
 async def liability(db, project):
     row = await one(db, '''SELECT COALESCE(SUM(CASE WHEN actual IS NOT NULL THEN actual ELSE estimate END),0) AS total
       FROM cartoon_jobs WHERE project_id=? AND status NOT IN ('quoted','cancelled','stale','preflight_failed')''', (project,))

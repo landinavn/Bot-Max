@@ -71,12 +71,22 @@ def create_router(admin_id, settings, assets):
             return False
         return True
 
-    async def tell(event,text,buttons=(),links=()):
+    async def tell(event,text,buttons=(),links=(),*,replace=False):
         builder = InlineKeyboardBuilder()
         for title,payload in buttons:
             builder.row(CallbackButton(text=title,payload='studio:'+payload))
         for title,url in links:
             builder.row(LinkButton(text=title,url=url))
+        editor=getattr(event.bot,'edit_message',None)
+        body=getattr(getattr(event,'message',None),'body',None)
+        if replace and len(text)<=3500 and callable(editor) and getattr(body,'mid',None):
+            try:
+                edited=await editor(message_id=body.mid,text=text,
+                    attachments=[builder.as_markup()] if buttons or links else [],notify=False)
+                if edited is not None:
+                    return
+            except Exception as exc:
+                logger.warning('Не удалось обновить карточку студии (%s); отправляется новая.',type(exc).__name__)
         for offset in range(0,max(1,len(text)),3500):
             last=offset+3500>=len(text)
             await _reply(event,text[offset:offset+3500],**({'attachments':[builder.as_markup()]} if last and (buttons or links) else {}))
@@ -113,7 +123,7 @@ def create_router(admin_id, settings, assets):
                    [(p['title']+f" / сезон {p['season']}",'project:'+p['id']) for p in projects]
                    +[('➕ Создать мультсериал','new:project:root')])
 
-    async def show(event,entity,key):
+    async def show(event,entity,key,*,notice='',replace=False):
         if entity=='project':
             logger.info('Открываю проект %s', key)
         row,project = await owner(entity,key)
@@ -140,12 +150,21 @@ def create_router(admin_id, settings, assets):
             await tell(event,row['title']+'\nЕстественная речь без ускорения; целевая длительность 40 секунд, допустимо 42–45.\n'
                        'Звуковые эффекты и отдельная музыка сцен в MVP сохраняются как режиссёрские указания; можно загрузить общий музыкальный трек.',buttons)
         else:
-            await tell(event,f"Сцена {row['number']} · версия {row['revision']}\n"+json.dumps(row['spec'],ensure_ascii=False,indent=2),[
+            snap=await repo.snapshot('scene',key)
+            links=[]
+            for kind,title in (('image','🖼️ Открыть картинку'),('video','🎬 Открыть видео')):
+                if snap['assets'].get(kind):
+                    try:
+                        links.append((title,await assets.asset_url(snap['assets'][kind])))
+                    except Exception as exc:
+                        logger.warning('Не удалось получить ссылку сцены %s kind=%s (%s)',key,kind,type(exc).__name__)
+            await tell(event,(notice+'\n' if notice else '')+f"Сцена {row['number']} · версия {row['revision']}\n"+json.dumps(row['spec'],ensure_ascii=False,indent=2),[
                 ('✏️ Изменить сцену','edit:scene:'+key),('🎨 Изображение / перегенерировать','make:image:scene:'+key),
+                ('♻️ Восстановить картинку и видео','restore_assets:'+key),
                 ('📤 Загрузить своё изображение','scene_upload:'+key),
                 ('⚙️ Параметры сцены (JSON)','scene_settings:'+key),
                 ('🎥 Оживить','make:video:scene:'+key),('🎙 Озвучить','make:speech:scene:'+key),
-                ('👁 Результаты / утвердить изображение','view:scene:'+key),('⬅️ Серия','e:'+row['episode_id'])])
+                ('👁 Результаты / утвердить изображение','view:scene:'+key),('⬅️ Серия','e:'+row['episode_id'])],links,replace=replace)
 
     @router.message_created(Command('multstudio'))
     async def studio_start(event,context:MemoryContext):
@@ -169,6 +188,13 @@ def create_router(admin_id, settings, assets):
                 await show(event,'project',parts[1])
             elif action in ('p','c','e','s'):
                 await show(event,{'p':'project','c':'character','e':'episode','s':'scene'}[action],parts[1])
+            elif action=='restore_assets':
+                key=parts[1]
+                await owner('scene',key)
+                result=await repo.restore_scene_assets(key,actor=admin_id,assets=assets)
+                restored=', '.join('картинка' if kind=='image' else 'видео' for kind in result['restored'])
+                missing=(' Не найдено в архиве: '+', '.join('картинка' if k=='image' else 'видео' for k in result['missing'])+'.') if result['missing'] else ''
+                await show(event,'scene',key,notice='♻️ Восстановлено из архива: '+restored+'.'+missing,replace=True)
             elif action=='characters':
                 key=parts[1]
                 await owner('project',key)
@@ -490,6 +516,9 @@ async def export_project(project,assets):
         data['assets']=await repo.rows(db,'SELECT * FROM cartoon_assets WHERE project_id=?',(project,))
         data['scene_image_selections']=await repo.rows(db,'''SELECT s.* FROM cartoon_scene_image_selections s
             JOIN cartoon_scenes c ON c.id=s.scene_id JOIN cartoon_episodes e ON e.id=c.episode_id
+            WHERE e.project_id=?''',(project,))
+        data['scene_asset_restorations']=await repo.rows(db,'''SELECT r.* FROM cartoon_scene_asset_restorations r
+            JOIN cartoon_scenes s ON s.id=r.scene_id JOIN cartoon_episodes e ON e.id=s.episode_id
             WHERE e.project_id=?''',(project,))
         ids=[project]+[r['id'] for kind in ('characters','episodes','scenes') for r in data[kind]]
         data['versions']=await repo.rows(db,'SELECT * FROM cartoon_versions WHERE entity_id IN ('+','.join('?' for _ in ids)+')',ids)

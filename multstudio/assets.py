@@ -170,6 +170,57 @@ class Assets:
         return await repo.add_asset(snapshot['project_id'], snapshot['target'], snapshot['id'], kind,
             snapshot['context_hash'], relative, checksum, job_id=job_id, source_url=url)
 
+    async def archived_scene_file(self, job, kind, candidates):
+        """Locate immutable output by job namespace/SHA, never generate or overwrite."""
+        suffixes=('png','jpg','jpeg','webp') if kind=='image' else ('mp4',)
+        canonical=[self.filename(s,job['id'],('image.' if kind=='image' else 'video.')+s) for s in suffixes]
+        if not candidates:
+            try:
+                snap=json.loads(job['snapshot'])
+            except (ValueError,TypeError):
+                snap={}
+            if not isinstance(snap,dict):
+                snap={}
+            candidates=[dict(context_hash=snap.get('context_hash'),public_url=job.get('result_url'),approved=0)]
+        for candidate in candidates:
+            expected=candidate.get('sha256')
+            if expected and not re.fullmatch(r'[a-f0-9]{64}',expected):
+                continue
+            paths=([candidate['path']] if candidate.get('path') else [])+canonical
+            def locate():
+                for relative in dict.fromkeys(paths):
+                    try:
+                        path=self.path(relative)
+                    except ValueError:
+                        continue
+                    if path.is_file() and path.stat().st_size:
+                        checksum=self.checksum(path)
+                        if not expected or checksum==expected:
+                            return path.relative_to(self.root).as_posix(),checksum
+                if expected:
+                    for path in self.root.rglob('*'):
+                        if path.suffix.lower().lstrip('.') in suffixes and path.is_file():
+                            try:
+                                path=self.path(path.relative_to(self.root))
+                            except ValueError:
+                                continue
+                            if self.checksum(path)==expected:
+                                return path.relative_to(self.root).as_posix(),expected
+                return None
+            found=await asyncio.to_thread(locate)
+            url=candidate.get('public_url') or job.get('result_url')
+            if found is None and url:
+                try:
+                    relative,checksum=await self.download(url,suffixes[0],job_id=job['id'],
+                        name=('image.' if kind=='image' else 'video.')+suffixes[0])
+                    if not expected or checksum==expected:
+                        found=(relative,checksum)
+                except Exception as exc:
+                    logger.warning('Архив сцены: файл недоступен job=%s kind=%s error=%s',job['id'],kind,type(exc).__name__)
+            if found:
+                return dict(candidate,path=found[0],sha256=found[1],public_url=url)
+        return None
+
     async def recover_image(self, asset):
         expected=asset.get('sha256','')
         if not re.fullmatch(r'[a-f0-9]{64}',expected):

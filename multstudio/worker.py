@@ -7,6 +7,7 @@ import time
 from . import repository as repo
 from .adapters import TemporaryPollError, KlingTaskFailed
 from .render import Renderer
+from .diagnostics import log_preflight_failure
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class Worker:
         key, kind = item['id'], item['kind']
         snap = json.loads(item['snapshot'])
         snap['job_id'] = key
+        preflight = item['status']=='preparing'
         beat = asyncio.create_task(self.heartbeat(key))
         try:
             if kind == 'video' and item['status'] == 'polling':
@@ -54,6 +56,7 @@ class Worker:
                 image_url = await self.assets.asset_url(snap['assets']['image'])
             if not await repo.begin_submission(key):
                 return
+            preflight = False
             if kind == 'image':
                 data = await self.providers.image(snap)
                 await self.save_result(item,snap,data=data)
@@ -77,6 +80,9 @@ class Worker:
             # Keep submitting + lease as durable evidence; recovery never resubmits it.
             raise
         except Exception as exc:
+            # Diagnose before persistence: even a subsequent SQLite error must not hide the original stack.
+            if preflight:
+                log_preflight_failure(logger,key,exc,self.settings,self.providers)
             current = await repo.job(key)
             attempts = current['attempts']+1
             polling = current['status']=='polling' and current['provider_id']
@@ -88,7 +94,8 @@ class Worker:
                          'preflight_failed' if current['status']=='preparing' else 'manual')
                 await repo.update_job(key,status=state,error=type(exc).__name__,lease_until=0,notified=0)
             # Do not log exception contents: provider errors may contain credentials/personal text.
-            logger.warning('Мультстудия: задание %s требует проверки (%s).',key,type(exc).__name__)
+            if not preflight:
+                logger.warning('Мультстудия: задание %s требует проверки (%s).',key,type(exc).__name__)
         finally:
             beat.cancel()
             try:

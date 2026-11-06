@@ -4,19 +4,30 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
 
+USD_MICROS = 1000000
+
 
 def money(value):
+    """Parse a USD amount; DB/quotes/budgets always use integer micro-USD."""
     try:
-        number = Decimal(str(value))
+        normalized = str(value).replace(',', '.').strip() or '0'
+        number = Decimal(normalized)
     except InvalidOperation:
         raise ValueError('Введите сумму USD числом, например 10.50.') from None
     if not number.is_finite() or number < 0 or number > 100000:
         raise ValueError('Сумма USD должна быть от 0 до 100000.')
-    return int((number * 1000000).to_integral_value(rounding=ROUND_CEILING))
+    return int((number * USD_MICROS).to_integral_value(rounding=ROUND_CEILING))
+
+
+def price_from_env(name):
+    try:
+        return money(os.getenv(name, '0'))
+    except ValueError as exc:
+        raise ValueError(f'{name}: {exc}') from None
 
 
 def dollars(value):
-    return f'{Decimal(value) / 1000000:.6f} USD'
+    return f'{Decimal(value) / USD_MICROS:.6f} USD'
 
 
 @dataclass(frozen=True)
@@ -38,9 +49,9 @@ class Settings:
                    image_model=config.image_model, image_quality=config.image_quality,
                    kling_key=os.getenv('STUDIO_KLING_API_KEY') or config.piapi_key or '',
                    tts_key=os.getenv('STUDIO_TTS_API_KEY') or config.image_api_key or '',
-                   image_price=money(os.getenv('STUDIO_IMAGE_USD', '0')),
-                   video_price=money(os.getenv('STUDIO_KLING_5S_USD', '0')),
-                   speech_price=money(os.getenv('STUDIO_TTS_1000_CHARS_USD', '0')),
+                   image_price=price_from_env('STUDIO_IMAGE_USD'),
+                   video_price=price_from_env('STUDIO_KLING_5S_USD'),
+                   speech_price=price_from_env('STUDIO_TTS_1000_CHARS_USD'),
                    concurrency=max(1, min(3, int(os.getenv('STUDIO_CONCURRENCY', '1')))),
                    enabled=os.getenv('STUDIO_ENABLED', '0') == '1')
 

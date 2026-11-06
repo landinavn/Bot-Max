@@ -62,4 +62,5 @@ async def seed(owner):
             characters=[cast[name] for name in people], visual=visual, camera=camera, sound=sound,
             dialogue=[dict(character_id=cast[name], text=text, direction=direction) for name,text,direction in dialogue]),
             episode_id=episode, number=number)
+    await repo.ensure_masha_voice()
     return project

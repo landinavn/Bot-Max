@@ -90,11 +90,14 @@ CREATE TABLE IF NOT EXISTS cartoon_scene_asset_restorations (
  scene_id TEXT NOT NULL REFERENCES cartoon_scenes(id), context_hash TEXT NOT NULL,
  kind TEXT NOT NULL, asset_id TEXT NOT NULL REFERENCES cartoon_assets(id),
  asset_watermark INTEGER NOT NULL, PRIMARY KEY(scene_id,context_hash,kind));
+CREATE TABLE IF NOT EXISTS cartoon_character_speech_profiles (
+ character_id TEXT PRIMARY KEY REFERENCES cartoon_characters(id), profile TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS cartoon_jobs_queue ON cartoon_jobs(status,next_attempt,lease_until);
 ''')
         columns = await rows(db,'PRAGMA table_info(cartoon_jobs)')
         if 'result_url' not in {column['name'] for column in columns}:
             await db.execute('ALTER TABLE cartoon_jobs ADD COLUMN result_url TEXT')
+        await _ensure_masha_voice(db)
         await db.commit()
 
 
@@ -120,6 +123,42 @@ async def children(entity, parent=None):
         result = await rows(db, f'SELECT * FROM {table}' + (f' WHERE {parent_field}=?' if parent_field else '')
                             + ' ORDER BY rowid', (parent,) if parent_field else ())
     return [unpack(r) for r in result]
+
+
+async def _ensure_masha_voice(db):
+    # Only the approved seed series. Never rewrite character specs/revisions or media hashes.
+    from .tts import MASHA_PROFILE
+    await db.execute('''INSERT OR IGNORE INTO cartoon_character_speech_profiles(character_id,profile)
+        SELECT c.id,? FROM cartoon_characters c JOIN cartoon_projects p ON p.id=c.project_id
+        WHERE p.seed_key='anya-s1-v1' AND c.name='Маша' ''', (encoded(MASHA_PROFILE),))
+
+
+async def ensure_masha_voice():
+    async with connect() as db:
+        await _ensure_masha_voice(db)
+        await db.commit()
+
+
+async def character_speech(key):
+    from .tts import speech_settings
+    async with connect() as db:
+        row=await one(db,'''SELECT c.name,c.spec,p.profile FROM cartoon_characters c
+            LEFT JOIN cartoon_character_speech_profiles p ON p.character_id=c.id WHERE c.id=?''',(key,))
+    if not row: raise ValueError('Персонаж не найден.')
+    return speech_settings(json.loads(row['profile'] or row['spec']),row['name'])
+
+
+async def set_character_speech(key,actor,profile):
+    from .tts import speech_settings
+    profile=speech_settings(profile)
+    async with connect() as db:
+        await db.execute('BEGIN IMMEDIATE')
+        row=await one(db,'''SELECT c.id FROM cartoon_characters c JOIN cartoon_projects p ON p.id=c.project_id
+            WHERE c.id=? AND p.owner_id=?''',(key,actor))
+        if not row: raise ValueError('Нет доступа к персонажу.')
+        await db.execute('INSERT OR REPLACE INTO cartoon_character_speech_profiles VALUES (?,?)',(key,encoded(profile)))
+        await db.commit()
+    return profile
 
 
 async def create(entity, spec, **fields):
@@ -411,15 +450,14 @@ async def quote(target, key, kind, settings):
         if not snap.get('scenes') or any(not (s['assets'].get('image') or s['assets'].get('video'))
              or (s['spec'].get('dialogue') and not s['assets'].get('speech')) for s in snap['scenes']):
             raise ValueError('Для каждой сцены нужны изображение/видео и озвучка всех реплик.')
-    cost = settings.quote(kind, snap)
+    profiles = None
     if kind == 'speech':
-        from .tts import speech_settings
         profiles = {}
-        async with connect() as db:
-            for character in snap['cast']:
-                row = await one(db,'SELECT name FROM cartoon_characters WHERE id=?',(character['id'],))
-                name = row['name'] if row else None
-                profiles[character['id']] = dict(speech_settings(character['spec'],name),name=name or 'Персонаж')
+        for character in snap['cast']:
+            row = await get('character',character['id'])
+            profiles[character['id']] = dict(await character_speech(character['id']),name=row['name'])
+    cost = settings.quote(kind, snap, speech_profiles=profiles) if profiles is not None else settings.quote(kind, snap)
+    if profiles is not None:
         cost['speech_profiles'] = profiles
     snap['quote'] = cost
     fingerprint = digest(snap)

@@ -102,9 +102,10 @@ async def test_voice_settings_remain_separate_explicit_json_editor(studio,replie
     pressed=event('studio:character_settings:'+char['id'])
     await dispatch_callback(router,pressed,context)
     assert 'пришлите JSON' in pressed.bot.send_message.await_args.kwargs['text']
-    spec=dict(char['spec'],voice='alloy')
-    await call_handler(router,'studio_input',message_event(json.dumps(spec,ensure_ascii=False)),context)
-    assert (await repo.get('character',char['id']))['spec']==spec
+    profile=dict(voice='jane',emotion='good',speed=1.0)
+    await call_handler(router,'studio_input',message_event(json.dumps(profile,ensure_ascii=False)),context)
+    assert await repo.get('character',char['id'])==char
+    assert await repo.character_speech(char['id'])==profile
 
 
 async def test_foreign_project_and_non_admin_cannot_update_description(studio,replies):

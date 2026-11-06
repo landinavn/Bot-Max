@@ -11,7 +11,7 @@ import httpx
 from image_service import _image_api_client, _generate_image_bytes
 from .repository import encoded
 from .prompts import scene_image_prompt, validate_scene_image_references
-from .tts import normalize_speed, validate_speech_snapshot, VOICES, EMOTIONS
+from .tts import normalize_speed, validate_speech_snapshot, speech_settings, VOICES, EMOTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ class YandexTTSAdapter:
         self.ready()
         if not isinstance(text, str) or not text.strip() or len(text) > 5000:
             raise ValueError('Реплика SpeechKit должна содержать от 1 до 5000 символов.')
-        if voice not in VOICES or emotion not in EMOTIONS:
+        if voice not in VOICES or voice=='masha' or emotion not in EMOTIONS:
             raise ValueError('Нужен поддерживаемый голос и эмоция SpeechKit v1.')
         speed = normalize_speed(speed)
         try:
@@ -82,10 +82,67 @@ class YandexTTSAdapter:
         return data
 
 
+class YandexTTSV3Adapter(YandexTTSAdapter):
+    ENDPOINT = 'https://tts.api.cloud.yandex.net/tts/v3/utteranceSynthesis'
+
+    async def synthesize(self, text, voice, emotion='good', speed=1.0, *, pitch_shift=0):
+        self.ready()
+        if not isinstance(text,str) or not text.strip() or len(text)>5000:
+            raise ValueError('Реплика SpeechKit должна содержать от 1 до 5000 символов.')
+        if voice!='masha':
+            raise ValueError('Этот адаптер SpeechKit v3 настроен для голоса masha.')
+        profile=speech_settings(dict(voice=voice,emotion=emotion,speed=speed,pitch_shift=pitch_shift))
+        payload=dict(text=text,hints=[{'voice':voice},{'role':profile['emotion']},
+            {'speed':str(profile['speed'])},{'pitchShift':str(profile['pitch_shift'])}],
+            outputAudioSpec={'containerAudio':{'containerAudioType':'MP3'}})
+        if len(text)>250:
+            payload['unsafeMode']=True  # SpeechKit v3's documented long-utterance mode, billed in 250-char blocks.
+        try:
+            async with httpx.AsyncClient(timeout=60,trust_env=False,follow_redirects=False,
+                                         transport=self.transport) as client:
+                response=await client.post(self.ENDPOINT,headers={'Authorization':'Api-Key '+self.key},json=payload)
+        except httpx.HTTPError as exc:
+            logger.warning('Yandex TTS v3: ошибка соединения (%s)',type(exc).__name__)
+            raise ProviderFailed('Ошибка соединения со SpeechKit v3. Новый платный запрос автоматически не отправляется.') from None
+        if response.status_code!=200:
+            logger.warning('Yandex TTS v3: запрос отклонён, HTTP %s; ответ Yandex: %s',
+                           response.status_code,_tts_error_text(response,self.key,text))
+            raise ProviderFailed(f'SpeechKit v3 отклонил запрос: HTTP {response.status_code}.')
+        try:
+            # REST streaming is NDJSON with a result envelope per chunk; single objects
+            # (including direct protobuf-shaped responses) are accepted as well.
+            try:
+                parsed=response.json()
+                messages=parsed if isinstance(parsed,list) else [parsed]
+            except ValueError:
+                messages=[json.loads(line) for line in response.text.splitlines() if line.strip()]
+            chunks=[]
+            for message in messages:
+                if not isinstance(message,dict) or message.get('error'):
+                    raise ValueError('stream error')
+                result=message.get('result',message)
+                if not isinstance(result,dict) or result.get('error'):
+                    raise ValueError('stream error')
+                chunk=result.get('audioChunk',{}).get('data')
+                if chunk:
+                    chunks.append(base64.b64decode(chunk,validate=True))
+            data=b''.join(chunks)
+            if not (data.startswith(b'ID3') or (len(data)>1 and data[0]==255 and data[1]&224==224)):
+                raise ValueError('no MP3')
+        except (ValueError,TypeError,AttributeError):
+            logger.warning('Yandex TTS v3: некорректный ответ; ответ Yandex: %s',_tts_error_text(response,self.key,text))
+            raise ProviderFailed('SpeechKit v3 не вернул корректное MP3-аудио. Автоматического повтора нет.') from None
+        logger.info('Yandex TTS v3: озвучено %s символов, голос %s, role=%s, speed=%s, pitch_shift=%s',
+                    len(text),voice,profile['emotion'],profile['speed'],profile['pitch_shift'])
+        return data
+
+
 async def yandex_tts(text: str, voice: str, emotion: str = 'neutral', speed: float = 1.0, *,
-                     api_key=None, folder_id=None) -> bytes:
+                     api_key=None, folder_id=None, pitch_shift=0) -> bytes:
     key=os.getenv('YANDEX_TTS_API_KEY','').strip() if api_key is None else api_key
     # API-key auth uses the service account's folder; never send a folder override.
+    if voice=='masha':
+        return await YandexTTSV3Adapter(key).synthesize(text,voice,emotion,speed,pitch_shift=pitch_shift)
     return await YandexTTSAdapter(key).synthesize(text,voice,emotion,speed)
 
 
@@ -197,4 +254,4 @@ class Providers:
             raise ValueError('Говорящий персонаж отсутствует в сцене.')
         profile = snap['quote']['speech_profiles'][character['id']]
         return await yandex_tts(line['text'],profile['voice'],profile['emotion'],profile['speed'],
-                                api_key=self.settings.tts_key)
+                                api_key=self.settings.tts_key,**({'pitch_shift':profile['pitch_shift']} if profile['voice']=='masha' else {}))

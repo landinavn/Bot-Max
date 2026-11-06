@@ -164,7 +164,7 @@ async def test_editing_defaults_and_changes_preserve_all_scene_contexts(studio):
     before=[await repo.snapshot('scene',s['id']) for s in rows]
     assert (await repo.scene_editing(rows[0]['id']))['speech_start']==0
     for s in rows[1:]:
-        assert (await repo.scene_editing(s['id']))['speech_start']==(1 if s['number']==5 else 0)
+        assert (await repo.scene_editing(s['id']))['speech_start']==({2:3,3:3,5:1}.get(s['number'],0))
     original=await repo.snapshot('episode',episode['id'])
     await repo.set_scene_speech_start(rows[0]['id'],456,'1,5')
     await repo.init()

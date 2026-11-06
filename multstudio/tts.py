@@ -1,4 +1,5 @@
 """SpeechKit v1 configuration and compatibility for saved character voices."""
+import math
 
 MODEL = 'yandex-speechkit-v1'
 VOICES = {'alena', 'filipp', 'ermil', 'jane', 'omazh', 'zahar'}
@@ -10,6 +11,24 @@ LEGACY_VOICES = {
     'fable': ('filipp', 'neutral'), 'ash': ('filipp', 'neutral'),
     'sage': ('alena', 'neutral'),
 }
+
+DEFAULT_PROFILES = {
+    'Аня': dict(voice='alena', old_emotion='neutral', emotion='good', speed=1.05),
+    'Дима': dict(voice='filipp', old_emotion='neutral', emotion='neutral', speed=0.95),
+    'Маша': dict(voice='alena', old_emotion='good', emotion='good', speed=1.1),
+}
+
+
+def normalize_speed(value):
+    try:
+        if isinstance(value, bool):
+            raise ValueError
+        speed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError('Скорость SpeechKit должна быть числом от 0.1 до 3.0.') from None
+    if not math.isfinite(speed) or not 0.1 <= speed <= 3.0:
+        raise ValueError('Скорость SpeechKit должна быть числом от 0.1 до 3.0.')
+    return speed
 
 
 def voice_settings(spec):
@@ -25,15 +44,32 @@ def voice_settings(spec):
     return voice, emotion
 
 
+def speech_settings(spec, name=None):
+    """Resolve old seed defaults without changing image/video identity in the DB."""
+    voice, emotion = voice_settings(spec)
+    default = DEFAULT_PROFILES.get(name or spec.get('name'))
+    speed = spec.get('speed', default['speed'] if default else 1.0)
+    if 'speed' not in spec and default and voice == default['voice']:
+        if 'emotion' not in spec or emotion == default['old_emotion']:
+            emotion = default['emotion']
+    return dict(voice=voice, emotion=emotion, speed=normalize_speed(speed))
+
+
 def validate_speech_snapshot(snap):
     if snap.get('quote', {}).get('model') != MODEL:
         raise ValueError('Задание озвучки подтверждено для старого провайдера. '
                          'Создайте новую оценку SpeechKit и подтвердите стоимость.')
     cast = {c['id']: c for c in snap.get('cast', [])}
+    profiles = snap.get('quote', {}).get('speech_profiles')
+    if not isinstance(profiles, dict):
+        raise ValueError('Обновились эмоции и скорость озвучки. Создайте новую оценку и подтвердите параметры.')
     for line in snap['spec'].get('dialogue', []):
         if line.get('character_id') not in cast:
             raise ValueError('Говорящий персонаж отсутствует в сцене.')
-        voice_settings(cast[line['character_id']]['spec'])
+        profile = profiles.get(line['character_id'])
+        if not isinstance(profile, dict) or not {'voice','emotion','speed'} <= profile.keys():
+            raise ValueError('Не сохранены параметры голоса для реплики. Создайте новую оценку.')
+        speech_settings(profile)
         text = line.get('text')
         if not isinstance(text, str) or not text.strip() or len(text) > 5000:
             raise ValueError('Реплика SpeechKit должна содержать от 1 до 5000 символов.')

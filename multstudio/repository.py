@@ -301,6 +301,15 @@ async def quote(target, key, kind, settings):
              or (s['spec'].get('dialogue') and not s['assets'].get('speech')) for s in snap['scenes']):
             raise ValueError('Для каждой сцены нужны изображение/видео и озвучка всех реплик.')
     cost = settings.quote(kind, snap)
+    if kind == 'speech':
+        from .tts import speech_settings
+        profiles = {}
+        async with connect() as db:
+            for character in snap['cast']:
+                row = await one(db,'SELECT name FROM cartoon_characters WHERE id=?',(character['id'],))
+                name = row['name'] if row else None
+                profiles[character['id']] = dict(speech_settings(character['spec'],name),name=name or 'Персонаж')
+        cost['speech_profiles'] = profiles
     snap['quote'] = cost
     fingerprint = digest(snap)
     async with connect() as db:

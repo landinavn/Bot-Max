@@ -62,7 +62,8 @@ async def test_seed_is_exact_idempotent_and_never_queues_paid_calls(studio):
     chars=await repo.children('character',project)
     assert [c['name'] for c in chars]==['Аня','Дима','Маша']
     assert [c['spec']['voice'] for c in chars]==['alena','filipp','alena']
-    assert [c['spec']['emotion'] for c in chars]==['neutral','neutral','good']
+    assert [c['spec']['emotion'] for c in chars]==['good','neutral','good']
+    assert [c['spec']['speed'] for c in chars]==[1.05,0.95,1.1]
     episode=(await repo.children('episode',project))[0]
     assert episode['title']=='Опять Новый год?!'
     scenes=await repo.children('scene',episode['id'])

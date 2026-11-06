@@ -11,7 +11,7 @@ import httpx
 from image_service import _image_api_client, _generate_image_bytes
 from .repository import encoded
 from .prompts import scene_image_prompt, validate_scene_image_references
-from .tts import voice_settings, validate_speech_snapshot, VOICES, EMOTIONS
+from .tts import normalize_speed, validate_speech_snapshot, VOICES, EMOTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -53,17 +53,19 @@ class YandexTTSAdapter:
         if not self.key:
             raise ValueError('Задайте YANDEX_TTS_API_KEY для мультстудии.')
 
-    async def synthesize(self, text: str, voice: str, emotion: str = 'neutral') -> bytes:
+    async def synthesize(self, text: str, voice: str, emotion: str = 'neutral', speed: float = 1.0) -> bytes:
         self.ready()
         if not isinstance(text, str) or not text.strip() or len(text) > 5000:
             raise ValueError('Реплика SpeechKit должна содержать от 1 до 5000 символов.')
         if voice not in VOICES or emotion not in EMOTIONS:
             raise ValueError('Нужен поддерживаемый голос и эмоция SpeechKit v1.')
+        speed = normalize_speed(speed)
         try:
             async with httpx.AsyncClient(timeout=60, trust_env=False, follow_redirects=False,
                                          transport=self.transport) as client:
                 result = await client.post(self.ENDPOINT, headers={'Authorization': 'Api-Key ' + self.key},
-                    data=dict(text=text, lang='ru-RU', voice=voice, format='mp3'))
+                    data=dict(text=text, lang='ru-RU', voice=voice, format='mp3',
+                              emotion=emotion, speed=str(speed)))
         except httpx.HTTPError as exc:
             logger.warning('Yandex TTS: ошибка соединения (%s)',type(exc).__name__)
             raise ProviderFailed('Ошибка соединения со SpeechKit. Новый платный запрос автоматически не отправляется.') from None
@@ -76,15 +78,15 @@ class YandexTTSAdapter:
         if not (data.startswith(b'ID3') or (len(data)>1 and data[0]==255 and data[1]&224==224)):
             logger.warning('Yandex TTS: вместо MP3 получен некорректный ответ, bytes=%s',len(data))
             raise ProviderFailed('SpeechKit не вернул непустое MP3-аудио.')
-        logger.info('Yandex TTS: озвучено %s символов, голос %s',len(text),voice)
+        logger.info('Yandex TTS: озвучено %s символов, голос %s, emotion=%s, speed=%s',len(text),voice,emotion,speed)
         return data
 
 
-async def yandex_tts(text: str, voice: str, emotion: str = 'neutral', *,
+async def yandex_tts(text: str, voice: str, emotion: str = 'neutral', speed: float = 1.0, *,
                      api_key=None, folder_id=None) -> bytes:
     key=os.getenv('YANDEX_TTS_API_KEY','').strip() if api_key is None else api_key
     # API-key auth uses the service account's folder; never send a folder override.
-    return await YandexTTSAdapter(key).synthesize(text,voice,emotion)
+    return await YandexTTSAdapter(key).synthesize(text,voice,emotion,speed)
 
 
 class KlingAdapter:
@@ -193,5 +195,6 @@ class Providers:
         character = next((c for c in snap['cast'] if c['id'] == line['character_id']), None)
         if character is None:
             raise ValueError('Говорящий персонаж отсутствует в сцене.')
-        voice, emotion = voice_settings(character['spec'])
-        return await yandex_tts(line['text'],voice,emotion,api_key=self.settings.tts_key)
+        profile = snap['quote']['speech_profiles'][character['id']]
+        return await yandex_tts(line['text'],profile['voice'],profile['emotion'],profile['speed'],
+                                api_key=self.settings.tts_key)

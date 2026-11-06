@@ -16,7 +16,7 @@ from handlers import _reply
 from . import repository as repo
 from .seed import seed
 from .settings import dollars, money
-from .tts import VOICES, voice_settings
+from .tts import VOICES, speech_settings
 
 
 class StudioStates(StatesGroup):
@@ -33,7 +33,7 @@ def validate_spec(entity, spec):
     if entity == 'character':
         if not isinstance(spec.get('description'), str) or not spec['description'].strip():
             raise ValueError('Укажите description и постоянный voice: ' + ', '.join(sorted(VOICES)))
-        voice_settings(spec)
+        speech_settings(spec)
     if entity == 'scene':
         if not isinstance(spec.get('visual'),str) or not spec['visual'].strip():
             raise ValueError('Нужно описание visual.')
@@ -125,9 +125,9 @@ def create_router(admin_id, settings, assets):
             await tell(event,f"📁 Проект: {row['title']}\nБюджет: {amount}$\n"
                        f"Расход + резервы: {dollars(state['committed'])}",buttons)
         elif entity=='character':
-            voice,emotion=voice_settings(row['spec'])
-            await tell(event,row['name']+'\nID: '+key+f'\nSpeechKit v1: {voice}, emotion={emotion} (сохранено, не отправляется в API)\n'
-                       +json.dumps(dict(row['spec'],voice=voice,emotion=emotion),ensure_ascii=False,indent=2),[
+            profile=speech_settings(row['spec'],row['name'])
+            await tell(event,row['name']+'\nID: '+key+f"\nSpeechKit v1: {profile['voice']}, emotion={profile['emotion']}, speed={profile['speed']}\n"
+                       +json.dumps(dict(row['spec'],**profile),ensure_ascii=False,indent=2),[
                 ('✏️ Изменить описание','edit:character:'+key),
                 ('🎙 Настройки голоса (JSON)','character_settings:'+key),('📷 Загрузить референс','reference:'+key),
                 ('🎨 Создать / перегенерировать эталон','make:image:character:'+key),
@@ -219,11 +219,11 @@ def create_router(admin_id, settings, assets):
                 row,_=await owner('character',key)
                 await context.update_data(studio_input=dict(action='character_settings',entity='character',key=key))
                 await context.set_state(StudioStates.input)
-                voice,emotion=voice_settings(row['spec'])
+                profile=speech_settings(row['spec'],row['name'])
                 await tell(event,'Настройки SpeechKit v1: пришлите JSON, voice='+', '.join(sorted(VOICES))
-                           +'. Поле emotion сохранено для совместимости и не отправляется в API. Чтобы изменить только описание, '
+                           +'; emotion=neutral/good/evil; speed=0.1–3.0. Чтобы изменить только описание, '
                            'используйте кнопку «Изменить описание».\n'
-                           +json.dumps(dict(row['spec'],voice=voice,emotion=emotion),ensure_ascii=False,indent=2),[('Отмена','home')])
+                           +json.dumps(dict(row['spec'],**profile),ensure_ascii=False,indent=2),[('Отмена','home')])
             elif action in ('new','edit'):
                 entity,key=parts[1:3]
                 if action=='edit':
@@ -233,7 +233,7 @@ def create_router(admin_id, settings, assets):
                     if entity!='project':
                         await owner('episode' if entity=='scene' else 'project',key)
                     sample={'project':{'title':'Новый мультсериал','season':1,'style':'Семейная 3D-анимация','location':'Описание локации'},
-                            'character':{'name':'Имя','description':'Возраст, лицо, причёска, одежда, характер','voice':'alena','emotion':'neutral','voice_direction':'Описание голоса'},
+                            'character':{'name':'Имя','description':'Возраст, лицо, причёска, одежда, характер','voice':'alena','emotion':'neutral','speed':1.0,'voice_direction':'Описание голоса'},
                             'episode':{'title':'Новая серия','ending':['Продолжение следует…']},
                             'scene':{'title':'Новая сцена','duration':5,'visual':'Действие и локация','camera':'Средний план',
                                      'characters':[],'dialogue':[],'approved':False}}[entity]
@@ -260,8 +260,12 @@ def create_router(admin_id, settings, assets):
                     raise ValueError('Недопустимое действие.')
                 item=await repo.quote(entity,key,kind,settings)
                 snap=json.loads(item['snapshot']); q=snap['quote']
+                speech_info=('Голоса:\n'+'\n'.join(
+                    f"{p.get('name','Персонаж')}: {p['voice']}, emotion={p['emotion']}, speed={p['speed']}"
+                    for p in q.get('speech_profiles',{}).values())+'\n') if kind=='speech' else ''
                 await tell(event, f"Подтверждение задания {item['id']}\nМодель: {q['model']}\nРазрешение: {q['resolution']}\n"
                     f"Длительность: {q['duration']} сек (озвучка — по естественной речи)\nОценка: {dollars(q['estimate'])}\n"
+                    +speech_info+
                     'Это оценка, не подтверждённый расход. Если провайдер не вернёт цену, сверка будет ручной, резерв сохранится. '
                     'При перегенерации предыдущий результат останется в архиве.',
                     [('✅ Подтвердить запуск','confirm:'+item['id']),('Отмена','cancel:'+item['id'])])

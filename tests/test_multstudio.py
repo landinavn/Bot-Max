@@ -352,6 +352,7 @@ async def test_completed_retry_keeps_previously_reconciled_actual_cost(studio):
     await repo.update_job(item['id'],status='manual',lease_until=0)
     await repo.reconcile(item['id'],456,250000)
     worker=Worker(SimpleNamespace(),456,settings,SimpleNamespace(),assets)
+    assets.asset_url=AsyncMock(return_value='https://storage.yandexcloud.net/vision-board-bot-images/multstudio/result.png')
     await worker.save_result(item,json.loads(item['snapshot']),data=b'retained-result')
     assert (await repo.job(item['id']))['actual']==250000
     assert (await repo.budget(item['project_id']))['committed']==250000

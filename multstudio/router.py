@@ -24,6 +24,7 @@ class StudioStates(StatesGroup):
 
 VOICES = {'alloy','nova','shimmer','echo','fable','onyx','coral','ash','sage'}
 logger = logging.getLogger(__name__)
+DESCRIPTION_PROMPT = 'Пожалуйста, введите описание обычным текстом (без кавычек и фигурных скобок)'
 
 
 def validate_spec(entity, spec):
@@ -124,7 +125,8 @@ def create_router(admin_id, settings, assets):
                        f"Расход + резервы: {dollars(state['committed'])}",buttons)
         elif entity=='character':
             await tell(event,row['name']+'\nID: '+key+'\n'+json.dumps(row['spec'],ensure_ascii=False,indent=2),[
-                ('✏️ Изменить персонажа / голос','edit:character:'+key),('📷 Загрузить референс','reference:'+key),
+                ('✏️ Изменить описание','edit:character:'+key),
+                ('🎙 Настройки голоса (JSON)','character_settings:'+key),('📷 Загрузить референс','reference:'+key),
                 ('🎨 Создать / перегенерировать эталон','make:image:character:'+key),
                 ('👁 Эталон / утвердить','view:character:'+key),('⬅️ Проект','p:'+project['id'])])
         elif entity=='episode':
@@ -176,6 +178,20 @@ def create_router(admin_id, settings, assets):
                     ('➕ Создать серию','new:episode:'+key),('✏️ Локация / стиль','edit:project:'+key),
                     ('📋 Задания и расходы','jobs:'+key),('📦 Архив исходников','export:'+key),
                     ('⬅️ Назад','project:'+key)])
+            elif action=='edit' and len(parts)>2 and parts[1]=='character':
+                key=parts[2]
+                row,_=await owner('character',key)
+                await context.update_data(studio_input=dict(action='description',entity='character',key=key))
+                await context.set_state(StudioStates.input)
+                await tell(event,DESCRIPTION_PROMPT+'\n\nТекущее описание:\n'+row['spec'].get('description',''),
+                           [('Отмена','home')])
+            elif action=='character_settings':
+                key=parts[1]
+                row,_=await owner('character',key)
+                await context.update_data(studio_input=dict(action='character_settings',entity='character',key=key))
+                await context.set_state(StudioStates.input)
+                await tell(event,'Расширенные настройки голоса: пришлите JSON. Чтобы изменить только описание, '
+                           'используйте кнопку «Изменить описание».\n'+json.dumps(row['spec'],ensure_ascii=False,indent=2),[('Отмена','home')])
             elif action in ('new','edit'):
                 entity,key=parts[1:3]
                 if action=='edit':
@@ -323,7 +339,17 @@ def create_router(admin_id, settings, assets):
         text=(event.message.body.text or '').strip()
         try:
             key=task.get('key')
-            if action=='budget':
+            if action=='description' or (action=='edit' and task.get('entity')=='character'):
+                if not text:
+                    raise ValueError(DESCRIPTION_PROMPT)
+                if len(text)>10000:
+                    raise ValueError('Описание слишком длинное: не более 10000 символов.\n'+DESCRIPTION_PROMPT)
+                await repo.update_character_description(key,admin_id,text)
+                logger.info('Обновлено описание персонажа %s: %s',key,text)
+                await context.clear()
+                await tell(event,'Описание персонажа сохранено.',[('👤 Персонаж','c:'+key)])
+                return
+            elif action=='budget':
                 await owner('project',key); await repo.budget(key,money(text))
             elif action=='cost':
                 await repo.reconcile(key,admin_id,money(text))
@@ -339,9 +365,9 @@ def create_router(admin_id, settings, assets):
                                              suffix='png' if action=='reference' else 'mp3')
                 if action=='reference':
                     await repo.edit('character',key,dict(row['spec'],reference=asset_id))
-            elif action in ('new','edit'):
+            elif action in ('new','edit','character_settings'):
                 entity=task['entity']; spec=validate_spec(entity,json.loads(text))
-                if action=='edit':
+                if action in ('edit','character_settings'):
                     _,project=await owner(entity,key)
                     if entity=='scene':
                         for character in spec['characters']:

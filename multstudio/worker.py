@@ -9,6 +9,7 @@ from .adapters import TemporaryPollError, KlingTaskFailed
 from .render import Renderer
 from .diagnostics import log_preflight_failure
 from .prompts import validate_scene_image_references
+from .tts import validate_speech_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,8 @@ class Worker:
             self.providers.preflight(kind)
             if kind == 'image':
                 validate_scene_image_references(snap)
+            if kind == 'speech':
+                validate_speech_snapshot(snap)
             # Persist exact approved inputs before the paid request.
             await self.assets.retain(snap,'job_source',data=repo.encoded(snap).encode(),suffix='json',job_id=key)
             image_url = None

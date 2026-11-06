@@ -3,6 +3,7 @@ import os
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
+from .tts import MODEL as TTS_MODEL
 
 USD_MICROS = 1000000
 
@@ -37,6 +38,7 @@ class Settings:
     image_quality: str = 'high'
     kling_key: str = field(default='', repr=False)
     tts_key: str = field(default='', repr=False)
+    tts_folder_id: str = field(default='', repr=False)
     image_price: int = 0
     video_price: int = 0  # Estimate per 5 seconds; must be configured by owner.
     speech_price: int = 0  # Estimate per 1000 characters.
@@ -48,7 +50,8 @@ class Settings:
         return cls(root=Path(os.getenv('STUDIO_FILES_DIR', str(Path(__file__).resolve().parents[1] / 'studio_files'))),
                    image_model=config.image_model, image_quality=config.image_quality,
                    kling_key=os.getenv('STUDIO_KLING_API_KEY') or config.piapi_key or '',
-                   tts_key=os.getenv('STUDIO_TTS_API_KEY') or config.image_api_key or '',
+                   tts_key=os.getenv('YANDEX_TTS_API_KEY', '').strip(),
+                   tts_folder_id=os.getenv('YANDEX_TTS_FOLDER_ID', '').strip(),
                    image_price=price_from_env('STUDIO_IMAGE_USD'),
                    video_price=price_from_env('STUDIO_KLING_5S_USD'),
                    speech_price=price_from_env('STUDIO_TTS_1000_CHARS_USD'),
@@ -65,7 +68,7 @@ class Settings:
         elif kind == 'speech':
             chars = sum(len(x['text']) for x in snapshot['spec'].get('dialogue', []))
             price = (self.speech_price * chars + 999) // 1000
-            model, size = 'gpt-4o-mini-tts', 'MP3; естественная речь'
+            model, size = TTS_MODEL, 'MP3; ru-RU; естественная речь'
         elif kind == 'assemble':
             price, model, size = 0, 'FFmpeg/local', '1080x1920 / 30 FPS / H.264 + AAC'
         else:

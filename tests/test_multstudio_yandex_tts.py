@@ -59,11 +59,11 @@ async def test_public_yandex_tts_function_reads_only_yandex_environment(monkeypa
 
 
 @pytest.mark.parametrize('status',[400,401,403,429,500])
-async def test_provider_errors_never_retry_paid_post_or_expose_body(status,caplog):
+async def test_provider_errors_never_retry_paid_post_or_expose_secrets(status,caplog):
     calls=[]
     def fail(req):
         calls.append(req)
-        return httpx.Response(status,json={'error':'private-yandex-key private dialogue'})
+        return httpx.Response(status,json={'error':'private-yandex-key Текст'})
     with pytest.raises(ProviderFailed) as error:
         await YandexTTSAdapter('private-yandex-key','folder',httpx.MockTransport(fail)).synthesize('Текст','alena')
     assert len(calls)==1
@@ -117,6 +117,51 @@ def test_settings_no_longer_fall_back_to_openai_key(tmp_path,monkeypatch):
     settings=Settings.from_config(config)
     assert settings.tts_key=='yandex-key' and settings.tts_folder_id=='folder-id'
     assert 'yandex-key' not in repr(settings)
+
+
+@pytest.mark.parametrize('status,body',[
+    (401,'{"error_code":"UNAUTHENTICATED","error_message":"Unknown api key"}'),
+    (403,'Folder not found'),
+    (400,'Параметр folderId не найден\nПодробности ошибки без сокращений'),
+])
+async def test_full_yandex_error_body_is_logged_and_request_contract_remains_correct(status,body,caplog):
+    calls=[]
+    def reply(request):
+        calls.append(request)
+        assert request.headers['Authorization']=='Api-Key test-key'
+        assert not request.url.query
+        assert parse_qs(request.content.decode())=={
+            'text':['Привет, мир!'],'lang':['ru-RU'],'voice':['alena'],
+            'emotion':['neutral'],'format':['mp3'],'folderId':['test-folder']}
+        assert request.headers['content-type'].startswith('application/x-www-form-urlencoded')
+        return httpx.Response(status,text=body)
+    with pytest.raises(ProviderFailed):
+        await YandexTTSAdapter('test-key','test-folder',httpx.MockTransport(reply)).synthesize('Привет, мир!','alena')
+    assert len(calls)==1
+    assert f'HTTP {status}; ответ Yandex: {body}' in caplog.text
+
+
+async def test_error_response_is_not_truncated(caplog):
+    body='Unknown api key\n'+('detail '*3000)+'END_OF_YANDEX_RESPONSE'
+    transport=httpx.MockTransport(lambda request:httpx.Response(401,text=body))
+    with pytest.raises(ProviderFailed):
+        await YandexTTSAdapter('secret-key','folder',transport).synthesize('Русская реплика','alena')
+    assert body in caplog.text
+
+
+@pytest.mark.parametrize('encoded',[False,True])
+async def test_error_response_masks_echoed_key_and_dialogue_including_json_escapes(encoded,caplog):
+    key='private-key-123'
+    text='Мам, а ты себе что хочешь?'
+    response=json.dumps({'message':'Unknown api key','Authorization':'Api-Key '+key,
+                         'text':text,'details':{'reason':'api key is invalid'}},ensure_ascii=not encoded)
+    with pytest.raises(ProviderFailed) as error:
+        await YandexTTSAdapter(key,'folder',httpx.MockTransport(lambda req:httpx.Response(401,text=response))).synthesize(text,'alena')
+    assert 'Unknown api key' in caplog.text and 'api key is invalid' in caplog.text
+    assert '[REDACTED]' in caplog.text
+    assert key not in caplog.text and text not in caplog.text
+    assert json.dumps(text,ensure_ascii=True)[1:-1] not in caplog.text
+    assert 'Unknown api key' not in str(error.value)  # Body belongs in the server log only.
 
 
 @pytest.mark.parametrize('old,expected',[('nova',('alena','neutral')),('onyx',('filipp','neutral')),('coral',('alena','good'))])

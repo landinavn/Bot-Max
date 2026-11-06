@@ -1,9 +1,10 @@
 """One paid POST per confirmed job; polling is a separate, retryable operation."""
 import base64
+import json
 import logging
 import os
 from dataclasses import replace
-from urllib.parse import quote
+from urllib.parse import quote, quote_plus
 
 import httpx
 
@@ -13,6 +14,20 @@ from .prompts import scene_image_prompt, validate_scene_image_references
 from .tts import voice_settings, validate_speech_snapshot, VOICES, EMOTIONS
 
 logger = logging.getLogger(__name__)
+
+
+def _tts_error_text(response, api_key, text):
+    """Keep the full provider explanation, masking only known echoed secrets."""
+    body = response.text
+    variants = set()
+    for value in (api_key, text):
+        if value:
+            variants.update((value, json.dumps(value, ensure_ascii=True)[1:-1],
+                             json.dumps(value, ensure_ascii=False)[1:-1],
+                             quote(value, safe=''), quote_plus(value, safe='')))
+    for value in sorted(variants, key=len, reverse=True):
+        body = body.replace(value, '[REDACTED]')
+    return body
 
 
 class TemporaryPollError(Exception):
@@ -55,8 +70,9 @@ class YandexTTSAdapter:
             logger.warning('Yandex TTS: ошибка соединения (%s)',type(exc).__name__)
             raise ProviderFailed('Ошибка соединения со SpeechKit. Новый платный запрос автоматически не отправляется.') from None
         if result.status_code != 200:
-            # Never log the body: provider errors may echo API keys or dialogue.
-            logger.warning('Yandex TTS: запрос отклонён, HTTP %s',result.status_code)
+            # Do not truncate provider details; mask credentials/dialogue if echoed.
+            logger.warning('Yandex TTS: запрос отклонён, HTTP %s; ответ Yandex: %s',
+                           result.status_code,_tts_error_text(result,self.key,text))
             raise ProviderFailed(f'SpeechKit отклонил запрос: HTTP {result.status_code}.')
         data = result.content
         if not (data.startswith(b'ID3') or (len(data)>1 and data[0]==255 and data[1]&224==224)):

@@ -1,12 +1,16 @@
 """Only cartoon_* tables. Immutable revisions and transactional budget reservations."""
 import hashlib
 import json
+import logging
 import time
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
 import aiosqlite
 import database
+
+logger = logging.getLogger(__name__)
+RESTORE_NOT_FOUND = 'Не удалось найти сохраненные файлы для этой сцены в архиве заданий'
 
 
 def encoded(value):
@@ -82,6 +86,10 @@ CREATE TABLE IF NOT EXISTS cartoon_job_events (
 CREATE TABLE IF NOT EXISTS cartoon_scene_image_selections (
  scene_id TEXT PRIMARY KEY REFERENCES cartoon_scenes(id), context_hash TEXT NOT NULL,
  asset_id TEXT NOT NULL REFERENCES cartoon_assets(id));
+CREATE TABLE IF NOT EXISTS cartoon_scene_asset_restorations (
+ scene_id TEXT NOT NULL REFERENCES cartoon_scenes(id), context_hash TEXT NOT NULL,
+ kind TEXT NOT NULL, asset_id TEXT NOT NULL REFERENCES cartoon_assets(id),
+ asset_watermark INTEGER NOT NULL, PRIMARY KEY(scene_id,context_hash,kind));
 CREATE INDEX IF NOT EXISTS cartoon_jobs_queue ON cartoon_jobs(status,next_attempt,lease_until);
 ''')
         columns = await rows(db,'PRAGMA table_info(cartoon_jobs)')
@@ -266,6 +274,16 @@ async def _snapshot(db, target, key):
             (key,snap['context_hash'],snap['context_hash']))
         if selected:
             snap['assets']['image'] = selected
+        restored = await rows(db, '''SELECT a.* FROM cartoon_scene_asset_restorations r
+            JOIN cartoon_assets a ON a.id=r.asset_id
+            WHERE r.scene_id=? AND r.context_hash=? AND a.project_id=?
+              AND a.target='scene' AND a.target_id=r.scene_id AND a.kind=r.kind
+              AND NOT EXISTS (SELECT 1 FROM cartoon_assets n WHERE n.target='scene'
+                AND n.target_id=r.scene_id AND n.project_id=a.project_id AND n.kind=r.kind
+                AND n.context_hash=r.context_hash AND n.rowid>r.asset_watermark)''',
+            (key,snap['context_hash'],project_id))
+        for asset in restored:
+            snap['assets'][asset['kind']] = asset
     if snap.get('music'):
         snap['assets']['music'] = snap['music']
     if target == 'character' and row['spec'].get('reference'):
@@ -279,6 +297,99 @@ async def _snapshot(db, target, key):
 async def snapshot(target, key):
     async with connect() as db:
         return await _snapshot(db, target, key)
+
+
+async def restore_scene_assets(scene_id, *, actor=None, assets=None):
+    """Explicitly select archived results; retain original asset IDs/context/history."""
+    publish = assets is not None
+    if assets is None:
+        import os
+        from pathlib import Path
+        from .assets import Assets
+        assets = Assets(Path(os.getenv('STUDIO_FILES_DIR',str(Path(__file__).resolve().parents[1]/'studio_files'))),None)
+    async with connect() as db:
+        scene = await one(db, '''SELECT p.id AS project_id,p.owner_id FROM cartoon_scenes s
+            JOIN cartoon_episodes e ON e.id=s.episode_id
+            JOIN cartoon_projects p ON p.id=e.project_id WHERE s.id=?''',(scene_id,))
+        if not scene or (actor is not None and actor!=scene['owner_id']):
+            raise ValueError('Нет доступа к сцене.')
+        before = await _snapshot(db,'scene',scene_id)
+        jobs = await rows(db, '''SELECT * FROM cartoon_jobs WHERE target='scene' AND target_id=?
+            AND project_id=? AND status='done' AND kind IN ('image','scene_image','video')
+            ORDER BY rowid DESC''',(scene_id,scene['project_id']))
+        candidates = {}
+        for job in jobs:
+            kind='video' if job['kind']=='video' else 'image'
+            candidates[job['id']] = await rows(db, '''SELECT * FROM cartoon_assets
+                WHERE job_id=? AND project_id=? AND kind=? ORDER BY rowid DESC''',
+                (job['id'],scene['project_id'],kind))
+        # A video snapshot retains its input image descriptor even if its asset row was lost.
+        for video in (j for j in jobs if j['kind']=='video'):
+            try:
+                image=json.loads(video['snapshot']).get('assets',{}).get('image') or {}
+            except (ValueError,TypeError,AttributeError):
+                continue
+            image_job=image.get('job_id')
+            if image_job in candidates and not candidates[image_job] and image.get('target_id')==scene_id:
+                candidates[image_job]=[image]
+    found={}
+    for job in jobs:
+        kind='video' if job['kind']=='video' else 'image'
+        if kind in found:
+            continue
+        result=await assets.archived_scene_file(job,kind,candidates[job['id']])
+        if result is None:
+            continue
+        if publish:
+            try:
+                result['public_url']=await assets.publish(result['path'])
+            except Exception as exc:
+                logger.warning('Архив сцены: публикация недоступна scene=%s job=%s error=%s',scene_id,job['id'],type(exc).__name__)
+                raise ValueError('Сохранённые файлы найдены, но публикация временно недоступна. '
+                                 'Повторите восстановление; новая генерация не запускается.') from None
+        found[kind]=(job,result)
+    if not found:
+        raise ValueError(RESTORE_NOT_FOUND)
+    restored={}
+    async with connect() as db:
+        await db.execute('BEGIN IMMEDIATE')
+        current=await _snapshot(db,'scene',scene_id)
+        if current['context_hash']!=before['context_hash']:
+            raise ValueError('Сцена изменилась во время восстановления. Повторите действие.')
+        for kind,(job,result) in found.items():
+            existing=await one(db,'SELECT * FROM cartoon_assets WHERE id=?',(result.get('id'),))
+            if existing and (existing['project_id']!=scene['project_id'] or existing['job_id']!=job['id']):
+                raise ValueError('Архивный результат принадлежит другому заданию.')
+            asset_id=existing['id'] if existing else result.get('id') or uuid4().hex
+            try:
+                metadata=json.loads(result.get('metadata') or '{}')
+            except (ValueError,TypeError):
+                metadata={}
+            if not isinstance(metadata,dict):
+                metadata={}
+            if publish:
+                metadata.update(published_key=assets.object_key(result['path']),published_sha256=result['sha256'])
+            if existing:
+                await db.execute("UPDATE cartoon_assets SET target='scene',target_id=?,path=?,sha256=?,public_url=?,metadata=? WHERE id=?",
+                    (scene_id,result['path'],result['sha256'],result.get('public_url'),encoded(metadata),asset_id))
+            else:
+                await db.execute('''INSERT INTO cartoon_assets
+                    (id,project_id,target,target_id,kind,context_hash,path,sha256,public_url,approved,job_id,metadata)
+                    VALUES (?,?,'scene',?,?,?,?,?,?,?,?,?)''',
+                    (asset_id,scene['project_id'],scene_id,kind,result.get('context_hash') or current['context_hash'],
+                     result['path'],result['sha256'],result.get('public_url'),int(bool(result.get('approved'))),job['id'],encoded(metadata)))
+            watermark=await one(db,"SELECT COALESCE(MAX(rowid),0) AS n FROM cartoon_assets WHERE target='scene' AND target_id=?",(scene_id,))
+            prior=await one(db,'SELECT asset_id FROM cartoon_scene_asset_restorations WHERE scene_id=? AND context_hash=? AND kind=?',
+                            (scene_id,current['context_hash'],kind))
+            await db.execute('INSERT OR REPLACE INTO cartoon_scene_asset_restorations VALUES (?,?,?,?,?)',
+                             (scene_id,current['context_hash'],kind,asset_id,watermark['n']))
+            if not prior or prior['asset_id']!=asset_id:
+                await db.execute('INSERT INTO cartoon_job_events(job_id,event,details) VALUES (?,?,?)',
+                                 (job['id'],'scene_assets_restored',encoded(dict(scene_id=scene_id,asset_id=asset_id,kind=kind,actor=actor))))
+            restored[kind]=asset_id
+        await db.commit()
+    logger.info('Восстановлены ассеты сцены %s: %s',scene_id,restored)
+    return dict(success=True,restored=restored,missing=[kind for kind in ('image','video') if kind not in restored])
 
 
 async def quote(target, key, kind, settings):

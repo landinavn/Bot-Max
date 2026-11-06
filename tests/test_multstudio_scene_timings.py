@@ -13,21 +13,31 @@ from test_multstudio_project_menu import event
 from test_handlers import dispatch_callback, ready_context
 
 
-async def test_one_time_upgrade_sets_requested_timings_and_preserves_media_identity(studio):
+@pytest.mark.parametrize('old_schema',[True,False])
+async def test_one_time_upgrade_sets_requested_timings_and_preserves_media_identity(studio,old_schema):
     project,_,_=studio
     _,episode=await ready_scene(studio)
     shots=await repo.children('scene',episode['id'])
     before=[await repo.snapshot('scene',s['id']) for s in shots]
-    # Simulate the production schema/settings from PR #190.
-    async with repo.connect() as db:
-        await db.execute('DELETE FROM cartoon_editing_migrations')
-        await db.execute('DROP TABLE cartoon_scene_editing')
-        await db.execute('CREATE TABLE cartoon_scene_editing (scene_id TEXT PRIMARY KEY REFERENCES cartoon_scenes(id), speech_start REAL NOT NULL)')
-        await db.execute('INSERT INTO cartoon_scene_editing VALUES (?,3)',(shots[0]['id'],))
-        await db.execute('INSERT INTO cartoon_scene_editing VALUES (?,2)',(shots[2]['id'],))
-        await db.commit()
+    if old_schema:
+        # Production schema/settings from PR #190: no trimming column yet.
+        async with repo.connect() as db:
+            await db.execute('DELETE FROM cartoon_editing_migrations')
+            await db.execute('DROP TABLE cartoon_scene_editing')
+            await db.execute('CREATE TABLE cartoon_scene_editing (scene_id TEXT PRIMARY KEY REFERENCES cartoon_scenes(id), speech_start REAL NOT NULL)')
+            await db.execute('INSERT INTO cartoon_scene_editing VALUES (?,3)',(shots[0]['id'],))
+            await db.execute('INSERT INTO cartoon_scene_editing VALUES (?,2)',(shots[2]['id'],))
+            await db.commit()
+    else:
+        # PR #191 already applied; keep its 4-second trim and update only speech.
+        async with repo.connect() as db:
+            await db.execute("DELETE FROM cartoon_editing_migrations WHERE name='anya-s1-e1-no-intro-20261107-v3'")
+            await db.commit()
+        await repo.set_scene_speech_start(shots[0]['id'],456,1)
+        await repo.set_scene_speech_start(shots[2]['id'],456,2)
+        await repo.set_scene_speech_start(shots[3]['id'],456,0.5)
     await repo.init()
-    expected={1:(1,0),2:(0,4),3:(2,0),4:(0,0),5:(1,0),6:(0,0),7:(0,0)}
+    expected={1:(0,0),2:(0,4),3:(2,0),4:(0,0),5:(1,0),6:(0,0),7:(0,0)}
     for shot in shots:
         settings=await repo.scene_editing(shot['id'])
         assert (settings['speech_start'],settings['video_start'])==expected[shot['number']]
@@ -39,7 +49,7 @@ async def test_one_time_upgrade_sets_requested_timings_and_preserves_media_ident
     assert (await repo.scene_editing(shots[0]['id']))['speech_start']==1.5
     assert (await repo.scene_editing(shots[1]['id']))['video_start']==3.5
     async with repo.connect() as db:
-        assert len(await repo.rows(db,'SELECT * FROM cartoon_editing_migrations'))==1
+        assert len(await repo.rows(db,'SELECT * FROM cartoon_editing_migrations'))==2
     assert await repo.claim() is None
 
 

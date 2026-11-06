@@ -61,7 +61,7 @@ async def test_provider_uses_single_frame_prompt_and_keeps_all_edit_references(s
     snap = await repo.snapshot('scene', scene['id'])
     snap['quote'] = dict(model='image-test', image_quality='high')
     # Supply two canonical character refs plus a location, as in scene two.
-    snap['location_reference'] = dict(id='apartment')
+    snap['location_reference'] = dict(id='apartment', approved=1)
     assets.asset_url = AsyncMock(side_effect=['https://cdn.example/anya.png',
         'https://cdn.example/dima.png', 'https://cdn.example/apartment.png'])
     assets.retain = AsyncMock()
@@ -72,7 +72,7 @@ async def test_provider_uses_single_frame_prompt_and_keeps_all_edit_references(s
     provider = Providers(settings, config, assets)
     assert await provider.image(snap) == b'image'
     kwargs = generate.await_args.kwargs
-    assert kwargs['prompt_override'] == scene_image_prompt(snap)
+    assert kwargs['prompt_override'] == scene_image_prompt(snap, 'https://cdn.example/apartment.png')
     assert kwargs['style_reference_urls'] == ('https://cdn.example/dima.png',
                                              'https://cdn.example/apartment.png')
     assert generate.await_args.args[0] == 'https://cdn.example/anya.png'

@@ -108,7 +108,9 @@ async def test_scene_references_location_and_image_approval_are_required(studio)
     with pytest.raises(ValueError,match='эталоны'):
         await repo.quote('scene',scenes[0]['id'],'image',settings)
     await ready_scene(studio)
-    with pytest.raises(ValueError,match='сцену 1'):
+    # Stay in the kitchen: scene two must use scene one's approved room image.
+    await repo.edit('scene',scenes[1]['id'],dict(scenes[1]['spec'],visual='Кухня. Аня и Дима у стола.'))
+    with pytest.raises(ValueError,match='предыдущей сцены'):
         await repo.quote('scene',scenes[1]['id'],'image',settings)
     snap=await repo.snapshot('scene',scenes[0]['id'])
     image=await add_image(assets,snap,approved=False)

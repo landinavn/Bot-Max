@@ -8,6 +8,7 @@ from . import repository as repo
 from .adapters import TemporaryPollError, KlingTaskFailed
 from .render import Renderer
 from .diagnostics import log_preflight_failure
+from .prompts import validate_scene_image_references
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,8 @@ class Worker:
                 await self.save_result(item,snap,data=path.read_bytes(),suffix='mp4')
                 return
             self.providers.preflight(kind)
+            if kind == 'image':
+                validate_scene_image_references(snap)
             # Persist exact approved inputs before the paid request.
             await self.assets.retain(snap,'job_source',data=repo.encoded(snap).encode(),suffix='json',job_id=key)
             image_url = None

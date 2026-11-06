@@ -23,7 +23,19 @@ KEYFRAMES = (
 )
 
 
-def scene_image_prompt(snap):
+def validate_scene_image_references(snap):
+    """Also guard frozen/legacy jobs before a paid submission, not just quotes."""
+    if snap['target'] != 'scene':
+        return
+    if not snap.get('cast') or any(
+        not c.get('assets', {}).get('image', {}).get('approved') for c in snap['cast']
+    ):
+        raise ValueError('Сначала создайте и утвердите эталоны всех персонажей сцены.')
+    if snap['number'] > 1 and snap.get('location_reference_required', True) and not (snap.get('location_reference') or {}).get('approved'):
+        raise ValueError('Сначала создайте и утвердите изображение предыдущей сцены как эталон комнаты.')
+
+
+def scene_image_prompt(snap, location_reference_url=None):
     spec = snap['spec']
     moment = spec.get('visual', '')
     camera = 'One fixed medium-wide camera view showing the cast together in one space.'
@@ -34,6 +46,21 @@ def scene_image_prompt(snap):
     # Never send the full spec (camera transitions, dialogue, sound, duration) to
     # the still-image model. Custom scenes select one instant from their visual.
     cast = [c['spec'] for c in snap['cast']]
+    location_direction = (
+        '\nCRITICAL: Keep the same interior background, lighting, and furniture as in '
+        'the provided location reference. Do not change the room. '
+        'Keep the exact same background, furniture, and room interior as in the reference image. '
+        'The location reference is the LAST attached image, after all character references. '
+        'It defines the apartment, not the cast: show only the characters listed for this scene. '
+        'Preserve the arrangement of doors, windows, kitchen, sofa and table, furniture '
+        'materials, colours and light direction. Stage the action in the scripted part '
+        'of this SAME apartment; a sofa scene must stay by the same sofa, not move to '
+        'the kitchen. Change only framing and character poses, never redesign the interior. '
+        + ('\nLOCATION REFERENCE URL: ' + location_reference_url if location_reference_url else '')
+        if snap.get('location_reference') else
+        '\nNEW LOCATION: Create the room described in STILL MOMENT. Character reference '
+        'backgrounds must not determine the room. Preserve character identities and outfits.'
+    )
     return (
         'Create ONE vertical family 3D animated-film keyframe: a single uninterrupted '
         'full-frame image, one instant, one camera position and one coherent perspective. '
@@ -51,4 +78,5 @@ def scene_image_prompt(snap):
         '\nSTILL MOMENT:\n' + moment + '\nFIXED CAMERA:\n' + camera
         + '\nWORLD:\n' + encoded(snap['world'])
         + '\nCAST IN IMAGE ORDER:\n' + encoded(cast)
+        + location_direction
     )

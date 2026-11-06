@@ -7,7 +7,7 @@ import httpx
 
 from image_service import _image_api_client, _generate_image_bytes
 from .repository import encoded
-from .prompts import scene_image_prompt
+from .prompts import scene_image_prompt, validate_scene_image_references
 
 
 class TemporaryPollError(Exception):
@@ -95,6 +95,7 @@ class Providers:
             raise ValueError('Задайте IMAGE_API_KEY.')
 
     async def image(self, snap):
+        validate_scene_image_references(snap)
         config = replace(self.config, image_model=snap['quote']['model'], image_quality=snap['quote']['image_quality'])
         if snap['target'] == 'character':
             prompt = ('Create a single canonical character reference portrait, full body and clear face. '
@@ -102,13 +103,14 @@ class Providers:
                       'Neutral background, no text. ' + encoded(snap['world']) + '\n' + encoded(snap['spec']))
             refs = [snap['assets']['image']] if snap['assets'].get('image') else []
         else:
-            prompt = scene_image_prompt(snap)
             refs = [c['assets']['image'] for c in snap['cast']]
             if snap.get('location_reference'):
                 refs.append(snap['location_reference'])
+        urls = [await self.assets.asset_url(a) for a in refs]
+        if snap['target'] == 'scene':
+            prompt = scene_image_prompt(snap, urls[-1] if snap.get('location_reference') else None)
         await self.assets.retain(snap,'image_prompt',data=prompt.encode(),suffix='txt',job_id=snap.get('job_id'))
         if refs:
-            urls = [await self.assets.asset_url(a) for a in refs]
             images = await _generate_image_bytes(urls[0], 'Мультстудия', config, count=1,
                 prompt_override=prompt, image_size='1024x1536',
                 **({'style_reference_urls':tuple(urls[1:])} if len(urls)>1 else {}))

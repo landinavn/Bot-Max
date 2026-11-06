@@ -79,6 +79,9 @@ CREATE TABLE IF NOT EXISTS cartoon_assets (
 CREATE TABLE IF NOT EXISTS cartoon_job_events (
  id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL REFERENCES cartoon_jobs(id),
  event TEXT NOT NULL, details TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS cartoon_scene_image_selections (
+ scene_id TEXT PRIMARY KEY REFERENCES cartoon_scenes(id), context_hash TEXT NOT NULL,
+ asset_id TEXT NOT NULL REFERENCES cartoon_assets(id));
 CREATE INDEX IF NOT EXISTS cartoon_jobs_queue ON cartoon_jobs(status,next_attempt,lease_until);
 ''')
         columns = await rows(db,'PRAGMA table_info(cartoon_jobs)')
@@ -162,6 +165,33 @@ async def update_character_description(key, actor, description):
         await db.commit()
 
 
+async def update_scene_visual(key, actor, visual):
+    """Patch the current visual only; preserve dialogue, cast, camera and timing."""
+    if not isinstance(visual, str) or not visual.strip() or len(visual) > 10000:
+        raise ValueError('Описание сцены должно содержать от 1 до 10000 символов обычного текста.')
+    async with connect() as db:
+        await db.execute('BEGIN IMMEDIATE')
+        row = await one(db, '''SELECT s.*,p.owner_id FROM cartoon_scenes s
+            JOIN cartoon_episodes e ON e.id=s.episode_id
+            JOIN cartoon_projects p ON p.id=e.project_id WHERE s.id=?''', (key,))
+        if not row or row['owner_id'] != actor:
+            raise ValueError('Сцена недоступна или нет доступа к проекту.')
+        try:
+            spec = json.loads(row['spec']) if isinstance(row['spec'], str) else row['spec']
+        except json.JSONDecodeError:
+            raise ValueError('Настройки сцены в базе повреждены. Изменений нет.') from None
+        if not isinstance(spec, dict):
+            raise ValueError('Настройки сцены в базе повреждены. Изменений нет.')
+        if spec.get('visual') == visual:
+            return
+        spec = dict(spec, visual=visual)
+        revision = row['revision'] + 1
+        await db.execute('UPDATE cartoon_scenes SET spec=?,revision=? WHERE id=?', (encoded(spec), revision, key))
+        await db.execute('INSERT INTO cartoon_versions VALUES (?,?,?,?,CURRENT_TIMESTAMP)',
+                         ('scene', key, revision, encoded(spec)))
+        await db.commit()
+
+
 async def liability(db, project):
     row = await one(db, '''SELECT COALESCE(SUM(CASE WHEN actual IS NOT NULL THEN actual ELSE estimate END),0) AS total
       FROM cartoon_jobs WHERE project_id=? AND status NOT IN ('quoted','cancelled','stale','preflight_failed')''', (project,))
@@ -212,10 +242,13 @@ async def _snapshot(db, target, key):
             cast.append(char)
         snap['cast'] = cast
         if row['number'] > 1:
-            first = await one(db, 'SELECT id FROM cartoon_scenes WHERE episode_id=? AND number=1', (row['episode_id'],))
-            if first:
-                first_snap = await _snapshot(db, 'scene', first['id'])
-                location = first_snap['assets'].get('image')
+            from .locations import use_previous_location
+            previous = unpack(await one(db, 'SELECT * FROM cartoon_scenes WHERE episode_id=? AND number=?',
+                                        (row['episode_id'], row['number'] - 1)))
+            snap['location_reference_required'] = not previous or use_previous_location(previous['spec'], row['spec'])
+            if previous and snap['location_reference_required']:
+                previous_snap = await _snapshot(db, 'scene', previous['id'])
+                location = previous_snap['assets'].get('image')
                 if location and location['approved']:
                     snap['location_reference'] = location
     if target == 'episode':
@@ -226,6 +259,13 @@ async def _snapshot(db, target, key):
         asset = await _latest(db, target, key, kind, snap['context_hash'])
         if asset:
             snap['assets'][kind] = asset
+    if target == 'scene':
+        selected = await one(db, '''SELECT a.* FROM cartoon_scene_image_selections s
+            JOIN cartoon_assets a ON a.id=s.asset_id WHERE s.scene_id=? AND s.context_hash=?
+            AND a.context_hash=? AND a.approved=1 AND a.kind='image' ''',
+            (key,snap['context_hash'],snap['context_hash']))
+        if selected:
+            snap['assets']['image'] = selected
     if snap.get('music'):
         snap['assets']['music'] = snap['music']
     if target == 'character' and row['spec'].get('reference'):
@@ -250,8 +290,8 @@ async def quote(target, key, kind, settings):
             raise ValueError('Сначала утвердите сценарий и укажите персонажей.')
         if any(not c['assets'].get('image') or not c['assets']['image']['approved'] for c in snap['cast']):
             raise ValueError('Сначала создайте и утвердите эталоны всех персонажей сцены.')
-        if snap['number'] > 1 and not snap.get('location_reference'):
-            raise ValueError('Сначала создайте и утвердите сцену 1 как эталон квартиры.')
+        if snap.get('location_reference_required') and not snap.get('location_reference'):
+            raise ValueError('Сначала создайте и утвердите изображение предыдущей сцены как эталон комнаты.')
     if kind in ('video','speech') and (not snap['assets'].get('image') or not snap['assets']['image']['approved']):
         raise ValueError('Сначала утвердите изображение этой версии сцены.')
     if kind == 'speech' and not snap['spec'].get('dialogue'):
@@ -284,7 +324,44 @@ async def job(key):
 
 
 def is_image_job(item):
-    return item['kind'] in ('image','character_reference')
+    return item['kind'] in ('image','character_reference','scene_image')
+
+
+async def begin_scene_upload(key, actor):
+    async with connect() as db:
+        await db.execute('BEGIN IMMEDIATE')
+        row = await one(db, '''SELECT p.owner_id FROM cartoon_scenes s
+            JOIN cartoon_episodes e ON e.id=s.episode_id
+            JOIN cartoon_projects p ON p.id=e.project_id WHERE s.id=?''', (key,))
+        if not row or row['owner_id'] != actor:
+            raise ValueError('Сцена недоступна или нет доступа к проекту.')
+        snap = await _snapshot(db, 'scene', key)
+        job_id = uuid4().hex
+        await db.execute('''INSERT INTO cartoon_jobs
+            (id,project_id,target,target_id,kind,snapshot,fingerprint,status,estimate,actual,approved_by,expires,notified)
+            VALUES (?,?,'scene',?,'scene_image',?,?,'uploading',0,0,?,0,1)''',
+            (job_id,snap['project_id'],key,encoded(snap),digest(snap),actor))
+        await db.commit()
+    return job_id, snap
+
+
+async def finish_scene_upload(key, asset_id, url):
+    async with connect() as db:
+        await db.execute('BEGIN IMMEDIATE')
+        item = await one(db, "SELECT * FROM cartoon_jobs WHERE id=? AND kind='scene_image' AND status='uploading'", (key,))
+        asset = await one(db, "SELECT * FROM cartoon_assets WHERE id=? AND job_id=? AND kind='scene_upload_pending'", (asset_id,key))
+        if not item or not asset or asset['target_id'] != item['target_id']:
+            raise ValueError('Не найден результат загрузки.')
+        current = await _snapshot(db, 'scene', item['target_id'])
+        if current['context_hash'] != json.loads(item['snapshot'])['context_hash']:
+            raise ValueError('Сцена изменилась во время загрузки. Загрузите изображение для новой версии.')
+        await db.execute("UPDATE cartoon_assets SET public_url=?,approved=1,kind='image' WHERE id=?", (url,asset_id))
+        await db.execute('INSERT OR REPLACE INTO cartoon_scene_image_selections VALUES (?,?,?)',
+                         (item['target_id'],current['context_hash'],asset_id))
+        await db.execute("UPDATE cartoon_jobs SET status='done',result_url=?,actual=0 WHERE id=?", (url,key))
+        await db.execute('INSERT INTO cartoon_job_events(job_id,event,details) VALUES (?,?,?)',
+                         (key,'scene_image_uploaded',encoded({'asset_id':asset_id,'actual':0})))
+        await db.commit()
 
 
 async def job_result(key):
@@ -454,10 +531,15 @@ async def add_asset(project, target, key, kind, context_hash, path, sha256, **fi
 
 async def approve_asset(key, actor):
     async with connect() as db:
+        await db.execute('BEGIN IMMEDIATE')
         result = await db.execute('''UPDATE cartoon_assets SET approved=1 WHERE id=? AND project_id IN
           (SELECT id FROM cartoon_projects WHERE owner_id=?)''', (key, actor))
         if not result.rowcount:
             raise ValueError('Нет доступа к изображению.')
+        asset = await one(db,'SELECT * FROM cartoon_assets WHERE id=?',(key,))
+        if asset['target']=='scene' and asset['kind']=='image':
+            await db.execute('INSERT OR REPLACE INTO cartoon_scene_image_selections VALUES (?,?,?)',
+                             (asset['target_id'],asset['context_hash'],key))
         await db.commit()
 
 

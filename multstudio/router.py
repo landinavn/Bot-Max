@@ -268,6 +268,18 @@ def create_router(admin_id, settings, assets):
             elif action=='approve':
                 await repo.approve_asset(parts[1],admin_id)
                 await tell(event,'Изображение утверждено. Генерация видео не запускается автоматически.',[('Проекты','home')])
+            elif action=='approve_video':
+                await repo.approve_asset(parts[1],admin_id,expected_kind='video')
+                await tell(event,'✅ Видео утверждено. Новая генерация не запускается.',[('Проекты','home')])
+            elif action=='resend_result':
+                item=await repo.job(parts[1])
+                if not item: raise ValueError('Задание не найдено.')
+                await owner('project',item['project_id'])
+                if item['status']!='done' or not repo.is_media_job(item):
+                    raise ValueError('В задании пока нет готового медиафайла.')
+                await repo.update_job(item['id'],notified=0)
+                await tell(event,'Готовый результат будет повторно отправлен в этот чат. '
+                           'Новая генерация и платный запрос не запускаются.',[('Задание','job:'+item['id'])])
             elif action=='view':
                 entity,key=parts[1:3]
                 await owner(entity,key)
@@ -301,9 +313,22 @@ def create_router(admin_id, settings, assets):
                     item=await repo.job(item['id'])
                     links.append(('🔗 Открыть изображение',url))
                     buttons.append(('Показать картинку','show_image:'+item['id']))
+                    buttons.append(('Отправить результат в чат','resend_result:'+item['id']))
                     if item['target']=='character':
                         buttons += [('✅ Утвердить эталон','approve_reference:'+item['id']),
                                     ('🔄 Перегенерировать','make:image:character:'+item['target_id'])]
+                if item['status']=='done' and item['kind']=='video':
+                    asset,url=await result_for_job(item)
+                    item=await repo.job(item['id'])
+                    links.append(('🔗 Открыть видео',url))
+                    buttons += [('Отправить видео в чат','resend_result:'+item['id']),
+                                ('✅ Утвердить видео','approve_video:'+asset['id']),
+                                ('🔄 Перегенерировать','make:video:scene:'+item['target_id'])]
+                if item['status']=='done' and item['kind'] in ('speech','assemble','episode_assembly'):
+                    _,url=await result_for_job(item)
+                    item=await repo.job(item['id'])
+                    links.append(('📥 Скачать результат',url))
+                    buttons.append(('Отправить результат в чат','resend_result:'+item['id']))
                 if item['status']=='manual' and await repo.job_result(item['id']):
                     buttons.append(('Опубликовать сохранённый результат','publish_result:'+item['id']))
                 if item['status']=='manual' and item['provider_id']:
@@ -311,7 +336,7 @@ def create_router(admin_id, settings, assets):
                 if item['status']=='manual' and item['kind']=='video':
                     buttons.append(('Завершить ручную сверку Kling','resolve:'+item['id']))
                 await tell(event,json.dumps({k:item[k] for k in ('id','kind','status','provider_id','result_url','error','estimate','actual','attempts')},ensure_ascii=False,indent=2)
-                           + ('\n🖼️ Изображение: '+item['result_url'] if links else '')
+                           + ('\nРезультат: '+item['result_url'] if links else '')
                            +'\nПри неизвестном результате платного запроса сначала сверьте расход в кабинете. Новый запрос — только с новым подтверждением.',
                            buttons+[('Проект','p:'+item['project_id'])],links)
             elif action=='show_image':

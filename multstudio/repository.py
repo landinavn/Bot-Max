@@ -327,6 +327,10 @@ def is_image_job(item):
     return item['kind'] in ('image','character_reference','scene_image')
 
 
+def is_media_job(item):
+    return is_image_job(item) or item['kind'] in ('video','speech','assemble','episode_assembly')
+
+
 async def begin_scene_upload(key, actor):
     async with connect() as db:
         await db.execute('BEGIN IMMEDIATE')
@@ -368,7 +372,8 @@ async def job_result(key):
     async with connect() as db:
         item=await one(db,'SELECT * FROM cartoon_jobs WHERE id=?',(key,))
         if not item: return None
-        kinds=('image','character_reference') if is_image_job(item) else (item['kind'],)
+        kinds=(('image','character_reference') if is_image_job(item) else
+               ('assemble','episode_assembly') if item['kind'] in ('assemble','episode_assembly') else (item['kind'],))
         return await one(db,'''SELECT * FROM cartoon_assets WHERE job_id=? AND project_id=? AND target=? AND target_id=?
           AND kind IN ('''+','.join('?' for _ in kinds)+') ORDER BY rowid DESC LIMIT 1',
           (key,item['project_id'],item['target'],item['target_id'],*kinds))
@@ -529,11 +534,13 @@ async def add_asset(project, target, key, kind, context_hash, path, sha256, **fi
     return asset_id
 
 
-async def approve_asset(key, actor):
+async def approve_asset(key, actor, *, expected_kind=None):
     async with connect() as db:
         await db.execute('BEGIN IMMEDIATE')
         result = await db.execute('''UPDATE cartoon_assets SET approved=1 WHERE id=? AND project_id IN
-          (SELECT id FROM cartoon_projects WHERE owner_id=?)''', (key, actor))
+          (SELECT id FROM cartoon_projects WHERE owner_id=?)'''
+          + (' AND kind=?' if expected_kind is not None else ''),
+          (key,actor,expected_kind) if expected_kind is not None else (key,actor))
         if not result.rowcount:
             raise ValueError('Нет доступа к изображению.')
         asset = await one(db,'SELECT * FROM cartoon_assets WHERE id=?',(key,))

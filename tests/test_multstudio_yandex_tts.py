@@ -16,7 +16,7 @@ from multstudio.adapters import Providers, ProviderFailed, YandexTTSAdapter, yan
 from multstudio.router import validate_spec, create_router
 from multstudio.seed import seed
 from multstudio.settings import Settings
-from multstudio.tts import MODEL, voice_settings
+from multstudio.tts import MODEL, voice_settings, speech_settings
 from multstudio.worker import Worker
 from test_multstudio import studio, ready_scene, add_image
 from test_multstudio_project_menu import event
@@ -37,7 +37,8 @@ async def test_speechkit_v1_exact_form_auth_binary_and_safe_log(caplog,voice,emo
         assert req.headers['Authorization']=='Api-Key private-yandex-key'
         assert req.headers['Content-Type'].startswith('application/x-www-form-urlencoded')
         assert parse_qs(req.content.decode())=={
-            'text':[text],'lang':['ru-RU'],'voice':[voice],'format':['mp3']}
+            'text':[text],'lang':['ru-RU'],'voice':[voice],'format':['mp3'],
+            'emotion':[emotion],'speed':['1.0']}
         return httpx.Response(200,content=MP3,headers={'Content-Type':'audio/mpeg'})
     with caplog.at_level(logging.INFO,logger='multstudio.adapters'):
         result=await YandexTTSAdapter('private-yandex-key','folder-id',httpx.MockTransport(request)).synthesize(text,voice,emotion)
@@ -55,18 +56,20 @@ async def test_public_yandex_tts_function_reads_only_yandex_environment(monkeypa
     assert route.call_count==1
     assert route.calls[0].request.headers['Authorization']=='Api-Key new-yandex-key'
     assert parse_qs(route.calls[0].request.content.decode())=={
-        'text':['Привет!'],'lang':['ru-RU'],'voice':['alena'],'format':['mp3']}
+        'text':['Привет!'],'lang':['ru-RU'],'voice':['alena'],'format':['mp3'],
+        'emotion':['neutral'],'speed':['1.0']}
 
 
 @pytest.mark.parametrize('folder',[None,'','wrong-old-folder'])
-async def test_api_key_request_does_not_require_or_send_folder_or_emotion(folder):
+async def test_api_key_request_does_not_require_or_send_folder(folder):
     calls=[]
     def reply(request):
         calls.append(request)
         assert request.headers['Authorization']=='Api-Key api-key-only'
         assert not request.url.query
         assert parse_qs(request.content.decode())=={
-            'text':['Русская речь'],'lang':['ru-RU'],'voice':['alena'],'format':['mp3']}
+            'text':['Русская речь'],'lang':['ru-RU'],'voice':['alena'],'format':['mp3'],
+            'emotion':['good'],'speed':['1.0']}
         return httpx.Response(200,content=MP3)
     result=await YandexTTSAdapter('api-key-only',folder,transport=httpx.MockTransport(reply)).synthesize(
         'Русская речь','alena','good')
@@ -80,7 +83,8 @@ async def test_yandex_tts_works_without_folder_environment_or_parameter(monkeypa
     route=respx.post(ENDPOINT).mock(return_value=httpx.Response(200,content=MP3))
     assert await yandex_tts('Текст','filipp')==MP3
     assert parse_qs(route.calls[0].request.content.decode())=={
-        'text':['Текст'],'lang':['ru-RU'],'voice':['filipp'],'format':['mp3']}
+        'text':['Текст'],'lang':['ru-RU'],'voice':['filipp'],'format':['mp3'],
+        'emotion':['neutral'],'speed':['1.0']}
 
 
 @pytest.mark.parametrize('status',[400,401,403,429,500])
@@ -156,7 +160,8 @@ async def test_full_yandex_error_body_is_logged_and_request_contract_remains_cor
         assert request.headers['Authorization']=='Api-Key test-key'
         assert not request.url.query
         assert parse_qs(request.content.decode())=={
-            'text':['Привет, мир!'],'lang':['ru-RU'],'voice':['alena'],'format':['mp3']}
+            'text':['Привет, мир!'],'lang':['ru-RU'],'voice':['alena'],'format':['mp3'],
+            'emotion':['neutral'],'speed':['1.0']}
         assert request.headers['content-type'].startswith('application/x-www-form-urlencoded')
         return httpx.Response(status,text=body)
     with pytest.raises(ProviderFailed):
@@ -203,6 +208,7 @@ async def test_existing_legacy_character_refs_survive_seed_and_show_effective_ya
     for char,voice in zip(chars,['nova','onyx','coral']):
         spec=dict(char['spec'],voice=voice)
         spec.pop('emotion',None)
+        spec.pop('speed',None)
         await repo.edit('character',char['id'],spec)
         await add_image(assets,await repo.snapshot('character',char['id']))
     before=await repo.snapshot('scene',scene['id'])
@@ -213,7 +219,7 @@ async def test_existing_legacy_character_refs_survive_seed_and_show_effective_ya
     assert after['assets']['image']['id']==approved
     pressed=event('studio:c:'+chars[0]['id'])
     await dispatch_callback(create_router(456,settings,assets),pressed,await ready_context())
-    assert 'SpeechKit v1: alena, emotion=neutral' in pressed.bot.send_message.await_args.kwargs['text']
+    assert 'SpeechKit v1: alena, emotion=good, speed=1.05' in pressed.bot.send_message.await_args.kwargs['text']
     assert '"voice": "alena"' in pressed.bot.send_message.await_args.kwargs['text']
 
 
@@ -282,7 +288,8 @@ async def test_provider_uses_saved_legacy_voice_with_speechkit(studio,voice,expe
     _,settings,assets=studio
     provider=Providers(replace(settings,tts_key='key',tts_folder_id='folder'),SimpleNamespace(),assets)
     line=dict(character_id='c',text='Русская речь без акцента.')
-    snap=dict(quote={'model':MODEL},cast=[{'id':'c','spec':{'voice':voice}}],spec={'dialogue':[line]})
+    snap=dict(quote={'model':MODEL,'speech_profiles':{'c':speech_settings({'voice':voice})}},
+              cast=[{'id':'c','spec':{'voice':voice}}],spec={'dialogue':[line]})
     route=respx.post(ENDPOINT).mock(return_value=httpx.Response(200,content=MP3))
     assert await provider.speech_line(snap,line)==MP3
     assert parse_qs(route.calls[0].request.content.decode())['voice']==[expected]

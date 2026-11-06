@@ -200,7 +200,9 @@ def create_router(admin_id, settings, assets):
                 await owner('scene',key)
                 await context.update_data(studio_input=dict(action='scene_upload',entity='scene',key=key))
                 await context.set_state(StudioStates.input)
-                await tell(event,'Отправьте изображение для этой сцены (JPG/PNG). Оно будет использовано вместо генерации.',
+                await tell(event,'Отправьте изображение для этой сцены (JPG/PNG). Оно будет использовано вместо генерации.\n'
+                           'Выберите «Файл» в MAX, чтобы сохранить исходный формат JPG/JPEG или PNG: '
+                           'при отправке как фото MAX может преобразовать изображение в WEBP.',
                            [('Отмена','home')])
             elif action=='scene_settings':
                 key=parts[1]
@@ -377,9 +379,11 @@ def create_router(admin_id, settings, assets):
             elif action=='scene_upload':
                 await owner('scene',key)
                 attachments=getattr(event.message.body,'attachments',None) or []
-                photos=[a for a in attachments if a.type=='image' and getattr(a.payload,'url',None)]
+                photos=[a for a in attachments if a.type in ('image','file') and getattr(a.payload,'url',None)]
+                logger.info('Мультстудия: вложения сцены scene=%s types=%s candidates=%s',
+                            key,[str(a.type) for a in attachments],len(photos))
                 if len(photos)!=1:
-                    raise ValueError('Отправьте одно изображение JPG/PNG для этой сцены.')
+                    raise ValueError('Отправьте один JPG/JPEG или PNG через «Файл» для этой сцены.')
                 from .uploads import upload_scene_image
                 await upload_scene_image(assets,key,admin_id,photos[0].payload.url)
                 await context.clear()

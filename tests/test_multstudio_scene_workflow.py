@@ -121,6 +121,7 @@ def png():
 def fake_download(assets,monkeypatch,data=None):
     async def download(url,suffix,**kwargs):
         kwargs.pop('limit',None)
+        kwargs.pop('accept',None)
         return await assets.write(png() if data is None else data,suffix,**kwargs)
     monkeypatch.setattr(assets,'download',download)
 

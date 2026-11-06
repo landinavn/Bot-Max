@@ -86,7 +86,7 @@ class Assets:
         await asyncio.to_thread(save)
         return relative,checksum
 
-    async def download(self, url, suffix, limit=200*1024*1024, *, job_id=None, name=None):
+    async def download(self, url, suffix, limit=200*1024*1024, *, job_id=None, name=None, accept=None):
         await public_url(url)
         self.root.mkdir(parents=True, exist_ok=True)
         relative = self.filename(suffix,job_id,name)
@@ -96,12 +96,18 @@ class Assets:
         total, checksum = 0, hashlib.sha256()
         try:
             async with httpx.AsyncClient(timeout=90, follow_redirects=False) as client:
-                async with client.stream('GET', url) as response:
+                async with client.stream('GET', url, **({'headers':{'Accept':accept}} if accept else {})) as response:
                     response.raise_for_status()
+                    if accept:
+                        logger.info('Мультстудия: ответ при скачивании job=%s status=%s content_type=%r content_length=%r',
+                                    job_id,response.status_code,response.headers.get('content-type','')[:100],
+                                    response.headers.get('content-length','')[:40])
                     with temporary.open('xb') as output:
                         async for chunk in response.aiter_bytes():
                             total += len(chunk)
                             if total > limit:
+                                if accept:
+                                    logger.warning('Мультстудия: отклонена загрузка job=%s reason=byte_limit bytes=%s limit=%s',job_id,total,limit)
                                 raise ValueError('Файл превышает лимит студии.')
                             checksum.update(chunk)
                             output.write(chunk)

@@ -81,6 +81,8 @@ class Providers:
         _storage_client(self.config)  # Validate storage credentials before any paid POST.
         if not self.config.storage_public_base_url:
             raise ValueError('Задайте STORAGE_PUBLIC_BASE_URL для студийных референсов и результатов.')
+        if kind=='image':
+            self.assets.canonical_image_url('multstudio/preflight.png')
         if kind == 'speech':
             from .render import Renderer
             Renderer(self.assets).ready()

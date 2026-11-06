@@ -92,6 +92,15 @@ def create_router(admin_id, settings, assets):
             raise ValueError('Нет доступа к проекту.')
         return row,project
 
+    async def result_for_job(item, *, force=False):
+        try:
+            return await assets.result_for_job(item,force=force)
+        except ValueError:
+            raise
+        except Exception as exc:
+            logger.warning('Не удалось опубликовать результат задания %s (%s).',item['id'],type(exc).__name__)
+            raise ValueError('Файл сохранён, но публикация временно недоступна. Повторите просмотр; генерация не перезапускается.') from None
+
     async def home(event,context):
         await context.clear()
         project = await seed(admin_id)
@@ -244,12 +253,52 @@ def create_router(admin_id, settings, assets):
                 await owner('project',item['project_id'])
                 if action=='poll': await repo.retry_poll(item['id'],admin_id)
                 buttons=[('💰 Сверить фактический расход','cost:'+item['id'])] if item['status'] in ('done','manual','failed') else []
+                links=[]
+                if item['status']=='done' and repo.is_image_job(item):
+                    _,url=await result_for_job(item)
+                    item=await repo.job(item['id'])
+                    links.append(('🔗 Открыть изображение',url))
+                    buttons.append(('Показать картинку','show_image:'+item['id']))
+                    if item['target']=='character':
+                        buttons += [('✅ Утвердить эталон','approve_reference:'+item['id']),
+                                    ('🔄 Перегенерировать','make:image:character:'+item['target_id'])]
+                if item['status']=='manual' and await repo.job_result(item['id']):
+                    buttons.append(('Опубликовать сохранённый результат','publish_result:'+item['id']))
                 if item['status']=='manual' and item['provider_id']:
                     buttons.append(('Повторить только опрос Kling','poll:'+item['id']))
                 if item['status']=='manual' and item['kind']=='video':
                     buttons.append(('Завершить ручную сверку Kling','resolve:'+item['id']))
-                await tell(event,json.dumps({k:item[k] for k in ('id','kind','status','provider_id','error','estimate','actual','attempts')},ensure_ascii=False,indent=2)
-                           +'\nПри неизвестном результате платного запроса сначала сверьте расход в кабинете. Новый запрос — только с новым подтверждением.',buttons+[('Проект','p:'+item['project_id'])])
+                await tell(event,json.dumps({k:item[k] for k in ('id','kind','status','provider_id','result_url','error','estimate','actual','attempts')},ensure_ascii=False,indent=2)
+                           + ('\n🖼️ Изображение: '+item['result_url'] if links else '')
+                           +'\nПри неизвестном результате платного запроса сначала сверьте расход в кабинете. Новый запрос — только с новым подтверждением.',
+                           buttons+[('Проект','p:'+item['project_id'])],links)
+            elif action=='show_image':
+                item=await repo.job(parts[1])
+                if not item: raise ValueError('Задание не найдено.')
+                await owner('project',item['project_id'])
+                if item['status']!='done' or not repo.is_image_job(item):
+                    raise ValueError('В этом задании пока нет готового изображения.')
+                _,url=await result_for_job(item,force=True)
+                from image_service import upload_image_for_max
+                try:
+                    image=await upload_image_for_max(event.bot,url)
+                except Exception as exc:
+                    logger.warning('MAX не принял изображение задания %s (%s).',item['id'],type(exc).__name__)
+                    raise ValueError('Изображение сохранено в S3, но MAX временно не принял файл. Повторите показ; новая генерация не запускается.') from None
+                await _reply(event,'🖼️ Изображение задания '+item['id'],attachments=[image])
+            elif action=='approve_reference':
+                asset_id=await repo.approve_character_result(parts[1],admin_id)
+                await tell(event,'✅ Эталон утверждён и выбран для персонажа. ID: '+asset_id,
+                           [('Задание','job:'+parts[1])])
+            elif action=='publish_result':
+                item=await repo.job(parts[1])
+                if not item: raise ValueError('Задание не найдено.')
+                await owner('project',item['project_id'])
+                if item['status']!='manual' or not await repo.job_result(item['id']):
+                    raise ValueError('Нет сохранённого результата для повторной публикации.')
+                await repo.update_job(item['id'],status='publishing',attempts=0,lease_until=0,next_attempt=0,error=None)
+                await tell(event,'Повторяется только публикация сохранённого файла, без нового запроса генерации.',
+                           [('Задание','job:'+item['id'])])
             elif action=='resolve':
                 item=await repo.job(parts[1])
                 if not item: raise ValueError('Задание не найдено.')
@@ -337,8 +386,12 @@ async def export_project(project,assets):
     def pack():
         with zipfile.ZipFile(archive,'w',compression=zipfile.ZIP_DEFLATED) as output:
             output.writestr('project.json',json.dumps(data,ensure_ascii=False,indent=2))
+            packed=set()
             for asset in data['assets']:
                 path=assets.path(asset['path'])
-                if path.is_file(): output.write(path,'assets/'+path.name)
+                relative='assets/'+path.relative_to(assets.root).as_posix()
+                if path.is_file() and relative not in packed:
+                    output.write(path,relative)
+                    packed.add(relative)
     await asyncio.to_thread(pack)
     return await assets.publish(archive.name)

@@ -17,7 +17,8 @@ def digest(value):
     # Publishing an immutable file must not change scene identity or stale a quote.
     def stable(item):
         if isinstance(item, dict):
-            return {k:stable(v) for k,v in item.items() if k != 'public_url'}
+            technical={'public_url','path','metadata','source_url','created_at'} if {'id','sha256','path'}<=item.keys() else {'public_url'}
+            return {k:stable(v) for k,v in item.items() if k not in technical}
         if isinstance(item, list):
             return [stable(v) for v in item]
         return item
@@ -80,6 +81,9 @@ CREATE TABLE IF NOT EXISTS cartoon_job_events (
  event TEXT NOT NULL, details TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS cartoon_jobs_queue ON cartoon_jobs(status,next_attempt,lease_until);
 ''')
+        columns = await rows(db,'PRAGMA table_info(cartoon_jobs)')
+        if 'result_url' not in {column['name'] for column in columns}:
+            await db.execute('ALTER TABLE cartoon_jobs ADD COLUMN result_url TEXT')
         await db.commit()
 
 
@@ -150,6 +154,9 @@ async def budget(project, amount=None):
 
 
 async def _latest(db, target, key, kind, context):
+    if kind=='image':
+        return await one(db, '''SELECT * FROM cartoon_assets WHERE target=? AND target_id=?
+          AND kind IN ('image','character_reference') AND context_hash=? ORDER BY rowid DESC LIMIT 1''', (target,key,context))
     return await one(db, '''SELECT * FROM cartoon_assets WHERE target=? AND target_id=? AND kind=? AND context_hash=?
                          ORDER BY rowid DESC LIMIT 1''', (target, key, kind, context))
 
@@ -197,7 +204,7 @@ async def _snapshot(db, target, key):
         snap['assets']['music'] = snap['music']
     if target == 'character' and row['spec'].get('reference'):
         asset = await one(db, 'SELECT * FROM cartoon_assets WHERE id=?', (row['spec']['reference'],))
-        if not asset or asset['project_id'] != project_id or asset['kind'] != 'image':
+        if not asset or asset['project_id'] != project_id or asset['kind'] not in ('image','character_reference'):
             raise ValueError('Не найден сохранённый референс персонажа.')
         snap['assets']['image'] = asset
     return snap
@@ -248,6 +255,59 @@ async def quote(target, key, kind, settings):
 async def job(key):
     async with connect() as db:
         return await one(db, 'SELECT * FROM cartoon_jobs WHERE id=?', (key,))
+
+
+def is_image_job(item):
+    return item['kind'] in ('image','character_reference')
+
+
+async def job_result(key):
+    async with connect() as db:
+        item=await one(db,'SELECT * FROM cartoon_jobs WHERE id=?',(key,))
+        if not item: return None
+        kinds=('image','character_reference') if is_image_job(item) else (item['kind'],)
+        return await one(db,'''SELECT * FROM cartoon_assets WHERE job_id=? AND project_id=? AND target=? AND target_id=?
+          AND kind IN ('''+','.join('?' for _ in kinds)+') ORDER BY rowid DESC LIMIT 1',
+          (key,item['project_id'],item['target'],item['target_id'],*kinds))
+
+
+async def bind_job_result(key, asset_id, url):
+    async with connect() as db:
+        await db.execute('BEGIN IMMEDIATE')
+        item=await one(db,'SELECT * FROM cartoon_jobs WHERE id=?',(key,))
+        asset=await one(db,'SELECT * FROM cartoon_assets WHERE id=? AND job_id=?',(asset_id,key))
+        if not item or not asset or any(item[k]!=asset[k] for k in ('project_id','target','target_id')):
+            raise ValueError('Результат не принадлежит этому заданию.')
+        changed=item['result_url']!=url or asset['public_url']!=url
+        await db.execute('UPDATE cartoon_assets SET public_url=? WHERE id=?',(url,asset_id))
+        await db.execute('UPDATE cartoon_jobs SET result_url=? WHERE id=?',(url,key))
+        if changed:
+            await db.execute('INSERT INTO cartoon_job_events(job_id,event,details) VALUES (?,?,?)',
+                (key,'result_published',encoded({'asset_id':asset_id,'result_url':url})))
+        await db.commit()
+        return changed
+
+
+async def approve_character_result(key, actor):
+    asset=await job_result(key)
+    async with connect() as db:
+        await db.execute('BEGIN IMMEDIATE')
+        item=await one(db,'''SELECT j.*,p.owner_id FROM cartoon_jobs j JOIN cartoon_projects p ON p.id=j.project_id WHERE j.id=?''',(key,))
+        if (not item or item['owner_id']!=actor or item['status']!='done' or item['target']!='character'
+                or not is_image_job(item) or not asset):
+            raise ValueError('Готовый эталон этого задания недоступен.')
+        char=await one(db,'SELECT * FROM cartoon_characters WHERE id=? AND project_id=?',(item['target_id'],item['project_id']))
+        if not char: raise ValueError('Персонаж не найден.')
+        spec=json.loads(char['spec'])
+        await db.execute('UPDATE cartoon_assets SET approved=1 WHERE id=?',(asset['id'],))
+        if spec.get('reference')!=asset['id']:
+            spec['reference']=asset['id']
+            revision=char['revision']+1
+            await db.execute('UPDATE cartoon_characters SET spec=?,revision=? WHERE id=?',(encoded(spec),revision,char['id']))
+            await db.execute('INSERT INTO cartoon_versions VALUES (?,?,?,?,CURRENT_TIMESTAMP)',
+                             ('character',char['id'],revision,encoded(spec)))
+        await db.commit()
+        return asset['id']
 
 
 async def confirm(key, actor):
@@ -321,7 +381,7 @@ async def claim():
         await db.execute('BEGIN IMMEDIATE')
         await db.execute("UPDATE cartoon_jobs SET status='manual',error='unknown_submission',lease_until=0 WHERE status='submitting' AND lease_until<?", (now,))
         await db.execute("UPDATE cartoon_jobs SET status='queued',lease_until=0 WHERE status='preparing' AND lease_until<?", (now,))
-        candidates = await rows(db, "SELECT * FROM cartoon_jobs WHERE status IN ('queued','polling') AND lease_until<? AND next_attempt<=? ORDER BY rowid LIMIT 20", (now, now))
+        candidates = await rows(db, "SELECT * FROM cartoon_jobs WHERE status IN ('queued','polling','publishing') AND lease_until<? AND next_attempt<=? ORDER BY rowid LIMIT 20", (now, now))
         for item in candidates:
             # One studio Kling task IN FLIGHT, not just one concurrent HTTP POST.
             if item['kind']=='video' and item['status']=='queued' and await video_busy(db,item['id']):
@@ -329,7 +389,7 @@ async def claim():
             project = await one(db, 'SELECT * FROM cartoon_projects WHERE id=?', (item['project_id'],))
             if item['status'] == 'queued' and item['estimate'] and await liability(db, project['id']) > project['budget']:
                 continue
-            status = 'preparing' if item['status'] == 'queued' else 'polling'
+            status = 'preparing' if item['status'] == 'queued' else item['status']
             await db.execute('UPDATE cartoon_jobs SET status=?,lease_until=? WHERE id=?', (status, now+120, item['id']))
             await db.commit()
             return dict(item, status=status)

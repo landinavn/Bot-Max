@@ -16,7 +16,7 @@ from handlers import _reply
 from . import repository as repo
 from .seed import seed
 from .settings import dollars, money
-from .tts import VOICES, speech_settings
+from .tts import VOICES, speech_settings, MASHA_PROFILE
 
 
 class StudioStates(StatesGroup):
@@ -135,10 +135,12 @@ def create_router(admin_id, settings, assets):
             await tell(event,f"📁 Проект: {row['title']}\nБюджет: {amount}$\n"
                        f"Расход + резервы: {dollars(state['committed'])}",buttons)
         elif entity=='character':
-            profile=speech_settings(row['spec'],row['name'])
-            await tell(event,row['name']+'\nID: '+key+f"\nSpeechKit v1: {profile['voice']}, emotion={profile['emotion']}, speed={profile['speed']}\n"
+            profile=await repo.character_speech(key)
+            await tell(event,row['name']+'\nID: '+key+f"\nSpeechKit {'v3' if profile['voice']=='masha' else 'v1'}: {profile['voice']}, emotion={profile['emotion']}, speed={profile['speed']}"
+                       + (f", pitch_shift={profile['pitch_shift']} Гц" if 'pitch_shift' in profile else '')+'\n'
                        +json.dumps(dict(row['spec'],**profile),ensure_ascii=False,indent=2),[
                 ('✏️ Изменить описание','edit:character:'+key),
+                *([('🧒 Юный голос Маши','masha_voice:'+key)] if row['name']=='Маша' else []),
                 ('🎙 Настройки голоса (JSON)','character_settings:'+key),('📷 Загрузить референс','reference:'+key),
                 ('🎨 Создать / перегенерировать эталон','make:image:character:'+key),
                 ('👁 Эталон / утвердить','view:character:'+key),('⬅️ Проект','p:'+project['id'])])
@@ -240,16 +242,24 @@ def create_router(admin_id, settings, assets):
                 await context.set_state(StudioStates.input)
                 await tell(event,'Расширенные параметры сцены: пришлите JSON. Для изменения только описания '
                            'используйте «Изменить сцену».\n'+json.dumps(row['spec'],ensure_ascii=False,indent=2),[('Отмена','home')])
+            elif action=='masha_voice':
+                key=parts[1]
+                row,_=await owner('character',key)
+                if row['name']!='Маша': raise ValueError('Этот профиль предназначен для Маши.')
+                await repo.set_character_speech(key,admin_id,MASHA_PROFILE)
+                await tell(event,'Сохранён вариант юного голоса Маши: SpeechKit v3 / masha, темп 1.0, тон +80 Гц. '
+                           'Точный возраст голосом не задаётся: оцените звучание после подтверждения озвучки. '
+                           'Картинки и видео сохранены; платная озвучка не запускалась.',[('👤 Персонаж','c:'+key)])
             elif action=='character_settings':
                 key=parts[1]
                 row,_=await owner('character',key)
                 await context.update_data(studio_input=dict(action='character_settings',entity='character',key=key))
                 await context.set_state(StudioStates.input)
-                profile=speech_settings(row['spec'],row['name'])
-                await tell(event,'Настройки SpeechKit v1: пришлите JSON, voice='+', '.join(sorted(VOICES))
-                           +'; emotion=neutral/good/evil; speed=0.1–3.0. Чтобы изменить только описание, '
-                           'используйте кнопку «Изменить описание».\n'
-                           +json.dumps(dict(row['spec'],**profile),ensure_ascii=False,indent=2),[('Отмена','home')])
+                profile=await repo.character_speech(key)
+                await tell(event,'Настройки озвучки: пришлите JSON, voice='+', '.join(sorted(VOICES))
+                           +'; speed=0.1–3.0. Для masha (v3): emotion=good/friendly/strict, pitch_shift=-1000…1000 Гц. '
+                           'Для остальных (v1): emotion=neutral/good/evil. Эти настройки не меняют картинки и видео.\n'
+                           +json.dumps(profile,ensure_ascii=False,indent=2),[('Отмена','home')])
             elif action in ('new','edit'):
                 entity,key=parts[1:3]
                 if action=='edit':
@@ -288,6 +298,7 @@ def create_router(admin_id, settings, assets):
                 snap=json.loads(item['snapshot']); q=snap['quote']
                 speech_info=('Голоса:\n'+'\n'.join(
                     f"{p.get('name','Персонаж')}: {p['voice']}, emotion={p['emotion']}, speed={p['speed']}"
+                    +(f", pitch_shift={p['pitch_shift']} Гц; SpeechKit v3" if p['voice']=='masha' else '')
                     for p in q.get('speech_profiles',{}).values())+'\n') if kind=='speech' else ''
                 await tell(event, f"Подтверждение задания {item['id']}\nМодель: {q['model']}\nРазрешение: {q['resolution']}\n"
                     f"Длительность: {q['duration']} сек (озвучка — по естественной речи)\nОценка: {dollars(q['estimate'])}\n"
@@ -474,7 +485,12 @@ def create_router(admin_id, settings, assets):
                                              suffix='png' if action=='reference' else 'mp3')
                 if action=='reference':
                     await repo.edit('character',key,dict(row['spec'],reference=asset_id))
-            elif action in ('new','edit','character_settings','scene_settings'):
+            elif action=='character_settings':
+                profile=json.loads(text)
+                if not isinstance(profile,dict) or set(profile)-{'voice','emotion','speed','pitch_shift'}:
+                    raise ValueError('Пришлите только voice, emotion, speed и pitch_shift (для masha).')
+                await repo.set_character_speech(key,admin_id,profile)
+            elif action in ('new','edit','scene_settings'):
                 entity=task['entity']; spec=validate_spec(entity,json.loads(text))
                 if action in ('edit','character_settings','scene_settings'):
                     _,project=await owner(entity,key)
@@ -510,6 +526,8 @@ async def export_project(project,assets):
     async with repo.connect() as db:
         data={'project':await repo.one(db,'SELECT * FROM cartoon_projects WHERE id=?',(project,))}
         data['characters']=await repo.rows(db,'SELECT * FROM cartoon_characters WHERE project_id=?',(project,))
+        data['speech_profiles']=await repo.rows(db,'''SELECT p.* FROM cartoon_character_speech_profiles p
+            JOIN cartoon_characters c ON c.id=p.character_id WHERE c.project_id=?''',(project,))
         data['episodes']=await repo.rows(db,'SELECT * FROM cartoon_episodes WHERE project_id=?',(project,))
         data['scenes']=await repo.rows(db,'SELECT s.* FROM cartoon_scenes s JOIN cartoon_episodes e ON e.id=s.episode_id WHERE e.project_id=?',(project,))
         data['jobs']=await repo.rows(db,'SELECT * FROM cartoon_jobs WHERE project_id=?',(project,))

@@ -103,7 +103,7 @@ async def test_all_seven_ready_videos_and_refs_survive_seed_and_new_speech_quote
     chars,episode,saved=await setup_old_ready_episode(studio)
     before_chars=await repo.children('character',project)
     assert await seed(456)==project
-    expected={'Аня':('alena','good',1.05),'Дима':('filipp','neutral',0.95),'Маша':('alena','good',1.1)}
+    expected={'Аня':('alena','good',1.05),'Дима':('filipp','neutral',0.95),'Маша':('masha','good',1.0)}
     for scene,job,asset_id,data,before in saved:
         if scene['spec'].get('dialogue'):
             speech=await repo.quote('scene',scene['id'],'speech',settings)

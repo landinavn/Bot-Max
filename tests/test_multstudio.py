@@ -25,7 +25,7 @@ async def studio(credit_db,tmp_path):
     await repo.init()
     project=await seed(456)
     settings=Settings(root=tmp_path/'files',image_model='image-test',image_price=1000000,
-                      video_price=500000,speech_price=100000,enabled=True)
+                      video_price=500000,speech_price=100000,speech_v3_price=25000,enabled=True)
     await repo.prepare_drafts(project,settings)
     return project,settings,Assets(settings.root,SimpleNamespace())
 

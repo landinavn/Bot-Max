@@ -42,6 +42,7 @@ class Settings:
     image_price: int = 0
     video_price: int = 0  # Estimate per 5 seconds; must be configured by owner.
     speech_price: int = 0  # Estimate per 1000 characters.
+    speech_v3_price: int = 0  # Estimate per 250 characters per utterance.
     concurrency: int = 1
     enabled: bool = False
 
@@ -55,10 +56,11 @@ class Settings:
                    image_price=price_from_env('STUDIO_IMAGE_USD'),
                    video_price=price_from_env('STUDIO_KLING_5S_USD'),
                    speech_price=price_from_env('STUDIO_TTS_1000_CHARS_USD'),
+                   speech_v3_price=price_from_env('STUDIO_TTS_V3_250_CHARS_USD'),
                    concurrency=max(1, min(3, int(os.getenv('STUDIO_CONCURRENCY', '1')))),
                    enabled=os.getenv('STUDIO_ENABLED', '0') == '1')
 
-    def quote(self, kind, snapshot):
+    def quote(self, kind, snapshot, *, speech_profiles=None):
         duration = snapshot.get('spec', {}).get('duration', 0)
         if kind == 'image':
             price, model, size = self.image_price, self.image_model, '1024x1536'
@@ -66,9 +68,19 @@ class Settings:
             duration = 5 if duration <= 5 else 10
             price, model, size = self.video_price * (duration // 5), 'kling/3.0/std', '9:16; итог 1080x1920'
         elif kind == 'speech':
-            chars = sum(len(x['text']) for x in snapshot['spec'].get('dialogue', []))
+            profiles = speech_profiles or {}
+            lines = snapshot['spec'].get('dialogue', [])
+            v3 = [line for line in lines if profiles.get(line['character_id'],{}).get('voice')=='masha']
+            v1 = [line for line in lines if line not in v3]
+            if v3 and self.speech_v3_price <= 0:
+                raise ValueError('Для голоса Маши задайте оценку STUDIO_TTS_V3_250_CHARS_USD в USD за 250 символов SpeechKit v3.')
+            if v1 and self.speech_price <= 0:
+                raise ValueError('Задайте STUDIO_TTS_1000_CHARS_USD для SpeechKit v1.')
+            chars = sum(len(x['text']) for x in v1)
             price = (self.speech_price * chars + 999) // 1000
-            model, size = TTS_MODEL, 'MP3; ru-RU; естественная речь'
+            price += sum(((len(x['text'])+249)//250)*self.speech_v3_price for x in v3)
+            model = (TTS_MODEL+'+v3' if v1 else 'yandex-speechkit-v3') if v3 else TTS_MODEL
+            size = 'MP3; ru-RU; естественная речь'
         elif kind == 'assemble':
             price, model, size = 0, 'FFmpeg/local', '1080x1920 / 30 FPS / H.264 + AAC'
         else:

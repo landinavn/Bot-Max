@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import math
+import re
 from fractions import Fraction
 import shutil
 from pathlib import Path
@@ -23,7 +24,7 @@ def stamp(value):
 
 
 
-async def process(*args, cwd=None, timeout=900):
+async def process(*args, cwd=None, timeout=900, return_stderr=False):
     child = await asyncio.create_subprocess_exec(*map(str,args), cwd=cwd,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
@@ -35,7 +36,7 @@ async def process(*args, cwd=None, timeout=900):
         raise
     if child.returncode:
         raise ValueError('Ошибка локального FFmpeg/FFprobe; исходники сохранены.')
-    return out
+    return error if return_stderr else out
 
 
 async def probe(path):
@@ -87,6 +88,31 @@ class Renderer:
                       '-map','[a]','-ar','48000','-c:a','libmp3lame',result)
         return result
 
+    async def speech_timing(self, path):
+        """Remove only a long silent prefix from the render, never from the source."""
+        seconds=await duration(path)
+        report=await process('ffmpeg','-nostdin','-hide_banner','-v','info','-i',str(path),
+            '-map','0:a:0','-af','asetpts=N/SR/TB,silencedetect=noise=-50dB:d=0.3',
+            '-f','null','-',return_stderr=True)
+        events=re.finditer(r'silence_(start|end):\s*([-+0-9.eE]+)',report.decode(errors='replace'))
+        initial=False
+        for event in events:
+            kind,value=event.group(1),float(event.group(2))
+            if not math.isfinite(value):
+                raise ValueError('Некорректная проверка начальной тишины озвучки.')
+            if kind=='start':
+                if value>0.001:
+                    break  # Speech has already begun; keep ALL interior pauses.
+                initial=True
+            elif initial:
+                if value>=seconds-0.05:
+                    raise ValueError('Сохранённая озвучка содержит только тишину. Выберите другой аудиорезультат; исходник сохранён.')
+                # Keep 20 ms before the first sound to protect a soft consonant/breath.
+                trim=max(0.0,value-0.02)
+                logger.info('Монтаж озвучки: начальная тишина %.3f с, убрано %.3f с; исходник сохранён',value,trim)
+                return trim,max(0.0,seconds-trim)
+        return 0.0,seconds
+
     @staticmethod
     def subtitle_text(scene):
         return ' '.join(x['text'] for x in scene['spec'].get('dialogue', [])).replace('\n',' ').replace('{','').replace('}','').replace('\\','')
@@ -104,7 +130,7 @@ class Renderer:
         if trim and trim>=source_seconds:
             raise ValueError('Начало видео находится за концом ролика. Укажите время меньше его длительности.')
         video_seconds=max(0.0,source_seconds-trim)
-        voice_seconds=await duration(self.assets.path(voice['path'])) if voice else 0.0
+        voice_trim,voice_seconds=await self.speech_timing(self.assets.path(voice['path'])) if voice else (0.0,0.0)
         longest=max(max(0.0,float(scene['spec']['duration'])-trim),video_seconds,offset+voice_seconds+0.2 if voice else 0)
         # An integral video frame count also gives an integral 48 kHz sample count.
         seconds=math.ceil(longest*FPS-1e-9)/FPS
@@ -145,8 +171,8 @@ class Renderer:
             filters += f';[2:v]setpts=PTS-STARTPTS[title];[{current}][title]overlay=0:0[out]'
             current = 'out'
         delay=f',adelay={round(offset*48000)}S:all=1' if voice and offset else ''
-        filters += (f';[1:a:0]asetpts=PTS-STARTPTS,aresample=48000,'
-                    f'aformat=sample_rates=48000:channel_layouts=stereo{delay},apad,'
+        filters += (f';[1:a:0]asetpts=PTS-STARTPTS,atrim=start={voice_trim:.9f},asetpts=N/SR/TB,aresample=48000,'
+                    f'aformat=sample_rates=48000:channel_layouts=stereo{delay},asetpts=N/SR/TB,apad,'
                     f'atrim=duration={seconds:.9f},asetpts=N/SR/TB[a]')
         await process(*args,'-filter_complex',filters,'-map',f'[{current}]','-map','[a]',
             '-t',str(seconds),'-r','30','-c:v','libx264','-preset','veryfast','-threads','2','-crf','23',
@@ -193,7 +219,11 @@ class Renderer:
             if text:
                 voice=scene['assets'].get('speech')
                 start=repo.speech_start(scene.get('editing',{}).get('speech_start',0)) if voice else 0
-                end=min(seconds,start+await duration(self.assets.path(voice['path']))) if voice else seconds
+                if voice:
+                    _,voice_seconds=await self.speech_timing(self.assets.path(voice['path']))
+                    end=min(seconds,start+voice_seconds)
+                else:
+                    end=seconds
                 cues.append(f'{len(cues)+1}\n{stamp(elapsed+start)} --> {stamp(elapsed+end)}\n{text}\n')
             elapsed += seconds
         episode_srt=self.assets.path(uuid4().hex+'.srt')

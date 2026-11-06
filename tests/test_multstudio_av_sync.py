@@ -235,7 +235,7 @@ async def test_new_assembly_quote_uses_saved_media_and_never_calls_paid_provider
     assert revised['id']!=initial['id'] and revised['estimate']==0
     import json
     snap=json.loads(revised['snapshot'])
-    assert snap['quote']['render_version']==3
+    assert snap['quote']['render_version']==4
     assert snap['scenes'][0]['editing']['speech_start']==3.5
     assert all(s['assets'].get('video') and s['assets'].get('speech') for s in snap['scenes'])
     # Confirming a stale free quote must not silently use previous timing.

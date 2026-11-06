@@ -139,6 +139,8 @@ def create_router(admin_id, settings, assets):
         else:
             await tell(event,f"Сцена {row['number']} · версия {row['revision']}\n"+json.dumps(row['spec'],ensure_ascii=False,indent=2),[
                 ('✏️ Изменить сцену','edit:scene:'+key),('🎨 Изображение / перегенерировать','make:image:scene:'+key),
+                ('📤 Загрузить своё изображение','scene_upload:'+key),
+                ('⚙️ Параметры сцены (JSON)','scene_settings:'+key),
                 ('🎥 Оживить','make:video:scene:'+key),('🎙 Озвучить','make:speech:scene:'+key),
                 ('👁 Результаты / утвердить изображение','view:scene:'+key),('⬅️ Серия','e:'+row['episode_id'])])
 
@@ -185,6 +187,28 @@ def create_router(admin_id, settings, assets):
                 await context.set_state(StudioStates.input)
                 await tell(event,DESCRIPTION_PROMPT+'\n\nТекущее описание:\n'+row['spec'].get('description',''),
                            [('Отмена','home')])
+            elif action=='edit' and len(parts)>2 and parts[1]=='scene':
+                key=parts[2]
+                row,_=await owner('scene',key)
+                await context.update_data(studio_input=dict(action='scene_visual',entity='scene',key=key))
+                await context.set_state(StudioStates.input)
+                await tell(event,'Опишите словами, что изменить в сцене (например: Аня сидит на диване)'
+                           +'\nТекст заменит визуальное описание целиком.\n\nТекущее описание:\n'
+                           +row['spec'].get('visual',''),[('Отмена','home')])
+            elif action=='scene_upload':
+                key=parts[1]
+                await owner('scene',key)
+                await context.update_data(studio_input=dict(action='scene_upload',entity='scene',key=key))
+                await context.set_state(StudioStates.input)
+                await tell(event,'Отправьте изображение для этой сцены (JPG/PNG). Оно будет использовано вместо генерации.',
+                           [('Отмена','home')])
+            elif action=='scene_settings':
+                key=parts[1]
+                row,_=await owner('scene',key)
+                await context.update_data(studio_input=dict(action='scene_settings',entity='scene',key=key))
+                await context.set_state(StudioStates.input)
+                await tell(event,'Расширенные параметры сцены: пришлите JSON. Для изменения только описания '
+                           'используйте «Изменить сцену».\n'+json.dumps(row['spec'],ensure_ascii=False,indent=2),[('Отмена','home')])
             elif action=='character_settings':
                 key=parts[1]
                 row,_=await owner('character',key)
@@ -337,6 +361,7 @@ def create_router(admin_id, settings, assets):
         if not await allowed(event): return
         data=await context.get_data(); task=data.get('studio_input',{}); action=task.get('action')
         text=(event.message.body.text or '').strip()
+        if text.startswith('/'): return
         try:
             key=task.get('key')
             if action=='description' or (action=='edit' and task.get('entity')=='character'):
@@ -348,6 +373,25 @@ def create_router(admin_id, settings, assets):
                 logger.info('Обновлено описание персонажа %s: %s',key,text)
                 await context.clear()
                 await tell(event,'Описание персонажа сохранено.',[('👤 Персонаж','c:'+key)])
+                return
+            elif action=='scene_upload':
+                await owner('scene',key)
+                attachments=getattr(event.message.body,'attachments',None) or []
+                photos=[a for a in attachments if a.type=='image' and getattr(a.payload,'url',None)]
+                if len(photos)!=1:
+                    raise ValueError('Отправьте одно изображение JPG/PNG для этой сцены.')
+                from .uploads import upload_scene_image
+                await upload_scene_image(assets,key,admin_id,photos[0].payload.url)
+                await context.clear()
+                await tell(event,'✅ Изображение загружено и утверждено. Перейти к оживлению?',
+                           [('🎬 Оживить сцену','make:video:scene:'+key),('🎬 Сцена','s:'+key)])
+                return
+            elif action=='scene_visual' or (action=='edit' and task.get('entity')=='scene'):
+                await repo.update_scene_visual(key,admin_id,text)
+                logger.info('Обновлено визуальное описание сцены %s',key)
+                await context.clear()
+                await tell(event,'Описание сцены сохранено. Платные задания автоматически не запускаются.',
+                           [('🎬 Сцена','s:'+key)])
                 return
             elif action=='budget':
                 await owner('project',key); await repo.budget(key,money(text))
@@ -365,9 +409,9 @@ def create_router(admin_id, settings, assets):
                                              suffix='png' if action=='reference' else 'mp3')
                 if action=='reference':
                     await repo.edit('character',key,dict(row['spec'],reference=asset_id))
-            elif action in ('new','edit','character_settings'):
+            elif action in ('new','edit','character_settings','scene_settings'):
                 entity=task['entity']; spec=validate_spec(entity,json.loads(text))
-                if action in ('edit','character_settings'):
+                if action in ('edit','character_settings','scene_settings'):
                     _,project=await owner(entity,key)
                     if entity=='scene':
                         for character in spec['characters']:
@@ -405,6 +449,9 @@ async def export_project(project,assets):
         data['scenes']=await repo.rows(db,'SELECT s.* FROM cartoon_scenes s JOIN cartoon_episodes e ON e.id=s.episode_id WHERE e.project_id=?',(project,))
         data['jobs']=await repo.rows(db,'SELECT * FROM cartoon_jobs WHERE project_id=?',(project,))
         data['assets']=await repo.rows(db,'SELECT * FROM cartoon_assets WHERE project_id=?',(project,))
+        data['scene_image_selections']=await repo.rows(db,'''SELECT s.* FROM cartoon_scene_image_selections s
+            JOIN cartoon_scenes c ON c.id=s.scene_id JOIN cartoon_episodes e ON e.id=c.episode_id
+            WHERE e.project_id=?''',(project,))
         ids=[project]+[r['id'] for kind in ('characters','episodes','scenes') for r in data[kind]]
         data['versions']=await repo.rows(db,'SELECT * FROM cartoon_versions WHERE entity_id IN ('+','.join('?' for _ in ids)+')',ids)
         data['events']=await repo.rows(db,'SELECT v.* FROM cartoon_job_events v JOIN cartoon_jobs j ON j.id=v.job_id WHERE j.project_id=?',(project,))

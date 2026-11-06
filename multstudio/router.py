@@ -161,8 +161,8 @@ def create_router(admin_id, settings, assets):
                         links.append((title,await assets.asset_url(snap['assets'][kind])))
                     except Exception as exc:
                         logger.warning('Не удалось получить ссылку сцены %s kind=%s (%s)',key,kind,type(exc).__name__)
-            await tell(event,(notice+'\n' if notice else '')+f"Сцена {row['number']} · версия {row['revision']}\nНачало речи: {editing['speech_start']:g} с\n"+json.dumps(row['spec'],ensure_ascii=False,indent=2),[
-                ('✏️ Изменить сцену','edit:scene:'+key),('⏱ Начало речи','speech_start:'+key),('🎨 Изображение / перегенерировать','make:image:scene:'+key),
+            await tell(event,(notice+'\n' if notice else '')+f"Сцена {row['number']} · версия {row['revision']}\nНачало речи: {editing['speech_start']:g} с\nНачало исходного видео: {editing['video_start']:g} с\n"+json.dumps(row['spec'],ensure_ascii=False,indent=2),[
+                ('✏️ Изменить сцену','edit:scene:'+key),('⏱ Начало речи','speech_start:'+key),('✂️ Начало видео','video_start:'+key),('🎨 Изображение / перегенерировать','make:image:scene:'+key),
                 ('♻️ Восстановить картинку и видео','restore_assets:'+key),
                 ('📤 Загрузить своё изображение','scene_upload:'+key),
                 ('⚙️ Параметры сцены (JSON)','scene_settings:'+key),
@@ -236,6 +236,15 @@ def create_router(admin_id, settings, assets):
                            'Выберите «Файл» в MAX, чтобы сохранить исходный формат JPG/JPEG или PNG: '
                            'при отправке как фото MAX может преобразовать изображение в WEBP.',
                            [('Отмена','home')])
+            elif action=='video_start':
+                key=parts[1]
+                await owner('scene',key)
+                value=(await repo.scene_editing(key))['video_start']
+                await context.update_data(studio_input=dict(action='video_start',entity='scene',key=key))
+                await context.set_state(StudioStates.input)
+                await tell(event,f'Сейчас ролик начинается с {value:g} секунды исходного видео. '
+                           'Пришлите таймкод начала от 0 до 30 секунд, например 1.5. '
+                           'Ранние кадры будут пропущены только при сборке; оригинал и озвучка сохранятся.',[('Отмена','home')])
             elif action=='speech_start':
                 key=parts[1]
                 await owner('scene',key)
@@ -495,6 +504,12 @@ def create_router(admin_id, settings, assets):
                                              suffix='png' if action=='reference' else 'mp3')
                 if action=='reference':
                     await repo.edit('character',key,dict(row['spec'],reference=asset_id))
+            elif action=='video_start':
+                value=await repo.set_scene_video_start(key,admin_id,text)
+                await context.clear()
+                await tell(event,f'Видео будет начинаться с {value:g} секунды исходного ролика. Нажмите «Собрать серию».',
+                           [('🎬 Сцена','s:'+key)])
+                return
             elif action=='speech_start':
                 value=await repo.set_scene_speech_start(key,admin_id,text)
                 await context.clear()
@@ -542,6 +557,7 @@ async def export_project(project,assets):
     async with repo.connect() as db:
         data={'project':await repo.one(db,'SELECT * FROM cartoon_projects WHERE id=?',(project,))}
         data['characters']=await repo.rows(db,'SELECT * FROM cartoon_characters WHERE project_id=?',(project,))
+        data['editing_migrations']=await repo.rows(db,'SELECT * FROM cartoon_editing_migrations WHERE project_id=?',(project,))
         data['scene_editing']=await repo.rows(db,'''SELECT t.* FROM cartoon_scene_editing t
             JOIN cartoon_scenes s ON s.id=t.scene_id JOIN cartoon_episodes e ON e.id=s.episode_id
             WHERE e.project_id=?''',(project,))

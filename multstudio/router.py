@@ -126,7 +126,7 @@ def create_router(admin_id, settings, assets):
                        f"Расход + резервы: {dollars(state['committed'])}",buttons)
         elif entity=='character':
             voice,emotion=voice_settings(row['spec'])
-            await tell(event,row['name']+'\nID: '+key+f'\nSpeechKit v1: {voice}, emotion={emotion}\n'
+            await tell(event,row['name']+'\nID: '+key+f'\nSpeechKit v1: {voice}, emotion={emotion} (сохранено, не отправляется в API)\n'
                        +json.dumps(dict(row['spec'],voice=voice,emotion=emotion),ensure_ascii=False,indent=2),[
                 ('✏️ Изменить описание','edit:character:'+key),
                 ('🎙 Настройки голоса (JSON)','character_settings:'+key),('📷 Загрузить референс','reference:'+key),
@@ -221,7 +221,7 @@ def create_router(admin_id, settings, assets):
                 await context.set_state(StudioStates.input)
                 voice,emotion=voice_settings(row['spec'])
                 await tell(event,'Настройки SpeechKit v1: пришлите JSON, voice='+', '.join(sorted(VOICES))
-                           +'; emotion=neutral/good/evil. Чтобы изменить только описание, '
+                           +'. Поле emotion сохранено для совместимости и не отправляется в API. Чтобы изменить только описание, '
                            'используйте кнопку «Изменить описание».\n'
                            +json.dumps(dict(row['spec'],voice=voice,emotion=emotion),ensure_ascii=False,indent=2),[('Отмена','home')])
             elif action in ('new','edit'):

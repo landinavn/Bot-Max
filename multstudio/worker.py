@@ -19,6 +19,9 @@ class Worker:
         self.providers, self.assets = providers, assets
         self.renderer = Renderer(assets)
         self._notice_lock = asyncio.Lock()
+        # Reuse the same MAX token while its video is processing / delivery retries.
+        # This cache never contains provider tasks and cannot resubmit a paid job.
+        self._media_uploads = {}
 
     async def heartbeat(self, key):
         while True:
@@ -135,24 +138,71 @@ class Worker:
                 text += 'Фактическую стоимость сверьте с провайдером; резерв бюджета сохранён. '
             text += 'Откройте /multstudio → проект → Сцены → Задания и расходы.'
             try:
-                attachments=[]
-                if item['status']=='done' and repo.is_image_job(item):
-                    from image_service import upload_image_for_max
-                    from maxapi.types import CallbackButton
-                    from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
-                    asset,url=await self.assets.result_for_job(item)
-                    image=await upload_image_for_max(self.bot,url)
-                    character=item['target']=='character'
-                    text='✅ Эталон сгенерирован!' if character else '✅ Изображение сцены сгенерировано!'
-                    approve='studio:approve_reference:'+item['id'] if character else 'studio:approve:'+asset['id']
-                    keyboard=InlineKeyboardBuilder().row(CallbackButton(text='✅ Утвердить',payload=approve)).row(
-                        CallbackButton(text='🔄 Перегенерировать',payload=f"studio:make:image:{item['target']}:{item['target_id']}")).as_markup()
-                    attachments=[image,keyboard]
-                sent = await self.bot.send_message(user_id=self.admin_id,text=text,**({'attachments':attachments} if attachments else {}))
+                if item['status']=='done' and repo.is_media_job(item):
+                    _,url=await self.assets.result_for_job(item)
+                    sent=await self.send_result_to_admin(item['id'],item['kind'],url)
+                else:
+                    sent=await self.bot.send_message(user_id=self.admin_id,text=text)
                 if sent is not None:
                     await repo.update_job(item['id'],notified=1)
-            except Exception:
-                logger.warning('Мультстудия: не доставлено уведомление %s.',item['id'])
+                    self._media_uploads.pop(item['id'],None)
+                    logger.info('Мультстудия: результат доставлен job=%s kind=%s',item['id'],item['kind'])
+            except Exception as exc:
+                logger.warning('Мультстудия: не доставлено уведомление job=%s kind=%s error=%s; повторится только доставка.',
+                               item['id'],item['kind'],type(exc).__name__)
+
+    async def send_result_to_admin(self, job_id, kind, public_url):
+        """Send a retained result only; never enter generation or billing paths."""
+        from maxapi.types import CallbackButton, LinkButton
+        from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
+        item=await repo.job(job_id)
+        asset=await repo.job_result(job_id)
+        if not item or item['status']!='done' or item['kind']!=kind or not asset:
+            raise ValueError('Готовый результат задания не найден.')
+        media=self._media_uploads.get(job_id)
+        image=repo.is_image_job(item)
+        if media is None:
+            if image:
+                from image_service import upload_image_for_max
+                media=await upload_image_for_max(self.bot,public_url)
+            elif kind=='speech':
+                from media_service import upload_audio_for_max
+                media=await upload_audio_for_max(self.bot,public_url)
+            elif kind in ('video','assemble','episode_assembly'):
+                from media_service import upload_video_for_max
+                media=await upload_video_for_max(self.bot,public_url)
+            else:
+                raise ValueError('Для этого типа задания нет медиа-доставки.')
+            expected='image' if image else 'audio' if kind=='speech' else 'video'
+            if getattr(media.type,'value',media.type)!=expected:
+                raise ValueError('MAX вернул вложение неверного типа.')
+            self._media_uploads[job_id]=media
+        attachments=[media]
+        if image:
+            character=item['target']=='character'
+            text='✅ Эталон сгенерирован!' if character else '✅ Изображение сцены сгенерировано!'
+            approve='studio:approve_reference:'+job_id if character else 'studio:approve:'+asset['id']
+            keyboard=InlineKeyboardBuilder().row(CallbackButton(text='✅ Утвердить',payload=approve)).row(
+                CallbackButton(text='🔄 Перегенерировать',payload=f"studio:make:image:{item['target']}:{item['target_id']}")).as_markup()
+            attachments.append(keyboard)
+        elif kind=='video':
+            snap=json.loads(item['snapshot'])
+            number=snap.get('number')
+            if number is None:
+                scene=await repo.get('scene',item['target_id'])
+                number=scene['number'] if scene else '?'
+            text=f'🎬 Сцена {number} оживлена! Посмотрите результат.'
+            keyboard=InlineKeyboardBuilder().row(CallbackButton(
+                text='✅ Утвердить',payload='studio:approve_video:'+asset['id'])).row(CallbackButton(
+                text='🔄 Перегенерировать',payload='studio:make:video:scene:'+item['target_id'])).as_markup()
+            attachments.append(keyboard)
+        elif kind=='speech':
+            text='🎧 Озвучка готова'
+        else:
+            text='🎉 Мультфильм собран! Скачайте или отправьте в соцсети.'
+            attachments.append(InlineKeyboardBuilder().row(LinkButton(
+                text='📥 Скачать MP4',url=public_url)).as_markup())
+        return await self.bot.send_message(user_id=self.admin_id,text=text,attachments=attachments)
 
     async def lane(self):
         while True:

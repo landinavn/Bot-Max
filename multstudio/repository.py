@@ -92,6 +92,8 @@ CREATE TABLE IF NOT EXISTS cartoon_scene_asset_restorations (
  asset_watermark INTEGER NOT NULL, PRIMARY KEY(scene_id,context_hash,kind));
 CREATE TABLE IF NOT EXISTS cartoon_character_speech_profiles (
  character_id TEXT PRIMARY KEY REFERENCES cartoon_characters(id), profile TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS cartoon_scene_editing (
+ scene_id TEXT PRIMARY KEY REFERENCES cartoon_scenes(id), speech_start REAL NOT NULL);
 CREATE INDEX IF NOT EXISTS cartoon_jobs_queue ON cartoon_jobs(status,next_attempt,lease_until);
 ''')
         columns = await rows(db,'PRAGMA table_info(cartoon_jobs)')
@@ -264,6 +266,43 @@ async def _latest(db, target, key, kind, context):
                          ORDER BY rowid DESC LIMIT 1''', (target, key, kind, context))
 
 
+def speech_start(value):
+    import math
+    try:
+        if isinstance(value,bool): raise ValueError
+        seconds=float(str(value).replace(',', '.'))
+        if not math.isfinite(seconds) or not 0<=seconds<=30: raise ValueError
+    except (ValueError,TypeError,OverflowError):
+        raise ValueError('Начало речи: число от 0 до 30 секунд, например 3 или 1.5.') from None
+    return seconds
+
+
+async def _scene_editing(db,key):
+    row=await one(db,'''SELECT s.number,p.seed_key,t.speech_start FROM cartoon_scenes s
+        JOIN cartoon_episodes e ON e.id=s.episode_id JOIN cartoon_projects p ON p.id=e.project_id
+        LEFT JOIN cartoon_scene_editing t ON t.scene_id=s.id WHERE s.id=?''',(key,))
+    if not row: raise ValueError('Сцена не найдена.')
+    default=3.0 if row['seed_key']=='anya-s1-v1' and row['number']==1 else 0.0
+    return dict(speech_start=row['speech_start'] if row['speech_start'] is not None else default)
+
+
+async def scene_editing(key):
+    async with connect() as db:
+        return await _scene_editing(db,key)
+
+
+async def set_scene_speech_start(key,actor,value):
+    value=speech_start(value)
+    async with connect() as db:
+        await db.execute('BEGIN IMMEDIATE')
+        row=await one(db,'''SELECT s.id FROM cartoon_scenes s JOIN cartoon_episodes e ON e.id=s.episode_id
+            JOIN cartoon_projects p ON p.id=e.project_id WHERE s.id=? AND p.owner_id=?''',(key,actor))
+        if not row: raise ValueError('Нет доступа к сцене.')
+        await db.execute('INSERT OR REPLACE INTO cartoon_scene_editing VALUES (?,?)',(key,value))
+        await db.commit()
+    return value
+
+
 async def _snapshot(db, target, key):
     row = unpack(await one(db, f'SELECT * FROM {TABLES[target]} WHERE id=?', (key,)))
     if not row:
@@ -279,6 +318,9 @@ async def _snapshot(db, target, key):
     if target == 'episode':
         scene_rows = await rows(db, 'SELECT id FROM cartoon_scenes WHERE episode_id=? ORDER BY number', (key,))
         snap['scenes'] = [await _snapshot(db, 'scene', s['id']) for s in scene_rows]
+        # Editing is attached only to episode snapshots, after each scene's visual hash.
+        for scene in snap['scenes']:
+            scene['editing']=await _scene_editing(db,scene['id'])
     elif target == 'scene':
         snap['number'] = row['number']
         cast = []
@@ -459,6 +501,8 @@ async def quote(target, key, kind, settings):
     cost = settings.quote(kind, snap, speech_profiles=profiles) if profiles is not None else settings.quote(kind, snap)
     if profiles is not None:
         cost['speech_profiles'] = profiles
+    if kind=='assemble':
+        cost['render_version']=2
     snap['quote'] = cost
     fingerprint = digest(snap)
     async with connect() as db:

@@ -153,6 +153,7 @@ def create_router(admin_id, settings, assets):
                        'Звуковые эффекты и отдельная музыка сцен в MVP сохраняются как режиссёрские указания; можно загрузить общий музыкальный трек.',buttons)
         else:
             snap=await repo.snapshot('scene',key)
+            editing=await repo.scene_editing(key)
             links=[]
             for kind,title in (('image','🖼️ Открыть картинку'),('video','🎬 Открыть видео')):
                 if snap['assets'].get(kind):
@@ -160,8 +161,8 @@ def create_router(admin_id, settings, assets):
                         links.append((title,await assets.asset_url(snap['assets'][kind])))
                     except Exception as exc:
                         logger.warning('Не удалось получить ссылку сцены %s kind=%s (%s)',key,kind,type(exc).__name__)
-            await tell(event,(notice+'\n' if notice else '')+f"Сцена {row['number']} · версия {row['revision']}\n"+json.dumps(row['spec'],ensure_ascii=False,indent=2),[
-                ('✏️ Изменить сцену','edit:scene:'+key),('🎨 Изображение / перегенерировать','make:image:scene:'+key),
+            await tell(event,(notice+'\n' if notice else '')+f"Сцена {row['number']} · версия {row['revision']}\nНачало речи: {editing['speech_start']:g} с\n"+json.dumps(row['spec'],ensure_ascii=False,indent=2),[
+                ('✏️ Изменить сцену','edit:scene:'+key),('⏱ Начало речи','speech_start:'+key),('🎨 Изображение / перегенерировать','make:image:scene:'+key),
                 ('♻️ Восстановить картинку и видео','restore_assets:'+key),
                 ('📤 Загрузить своё изображение','scene_upload:'+key),
                 ('⚙️ Параметры сцены (JSON)','scene_settings:'+key),
@@ -235,6 +236,15 @@ def create_router(admin_id, settings, assets):
                            'Выберите «Файл» в MAX, чтобы сохранить исходный формат JPG/JPEG или PNG: '
                            'при отправке как фото MAX может преобразовать изображение в WEBP.',
                            [('Отмена','home')])
+            elif action=='speech_start':
+                key=parts[1]
+                await owner('scene',key)
+                value=(await repo.scene_editing(key))['speech_start']
+                await context.update_data(studio_input=dict(action='speech_start',entity='scene',key=key))
+                await context.set_state(StudioStates.input)
+                await tell(event,f'Сейчас речь начинается на {value:g} секунде сцены. '
+                           'Пришлите новое время от 0 до 30 секунд. Например: 3. '
+                           'Изменится только монтаж; готовые картинки, видео и озвучка сохраняются.',[('Отмена','s:'+key)])
             elif action=='scene_settings':
                 key=parts[1]
                 row,_=await owner('scene',key)
@@ -485,6 +495,12 @@ def create_router(admin_id, settings, assets):
                                              suffix='png' if action=='reference' else 'mp3')
                 if action=='reference':
                     await repo.edit('character',key,dict(row['spec'],reference=asset_id))
+            elif action=='speech_start':
+                value=await repo.set_scene_speech_start(key,admin_id,text)
+                await context.clear()
+                await tell(event,f'Начало речи: {value:g} с. Нажмите «Собрать серию», чтобы применить к готовым файлам.',
+                           [('🎬 Сцена','s:'+key)])
+                return
             elif action=='character_settings':
                 profile=json.loads(text)
                 if not isinstance(profile,dict) or set(profile)-{'voice','emotion','speed','pitch_shift'}:
@@ -526,6 +542,9 @@ async def export_project(project,assets):
     async with repo.connect() as db:
         data={'project':await repo.one(db,'SELECT * FROM cartoon_projects WHERE id=?',(project,))}
         data['characters']=await repo.rows(db,'SELECT * FROM cartoon_characters WHERE project_id=?',(project,))
+        data['scene_editing']=await repo.rows(db,'''SELECT t.* FROM cartoon_scene_editing t
+            JOIN cartoon_scenes s ON s.id=t.scene_id JOIN cartoon_episodes e ON e.id=s.episode_id
+            WHERE e.project_id=?''',(project,))
         data['speech_profiles']=await repo.rows(db,'''SELECT p.* FROM cartoon_character_speech_profiles p
             JOIN cartoon_characters c ON c.id=p.character_id WHERE c.project_id=?''',(project,))
         data['episodes']=await repo.rows(db,'SELECT * FROM cartoon_episodes WHERE project_id=?',(project,))

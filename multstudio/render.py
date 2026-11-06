@@ -2,12 +2,25 @@
 import asyncio
 import hashlib
 import json
+import logging
+import math
+from fractions import Fraction
 import shutil
 from pathlib import Path
 from uuid import uuid4
 
 from PIL import Image, ImageDraw, ImageFont
 from . import repository as repo
+
+logger = logging.getLogger(__name__)
+FPS = 30
+SUBTITLE_FONT_SIZE = 14
+ENDCARD_FONT_SIZE = 94  # Comparable to 14 ASS points at libass's default 288-line canvas.
+
+def stamp(value):
+    ms=int(round(value*1000))
+    return f'{ms//3600000:02}:{ms//60000%60:02}:{ms//1000%60:02},{ms%1000:03}'
+
 
 
 async def process(*args, cwd=None, timeout=900):
@@ -30,7 +43,25 @@ async def probe(path):
 
 
 async def duration(path):
-    return float((await probe(path))['format']['duration'])
+    info=await probe(path)
+    # Container duration can include a nonzero start timestamp or an unrelated
+    # audio track. Measure the selected track that will actually be rendered.
+    streams=info.get('streams',[])
+    stream=next((x for x in streams if x.get('codec_type')=='video'),None)
+    stream=stream or next((x for x in streams if x.get('codec_type')=='audio'),{})
+    values=[stream.get('duration')]
+    try:
+        values.append(float(stream['duration_ts'])*float(Fraction(stream['time_base'])))
+    except (KeyError,ValueError,TypeError,ZeroDivisionError):
+        pass
+    values.append(info.get('format',{}).get('duration'))
+    for value in values:
+        try:
+            seconds=float(value)
+            if math.isfinite(seconds) and seconds>0: return seconds
+        except (TypeError,ValueError,OverflowError):
+            pass
+    raise ValueError('Не удалось определить длительность сохранённого медиафайла; исходники сохранены.')
 
 
 class Renderer:
@@ -47,8 +78,12 @@ class Renderer:
         args = ['ffmpeg','-nostdin','-v','error','-y']
         for path in paths:
             args += ['-i',str(path)]
-        chain = ''.join(f'[{i}:a]' for i in range(len(paths)))
-        await process(*args,'-filter_complex',chain+f'concat=n={len(paths)}:v=0:a=1[a]',
+        if not paths:
+            raise ValueError('Нет сохранённых реплик для сборки озвучки.')
+        filters=';'.join(f'[{i}:a:0]asetpts=PTS-STARTPTS,aresample=48000,'
+                         f'aformat=sample_rates=48000:channel_layouts=stereo[part{i}]' for i in range(len(paths)))
+        chain = ''.join(f'[part{i}]' for i in range(len(paths)))
+        await process(*args,'-filter_complex',filters+';'+chain+f'concat=n={len(paths)}:v=0:a=1[a]',
                       '-map','[a]','-ar','48000','-c:a','libmp3lame',result)
         return result
 
@@ -61,9 +96,15 @@ class Renderer:
         assets = scene['assets']
         source = assets.get('video') or assets['image']
         voice = assets.get('speech')
-        seconds = float(scene['spec']['duration'])
-        if voice:
-            seconds = max(seconds, await duration(self.assets.path(voice['path'])) + 0.2)
+        offset=repo.speech_start(scene.get('editing',{}).get('speech_start',0))
+        video_seconds=0.0 if source['kind']=='image' else await duration(self.assets.path(source['path']))
+        voice_seconds=await duration(self.assets.path(voice['path'])) if voice else 0.0
+        longest=max(float(scene['spec']['duration']),video_seconds,offset+voice_seconds+0.2 if voice else 0)
+        # An integral video frame count also gives an integral 48 kHz sample count.
+        seconds=math.ceil(longest*FPS-1e-9)/FPS
+        extension=max(0.0,seconds-video_seconds) if source['kind']!='image' else 0.0
+        logger.info('Монтаж сцены %s: video=%.3f speech=%.3f start=%.3f output=%.3f freeze=%.3f',
+                    scene.get('number',scene.get('id','?')),video_seconds,voice_seconds,offset,seconds,extension)
         result = self.assets.path(uuid4().hex + '.mp4')
         args = ['ffmpeg','-nostdin','-v','error','-y']
         if source['kind'] == 'image':
@@ -73,29 +114,34 @@ class Renderer:
             args += ['-i',str(self.assets.path(voice['path']))]
         else:
             args += ['-f','lavfi','-i','anullsrc=channel_layout=stereo:sample_rate=48000']
-        filters = f'[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30,tpad=stop_mode=clone:stop_duration={seconds}[base]'
+        filters = (f'[0:v:0]setpts=PTS-STARTPTS,scale=1080:1920:force_original_aspect_ratio=increase,'
+                   f'crop=1080:1920,setsar=1,fps={FPS},tpad=stop_mode=clone:stop_duration={extension:.9f},'
+                   f'trim=duration={seconds:.9f},setpts=PTS-STARTPTS[base]')
         current = 'base'
         text = self.subtitle_text(scene)
         if text:
             # Relative generated filename; no user input interpolated into a filter expression.
             srt = self.assets.path(uuid4().hex + '.srt')
-            millis = int(seconds*1000)
-            stamp = f'{millis//3600000:02}:{millis//60000%60:02}:{millis//1000%60:02},{millis%1000:03}'
-            srt.write_text(f'1\n00:00:00,000 --> {stamp}\n{text}\n', encoding='utf-8')
+            end=min(seconds,offset+voice_seconds) if voice else seconds
+            start=offset if voice else 0
+            srt.write_text(f'1\n{stamp(start)} --> {stamp(end)}\n{text}\n', encoding='utf-8')
             if all(k in scene for k in ('project_id','target','id','context_hash')):
                 await repo.add_asset(scene['project_id'],scene['target'],scene['id'],'subtitle',scene['context_hash'],
                     srt.name,hashlib.sha256(srt.read_bytes()).hexdigest(),job_id=scene.get('assembly_job_id'),
                     metadata=repo.encoded({'language':'ru','source':'scene.dialogue','white_text_black_outline':True}))
-            filters += (f';[base]subtitles={srt.name}:force_style=\'FontName=DejaVu Sans,FontSize=18,MarginV=35,'
+            filters += (f';[base]subtitles={srt.name}:force_style=\'FontName=DejaVu Sans,FontSize={SUBTITLE_FONT_SIZE},MarginV=35,'
                         'PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0\'[sub]')
             current = 'sub'
         if ending:
             overlay = self.assets.path(uuid4().hex + '.png')
             await asyncio.to_thread(self.endcard, ending, overlay)
             args += ['-loop','1','-i',str(overlay)]
-            filters += f';[{current}][2:v]overlay=0:0[out]'
+            filters += f';[2:v]setpts=PTS-STARTPTS[title];[{current}][title]overlay=0:0[out]'
             current = 'out'
-        filters += f';[1:a]apad,atrim=duration={seconds},aformat=sample_rates=48000:channel_layouts=stereo[a]'
+        delay=f',adelay={round(offset*48000)}S:all=1' if voice and offset else ''
+        filters += (f';[1:a:0]asetpts=PTS-STARTPTS,aresample=48000,'
+                    f'aformat=sample_rates=48000:channel_layouts=stereo{delay},apad,'
+                    f'atrim=duration={seconds:.9f},asetpts=N/SR/TB[a]')
         await process(*args,'-filter_complex',filters,'-map',f'[{current}]','-map','[a]',
             '-t',str(seconds),'-r','30','-c:v','libx264','-preset','veryfast','-threads','2','-crf','23',
             '-pix_fmt','yuv420p','-c:a','aac','-ar','48000','-ac','2','-movflags','+faststart',result,cwd=self.assets.root)
@@ -105,37 +151,44 @@ class Renderer:
     def endcard(lines, destination):
         image = Image.new('RGBA', (1080,1920), (0,0,0,0))
         draw = ImageDraw.Draw(image)
-        font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 42)
-        y = 1300
+        font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', ENDCARD_FONT_SIZE)
+        wrapped=[]
         for line in lines:
-            # Long titles are wrapped, never shell/filter text.
-            words, wrapped, current = str(line).split(), [], ''
-            for word in words:
-                candidate = (current+' '+word).strip()
-                if draw.textlength(candidate,font=font) > 940 and current:
-                    wrapped.append(current); current = word
-                else:
-                    current = candidate
-            wrapped.append(current)
-            for part in wrapped:
-                draw.text((540,y),part,font=font,fill='white',anchor='mm',stroke_width=3,stroke_fill='black')
-                y += 65
+            current=''
+            # Keep even a single long word inside the safe area.
+            for word in str(line).split():
+                candidate=(current+' '+word).strip()
+                if draw.textlength(candidate,font=font)>920 and current:
+                    wrapped.append(current); current=''
+                for char in word:
+                    candidate=current+char
+                    if draw.textlength(candidate,font=font)>920 and current:
+                        wrapped.append(current); current=''
+                    current+=char
+                current+=' '
+            wrapped.append(current.strip())
+        line_height=ENDCARD_FONT_SIZE+24
+        y=max(120,min(1300,1720-len(wrapped)*line_height))
+        for line in wrapped:
+            draw.text((540,y),line,font=font,fill='white',anchor='mt',stroke_width=4,stroke_fill='black')
+            y+=line_height
         image.save(destination)
 
     async def assemble(self, snapshot):
         self.ready()
-        paths, cues, elapsed = [], [], 0.0
+        paths, lengths, cues, elapsed = [], [], [], 0.0
         for index, scene in enumerate(snapshot['scenes']):
             ending = snapshot['spec'].get('ending') if index == len(snapshot['scenes'])-1 else None
             path=await self.scene(dict(scene,assembly_job_id=snapshot.get('job_id')), ending)
             paths.append(path)
             seconds=await duration(path)
+            lengths.append(seconds)
             text=self.subtitle_text(scene)
-            def stamp(value):
-                ms=int(round(value*1000))
-                return f'{ms//3600000:02}:{ms//60000%60:02}:{ms//1000%60:02},{ms%1000:03}'
             if text:
-                cues.append(f'{len(cues)+1}\n{stamp(elapsed)} --> {stamp(elapsed+seconds)}\n{text}\n')
+                voice=scene['assets'].get('speech')
+                start=repo.speech_start(scene.get('editing',{}).get('speech_start',0)) if voice else 0
+                end=min(seconds,start+await duration(self.assets.path(voice['path']))) if voice else seconds
+                cues.append(f'{len(cues)+1}\n{stamp(elapsed+start)} --> {stamp(elapsed+end)}\n{text}\n')
             elapsed += seconds
         episode_srt=self.assets.path(uuid4().hex+'.srt')
         episode_srt.write_text('\n'.join(cues),encoding='utf-8')
@@ -144,15 +197,32 @@ class Renderer:
                 episode_srt.name,hashlib.sha256(episode_srt.read_bytes()).hexdigest(),job_id=snapshot.get('job_id'),
                 metadata=repo.encoded({'language':'ru','timeline':'episode','duration':elapsed}))
         manifest = self.assets.path(uuid4().hex + '.ffconcat')
-        manifest.write_text(''.join(f"file '{p.name}'\n" for p in paths))
+        manifest.write_text(''.join(f"file '{p.name}'\nduration {seconds:.9f}\n" for p,seconds in zip(paths,lengths)))
         result = self.assets.path(uuid4().hex + '.mp4')
-        args = ['ffmpeg','-nostdin','-v','error','-y','-f','concat','-safe','1','-i',str(manifest)]
+        # Preserve the zero video PTS; concat's negative AAC priming start would
+        # otherwise shift all video forward by about 21 ms before audio filtering.
+        args = ['ffmpeg','-nostdin','-v','error','-y','-copyts','-f','concat','-safe','1','-i',str(manifest)]
+        # Copy the uniform video frames, but rebuild audio from exact scene
+        # sample ranges. Copying independent AAC packets accumulates encoder priming
+        # and tail padding at scene boundaries and shifts later speech.
+        for path in paths:
+            args+=['-i',str(path)]
+        filters=[]
+        for i,seconds in enumerate(lengths,1):
+            filters.append(f'[{i}:a:0]asetpts=PTS-STARTPTS,aresample=48000,'
+                f'aformat=sample_rates=48000:channel_layouts=stereo,apad,'
+                f'atrim=duration={seconds:.9f},asetpts=N/SR/TB[clip{i}]')
+        filters.append(''.join(f'[clip{i}]' for i in range(1,len(paths)+1))
+                       +f'concat=n={len(paths)}:v=0:a=1[voice]')
         music = snapshot['assets'].get('music')
+        current='voice'
         if music:
-            args += ['-stream_loop','-1','-i',str(self.assets.path(music['path'])),
-                     '-filter_complex','[1:a]volume=0.12[m];[0:a][m]amix=inputs=2:duration=first:normalize=0[a]',
-                     '-map','0:v','-map','[a]','-c:a','aac']
-        else:
-            args += ['-map','0:v','-map','0:a','-c:a','copy']
-        await process(*args,'-c:v','copy','-movflags','+faststart',result,cwd=self.assets.root)
+            args += ['-stream_loop','-1','-i',str(self.assets.path(music['path']))]
+            filters.append(f'[{len(paths)+1}:a:0]asetpts=PTS-STARTPTS,aresample=48000,'
+                'aformat=sample_rates=48000:channel_layouts=stereo,volume=0.12[m]')
+            filters.append('[voice][m]amix=inputs=2:duration=first:normalize=0[a]')
+            current='a'
+        await process(*args,'-filter_complex',';'.join(filters),'-map','0:v:0','-map',f'[{current}]',
+            '-c:v','copy','-c:a','aac','-ar','48000','-ac','2','-t',f'{elapsed:.9f}',
+            '-movflags','+faststart',result,cwd=self.assets.root)
         return result

@@ -228,6 +228,25 @@ class ProdamusPayments:
         # Заказ должен существовать ДО передачи ссылки покупателю.
         return await self._request_payment_link(data)
 
+    async def create_promo1111_payment_link(self,user_id,code):
+        from promo1111 import create_order, save_link, open_now, EXPIRED
+        order=await create_order(user_id,code)
+        if order['payment_link']:
+            return order['payment_link']
+        package=order['package_id']
+        data=dict(do='link',order_id=order['order_id'],
+            products=[dict(name=order['product_name'],price=f"{order['amount_kopecks']//100}.00",quantity='1')],
+            customer_extra=json.dumps(dict(user_id=user_id,credits=order['credits'],package_id=package),separators=(',',':')),
+            _param_user_id=str(user_id),_param_credits=str(order['credits']),_param_package_id=package,
+            urlReturn=self.return_url,urlSuccess=self.return_url,urlNotification=self.webhook_url,
+            payments_limit='1',link_expired='2026-11-12 00:00')
+        data['sign']=sign_link_payload(data,self.secret)
+        link=await self._request_payment_link(data)
+        if not open_now():
+            raise ValueError(EXPIRED)
+        await save_link(order['order_id'],link)
+        return link
+
     async def _request_payment_link(self, data: dict) -> str:
         query = urlencode(flatten_fields(data), quote_via=quote)
         # Не повторяем запрос автоматически: Prodamus мог создать ссылку до таймаута.
@@ -454,6 +473,10 @@ class ProdamusPayments:
         elif order.get('order_type') == 'musical':
             if repeat_order_value(order,'music_card',MUSICAL_TARIFFS.get(order['tariff'])) != (order['amount_kopecks'], order['product_name']):
                 raise ValueError('Неизвестный музыкальный тариф.')
+        elif (order.get('package_id') or '').startswith('promo1111_'):
+            from promo1111 import validate_order
+            validate_order(order)
         elif order["credits"] not in PACKAGES or PACKAGES[order["credits"]][1] != order["product_name"]:
             raise ValueError("Неизвестный пакет.")
         return order, payment_id
+

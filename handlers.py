@@ -31,6 +31,7 @@ from maxapi.types import (
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
 from config import DEFAULT_BOT_LINK, validate_bot_link
+import promo1111
 from video_service import build_video_prompt, generate_video_from_avatar, CARTOON_VIDEO_PROMPTS, create_video_task_with_retry as create_video_task, poll_video_task
 from media_service import VIDEO_MERGE_POLICY, MUSICAL_VIDEO_POLICY, MUSICAL_VIDEO_WAIT_MESSAGE, merge_video_and_audio, create_musical_video, upload_video_for_max, upload_audio_for_max
 from audio_service import create_audio_preview, song_audio_url, TEACHER_MUSIC_TAGS
@@ -815,8 +816,14 @@ PROMO_TEXT = (
 )
 
 
-def packages_keyboard(*, promo: bool = False):
+def packages_keyboard(*, promo: bool = False, promo1111_active: bool = False):
     builder = InlineKeyboardBuilder()
+    if promo1111_active:
+        builder.row(CallbackButton(text='🔥 Акция 11.11',payload='promo1111_menu'))
+        for code,label in (('111','111 ₽ — 3 генерации (только изображения)'),
+                           ('333','333 ₽ — 11 генераций (только изображения)'),
+                           ('799','799 ₽ — 15 генераций + оживление фото в подарок')):
+            builder.row(CallbackButton(text=label,payload='buy_promo_'+code))
     if promo:
         builder.row(CallbackButton(text="Купить 3 генерации за 149 ₽", payload="buy_3_promo"))
     for credits, label in ((1, "1 генерацию"), (3, "3 генерации"), (5, "5 генераций"), (15, "15 генераций")):
@@ -825,7 +832,8 @@ def packages_keyboard(*, promo: bool = False):
 
 
 async def purchase_keyboard(user_id: int | None):
-    return packages_keyboard(promo=user_id is not None and await is_promo_active(user_id))
+    return packages_keyboard(promo=user_id is not None and await is_promo_active(user_id),
+                             promo1111_active=await promo1111.eligible(user_id))
 
 
 class PosterStates(StatesGroup):
@@ -1512,7 +1520,7 @@ def create_router(
             if data.get("new_batch_requested") or not urls:
                 if not is_admin:
                     user = await get_user(credit_user_id)
-                    if user is None or user["balance"] < 1:
+                    if promo1111.image_balance(user) < 1:
                         await context.set_state(retry_state)
                         await _reply(event, NO_CREDITS_TEXT, attachments=[await purchase_keyboard(credit_user_id)] + ([postcard_retry_keyboard()] if is_postcard else []))
                         return
@@ -1540,13 +1548,13 @@ def create_router(
                     await increment_generations(credit_user_id, event_name=generation_event)
                     logger.info("Пропущено списание кредитов для администратора %s", credit_user_id)
                 else:
-                    if not await deduct_credit(credit_user_id, count_generation=True, generation_event=generation_event):
+                    if not await deduct_credit(credit_user_id, count_generation=True, generation_event=generation_event, allow_promo_images=True):
                         raise RuntimeError("Не удалось списать кредит после генерации.")
                     user = await get_user(credit_user_id)
                 data = await context.update_data(
                     variants=urls, batch_id=uuid4().hex[:12], sent_count=0,
                     new_batch_requested=False, share_prompt_sent=False, channel_invite_sent=False,
-                    package_offer_pending=not is_admin and user is not None and user["balance"] == 0,
+                    package_offer_pending=not is_admin and user is not None and promo1111.image_balance(user) == 0,
                     video_upsell_sent=False,
                 )
                 await send_offline_conversion(credit_user_id, goal_id="bot_generation")
@@ -1592,7 +1600,11 @@ def create_router(
                 await context.update_data(share_prompt_sent=True)
             if not is_admin:
                 user = await get_user(credit_user_id)
-                await _reply(event, f"Осталось кредитов: {user['balance'] if user else 0}.")
+                if user and user['promo_image_balance']:
+                    await _reply(event, f"Осталось кредитов на изображения: {promo1111.image_balance(user)}. "
+                                 f"Из них по акции 11.11: {user['promo_image_balance']}.")
+                else:
+                    await _reply(event, f"Осталось кредитов: {user['balance'] if user else 0}.")
                 if data.get("package_offer_pending"):
                     await _reply(event,
                         PROMO_TEXT if await is_promo_active(credit_user_id) else NO_CREDITS_TEXT,
@@ -1743,6 +1755,12 @@ def create_router(
             f"- 3 генерации (199 ₽ / 149 ₽): {c('buy_credit_199')} (из них по акции: {c('buy_credit_149')})\n"
             f"- 5 генераций (299 ₽): {c('buy_credit_299')}\n"
             f"- 15 генераций (799 ₽): {c('buy_credit_799')}\n\n"
+            "🔥 Акция 11.11:\n"
+            f"- 111 ₽ / 3 изображения: {c('buy_promo_111')}\n"
+            f"- 333 ₽ / 11 изображений: {c('buy_promo_333')}\n"
+            f"- 799 ₽ / 15 кредитов + подарок: {c('buy_promo_799')}\n"
+            f"- Использовано кредитов на изображения: {c('use_promo_image_credit')}\n"
+            f"- Использовано бесплатных оживлений: {c('use_free_animation')}\n\n"
             "📸 Фотосессии:\n"
             f"- Попробовать (590 ₽): {c('buy_photo_590')}\n"
             f"- Стандарт (990 ₽): {c('buy_photo_990')}\n"
@@ -1951,6 +1969,103 @@ def create_router(
             title = "Рассылка остановлена" if stopped else "Рассылка завершена"
             await _reply(event, f"{title}. Отправлено: {sent}. "
                          f"Недоступны (403): {blocked}. Ошибок: {failed}.")
+
+    async def promo_image_credit_notice(event):
+        user=await get_user(event.get_ids()[1])
+        if user and user['promo_image_balance']>0 and user['balance']==0:
+            await _reply(event,promo1111.IMAGE_ONLY)
+
+    async def animation_example(event):
+        path=EXAMPLES_DIR/promo1111.ANIMATION_EXAMPLE
+        if not path.is_file():
+            await _reply(event,'Пример скоро появится')
+            return
+        try:
+            video=await event.bot.upload_media(InputMedia(path=str(path),type=UploadType.VIDEO))
+            await _reply(event,'✨ Пример оживления фотографии',attachments=[video])
+        except Exception:
+            logger.exception('Не удалось показать пример оживления фото:')
+            await _reply(event,'Пример скоро появится')
+
+    async def promo1111_messages(bot):
+        photos=[]
+        for name in START_EXAMPLE_FILES[:4]:
+            path=EXAMPLES_DIR/name
+            if not path.is_file(): raise FileNotFoundError(name)
+            media=await bot.upload_media(InputMedia(path=str(path),type=UploadType.IMAGE))
+            if not isinstance(media.payload.token,str) or not media.payload.token.strip():
+                raise RuntimeError('MAX не вернул токен примера.')
+            photos.append(media)
+        messages=[('✨ Примеры изображений',photos)]
+        path=EXAMPLES_DIR/promo1111.ANIMATION_EXAMPLE
+        if path.is_file():
+            video=await bot.upload_media(InputMedia(path=str(path),type=UploadType.VIDEO))
+            if not isinstance(video.payload.token,str) or not video.payload.token.strip():
+                raise RuntimeError('MAX не вернул токен видео.')
+            messages.append(('✨ Пример оживления фотографии',[video]))
+        else:
+            messages.append(('Пример скоро появится',[]))
+        messages.append((promo1111.TEXT,[navigation_keyboard((('🚀 Открыть меню','back_to_main'),))]))
+        return messages
+
+    @router.message_created(Command('broadcast_1111_preview'))
+    async def broadcast_1111_preview(event: MessageCreated):
+        if is_bot_message(event) or admin_user_id is None or event.get_ids()[1]!=admin_user_id: return
+        if not promo1111.open_now():
+            await _reply(event,promo1111.EXPIRED); return
+        try:
+            for text,attachments in await promo1111_messages(event.bot):
+                if not promo1111.open_now(): raise PromoUnavailableError(promo1111.EXPIRED)
+                if await _reply(event,text,attachments=attachments) is None:
+                    raise RuntimeError('MAX не подтвердил пример.')
+                await asyncio.sleep(0.5)
+            await promo1111.progress(admin_user_id,3,activate=True)
+        except Exception:
+            logger.exception('Не удалось показать акцию 11.11:')
+            await _reply(event,'Не удалось показать анонс. Проверьте первые 4 файла главного меню в examples.')
+
+    @router.message_created(Command('broadcast_1111'))
+    async def broadcast_1111(event: MessageCreated):
+        if is_bot_message(event) or admin_user_id is None or event.get_ids()[1]!=admin_user_id: return
+        if not promo1111.open_now():
+            await _reply(event,promo1111.EXPIRED); return
+        if broadcast_lock.locked():
+            await _reply(event,'Рассылка уже выполняется. Дождитесь завершения.'); return
+        async with broadcast_lock:
+            try:
+                messages=await promo1111_messages(event.bot)
+            except Exception:
+                logger.exception('Не удалось подготовить рассылку 11.11:')
+                await _reply(event,'Рассылка отменена: проверьте первые 4 фото главного меню в examples. Подписчикам ничего не отправлено.'); return
+            success=failed=0; stopped=False
+            for user_id in await get_active_user_ids():
+                try:
+                    row=await promo1111.recipient(user_id)
+                    if row and row['completed']: continue
+                    user=await get_user(user_id)
+                    if not user or not user['is_active']: continue
+                    for index,(text,attachments) in enumerate(messages):
+                        if row and index<row['next_message']: continue
+                        if not promo1111.open_now(): raise PromoUnavailableError(promo1111.EXPIRED)
+                        sent=await event.bot.send_message(user_id=user_id,text=text,attachments=attachments)
+                        if sent is None: raise RuntimeError('MAX не подтвердил рассылку.')
+                        await promo1111.progress(user_id,index+1,activate=index==len(messages)-1)
+                        await asyncio.sleep(0.5)
+                    success+=1
+                except Exception as exc:
+                    failed+=1
+                    logger.error('Рассылка 11.11: ошибка получателя %s (%s)',user_id,type(exc).__name__)
+                    status=max_error_status(exc)
+                    if status==403:
+                        try:
+                            await mark_user_inactive(user_id)
+                        except Exception:
+                            logger.exception('Рассылка 11.11: не удалось отметить недоступного пользователя %s',user_id)
+                    if status in (401,429) or not promo1111.open_now():
+                        stopped=True; break
+                    await asyncio.sleep(0.5)
+            title='⏸ Рассылка остановлена.' if stopped else '✅ Рассылка завершена.'
+            await _reply(event,f'{title} Успешно: {success}, Ошибок: {failed}')
 
     async def broadcast_update_messages(bot):
         # Upload once before the first subscriber; keep image and video messages separate.
@@ -2515,12 +2630,17 @@ def create_router(
                                          PosterStates.waiting_for_audio_generation):
             await _reply(event, 'Текущая генерация ещё не завершена. Пожалуйста, подождите.')
             return
+        await promo_image_credit_notice(event)
+        await animation_example(event)
         await increment_counter('click_animation', user_id=user_id)
         await context.clear()
         price = await animation_first_price(user_id)
+        user=await get_user(user_id)
         choices = [(f'1 фотография — {price} ₽', 'animation_buy:one'),
                    ('3 фотографии — 599 ₽', 'animation_buy:three'),
                    ('5 фотографий — 899 ₽', 'animation_buy:five')]
+        if user and user['free_animation_count']>0:
+            choices.insert(0,(f"🎁 Использовать подарок (доступно {user['free_animation_count']})",'animation_free_1111'))
         for order in await animation_orders_for_user(user_id):
             if order['remaining'] > 0:
                 choices.append((f"📷 Продолжить пакет (осталось {order['remaining']})", 'animation_resume:' + order['order_id']))
@@ -2533,6 +2653,18 @@ def create_router(
             '• 3 фотографии — 599 ₽\n• 5 фотографий — 899 ₽\n\n'
             'Каждая фотография — отдельный ролик на 5 секунд. Выберите пакет:',
             attachments=[navigation_keyboard(choices)])
+
+    @router.message_callback(F.callback.payload == 'animation_free_1111')
+    async def animation_free_1111(event: MessageCallback, context: MemoryContext):
+        await event.ack(notification='Открываю подарок…')
+        if event.message is None or event.get_ids()[1] is None: return
+        if await context.get_state() in (PosterStates.generating,PosterStates.cartoon_generating,PosterStates.waiting_for_audio_generation):
+            await _reply(event,'Текущая генерация ещё не завершена. Пожалуйста, подождите.'); return
+        try:
+            order=await promo1111.claim_animation(event.get_ids()[1])
+            await show_animation_photo_request(event,context,order)
+        except ValueError as exc:
+            await _reply(event,str(exc))
 
     @router.message_callback(F.callback.payload.startswith('animation_buy:'))
     async def animation_buy(event: MessageCallback, context: MemoryContext):
@@ -2670,6 +2802,7 @@ def create_router(
             await event.ack(notification='Отправьте /start, чтобы открыть меню.')
             return
         await event.ack(notification='Выберите стиль…')
+        await promo_image_credit_notice(event)
         flow, price, text, _ = CARTOON_PRODUCTS[event.callback.payload]
         await increment_counter('click_cartoon_short' if flow == 'short' else 'click_cartoon_long', user_id=user_id)
         await context.clear()
@@ -3279,6 +3412,7 @@ def create_router(
         await open_music_menu(event,context)
 
     async def open_music_menu(event,context):
+        await promo_image_credit_notice(event)
         user_id = event.get_ids()[1]
         if user_id is not None:
             await increment_counter('click_video_menu', user_id=user_id)
@@ -3780,6 +3914,8 @@ def create_router(
         await context.clear()
         await context.set_state(PosterStates.waiting_for_mode)
         screen = "cat_cards" if event.callback.payload == "back_to_cards" else event.callback.payload
+        if screen in ('cat_audio','cat_photo'):
+            await promo_image_credit_notice(event)
         filenames, text, buttons = CATEGORY_MENUS[screen]
         interest_event = {"cat_photo": "click_photo", "cat_audio": "click_audio",
                           "cat_meditation": "click_meditation"}.get(screen)
@@ -4725,9 +4861,40 @@ def create_router(
         if is_bot_message(event):
             return
         await _reply(event,
-            PACKAGES_TEXT,
+            PACKAGES_TEXT+(('\n\n🔥 Акция 11.11 — до 23:59 11 ноября по Москве. Генерации и подарки не сгорают.')
+                           if await promo1111.eligible(event.get_ids()[1]) else ''),
             attachments=[await purchase_keyboard(event.get_ids()[1])],
         )
+
+    @router.message_callback(F.callback.payload == 'promo1111_menu')
+    async def promo1111_menu(event: MessageCallback):
+        await event.ack(notification='Акция 11.11')
+        user_id=event.get_ids()[1]
+        await _reply(event,promo1111.TEXT if await promo1111.eligible(user_id) else promo1111.EXPIRED,
+                     attachments=[await purchase_keyboard(user_id)])
+
+    @router.message_callback(F.callback.payload.in_({'buy_promo_111','buy_promo_333','buy_promo_799'}))
+    async def buy_promo1111(event: MessageCallback):
+        await event.ack(notification='Создаю ссылку…')
+        user_id=event.get_ids()[1]
+        if event.message is None or user_id is None: return
+        if payments is None:
+            await _reply(event,'Оплата временно недоступна. Попробуйте позже.'); return
+        lock=generation_locks.setdefault(user_id,asyncio.Lock())
+        if lock.locked():
+            await _reply(event,'Ссылка уже формируется. Пожалуйста, подождите.'); return
+        async with lock:
+            try:
+                code=event.callback.payload.removeprefix('buy_promo_')
+                link=await payments.create_promo1111_payment_link(user_id,code)
+                await _reply(event,f'🔥 Акция 11.11: {promo1111.PACKAGES[code][2]} — {code} ₽. '
+                             'Оплата доступна до 23:59 11 ноября по Москве. Купленное можно использовать позже.',
+                    attachments=[InlineKeyboardBuilder().row(LinkButton(text=f'Оплатить {code} ₽',url=link)).as_markup()])
+            except ValueError as exc:
+                await _reply(event,str(exc))
+            except Exception:
+                logger.exception('Не удалось создать счёт акции 11.11:')
+                await _reply(event,'Не удалось получить ссылку оплаты. Попробуйте ещё раз позже.')
 
     @router.message_callback(F.callback.payload.in_({"buy_1", "buy_3", "buy_3_promo", "buy_promo_149", "buy_5", "buy_15"}))
     async def buy_callback(event: MessageCallback) -> None:

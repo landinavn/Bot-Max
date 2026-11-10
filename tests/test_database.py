@@ -15,6 +15,7 @@ async def test_trial_is_atomic_under_concurrent_starts(credit_db):
         "is_active": 1, "days_active": 1, "last_active_at": None,
         "promo_expires_at": None, "promo_redeemed_at": None, "promo_campaign_id": None,
         "song_promo_expires_at": None, "yclid": "",
+        "promo_image_balance": 0, "free_animation_count": 0,
     }
 
 
@@ -425,6 +426,7 @@ async def test_tripwire_migration_preserves_old_paid_orders_and_never_grants_ret
     await credit_db.add_credits(456, 3, payment_order_id="old-order", provider_payment_id="old-payment")
     async with aiosqlite.connect(credit_db.DATABASE_PATH) as db:
         await db.execute("DROP INDEX one_promo_order_per_campaign")
+        await db.execute("DROP INDEX promo1111_single_checkout")
         await db.execute("ALTER TABLE payment_orders DROP COLUMN package_id")
         await db.execute("ALTER TABLE users DROP COLUMN promo_expires_at")
         await db.execute("ALTER TABLE users DROP COLUMN promo_redeemed_at")

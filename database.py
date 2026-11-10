@@ -206,12 +206,15 @@ async def init_db() -> None:
                 count INTEGER NOT NULL DEFAULT 0 CHECK (count >= 0)
             )"""
         )
+        async with db.execute('PRAGMA table_info(payment_orders)') as cursor:
+            payment_columns={r[1] for r in await cursor.fetchall()}
+        legacy_credit_filter="AND COALESCE(package_id,'') NOT LIKE 'promo1111_%'" if 'package_id' in payment_columns else ''
         if not counters_exist:
             # Покупки восстановим из заказов один раз; тип старых генераций неизвестен.
             await db.execute(
-                """INSERT INTO global_counters (event_name, count)
+                f"""INSERT INTO global_counters (event_name, count)
                    SELECT 'buy_' || credits, COUNT(*) FROM payment_orders
-                   WHERE status = 'paid' AND credits IN (1, 3, 5, 15)
+                   WHERE status = 'paid' AND credits IN (1, 3, 5, 15) {legacy_credit_filter}
                    GROUP BY credits"""
             )
         async with db.execute("PRAGMA table_info(users)") as cursor:
@@ -299,7 +302,7 @@ async def init_db() -> None:
             await db.execute(
                 """INSERT INTO user_counters (user_id, event_name, count)
                    SELECT user_id, 'buy_' || credits, COUNT(*) FROM payment_orders
-                   WHERE status = 'paid' AND credits IN (1, 3, 5, 15) GROUP BY user_id, credits"""
+                   WHERE status = 'paid' AND credits IN (1, 3, 5, 15) AND COALESCE(package_id,'') NOT LIKE 'promo1111_%' GROUP BY user_id, credits"""
             )
             await db.execute(
                 """INSERT INTO user_counters (user_id, event_name, count)
@@ -307,6 +310,8 @@ async def init_db() -> None:
                    WHERE status = 'paid' AND package_id = 'promo_3' GROUP BY user_id"""
             )
         await _init_animation_orders(db)
+        from promo1111 import init as init_promo1111
+        await init_promo1111(db)
         await _init_repeat_promos(db)
         await _backfill_sale_counters(db, force=not counters_exist or not user_counters_exist)
         await db.commit()
@@ -511,15 +516,24 @@ async def add_credits(
                    paid_at = CURRENT_TIMESTAMP WHERE order_id = ?""",
                 (provider_payment_id, payment_order_id),
             )
-        await db.execute(
-            """INSERT INTO users (user_id, balance) VALUES (?, ?)
-               ON CONFLICT(user_id) DO UPDATE SET balance = balance + excluded.balance""",
-            (user_id, amount),
-        )
+        promo_code=None
+        if payment_order_id is not None and (order['package_id'] or '').startswith('promo1111_'):
+            from promo1111 import validate_order
+            promo_code,offer=validate_order(dict(order))
+            wallet='promo_image_balance' if offer[3] else 'balance'
+            await db.execute('INSERT INTO users(user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING',(user_id,))
+            await db.execute('UPDATE users SET '+wallet+'='+wallet+'+?,free_animation_count=free_animation_count+? WHERE user_id=?',
+                             (amount,offer[4],user_id))
+        else:
+            await db.execute(
+                """INSERT INTO users (user_id, balance) VALUES (?, ?)
+                   ON CONFLICT(user_id) DO UPDATE SET balance = balance + excluded.balance""",
+                (user_id, amount),
+            )
         if payment_order_id is not None:
             await _record_sale_counters(db, 'credit', dict(order))
             await increment_purchases(user_id, connection=db)
-            if order["credits"] in (1, 3, 5, 15):
+            if not promo_code and order["credits"] in (1, 3, 5, 15):
                 await increment_counter(f"buy_{order['credits']}", user_id=user_id, connection=db)
             if order["package_id"] == "promo_3":
                 await db.execute(
@@ -586,9 +600,19 @@ async def get_payment_order(order_id: str) -> aiosqlite.Row | None:
 
 async def deduct_credit(
     user_id: int, *, count_generation: bool = False, generation_event: str | None = None,
+    allow_promo_images: bool = False,
 ) -> bool:
     """Атомарно списать кредит и при необходимости учесть новую генерацию."""
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        await db.execute('BEGIN IMMEDIATE')
+        if allow_promo_images:
+            cursor=await db.execute('UPDATE users SET promo_image_balance=promo_image_balance-1 WHERE user_id=? AND promo_image_balance>0',(user_id,))
+            if cursor.rowcount:
+                await increment_counter('use_promo_image_credit',user_id=user_id,connection=db)
+                if count_generation:
+                    await increment_generations(user_id,connection=db,event_name=generation_event)
+                await db.commit()
+                return True
         cursor = await db.execute(
             """UPDATE users SET balance = balance - 1,
                promo_expires_at = CASE WHEN ? AND free_trial_used = 1 AND total_generations = 0
@@ -1298,6 +1322,8 @@ PHOTO_TARIFFS = {
 def _base_sale_counter_keys(kind: str, order: dict) -> tuple[str, ...]:
     """Classify by validated order family and tariff; equal prices are not products."""
     if kind == 'credit':
+        if (order.get('package_id') or '').startswith('promo1111_'):
+            return ('buy_promo_'+order['package_id'].removeprefix('promo1111_'),)
         credits = order['credits']
         keys = {1: ('buy_credit_99',), 3: ('buy_credit_199',),
                 5: ('buy_credit_299',), 15: ('buy_credit_799',)}.get(credits, ())
@@ -1334,7 +1360,7 @@ async def _backfill_sale_counters(db, *, force=False) -> None:
         ('musical', 'musical_orders', 'tariff,promo_token', "status='paid'"),
         ('cartoon', 'cartoon_orders', 'tariff,promo_token', "status IN ('paid','completed','manual')"),
         ('photo', 'photo_orders', 'tariff,promo_token', "status='paid'"),
-        ('animation', 'animation_orders', 'tariff', "status='paid' AND is_admin=0"),
+        ('animation', 'animation_orders', 'tariff', "status='paid' AND is_admin=0 AND promo_bonus=0"),
     ):
         async with db.execute(f'SELECT user_id,{fields},COUNT(*) FROM {table} WHERE {status} GROUP BY user_id,{fields}') as cursor:
             names = [column[0] for column in cursor.description]
@@ -1807,7 +1833,7 @@ async def _init_animation_orders(db):
 
 async def animation_first_price(user_id):
     async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
-        async with db.execute("SELECT 1 FROM animation_orders WHERE user_id=? AND status='paid' AND is_admin=0 LIMIT 1",(user_id,)) as cursor:
+        async with db.execute("SELECT 1 FROM animation_orders WHERE user_id=? AND status='paid' AND is_admin=0 AND promo_bonus=0 LIMIT 1",(user_id,)) as cursor:
             return 249 if await cursor.fetchone() else 199
 
 
@@ -1824,7 +1850,7 @@ async def create_animation_order(user_id,package,*,admin=False):
                 return dict(row)
         tariff=package
         if package=='one' and not admin:
-            async with db.execute("SELECT 1 FROM animation_orders WHERE user_id=? AND is_admin=0 AND status='paid' LIMIT 1",(user_id,)) as cursor:
+            async with db.execute("SELECT 1 FROM animation_orders WHERE user_id=? AND is_admin=0 AND promo_bonus=0 AND status='paid' LIMIT 1",(user_id,)) as cursor:
                 if not await cursor.fetchone(): tariff='intro'
         amount,quantity,title=ANIMATION_TARIFFS[tariff]
         key=f'animate_{user_id}_{token_urlsafe(12)}'
@@ -1897,6 +1923,8 @@ async def queue_animation_photo(user_id,order_id,image_url,message_id):
         key='animation_job_'+token_urlsafe(12)
         await db.execute('INSERT INTO animation_jobs(job_id,order_id,user_id,slot,image_url,source_message_id) VALUES (?,?,?,?,?,?)',
                          (key,order_id,user_id,count+1,image_url,message_id))
+        if order['promo_bonus']:
+            await increment_counter('use_free_animation',user_id=user_id,connection=db)
         await db.commit()
         return key
 

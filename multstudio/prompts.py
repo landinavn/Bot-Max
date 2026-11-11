@@ -31,7 +31,7 @@ def validate_scene_image_references(snap):
         not c.get('assets', {}).get('image', {}).get('approved') for c in snap['cast']
     ):
         raise ValueError('Сначала создайте и утвердите эталоны всех персонажей сцены.')
-    if snap['number'] > 1 and snap.get('location_reference_required', True) and not (snap.get('location_reference') or {}).get('approved'):
+    if (snap['number'] > 1 or snap['spec'].get('location_reference_scene_id')) and snap.get('location_reference_required', True) and not (snap.get('location_reference') or {}).get('approved'):
         raise ValueError('Сначала создайте и утвердите изображение предыдущей сцены как эталон комнаты.')
 
 

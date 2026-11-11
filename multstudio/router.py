@@ -149,7 +149,11 @@ def create_router(admin_id, settings, assets):
             buttons += [('➕ Сцена','new:scene:'+key),('✏️ Серия / финальная заставка','edit:episode:'+key),
                         ('🎵 Загрузить фоновую музыку','music:'+key),('🎞 Собрать серию','make:assemble:episode:'+key),
                         ('📥 Получить MP4','view:episode:'+key),('⬅️ Проект','p:'+project['id'])]
-            await tell(event,row['title']+'\nЕстественная речь без ускорения; целевая длительность 40 секунд, допустимо 42–45.\n'
+            timing = '\nЕстественная речь без ускорения; целевая длительность 40 секунд, допустимо 42–45.\n'
+            if row['spec'].get('production',{}).get('audio_first'):
+                buttons.insert(-2,('💵 План и стоимость','episode_plan:'+key))
+                timing = f"\nЕстественная речь без ускорения; целевая длительность {row['spec']['target_seconds']} секунд; сцены продлеваются под речь.\n"
+            await tell(event,row['title']+timing+
                        'Звуковые эффекты и отдельная музыка сцен в MVP сохраняются как режиссёрские указания; можно загрузить общий музыкальный трек.',buttons)
         else:
             snap=await repo.snapshot('scene',key)
@@ -198,6 +202,17 @@ def create_router(admin_id, settings, assets):
                 restored=', '.join('картинка' if kind=='image' else 'видео' for kind in result['restored'])
                 missing=(' Не найдено в архиве: '+', '.join('картинка' if k=='image' else 'видео' for k in result['missing'])+'.') if result['missing'] else ''
                 await show(event,'scene',key,notice='♻️ Восстановлено из архива: '+restored+'.'+missing,replace=True)
+            elif action=='episode_plan':
+                from .episode_two import plan
+                await owner('episode',parts[1])
+                result=await plan(parts[1],settings)
+                lines=[f"Изображений: {result['images']}; видео: {result['videos']}; отдельных реплик: {result['utterances']}."]
+                for kind,value in result['services'].items():
+                    lines.append(f"{kind}: {', '.join(sorted(value['models']))}; {', '.join(sorted(value['resolutions']))}; длительность по плану {value['duration']} сек; {dollars(value['estimate'])}")
+                lines.append(('Частичная оценка: ' if result['errors'] else 'Всего ориентировочно: ')+dollars(result['total']))
+                lines.extend(result['errors'])
+                lines.append('Оплата не запущена. Каждый кадр, видео и озвучка требуют отдельной актуальной оценки и подтверждения. После измерения речи оценка видео может увеличиться. Музыка и эффекты требуют предоставленных исходников; точная артикуляция требует просмотра.')
+                await tell(event,'\n'.join(lines),[('⬅️ Серия','e:'+parts[1])])
             elif action=='characters':
                 key=parts[1]
                 await owner('project',key)

@@ -91,8 +91,12 @@ class Worker:
                 for line in snap['spec']['dialogue']:
                     data = await self.providers.speech_line(snap,line)
                     relative, checksum = await self.assets.write(data,'mp3',job_id=key,name=f'speech-line-{len(paths)+1}.mp3')
+                    measured = {}
+                    if snap['spec'].get('speech_speeds'):
+                        from .render import duration
+                        measured['duration_seconds'] = await duration(self.assets.path(relative))
                     await repo.add_asset(snap['project_id'],snap['target'],snap['id'],'speech_line',
-                        snap['context_hash'],relative,checksum,job_id=key,metadata=repo.encoded(line))
+                        snap['context_hash'],relative,checksum,job_id=key,metadata=repo.encoded(dict(line,**measured)))
                     paths.append(self.assets.path(relative))
                 result = await self.renderer.speech(paths)
                 await self.save_result(item,snap,data=result.read_bytes(),suffix='mp3')

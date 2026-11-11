@@ -16,6 +16,13 @@ async def configure(bot, dispatcher, config):
         return None
     await repository.init()
     project = await seed(config.admin_user_id)
+    from .episode_two import prepare, prepare_jobs
+    try:
+        episode_two = await prepare(project,config.admin_user_id)
+        await prepare_jobs(episode_two,settings)
+    except ValueError:
+        import logging
+        logging.getLogger(__name__).exception('Не удалось подготовить серию 2; существующие серии сохранены:')
     await repository.prepare_drafts(project,settings)
     assets = Assets(settings.root,config)
     dispatcher.include_routers(create_router(config.admin_user_id,settings,assets))

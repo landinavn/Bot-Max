@@ -435,7 +435,19 @@ async def _snapshot(db, target, key):
                 raise ValueError('Персонаж из другого проекта.')
             cast.append(char)
         snap['cast'] = cast
-        if row['number'] > 1:
+        anchor_id = row['spec'].get('location_reference_scene_id')
+        if anchor_id:
+            anchor = await one(db, '''SELECT s.id FROM cartoon_scenes s JOIN cartoon_episodes e ON e.id=s.episode_id
+                WHERE s.id=? AND e.project_id=? AND e.number < ?''', (anchor_id, project_id, episode['number']))
+            if not anchor:
+                raise ValueError('Референс должен быть сценой предыдущей серии этого проекта.')
+            snap['location_reference_required'] = True
+            location = (await _snapshot(db, 'scene', anchor_id))['assets'].get('image')
+            if location and location['approved']:
+                snap['location_reference'] = location
+        elif row['spec'].get('new_location'):
+            snap['location_reference_required'] = False
+        elif row['number'] > 1:
             from .locations import use_previous_location
             previous = unpack(await one(db, 'SELECT * FROM cartoon_scenes WHERE episode_id=? AND number=?',
                                         (row['episode_id'], row['number'] - 1)))
@@ -591,6 +603,8 @@ async def quote(target, key, kind, settings):
             raise ValueError('Сначала создайте и утвердите изображение предыдущей сцены как эталон комнаты.')
     if kind in ('video','speech') and (not snap['assets'].get('image') or not snap['assets']['image']['approved']):
         raise ValueError('Сначала утвердите изображение этой версии сцены.')
+    if kind == 'video' and snap['spec'].get('speech_speeds') and not snap['assets'].get('speech'):
+        raise ValueError('Для этой серии сначала создайте озвучку и измерьте её длительность, затем запускайте анимацию.')
     if kind == 'speech' and not snap['spec'].get('dialogue'):
         raise ValueError('В сцене нет реплик.')
     if kind == 'assemble':
@@ -600,9 +614,8 @@ async def quote(target, key, kind, settings):
     profiles = None
     if kind == 'speech':
         profiles = {}
-        for character in snap['cast']:
-            row = await get('character',character['id'])
-            profiles[character['id']] = dict(await character_speech(character['id']),name=row['name'])
+        from .episode_two import speech_profiles
+        profiles = await speech_profiles(snap)
     cost = settings.quote(kind, snap, speech_profiles=profiles) if profiles is not None else settings.quote(kind, snap)
     if profiles is not None:
         cost['speech_profiles'] = profiles

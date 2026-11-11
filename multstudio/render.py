@@ -131,7 +131,8 @@ class Renderer:
             raise ValueError('Начало видео находится за концом ролика. Укажите время меньше его длительности.')
         video_seconds=max(0.0,source_seconds-trim)
         voice_trim,voice_seconds=await self.speech_timing(self.assets.path(voice['path'])) if voice else (0.0,0.0)
-        longest=max(max(0.0,float(scene['spec']['duration'])-trim),video_seconds,offset+voice_seconds+0.2 if voice else 0)
+        keep_video = 0 if scene['spec'].get('trim_video_to_script') else video_seconds
+        longest=max(max(0.0,float(scene['spec']['duration'])-trim),keep_video,offset+voice_seconds+0.2 if voice else 0)
         # An integral video frame count also gives an integral 48 kHz sample count.
         seconds=math.ceil(longest*FPS-1e-9)/FPS
         extension=max(0.0,seconds-video_seconds) if source['kind']!='image' else 0.0

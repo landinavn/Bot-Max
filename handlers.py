@@ -47,7 +47,7 @@ from database import (
     create_musical_order, get_musical_order, create_prepaid_musical_order,
     save_musical_draft, set_musical_inputs,
     deduct_credit, get_user, grant_free_trial, get_global_stats, increment_generations,
-    record_first_start, save_yclid, get_source_stats, get_stats_by_source, register_shared_image, get_shared_image,
+    record_first_start, save_yclid, get_source_stats, get_stats_by_source, get_ad_source_counts, AD_SOURCE_LABELS, register_shared_image, get_shared_image,
     get_all_counters, increment_counter,
     get_advanced_stats, update_user_activity, mark_user_inactive, get_active_user_ids,
     is_promo_active, PromoUnavailableError, get_users_by_activity, start_broadcast_promo,
@@ -245,17 +245,17 @@ IMAGE_MODERATION_MESSAGE = (
 
 PosterGenerator = Callable[[str, str], Awaitable[list[str]]]
 WELCOME_TEXT = (
-    "Привет! Я твой личный нейро-художник 🎨\n"
-    "\n"
-    "Я создаю волшебные карты желаний и персональные открытки с твоим лицом или лицом твоего "
-    "близкого человека. \n"
-    "\n"
-    "🎁 Ты можешь добавить любое пожелание, а мы красиво его оформим.\n"
-    "\n"
-    "🎨 Первая генерация — бесплатно!\n"
-    "\n"
+    "Привет! Я создаю волшебные открытки и карты желаний с твоим лицом или лицом твоего близкого человека.\n\n"
+    "✍️ На открытках ты можешь добавить любое пожелание и поздравление.\n\n"
+    "🎨 Первая открытка с вашим фото — бесплатно!\n\n"
     "👇 Выбери, что хочешь создать:"
 )
+MAIN_SCREEN_IMAGE = 'NY_card.png'
+DED_MOROZ_TEXT = (
+    '🎅 Поздравление от Деда Мороза уже в разработке! Скоро вы сможете заказать '
+    'персональное видео-поздравление с вашим ребёнком. Следите за обновлениями!'
+)
+
 BROADCAST_UPDATE_TEXT = (
     '✨ У нас много красивых новинок!\n\n'
     'Теперь твои фотографии могут стать частью особенного подарка ❤️\n\n'
@@ -394,15 +394,15 @@ PHOTO_NY_TARIFF_EXAMPLE_FILES = (r"photo_fam_3.webp", *NEW_PHOTO_EXAMPLE_FILES)
 SONG_PROMO_EXPIRED_TEXT = 'К сожалению, 48 часов уже прошли. Вы можете приобрести песню по обычной цене 490 ₽.'
 
 CATEGORY_BUTTONS = (
-    ("🎵 Музыкальная открытка — Новинка 🔥", "cat_video"),
-    ("🎬 Мульт-открытка — Новинка 🔥", "cat_cartoon"),
-    ("👑 Эксклюзив (ручная работа) — от 2 000 ₽", "custom_order"),
-    ("📸 Нейрофотосессия", "cat_photo"),
-    ("✨ Оживление фотографий", "cat_animation"),
-    ("🎵 Аудиопесни", "cat_audio"),
-    ("🎁 Открытки", "cat_cards"),
-    ("🔮 Карта Желаний", "cat_vision"),
-    ("🧘 Медитации", "cat_meditation"),
+    ('🔮 Карты желаний', 'cat_vision'),
+    ('🎁 Открытки', 'cat_cards'),
+    ('🎵 Музыкальная открытка', 'cat_video'),
+    ('🎬 Мульт-открытка', 'cat_cartoon'),
+    ('✨ Оживление фотографий', 'cat_animate'),
+    ('🎅 Поздравление Деда Мороза', 'cat_ded_moroz'),
+    ('👑 Ручная работа', 'custom_order'),
+    ('🎵 Аудиопесни', 'cat_audio'),
+    ('📸 Нейрофотосессии', 'cat_photo'),
 )
 
 # Файлы, текст и кнопки каждого экрана. mode_* остаются текущими входами в FSM.
@@ -932,9 +932,7 @@ def navigation_keyboard(buttons, *, footer=()):
 
 
 def main_keyboard():
-    return navigation_keyboard(CATEGORY_BUTTONS, footer=(
-        ("🖼 Примеры", "show_examples"), ("🆘 Помощь", "show_help"),
-    ))
+    return navigation_keyboard(CATEGORY_BUTTONS)
 
 
 def campaign_bot_link(bot_link, source):
@@ -1730,6 +1728,7 @@ def create_router(
         activity = await get_advanced_stats(admin_id=admin_user_id)
         counters = await get_all_counters(admin_id=admin_user_id)
         sources = await get_source_stats(admin_id=admin_user_id)
+        ad_sources = await get_ad_source_counts(admin_id=admin_user_id)
         admin = await get_user(admin_user_id)
         mom_stats = await get_photo_template_stats('mom_daughter', admin_id=admin_user_id)
         rabbit_stats = await get_photo_template_stats('rabbit', admin_id=admin_user_id)
@@ -1755,6 +1754,7 @@ def create_router(
             f"- 3 генерации (199 ₽ / 149 ₽): {c('buy_credit_199')} (из них по акции: {c('buy_credit_149')})\n"
             f"- 5 генераций (299 ₽): {c('buy_credit_299')}\n"
             f"- 15 генераций (799 ₽): {c('buy_credit_799')}\n\n"
+            f"🔥 Клики по кнопке акции 11.11: {c('promo_1111_click')}\n"
             "🔥 Акция 11.11:\n"
             f"- 111 ₽ / 3 изображения: {c('buy_promo_111')}\n"
             f"- 333 ₽ / 11 изображений: {c('buy_promo_333')}\n"
@@ -1787,6 +1787,9 @@ def create_router(
             f"- Фотосессии (590): {c('promo_buy_photo_590')}\n"
             f"- Фотосессии (990): {c('promo_buy_photo_990')}\n"
             f"- Фотосессии (1490): {c('promo_buy_photo_1490')}\n\n"
+            "📍 Рекламные метки:\n" + "\n".join(
+                f"- {label}: {ad_sources.get(tag, 0)}" for tag,label in AD_SOURCE_LABELS.items()
+            ) + "\n\n"
             "📍 ИСТОЧНИКИ ТРАФИКА:\n" + sources_text + "\n\n"
             f"🔗 Ссылка для постов ВК: {campaign_bot_link(bot_link, 'vk_posts')}\n"
             f"🔗 Ссылка для Дзена: {campaign_bot_link(bot_link, 'dzen_posts')}\n\n"
@@ -1806,6 +1809,7 @@ def create_router(
             f"- Мульт-открытки: {c('click_cartoon_short')}\n"
             f"- Эксклюзив (ручная работа): {c('click_custom_order')}\n"
             f"- Оживление фотографий: {c('click_animation')}\n"
+            f"- Дед Мороз: {c('click_ded_moroz')}\n"
             f"- Медитации: {c('click_meditation')}\n\n"
             "👩‍👧 Фотосессия «Мама + дочка»:\n"
             f"- Выбор сюжета (клики): {c('select_photo_mom_daughter')}\n"
@@ -2005,7 +2009,7 @@ def create_router(
             messages.append(('✨ Пример оживления фотографии',[video]))
         else:
             messages.append(('Пример скоро появится',[]))
-        messages.append((promo1111.TEXT,[navigation_keyboard((('🚀 Открыть меню','back_to_main'),))]))
+        messages.append((promo1111.TEXT,[navigation_keyboard((('🚀 Открыть меню','open_promo_menu'),))]))
         return messages
 
     @router.message_created(Command('broadcast_1111_preview'))
@@ -2333,7 +2337,16 @@ def create_router(
                     await _reply(event, "Вам начислен 1 бесплатный кредит!")
                 return
             await _reply(event, "Эта ссылка на картинку недоступна. Вы можете создать свою.")
-        await send_menu_examples(event, START_EXAMPLE_FILES)
+        try:
+            path = EXAMPLES_DIR / MAIN_SCREEN_IMAGE
+            if not path.is_file():
+                raise FileNotFoundError(path)
+            image = await event.bot.upload_media(InputMedia(path=str(path), type=UploadType.IMAGE))
+            if not isinstance(image.payload.token, str) or not image.payload.token.strip():
+                raise RuntimeError('MAX вернул пустой media token приветствия.')
+            await _reply(event, attachments=[image])
+        except Exception:
+            logger.exception('Не удалось отправить картинку приветствия %s:', MAIN_SCREEN_IMAGE)
         await _reply(event, text=WELCOME_TEXT, attachments=[main_keyboard()])
         if trial_granted:
             await _reply(event, "Вам начислен 1 бесплатный кредит!")
@@ -2351,13 +2364,28 @@ def create_router(
             parts = ((body.text or "").split(maxsplit=1) if body else [])
             await send_welcome_message(event, context, payload=parts[1].strip() if len(parts) > 1 else getattr(event, "payload", None))
 
-    @router.message_callback(F.callback.payload.in_({"open_main_menu", "back_to_main"}))
+    @router.message_callback(F.callback.payload.in_({"open_main_menu", "back_to_main", "open_promo_menu"}))
     async def open_main_menu(event: MessageCallback, context: MemoryContext) -> None:
         if event.message is None:
             await event.ack(notification="Отправьте /start, чтобы открыть меню.")
             return
         await event.ack(notification="Открываю меню…")
+        if event.callback.payload == 'open_promo_menu':
+            user_id = event.get_ids()[1]
+            if user_id is None:
+                return
+            await increment_counter('promo_1111_click', user_id=user_id)
         await send_welcome_message(event, context)
+
+    @router.message_callback(F.callback.payload == 'cat_ded_moroz')
+    async def ded_moroz_menu(event: MessageCallback):
+        await event.ack(notification='Поздравление Деда Мороза')
+        user_id = event.get_ids()[1]
+        if event.message is None or user_id is None:
+            return
+        await increment_counter('click_ded_moroz', user_id=user_id)
+        await _reply(event, DED_MOROZ_TEXT,
+                     attachments=[navigation_keyboard((('⬅️ Назад', 'back_to_main'),))])
 
     def cartoon_style_keyboard(screen='cat_cards'):
         return navigation_keyboard((*((label, key) for key, label in CARTOON_THEMES.items()), ('⬅️ Назад', 'back_to_main')))
@@ -2620,7 +2648,7 @@ def create_router(
             'Мы бережно сохраним внешность и добавим естественные движения. Видео — 5 секунд. /cancel — отмена.',
             attachments=[navigation_keyboard((('⬅️ Назад', 'back_to_main'),))])
 
-    @router.message_callback(F.callback.payload == 'cat_animation')
+    @router.message_callback(F.callback.payload.in_({'cat_animation', 'cat_animate'}))
     async def animation_menu(event: MessageCallback, context: MemoryContext):
         await event.ack(notification='Открываю оживление фотографий…')
         user_id = event.get_ids()[1]

@@ -35,8 +35,9 @@ def buttons(event):
 
 async def test_custom_order_menu_position_and_retired_button(credit_db):
     entries = [(b.text,b.payload) for row in handlers.main_keyboard().payload.buttons for b in row]
-    assert entries[1:4] == [('🎬 Мульт-открытка — Новинка 🔥','cat_cartoon'),
-        ('👑 Эксклюзив (ручная работа) — от 2 000 ₽','custom_order'),('📸 Нейрофотосессия','cat_photo')]
+    assert entries[3] == ('🎬 Мульт-открытка','cat_cartoon')
+    assert entries[6] == ('👑 Ручная работа','custom_order')
+    assert entries[8] == ('📸 Нейрофотосессии','cat_photo')
     assert 'cat_cartoon_long' not in [payload for _,payload in entries]
     context = await ready_context()
     event = callback_event('custom_order')

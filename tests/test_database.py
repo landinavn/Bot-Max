@@ -15,7 +15,7 @@ async def test_trial_is_atomic_under_concurrent_starts(credit_db):
         "is_active": 1, "days_active": 1, "last_active_at": None,
         "promo_expires_at": None, "promo_redeemed_at": None, "promo_campaign_id": None,
         "song_promo_expires_at": None, "yclid": "",
-        "promo_image_balance": 0, "free_animation_count": 0,
+        "promo_image_balance": 0, "free_animation_count": 0, "source": None,
     }
 
 

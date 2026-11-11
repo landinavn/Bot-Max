@@ -35,6 +35,14 @@ SOURCE_LABELS = {
 }
 
 
+AD_SOURCE_LABELS = {
+    'vk_animate': 'VK Оживление фото', 'vk_cartoon': 'VK Мульт-открытка',
+    'vk_music': 'VK Музыкальная открытка', 'vk_ded_moroz': 'VK Дед Мороз',
+    'ya_animate': 'Яндекс Оживление фото', 'ya_cartoon': 'Яндекс Мульт-открытка',
+    'ya_music': 'Яндекс Музыкальная открытка', 'ya_ded_moroz': 'Яндекс Дед Мороз',
+}
+
+
 async def init_db() -> None:
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         await db.execute("BEGIN IMMEDIATE")
@@ -232,7 +240,7 @@ async def init_db() -> None:
                     WHERE payment_orders.user_id = users.user_id AND status = 'paid'
                 )"""
             )
-        for column in ("first_start_source", "first_started_at"):
+        for column in ("first_start_source", "first_started_at", "source"):
             if column not in columns:
                 await db.execute(f"ALTER TABLE users ADD COLUMN {column} TEXT")
         if "first_start_source" not in columns:
@@ -754,6 +762,9 @@ async def record_first_start(user_id: int, payload: str | None = None, *, timest
     if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
         raise ValueError("Некорректный user_id.")
     source = payload.strip() if isinstance(payload, str) else None
+    ad_source = unquote(source).split('?', 1)[0].split('&', 1)[0] if source else None
+    if not ad_source or not ad_source.startswith(('vk_', 'ya_')):
+        ad_source = None
     if source and not source.startswith('share_'):
         campaign = unquote(source).split('?', 1)[0].split('&', 1)[0]
         if campaign in {'vk_ads', 'yandex_ads', 'yandex_newyear', 'vk_posts', 'dzen_posts', 'youtube'}:
@@ -768,17 +779,28 @@ async def record_first_start(user_id: int, payload: str | None = None, *, timest
     ).isoformat(timespec="milliseconds")
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         cursor = await db.execute(
-            """INSERT INTO users (user_id, first_start_source, first_started_at, created_at)
-               VALUES (?, ?, ?, ?)
+            """INSERT INTO users (user_id, first_start_source, first_started_at, created_at, source)
+               VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(user_id) DO UPDATE SET
+                 source = excluded.source,
                  first_start_source = excluded.first_start_source,
                  first_started_at = excluded.first_started_at,
                  created_at = excluded.created_at
                WHERE users.first_start_source IS NULL""",
-            (user_id, source, started_at, started_at),
+            (user_id, source, started_at, started_at, ad_source),
         )
         await db.commit()
         return cursor.rowcount == 1
+
+
+async def get_ad_source_counts(admin_id: int | None = None) -> dict[str, int]:
+    """Точные метки первого входа; повторный /start не меняет атрибуцию."""
+    async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+        async with db.execute(
+            """SELECT source, COUNT(*) FROM users WHERE source IS NOT NULL
+               AND (? IS NULL OR user_id != ?) GROUP BY source""", (admin_id, admin_id),
+        ) as cursor:
+            return dict(await cursor.fetchall())
 
 
 async def save_yclid(user_id: int, yclid: str | None = None) -> None:

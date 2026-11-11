@@ -198,7 +198,7 @@ async def test_broadcast_media_activation_and_repeat_safe(credit_db,media):
     assert messages[1].kwargs['attachments'][0].type.value=='video'
     assert messages[2].kwargs['text']==promo.TEXT
     button=messages[2].kwargs['attachments'][0].payload.buttons[0][0]
-    assert (button.text,button.payload)==('🚀 Открыть меню','back_to_main')
+    assert (button.text,button.payload)==('🚀 Открыть меню','open_promo_menu')
     assert await promo.eligible(101) and await promo.eligible(103) and not await promo.eligible(102)
     assert 'Успешно: 2, Ошибок: 0' in e.message.answer.await_args.args[0]
     assert all(c.args==(0.5,) for c in handlers.asyncio.sleep.await_args_list)

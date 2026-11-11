@@ -236,7 +236,7 @@ def isolated_example_directory(tmp_path, monkeypatch):
 def example_photos(tmp_path, monkeypatch):
     directory = tmp_path / "project" / "examples"
     directory.mkdir(parents=True)
-    for filename in {"before.jpg", "after.jpg", *handlers.START_EXAMPLE_FILES, *handlers.BROADCAST_EXAMPLE_FILES, *handlers.PHOTO_FAMILY_EXAMPLE_FILES, *handlers.PHOTO_NY_TARIFF_EXAMPLE_FILES, *handlers.PHOTO_NY_STANDARD_EXAMPLE_FILES, *handlers.PHOTO_TEMPLATE_EXAMPLE_FILES.values(),
+    for filename in {handlers.MAIN_SCREEN_IMAGE, "before.jpg", "after.jpg", *handlers.START_EXAMPLE_FILES, *handlers.BROADCAST_EXAMPLE_FILES, *handlers.PHOTO_FAMILY_EXAMPLE_FILES, *handlers.PHOTO_NY_TARIFF_EXAMPLE_FILES, *handlers.PHOTO_NY_STANDARD_EXAMPLE_FILES, *handlers.PHOTO_TEMPLATE_EXAMPLE_FILES.values(),
                      *(f for files, _, _ in handlers.CATEGORY_MENUS.values() for f in files)}:
         if not Path(filename).suffix:
             filename += ".webp"
@@ -876,27 +876,19 @@ async def test_purchase_link_error_is_reported_without_charging(credit_db):
     assert await credit_db.get_user(456) is None
 
 
-async def test_start_sends_album_before_welcome_and_menu(example_photos):
-    event = message_event("/start")
-    context = await ready_context()
-    await call_handler(create_router(), "start", event, context)
+async def test_start_sends_single_image_before_welcome_and_menu(example_photos):
+    event = message_event('/start'); context = await ready_context()
+    await call_handler(create_router(), 'start', event, context)
     assert await context.get_state() == PosterStates.waiting_for_mode
     assert await context.get_data() == {}
-    assert [Path(c.args[0].path).name for c in event.bot.upload_media.await_args_list] == [
-        "i (1).webp", "i (29).webp", "i (28).webp", "i (27).webp", "Леденец.webp", "кролик1.webp", "мама+дочка.webp",
-    ]
+    assert [Path(c.args[0].path).name for c in event.bot.upload_media.await_args_list] == ['NY_card.png']
     replies = event.message.answer.await_args_list
-    assert len(replies) == 3
-    assert replies[0].kwargs["text"] == "Примеры работ:"
-    assert len(replies[0].kwargs["attachments"]) == 7
-    assert all(a.payload.token == "example-token" for a in replies[0].kwargs["attachments"])
-    assert replies[1].kwargs["text"] == handlers.WELCOME_TEXT
-    buttons = replies[1].kwargs["attachments"][0].model_dump()["payload"]["buttons"]
-    assert [(row[0]["text"], row[0]["payload"]) for row in buttons[:-1]] == list(handlers.CATEGORY_BUTTONS)
-    assert [(button["text"], button["payload"]) for button in buttons[-1]] == [
-        ("🖼 Примеры", "show_examples"), ("🆘 Помощь", "show_help"),
-    ]
-    assert "бесплатный кредит" in replies[2].args[0]
+    assert len(replies) == 3 and len(replies[0].kwargs['attachments']) == 1
+    assert replies[0].kwargs['attachments'][0].payload.token == 'example-token'
+    assert replies[1].kwargs['text'] == handlers.WELCOME_TEXT
+    buttons = replies[1].kwargs['attachments'][0].payload.buttons
+    assert [(b.text,b.payload) for row in buttons for b in row] == list(handlers.CATEGORY_BUTTONS)
+    assert 'бесплатный кредит' in replies[2].args[0]
 
 
 async def test_start_still_offers_menu_if_examples_fail(example_photos):
@@ -1153,11 +1145,11 @@ async def test_real_bot_started_event_tracks_source_and_shows_start(credit_db, e
     assert user["balance"] == 1 and user["free_trial_used"] == 1
     assert await context.get_state() == PosterStates.waiting_for_mode
     album, greeting = event.bot.send_message.await_args_list[:2]
-    assert len(album.kwargs["attachments"]) == 7
+    assert len(album.kwargs["attachments"]) == 1
     assert greeting.kwargs["user_id"] == 456 and "chat_id" not in greeting.kwargs
     assert greeting.kwargs["text"].startswith(handlers.WELCOME_TEXT)
     assert len(greeting.kwargs["attachments"]) == 1
-    assert event.bot.upload_media.await_count == 7
+    assert event.bot.upload_media.await_count == 1
     assert len(event.bot.send_message.await_args_list) == 3
 
 
@@ -1508,24 +1500,17 @@ async def test_stats_displays_distinct_nonzero_values_for_each_event(credit_db):
 
 @pytest.mark.parametrize("failure", ["missing", "upload", "send"])
 async def test_start_still_shows_menu_after_example_failures(example_photos, failure, caplog):
-    event = message_event("/start")
-    if failure == "missing":
-        (example_photos / "Леденец.webp").unlink()
-    elif failure == "upload":
-        image = event.bot.upload_media.return_value
-        async def upload(media):
-            if Path(media.path).name == "Леденец.webp":
-                raise RuntimeError("upload failed")
-            return image
-        event.bot.upload_media.side_effect = upload
+    event = message_event('/start')
+    if failure == 'missing':
+        (example_photos / handlers.MAIN_SCREEN_IMAGE).unlink()
+    elif failure == 'upload':
+        event.bot.upload_media.side_effect = RuntimeError('upload failed')
     else:
-        event.message.answer.side_effect = [RuntimeError("album rejected"), None, None]
-    await call_handler(create_router(), "start", event, await ready_context())
-    replies = event.message.answer.await_args_list
-    assert len(replies[0].kwargs["attachments"]) == (7 if failure == "send" else 6)
-    assert replies[1].kwargs["text"] == handlers.WELCOME_TEXT
-    assert len(replies[1].kwargs["attachments"]) == 1
-    assert "Не удалось" in caplog.text
+        event.message.answer.side_effect = [RuntimeError('image rejected'), object(), object()]
+    await call_handler(create_router(), 'start', event, await ready_context())
+    greetings = [c for c in event.message.answer.await_args_list if c.kwargs.get('text') == handlers.WELCOME_TEXT]
+    assert len(greetings) == 1 and len(greetings[0].kwargs['attachments']) == 1
+    assert 'Не удалось' in caplog.text
 
 
 @pytest.mark.parametrize("mode", ["mode_vision", *handlers.POSTCARD_PROMPTS])
@@ -1680,7 +1665,7 @@ def test_new_menu_starts_with_five_new_year_modes_and_hides_march():
     assert len(modes) == 14 and len(set(modes)) == 14
     assert "mode_8march" not in modes
     assert {"mode_halloween", "mode_bday_old_elegant"} <= set(modes)
-    assert "🎨 Первая генерация — бесплатно!" in handlers.WELCOME_TEXT
+    assert "🎨 Первая открытка с вашим фото — бесплатно!" in handlers.WELCOME_TEXT
 
 
 @pytest.mark.parametrize("active", [True, False])
@@ -1813,26 +1798,24 @@ async def test_start_album_does_not_split_on_unrelated_errors(example_photos, st
     await call_handler(create_router(), "start", event, await ready_context())
     replies = event.message.answer.await_args_list
     assert len(replies) == 3
-    assert len(replies[0].kwargs["attachments"]) == 7
+    assert len(replies[0].kwargs["attachments"]) == 1
     assert replies[1].kwargs["text"] == handlers.WELCOME_TEXT
 
 
-async def test_start_sends_one_album_with_distinct_tokens_in_requested_order(example_photos):
-    event = message_event("/start")
-    event.bot.upload_media.side_effect = [SimpleNamespace(payload=SimpleNamespace(token=f"token-{i}")) for i in range(len(handlers.START_EXAMPLE_FILES))]
-    await call_handler(create_router(), "start", event, await ready_context())
-    albums = [c for c in event.message.answer.await_args_list if c.kwargs.get("text") == "Примеры работ:"]
-    assert len(albums) == 1
-    assert [a.payload.token for a in albums[0].kwargs["attachments"]] == [f"token-{i}" for i in range(len(handlers.START_EXAMPLE_FILES))]
+async def test_start_uploads_only_the_new_welcome_image(example_photos):
+    event = message_event('/start')
+    await call_handler(create_router(), 'start', event, await ready_context())
+    event.bot.upload_media.assert_awaited_once()
+    assert Path(event.bot.upload_media.await_args.args[0].path).name == 'NY_card.png'
+    assert not any(c.kwargs.get('text') == 'Примеры работ:' for c in event.message.answer.await_args_list)
 
 
 def test_welcome_has_exact_requested_line_breaks_and_emoji():
     assert handlers.WELCOME_TEXT == (
-        "Привет! Я твой личный нейро-художник 🎨\n\n"
-        "Я создаю волшебные карты желаний и персональные открытки с твоим лицом или лицом твоего близкого человека. \n\n"
-        "🎁 Ты можешь добавить любое пожелание, а мы красиво его оформим.\n\n"
-        "🎨 Первая генерация — бесплатно!\n\n"
-        "👇 Выбери, что хочешь создать:"
+        'Привет! Я создаю волшебные открытки и карты желаний с твоим лицом или лицом твоего близкого человека.\n\n'
+        '✍️ На открытках ты можешь добавить любое пожелание и поздравление.\n\n'
+        '🎨 Первая открытка с вашим фото — бесплатно!\n\n'
+        '👇 Выбери, что хочешь создать:'
     )
 
 
@@ -2140,10 +2123,7 @@ async def test_main_menu_button_resets_fsm_and_sends_welcome(credit_db, example_
     greetings = [c.kwargs for c in event.send.await_args_list if c.kwargs.get("text") == handlers.WELCOME_TEXT]
     assert len(greetings) == 1
     buttons = greetings[0]["attachments"][0].payload.buttons
-    assert [(row[0].text, row[0].payload) for row in buttons[:-1]] == list(handlers.CATEGORY_BUTTONS)
-    assert [(button.text, button.payload) for button in buttons[-1]] == [
-        ("🖼 Примеры", "show_examples"), ("🆘 Помощь", "show_help"),
-    ]
+    assert [(row[0].text, row[0].payload) for row in buttons] == list(handlers.CATEGORY_BUTTONS)
     assert (await credit_db.get_user(456))["balance"] == 1
 
 
@@ -4426,8 +4406,8 @@ async def test_gift_handler_directly_calls_ttapi_with_all_arguments(credit_db, c
 
 
 async def test_video_menu_first_and_matches_existing_style_labels(credit_db, example_photos):
-    first = handlers.main_keyboard().payload.buttons[0][0]
-    assert (first.text, first.payload) == ('🎵 Музыкальная открытка — Новинка 🔥', 'cat_video')
+    first = handlers.main_keyboard().payload.buttons[2][0]
+    assert (first.text, first.payload) == ('🎵 Музыкальная открытка', 'cat_video')
     router, context = create_router(), await ready_context()
     await context.update_data(photo={'url': 'old'}, card_text='old', audio_job_id='old')
     entry = callback_event('cat_video')
@@ -4721,12 +4701,13 @@ async def start_cartoon(router, context, entry='cat_cartoon', mode='mode_ny'):
 
 async def test_cartoon_main_menu_order_and_names_are_exact():
     buttons = handlers.main_keyboard().payload.buttons
-    assert [(button.text, button.payload) for row in buttons for button in row] == [
-        ('🎵 Музыкальная открытка — Новинка 🔥', 'cat_video'),
-        ('🎬 Мульт-открытка — Новинка 🔥', 'cat_cartoon'),
-        ('👑 Эксклюзив (ручная работа) — от 2 000 ₽', 'custom_order'),
-        ('📸 Нейрофотосессия', 'cat_photo'), ('✨ Оживление фотографий', 'cat_animation'), ('🎵 Аудиопесни', 'cat_audio'), ('🎁 Открытки', 'cat_cards'),
-        ('🔮 Карта Желаний', 'cat_vision'), ('🧘 Медитации', 'cat_meditation'), ('🖼 Примеры', 'show_examples'), ('🆘 Помощь', 'show_help')]
+    assert [(b.text,b.payload) for row in buttons for b in row] == [
+        ('🔮 Карты желаний','cat_vision'), ('🎁 Открытки','cat_cards'),
+        ('🎵 Музыкальная открытка','cat_video'), ('🎬 Мульт-открытка','cat_cartoon'),
+        ('✨ Оживление фотографий','cat_animate'), ('🎅 Поздравление Деда Мороза','cat_ded_moroz'),
+        ('👑 Ручная работа','custom_order'), ('🎵 Аудиопесни','cat_audio'),
+        ('📸 Нейрофотосессии','cat_photo')]
+
 
 
 @pytest.mark.parametrize('entry,price,minutes', [('cat_cartoon', 590, '5-10')])
@@ -7076,3 +7057,4 @@ async def test_rabbit_collage_precedes_checkout_or_photo_request(credit_db, exam
         assert event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0].text == 'Оплатить 590 ₽'
         payments.create_payment_link.assert_awaited_once()
     assert (await context.get_data())['template'] == 'rabbit'
+

@@ -66,9 +66,13 @@ async def main() -> None:
         animation_task = None
         payment_incident_task = None
         studio_task = None
+        dm_task = None
         musical_worker = PaidMusicalWorker(bot, bot_link=config.bot_link,admin_user_id=config.admin_user_id)
         audio_worker = PaidAudioWorker(bot, payments=payments, admin_user_id=config.admin_user_id)
         try:
+            if config.admin_user_id is not None:
+                from ded_moroz import Worker as DedMorozWorker
+                dm_task = asyncio.create_task(DedMorozWorker(bot,config.admin_user_id,config).run())
             if studio_worker is not None:
                 studio_task = asyncio.create_task(studio_worker.run())
             if payments is not None:
@@ -87,6 +91,12 @@ async def main() -> None:
             await dispatcher.start_polling(bot)
         finally:
             try:
+                if dm_task is not None:
+                    dm_task.cancel()
+                    try:
+                        await dm_task
+                    except asyncio.CancelledError:
+                        pass
                 if studio_task is not None:
                     studio_task.cancel()
                     try:

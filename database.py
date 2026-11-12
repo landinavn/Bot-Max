@@ -320,6 +320,8 @@ async def init_db() -> None:
         await _init_animation_orders(db)
         from promo1111 import init as init_promo1111
         await init_promo1111(db)
+        from ded_moroz import init_tables as init_ded_moroz
+        await init_ded_moroz(db)
         await _init_repeat_promos(db)
         await _backfill_sale_counters(db, force=not counters_exist or not user_counters_exist)
         await db.commit()

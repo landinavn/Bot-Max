@@ -251,10 +251,7 @@ WELCOME_TEXT = (
     "👇 Выбери, что хочешь создать:"
 )
 MAIN_SCREEN_IMAGE = 'NY_card.png'
-DED_MOROZ_TEXT = (
-    '🎅 Поздравление от Деда Мороза уже в разработке! Скоро вы сможете заказать '
-    'персональное видео-поздравление с вашим ребёнком. Следите за обновлениями!'
-)
+DED_MOROZ_TEXT = '🎅 Поздравление от Деда Мороза уже в разработке! Скоро здесь можно будет заказать персональное видео с вашим ребёнком.'
 
 BROADCAST_UPDATE_TEXT = (
     '✨ У нас много красивых новинок!\n\n'
@@ -837,6 +834,9 @@ async def purchase_keyboard(user_id: int | None):
 
 
 class PosterStates(StatesGroup):
+    ded_moroz_input = State()
+    ded_moroz_photo = State()
+    ded_moroz_edit = State()
     waiting_for_birthday_number = State()
     waiting_for_recovery_email = State()
     waiting_for_animation_photo = State()
@@ -1727,6 +1727,7 @@ def create_router(
         data = await get_global_stats(admin_id=admin_user_id)
         activity = await get_advanced_stats(admin_id=admin_user_id)
         counters = await get_all_counters(admin_id=admin_user_id)
+        dm_counters = await get_all_counters()
         sources = await get_source_stats(admin_id=admin_user_id)
         ad_sources = await get_ad_source_counts(admin_id=admin_user_id)
         admin = await get_user(admin_user_id)
@@ -1810,6 +1811,7 @@ def create_router(
             f"- Эксклюзив (ручная работа): {c('click_custom_order')}\n"
             f"- Оживление фотографий: {c('click_animation')}\n"
             f"- Дед Мороз: {c('click_ded_moroz')}\n"
+            f"🎅 Готовых поздравлений Деда Мороза: {dm_counters.get('dm_video_created',0)}\n"
             f"- Медитации: {c('click_meditation')}\n\n"
             "👩‍👧 Фотосессия «Мама + дочка»:\n"
             f"- Выбор сюжета (клики): {c('select_photo_mom_daughter')}\n"
@@ -2378,14 +2380,46 @@ def create_router(
         await send_welcome_message(event, context)
 
     @router.message_callback(F.callback.payload == 'cat_ded_moroz')
-    async def ded_moroz_menu(event: MessageCallback):
+    async def ded_moroz_menu(event: MessageCallback, context: MemoryContext):
         await event.ack(notification='Поздравление Деда Мороза')
         user_id = event.get_ids()[1]
         if event.message is None or user_id is None:
             return
         await increment_counter('click_ded_moroz', user_id=user_id)
-        await _reply(event, DED_MOROZ_TEXT,
-                     attachments=[navigation_keyboard((('⬅️ Назад', 'back_to_main'),))])
+        from ded_moroz import enter
+        await enter(event,context,admin_user_id)
+
+    @router.message_created(PosterStates.ded_moroz_input)
+    @router.message_created(PosterStates.ded_moroz_photo)
+    @router.message_created(PosterStates.ded_moroz_edit)
+    async def ded_moroz_input(event: MessageCreated, context: MemoryContext):
+        from ded_moroz import collect
+        try:
+            await collect(event,context,admin_user_id)
+        except ValueError as exc:
+            await _reply(event,str(exc))
+        except Exception:
+            logger.exception('Не удалось сохранить данные Деда Мороза:')
+            await _reply(event,'Не удалось завершить обработку. Данные сохранены; попробуйте ещё раз.')
+
+    @router.message_callback(F.callback.payload.in_({'dm_audio_ok','dm_audio_edit'}) | F.callback.payload.startswith('dm_audio_ok:') | F.callback.payload.startswith('dm_audio_edit:'))
+    async def ded_moroz_audio_action(event: MessageCallback, context: MemoryContext):
+        await event.ack(notification='Дед Мороз')
+        from ded_moroz import callback
+        await callback(event,context,admin_user_id)
+
+    @router.message_created(Command('dm_resume'))
+    async def ded_moroz_resume(event: MessageCreated):
+        if is_bot_message(event) or admin_user_id is None or event.get_ids()[1]!=admin_user_id:
+            return
+        from ded_moroz import resume
+        parts=(event.message.body.text or '').split()
+        try:
+            if len(parts)!=2:raise ValueError('Используйте /dm_resume ID_заказа')
+            state=await resume(parts[1],admin_user_id)
+            await _reply(event,'Заказ восстановлен на этапе '+state+'.')
+        except ValueError as exc:
+            await _reply(event,str(exc))
 
     def cartoon_style_keyboard(screen='cat_cards'):
         return navigation_keyboard((*((label, key) for key, label in CARTOON_THEMES.items()), ('⬅️ Назад', 'back_to_main')))

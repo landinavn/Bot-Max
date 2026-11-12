@@ -56,17 +56,24 @@ async def step(worker,key):
     return await dm.get(key)
 
 
-async def test_full_blank_template_precedes_questions_and_literal_phrases(credit_db):
+async def test_name_then_full_template_and_literal_phrases(credit_db):
     e=callback_event('cat_ded_moroz');context=await ready_context();router=create_router(admin_user_id=456)
     await dispatch_callback(router,e,context)
-    assert e.send.await_args_list[0].args[0]==dm.BLANK_TEMPLATE
+    e.send.assert_awaited_once_with(dm.GREETING)
     assert all(x in dm.BLANK_TEMPLATE for x in ('[ИМЯ]','[УВЛЕЧЕНИЕ]','[ДОСТИЖЕНИЕ]','[КАЧЕСТВО]','[ЗАДАНИЕ]'))
     assert await context.get_state()==PosterStates.ded_moroz_input
     values=['Машенька','любишь рисовать','научилась плавать','добрая','помогать маме']
     for n,value in enumerate(values):
         event=message_event(value)
         await call_handler(router,'ded_moroz_input',event,context)
-        if n<4:assert event.message.answer.await_args.args[0]==dm.QUESTIONS[n+1][1]
+        if n==0:
+            assert [c.args[0] for c in event.message.answer.await_args_list]==[dm.EXPLANATION,dm.QUESTIONS[1][1]]
+        elif n<4:
+            event.message.answer.assert_awaited_once_with(dm.QUESTIONS[n+1][1])
+        else:
+            event.message.answer.assert_awaited_once_with(dm.PHOTO_PROMPT)
+        assert 'SpeechKit' not in str(event.message.answer.await_args_list)
+        assert 'Фразы будут вставлены целиком' not in str(event.message.answer.await_args_list)
     row=await dm.get((await context.get_data())['dm_order'])
     assert list(json.loads(row['details']).values())==values
     assert await context.get_state()==PosterStates.ded_moroz_photo
@@ -107,16 +114,22 @@ async def test_photo_content_saved_normalized_to_local_alias_and_cloud(credit_db
     for path in (worker.assets.path(row['photo_path']),settings.root/'ded_moroz_456/child_photo.png'):
         with Image.open(path) as image:assert image.format=='PNG' and image.size==(941,1672)
     publish.assert_awaited_once();worker.tts.synthesize.assert_not_awaited()
+    e.message.answer.assert_awaited_once_with(dm.AUDIO_GENERATING)
     assert 'Здравствуй, Мишенька!' in row['text'] and 'что ты любишь рисовать.' in row['text']
 
 
-async def test_bad_image_and_missing_assets_never_call_tts(credit_db,setup_dm,monkeypatch):
+async def test_audio_does_not_require_video_assets_heygen_or_ffmpeg(credit_db,setup_dm,monkeypatch):
+    from dataclasses import replace
     _,settings,worker=setup_dm;row=await audio_order(worker)
-    (settings.examples/'fire_overlay.mp4').unlink()
-    await worker.tick()
-    assert (await dm.get(row['id']))['status']=='manual'
-    worker.tts.synthesize.assert_not_awaited();worker.heygen.create_avatar.assert_not_awaited()
-    assert await dm.resume(row['id'],456)=='audio_queued'
+    for file in (*settings.files(),settings.examples/'fire_overlay.mp4',settings.examples/'ded_moroz_ref.png'):file.unlink()
+    worker.settings=replace(settings,heygen_key=None)
+    monkeypatch.setattr(dm.shutil,'which',lambda name:None)
+    for _ in range(3):await step(worker,row['id'])
+    assert (await dm.get(row['id']))['status']=='audio_ready'
+    worker.tts.synthesize.assert_awaited_once()
+    worker.heygen.create_avatar.assert_not_awaited();worker.heygen.create_video.assert_not_awaited()
+    with pytest.raises(ValueError,match='HEYGEN_API_KEY'):
+        worker.settings.ready(worker.config,stage='video')
 
 
 async def test_audio_edit_once_stale_buttons_and_duplicate_approvals(credit_db,setup_dm):
@@ -286,7 +299,7 @@ async def test_real_dispatcher_keeps_question_sequence(credit_db,monkeypatch,eve
             await dp.handle(incoming)
         row=await dm.read('SELECT * FROM ded_moroz_orders WHERE user_id=456')
         assert len(json.loads(row['details']))==5 and row['status']=='input'
-        assert bot.send_message.await_args.kwargs['text'].startswith('Отправьте фото ребёнка')
+        assert bot.send_message.await_args.kwargs['text']==dm.PHOTO_PROMPT
     finally:await dp.shutdown()
 
 
@@ -352,3 +365,30 @@ async def test_max_processing_retry_reuses_same_video_token(credit_db,setup_dm):
     await worker.tick()
     worker.bot.upload_media.assert_awaited_once()
     assert (await dm.get(key))['status']=='done' and worker.uploads=={}
+
+
+async def test_video_preflight_ignores_absent_fire(credit_db,setup_dm):
+    from dataclasses import replace
+    config,settings,_=setup_dm
+    (settings.examples/'fire_overlay.mp4').unlink()
+    replace(settings,tts_key=None).ready(config,stage='video')
+    (settings.examples/'audio/ny_music.mp3').unlink()
+    settings.ready(config,stage='audio')
+    with pytest.raises(ValueError,match='ny_music.mp3'):
+        settings.ready(config,stage='video')
+
+
+async def test_resume_after_name_replays_template_then_hobby(credit_db):
+    row=await dm.begin(456);await dm.update(row['id'],details=json.dumps({'name':'Машенька'}))
+    e=callback_event('cat_ded_moroz');context=await ready_context()
+    await dispatch_callback(create_router(admin_user_id=456),e,context)
+    assert [c.args[0] for c in e.send.await_args_list]==[dm.EXPLANATION,dm.QUESTIONS[1][1]]
+    assert json.loads((await dm.get(row['id']))['details'])=={'name':'Машенька'}
+
+
+async def test_resume_at_photo_does_not_repeat_old_intro(credit_db):
+    row=await audio_order();await dm.update(row['id'],status='input')
+    e=callback_event('cat_ded_moroz');context=await ready_context()
+    await dispatch_callback(create_router(admin_user_id=456),e,context)
+    e.send.assert_awaited_once_with(dm.PHOTO_PROMPT)
+    assert await context.get_state()==PosterStates.ded_moroz_photo

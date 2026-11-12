@@ -28,13 +28,33 @@ TEMPLATE=('Здравствуй, {name}! Это я, Дедушка Мороз! �
     'В новом году у меня для тебя будет маленькое задание: {task}. Я знаю, у тебя всё получится! '
     'Я получил твоё письмо, {name}. И приготовил для тебя кое-что очень особенное! '
     'С Новым годом, {name}! До встречи!')
-BLANK_TEMPLATE=TEMPLATE.format(name='[ИМЯ]',fact1='[УВЛЕЧЕНИЕ]',fact2='[ДОСТИЖЕНИЕ]',fact3='[КАЧЕСТВО]',task='[ЗАДАНИЕ]')
+GREETING=(
+    '🎅 Добро пожаловать в мастерскую Деда Мороза!\n\n'
+    'Давайте создадим персональное видео-поздравление для вашего ребёнка.\n\n'
+    'Как зовут ребёнка или как вы ласково его называете? (Например: «Маша» или «Машенька»)')
+BLANK_TEMPLATE=(
+    'Здравствуй, [ИМЯ]! Это я, Дедушка Мороз!\n'
+    'Я весь год наблюдал за тобой. И знаешь что? Ты меня очень порадовал!\n'
+    'Я слышал, что ты [УВЛЕЧЕНИЕ].\n'
+    'А ещё ты [ДОСТИЖЕНИЕ].\n'
+    'И особенно мне нравится, что ты [КАЧЕСТВО].\n'
+    'Молодец! Я тобой очень горжусь!\n'
+    'В новом году у меня для тебя будет маленькое задание: [ЗАДАНИЕ].\n'
+    'Я знаю, у тебя всё получится!\n'
+    'Я получил твоё письмо, [ИМЯ]. И приготовил для тебя кое-что очень особенное!\n'
+    'С Новым годом, [ИМЯ]! До встречи!')
+EXPLANATION=(
+    'Отлично! Чтобы Дед Мороз поздравил вашего ребёнка по-настоящему лично, нам нужно добавить немного деталей.\n\n'
+    'Вот как будет звучать поздравление:\n\n«'+BLANK_TEMPLATE+'»\n\n'
+    'Мы зададим вам несколько коротких вопросов по очереди.')
+PHOTO_PROMPT='📸 Отправьте фотографию ребёнка. Она появится в видео на несколько секунд. Лучше всего подойдёт чёткое фото анфас.'
+AUDIO_GENERATING='🎙 Генерирую озвучку Деда Мороза. Это займет около минуты...'
 QUESTIONS=[
-    ('name','Как зовут ребёнка и как вы ласково его называете? Напишите обращение, которое вставить после «Здравствуй, …»: например, «Миша» или «Машенька».'),
-    ('fact1','Заполните: «Я слышал, что ты [УВЛЕЧЕНИЕ]». Напишите фразу так, как она должна звучать после «что ты…». Например: «любишь рисовать», «занимаешься футболом», «обожаешь конструкторы».'),
-    ('fact2','Заполните: «А ещё ты [ДОСТИЖЕНИЕ]». Напишите фразу так, как она должна звучать после «ты…». Например: «научился плавать», «пошёл в первый класс», «выиграл соревнование».'),
-    ('fact3','Заполните: «И особенно мне нравится, что ты [КАЧЕСТВО]». Напишите качество в нужной форме. Например: «добрый», «любознательный», «смелый», «весёлый», «заботливый».'),
-    ('task','Заполните: «В новом году у меня для тебя будет маленькое задание: [ЗАДАНИЕ]». Например: «помогать маме», «читать перед сном», «делать зарядку».'),
+    ('name',GREETING),
+    ('fact1','Заполните: «Я слышал, что ты [УВЛЕЧЕНИЕ]».\n\nНапишите фразу так, как она должна звучать после «что ты…». Например: «любишь рисовать», «занимаешься футболом», «обожаешь конструкторы».'),
+    ('fact2','Заполните: «А ещё ты [ДОСТИЖЕНИЕ]».\n\nНапишите фразу так, как она должна звучать после «ты…». Например: «научился плавать», «пошёл в первый класс», «выиграл соревнование».'),
+    ('fact3','Заполните: «И особенно мне нравится, что ты [КАЧЕСТВО]».\n\nНапишите качество в нужной форме. Например: «добрый», «любознательный», «смелый», «весёлый», «заботливый».'),
+    ('task','Заполните: «В новом году у меня для тебя будет маленькое задание: [ЗАДАНИЕ]».\n\nНапример: «помогать маме», «читать перед сном», «делать зарядку».'),
 ]
 
 
@@ -56,16 +76,22 @@ class Settings:
                    os.getenv('DED_MOROZ_REF_URL','').strip() or None)
 
     def files(self):
-        return [self.examples/'fire_overlay.mp4',self.examples/'audio/jingle_bells.mp3',self.examples/'audio/ny_music.mp3']
+        # Required audio decorations belong to the video phase, never to TTS.
+        return [self.examples/'audio/jingle_bells.mp3',self.examples/'audio/ny_music.mp3']
 
-    def ready(self,config,*,avatar_known=False):
-        if not self.heygen_key or not self.tts_key:raise ValueError('Задайте HEYGEN_API_KEY и YANDEX_TTS_API_KEY.')
+    def ready(self,config,*,avatar_known=False,stage='audio'):
+        if stage not in ('audio','video'):raise ValueError('Неизвестный этап подготовки.')
         if not config.storage_bucket or not config.storage_public_base_url:raise ValueError('Настройте Yandex Cloud STORAGE_BUCKET и STORAGE_PUBLIC_BASE_URL.')
+        if stage=='audio':
+            if not self.tts_key:raise ValueError('Задайте YANDEX_TTS_API_KEY.')
+            return
+        if not self.heygen_key:raise ValueError('Задайте HEYGEN_API_KEY.')
         required=self.files()
-        if not (avatar_known or self.avatar_id or self.reference_url):required.append(self.examples/'ded_moroz_ref.png')
+        if not (avatar_known or self.avatar_id):
+            if self.reference_url:https_url(self.reference_url)
+            else:required.append(self.examples/'ded_moroz_ref.png')
         missing=[str(p.relative_to(self.examples)) for p in required if not p.is_file()]
         if missing:raise ValueError('Добавьте файлы examples/: '+', '.join(missing))
-        if self.reference_url:https_url(self.reference_url)
         if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):raise ValueError('Установите FFmpeg и ffprobe.')
 
 
@@ -166,14 +192,14 @@ async def enter(event,context,admin):
     row=await begin(user)
     await context.clear();await context.update_data(dm_order=row['id'])
     if row['status']=='input':
-        await tell(event,BLANK_TEMPLATE)
-        await tell(event,'Фразы будут вставлены целиком. После фото будет создана платная озвучка SpeechKit; перед HeyGen вы её прослушаете.')
         data=json.loads(row['details']);remaining=[q for k,q in QUESTIONS if k not in data]
         if remaining:
-            await context.set_state(PosterStates.ded_moroz_input);await tell(event,remaining[0])
+            await context.set_state(PosterStates.ded_moroz_input)
+            if set(data)=={'name'}:await tell(event,EXPLANATION)
+            await tell(event,remaining[0])
         else:
             await context.set_state(PosterStates.ded_moroz_photo)
-            await tell(event,'Отправьте фото ребёнка JPG/PNG через «Файл», чтобы MAX не преобразовал его в WEBP.')
+            await tell(event,PHOTO_PROMPT)
     elif row['status']=='editing':
         await context.set_state(PosterStates.ded_moroz_edit);await tell(event,'Отправьте исправленный текст целиком. Доступна одна правка.')
     elif row['status']=='audio_ready':
@@ -200,10 +226,11 @@ async def collect(event,context,admin,config=None,settings=None):
         data[key]=text
         await update(row['id'],details=json.dumps(data,ensure_ascii=False))
         next_question=next((q for k,q in QUESTIONS if k not in data),None)
+        if key=='name':await tell(event,EXPLANATION)
         if next_question:await tell(event,next_question)
         else:
             await context.set_state(PosterStates.ded_moroz_photo)
-            await tell(event,'Отправьте фото ребёнка JPG/PNG через «Файл», чтобы MAX сохранил исходный формат.')
+            await tell(event,PHOTO_PROMPT)
     elif state==PosterStates.ded_moroz_photo and row['status']=='input':
         config=config or Config.from_env();settings=settings or Settings.from_config(config)
         avatar=await read('SELECT * FROM ded_moroz_avatar WHERE singleton=1')
@@ -222,7 +249,7 @@ async def collect(event,context,admin,config=None,settings=None):
         text=TEMPLATE.format(**json.loads(row['details']))
         await update(row['id'],photo_path=path,photo_url=url,text=text)
         if await transition(row['id'],admin,'input','audio_queued'):
-            await context.clear();await tell(event,'Данные сохранены. Создаю озвучку Деда Мороза.')
+            await context.clear();await tell(event,AUDIO_GENERATING)
 
 
 async def callback(event,context,admin):
@@ -313,7 +340,7 @@ class Worker:
             if not isinstance(mid,str) or not mid:raise RuntimeError('MAX не вернул ID сообщения с озвучкой.')
             await update(key,preview_sent=1,preview_mid=mid,preview_version=row['version'])
         elif state=='video_queued':
-            self.settings.ready(self.config,avatar_known=bool(await read('SELECT look_id FROM ded_moroz_avatar WHERE look_id IS NOT NULL')))
+            self.settings.ready(self.config,avatar_known=bool(await read('SELECT look_id FROM ded_moroz_avatar WHERE look_id IS NOT NULL')),stage='video')
             for field_name in ('photo_path','audio_path'):
                 if not row[field_name] or not self.assets.path(row[field_name]).is_file():raise ValueError('Не найден сохранённый исходник: '+field_name)
             https_url(row['audio_url'])

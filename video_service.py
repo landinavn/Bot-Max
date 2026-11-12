@@ -230,31 +230,39 @@ async def render_ded_moroz(video, child, speech, examples, target, name):
     video,child,speech,examples,target=map(Path,(video,child,speech,examples,target))
     seconds=await audio_duration(speech)
     if not 0<seconds<=1800:raise ValueError('Недопустимая длительность озвучки.')
-    for path in (video,child,speech,examples/'fire_overlay.mp4',examples/'audio/ny_music.mp3',examples/'audio/jingle_bells.mp3'):
+    fire=examples/'fire_overlay.mp4'
+    has_fire=fire.is_file()
+    if not has_fire:logger.warning('Оверлей огня %s не найден; наложение пропущено.',fire)
+    for path in (video,child,speech,examples/'audio/ny_music.mp3',examples/'audio/jingle_bells.mp3'):
         if not path.is_file():raise ValueError('Не найден файл монтажа: '+path.name)
     target.parent.mkdir(parents=True,exist_ok=True)
     # Text is data in a separate file; never interpolate child names into FFmpeg expressions.
     title=target.with_name('title.txt');title.write_text('Для '+name+' от Деда Мороза',encoding='utf-8')
     temporary=target.with_name('rendering.mp4')
+    offset=int(has_fire)
+    child_index,speech_index,bg_index,jingle_index=1+offset,2+offset,3+offset,4+offset
+    base_label='base' if has_fire else 'lit'
     filters=(
         f'[0:v]setpts=PTS-STARTPTS,scale=1920:1080:force_original_aspect_ratio=increase,'
-        f'crop=1920:1080,setsar=1,fps=30,tpad=stop_mode=clone:stop_duration={seconds:.6f},trim=duration={seconds:.6f}[base];'
-        '[1:v]setpts=PTS-STARTPTS,scale=1920:1080,setsar=1,fps=30[fire];'
-        '[base][fire]blend=all_mode=screen:shortest=1[lit];'
-        '[2:v]scale=480:900:force_original_aspect_ratio=decrease,pad=iw+12:ih+12:6:6:color=white[pip];'
+        f'crop=1920:1080,setsar=1,fps=30,tpad=stop_mode=clone:stop_duration={seconds:.6f},trim=duration={seconds:.6f}[{base_label}];'
+        + ('[1:v]setpts=PTS-STARTPTS,scale=1920:1080,setsar=1,fps=30[fire];'
+           '[base][fire]blend=all_mode=screen:shortest=1[lit];' if has_fire else '')
+        + f'[{child_index}:v]scale=480:900:force_original_aspect_ratio=decrease,pad=iw+12:ih+12:6:6:color=white[pip];'
         f"[lit][pip]overlay=x=W-w-48:y=H-h-48:enable='between(t,{seconds*.3:.6f},{seconds*.7:.6f})':shortest=1[framed];"
         "[framed]drawtext=textfile=title.txt:expansion=none:fontcolor=white:fontsize=54:"
         "borderw=3:bordercolor=black:x=(w-text_w)/2:y=55:enable='lt(t,5)'[v];"
-        '[3:a]asetpts=PTS-STARTPTS,aresample=48000,apad[voice];'
-        '[4:a]asetpts=PTS-STARTPTS,aresample=48000,volume=0.2[bg];'
-        '[5:a]atrim=duration=3,asetpts=PTS-STARTPTS,aresample=48000,volume=0.4[jingle];'
+        f'[{speech_index}:a]asetpts=PTS-STARTPTS,aresample=48000,apad[voice];'
+        f'[{bg_index}:a]asetpts=PTS-STARTPTS,aresample=48000,volume=0.2[bg];'
+        f'[{jingle_index}:a]atrim=duration=3,asetpts=PTS-STARTPTS,aresample=48000,volume=0.4[jingle];'
         '[voice][bg][jingle]amix=inputs=3:duration=first:normalize=0,alimiter=limit=0.95[a]'
     )
-    await render_process('ffmpeg','-nostdin','-v','error','-y','-filter_complex_threads','1',
-        '-i',str(video.resolve()),'-stream_loop','-1','-i',str((examples/'fire_overlay.mp4').resolve()),
-        '-loop','1','-framerate','30','-i',str(child.resolve()),'-i',str(speech.resolve()),
+    inputs=['-i',str(video.resolve())]
+    if has_fire:inputs+=['-stream_loop','-1','-i',str(fire.resolve())]
+    inputs+=['-loop','1','-framerate','30','-i',str(child.resolve()),'-i',str(speech.resolve()),
         '-stream_loop','-1','-i',str((examples/'audio/ny_music.mp3').resolve()),
-        '-i',str((examples/'audio/jingle_bells.mp3').resolve()),'-filter_complex',filters,
+        '-i',str((examples/'audio/jingle_bells.mp3').resolve())]
+    await render_process('ffmpeg','-nostdin','-v','error','-y','-filter_complex_threads','1',
+        *inputs,'-filter_complex',filters,
         '-map','[v]','-map','[a]','-t',f'{seconds:.6f}','-r','30','-c:v','libx264','-preset','fast','-crf','20',
         '-pix_fmt','yuv420p','-c:a','aac','-ar','48000','-ac','2','-movflags','+faststart',str(temporary.resolve()),
         timeout=1800,cwd=str(target.parent.resolve()))

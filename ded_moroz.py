@@ -112,6 +112,10 @@ async def init_tables(db):
     for name in ('speech_provider_url', 'approved_audio_url', 'approved_audio_path'):
         if name not in columns:
             await db.execute(f'ALTER TABLE ded_moroz_orders ADD COLUMN {name} TEXT')
+    if 'regeneration_attempts' not in columns:
+        await db.execute('ALTER TABLE ded_moroz_orders ADD COLUMN regeneration_attempts INTEGER NOT NULL DEFAULT 0')
+        # Each previous version was an explicitly requested regeneration or text revision.
+        await db.execute('UPDATE ded_moroz_orders SET regeneration_attempts=MAX(version,0)')
     await db.execute("""CREATE TABLE IF NOT EXISTS ded_moroz_audio_versions (
         order_id TEXT NOT NULL, version INTEGER NOT NULL, text TEXT NOT NULL,
         voice_id TEXT, provider_url TEXT NOT NULL, path TEXT, public_url TEXT,
@@ -162,21 +166,41 @@ async def begin(user):
     return await get(key)
 
 
-def keyboard(order):
+def can_regenerate(order, admin):
+    # admin is the trusted config.admin_user_id passed by the router/worker, never callback data.
+    return (admin is not None and order['user_id']==admin) or order.get('regeneration_attempts',0)<1
+
+
+async def finish_regeneration(db, cursor, key, user_id):
+    if cursor.rowcount!=1:
+        await db.commit()
+        return False
+    row=await db.execute('SELECT regeneration_attempts FROM ded_moroz_orders WHERE id=?',(key,))
+    attempts=(await row.fetchone())[0]
+    await db.commit()
+    logger.info(f"Перегенерация аудио для {user_id}. Попытка: {attempts}")
+    return True
+
+
+def keyboard(order, *, admin=None):
     b=InlineKeyboardBuilder().row(CallbackButton(text='✅ Всё верно, создать видео',payload='dm_audio_approve'))
-    b.row(CallbackButton(text='🔄 Перегенерировать озвучку',payload='dm_audio_regenerate'))
+    if can_regenerate(order,admin):
+        b.row(CallbackButton(text='🔄 Перегенерировать озвучку',payload='dm_audio_regenerate'))
+        if order['user_id']==admin:
+            b.row(CallbackButton(text='✏️ Изменить текст',payload='dm_audio_edit'))
     return b.as_markup()
 
 
-async def regenerate(key, user, version):
-    """One new version per current preview; no administrator attempt limit."""
+async def regenerate(key, user, version, *, admin=None):
+    """One accepted request per preview; admin unlimited, ordinary users one retry."""
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
-        cur=await db.execute("""UPDATE ded_moroz_orders SET version=version+1,
+        cur=await db.execute("""UPDATE ded_moroz_orders SET version=version+1,regeneration_attempts=regeneration_attempts+1,
             status='audio_queued',audio_path=NULL,audio_url=NULL,speech_provider_url=NULL,
             approved_audio_url=NULL,approved_audio_path=NULL,
             preview_sent=0,preview_mid=NULL,preview_version=NULL,error=NULL,next_attempt=0
-            WHERE id=? AND user_id=? AND version=? AND status='audio_ready'""",(key,user,version))
-        await db.commit();return cur.rowcount==1
+            WHERE id=? AND user_id=? AND version=? AND status='audio_ready'
+            AND (? OR regeneration_attempts<1)""",(key,user,version,admin is not None and user==admin))
+        return await finish_regeneration(db,cur,key,user)
 
 
 async def approve(key, user, version):
@@ -204,17 +228,17 @@ async def resume(key,user):
     return target
 
 
-async def request_edit(key,user,version):
+async def request_edit(key,user,version,*,admin=None):
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
-        cur=await db.execute("UPDATE ded_moroz_orders SET edit_used=1,status='editing' WHERE id=? AND user_id=? AND version=? AND edit_used=0 AND status='audio_ready'",(key,user,version))
+        cur=await db.execute("UPDATE ded_moroz_orders SET edit_used=1,status='editing' WHERE id=? AND user_id=? AND version=? AND status='audio_ready' AND (? OR (edit_used=0 AND regeneration_attempts<1))",(key,user,version,admin is not None and user==admin))
         await db.commit();return cur.rowcount==1
 
 
-async def revised(key,user,text):
+async def revised(key,user,text,*,admin=None):
     if not text or not text.strip() or len(text)>4500:raise ValueError('Введите текст от 1 до 4500 символов.')
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
-        cur=await db.execute("UPDATE ded_moroz_orders SET text=?,version=version+1,status='audio_queued',audio_path=NULL,audio_url=NULL,speech_provider_url=NULL,approved_audio_url=NULL,approved_audio_path=NULL,preview_sent=0,preview_mid=NULL,preview_version=NULL WHERE id=? AND user_id=? AND status='editing' AND edit_used=1",(text.strip(),key,user))
-        await db.commit();return cur.rowcount==1
+        cur=await db.execute("UPDATE ded_moroz_orders SET text=?,version=version+1,regeneration_attempts=regeneration_attempts+1,status='audio_queued',audio_path=NULL,audio_url=NULL,speech_provider_url=NULL,approved_audio_url=NULL,approved_audio_path=NULL,preview_sent=0,preview_mid=NULL,preview_version=NULL WHERE id=? AND user_id=? AND status='editing' AND edit_used=1 AND (? OR regeneration_attempts<1)",(text.strip(),key,user,admin is not None and user==admin))
+        return await finish_regeneration(db,cur,key,user)
 
 
 async def tell(event,text=None,**kwargs):
@@ -239,7 +263,7 @@ async def enter(event,context,admin):
             await context.set_state(PosterStates.ded_moroz_photo)
             await tell(event,PHOTO_PROMPT)
     elif row['status']=='editing':
-        await context.set_state(PosterStates.ded_moroz_edit);await tell(event,'Отправьте исправленный текст целиком. Доступна одна правка.')
+        await context.set_state(PosterStates.ded_moroz_edit);await tell(event,'Отправьте исправленный текст целиком.')
     elif row['status']=='audio_ready':
         await update(row['id'],preview_sent=0);await tell(event,'Повторно отправляю сохранённую озвучку; новая генерация не запускается.')
     else:
@@ -254,8 +278,8 @@ async def collect(event,context,admin,config=None,settings=None):
     text=(event.message.body.text or '').strip()
     state=await context.get_state()
     if state==PosterStates.ded_moroz_edit:
-        if await revised(row['id'],admin,text):
-            await context.clear();await tell(event,'Создаю новую озвучку. Дальнейшая правка недоступна.')
+        if await revised(row['id'],admin,text,admin=admin):
+            await context.clear();await tell(event,'Создаю новую озвучку. После прослушивания можно снова изменить текст или перегенерировать аудио.')
         return
     if state==PosterStates.ded_moroz_input and row['status']=='input':
         if not text or len(text)>300:raise ValueError('Введите фразу от 1 до 300 символов.')
@@ -306,10 +330,10 @@ async def callback(event,context,admin):
     except ValueError:return
     row=await get(key)
     if not row or row['user_id']!=admin:return
-    if action=='dm_audio_edit' and await request_edit(key,admin,version):
+    if action=='dm_audio_edit' and await request_edit(key,admin,version,admin=admin):
         await context.clear();await context.update_data(dm_order=key);await context.set_state(PosterStates.ded_moroz_edit)
-        await tell(event,'Отправьте новый текст целиком. Перегенерация озвучки платная; правка доступна один раз.')
-    elif action=='dm_audio_regenerate' and await regenerate(key,admin,version):
+        await tell(event,'Отправьте новый текст целиком. Перегенерация озвучки платная; для администратора число попыток не ограничено.')
+    elif action=='dm_audio_regenerate' and await regenerate(key,admin,version,admin=admin):
         await context.clear();await tell(event,AUDIO_GENERATING)
     elif action in ('dm_audio_ok','dm_audio_approve') and await approve(key,admin,version):
         await context.clear();await tell(event,'Утверждённая озвучка сохранена. Запускаю HeyGen Avatar IV и монтаж.')
@@ -390,7 +414,7 @@ class Worker:
             chunks=[row['text'][i:i+3500] for i in range(0,len(row['text']),3500)]
             for chunk in chunks:
                 if await self.bot.send_message(user_id=self.admin,text=chunk) is None:raise ValueError('MAX не подтвердил текст.')
-            sent=await self.bot.send_message(user_id=self.admin,text='🎧 Прослушайте озвучку Деда Мороза. Всё нравится?',attachments=[audio,keyboard(row)])
+            sent=await self.bot.send_message(user_id=self.admin,text='🎧 Прослушайте озвучку Деда Мороза. Всё нравится?',attachments=[audio,keyboard(row,admin=self.admin)])
             if sent is None:raise ValueError('MAX не подтвердил аудио.')
             message=getattr(sent,'message',sent)  # maxapi returns SendedMessage(message=Message(...)).
             mid=getattr(getattr(message,'body',None),'mid',None)

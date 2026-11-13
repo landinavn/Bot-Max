@@ -141,13 +141,13 @@ async def test_audio_edit_once_stale_buttons_and_duplicate_approvals(credit_db,s
     await step(worker,key);await step(worker,key);await step(worker,key);row=await step(worker,key)
     assert row['status']=='audio_ready' and row['preview_sent']==1
     worker.tts.generate_speech.assert_awaited_once_with(row['text'])
-    assert len(dm.keyboard(row).payload.buttons)==2
-    requests=await asyncio.gather(*(dm.request_edit(key,456,0) for _ in range(5)))
+    assert len(dm.keyboard(row,admin=456).payload.buttons)==3
+    requests=await asyncio.gather(*(dm.request_edit(key,456,0,admin=456) for _ in range(5)))
     assert sum(requests)==1
-    assert await dm.revised(key,456,'Исправленный текст')
-    assert not await dm.revised(key,456,'Повторная правка')
+    assert await dm.revised(key,456,'Исправленный текст',admin=456)
+    assert not await dm.revised(key,456,'Повторная правка',admin=456)
     await step(worker,key);await step(worker,key);await step(worker,key);row=await step(worker,key)
-    assert row['version']==1 and row['edit_used']==1 and len(dm.keyboard(row).payload.buttons)==2
+    assert row['version']==1 and row['edit_used']==1 and len(dm.keyboard(row,admin=456).payload.buttons)==3
     assert row['audio_path'].endswith('speech-v1.mp3')
     assert worker.assets.path(key+'/speech-v0.mp3').read_bytes()==b'mp3'
     assert not await dm.transition(key,456,'audio_ready','video_queued',version=0)
@@ -331,7 +331,7 @@ async def test_exact_button_payloads_bound_to_saved_preview_message(credit_db,se
     worker.bot.send_message.return_value=SimpleNamespace(body=SimpleNamespace(mid='old-preview'))
     for _ in range(4):await step(worker,key)
     row=await dm.get(key)
-    assert [b.payload for r in dm.keyboard(row).payload.buttons for b in r]==['dm_audio_approve','dm_audio_regenerate']
+    assert [b.payload for r in dm.keyboard(row,admin=456).payload.buttons for b in r]==['dm_audio_approve','dm_audio_regenerate','dm_audio_edit']
     router=create_router(admin_user_id=456);context=await ready_context()
     e=callback_event('dm_audio_edit');e.message.body=SimpleNamespace(mid='old-preview')
     await dispatch_callback(router,e,context)
@@ -440,7 +440,7 @@ async def test_unlimited_regenerations_archive_versions_and_approve_exact_file(c
         row=await dm.get(key)
         assert row['version']==version and row['preview_sent']==1
         assert row['text'].startswith('[warm] Охо-хо-хо!')
-        assert [b.payload for r in dm.keyboard(row).payload.buttons for b in r]==['dm_audio_approve','dm_audio_regenerate']
+        assert [b.payload for r in dm.keyboard(row,admin=456).payload.buttons for b in r]==['dm_audio_approve','dm_audio_regenerate','dm_audio_edit']
         assert worker.bot.upload_media.await_args.args[0].type.value=='audio'
         worker.heygen.create_video.assert_not_awaited()
         if version<3:
@@ -457,7 +457,7 @@ async def test_unlimited_regenerations_archive_versions_and_approve_exact_file(c
     approved=await dm.get(key)
     assert approved['approved_audio_url']==row['audio_url']
     assert approved['approved_audio_path']==row['audio_path']
-    assert not await dm.regenerate(key,456,3)
+    assert not await dm.regenerate(key,456,3,admin=456)
     # Even accidental changes to the working URL cannot replace the approved URL.
     await dm.update(key,audio_url='https://cdn.example/unapproved.mp3',audio_path=key+'/unapproved.mp3')
     await step(worker,key)
@@ -472,7 +472,7 @@ async def test_unlimited_regenerations_archive_versions_and_approve_exact_file(c
 async def test_regenerate_concurrent_clicks_only_one_new_version(credit_db,setup_dm):
     _,_,worker=setup_dm;row=await audio_order(worker);key=row['id']
     for _ in range(4):await step(worker,key)
-    results=await asyncio.gather(*(dm.regenerate(key,456,0) for _ in range(5)))
+    results=await asyncio.gather(*(dm.regenerate(key,456,0,admin=456) for _ in range(5)))
     assert sum(results)==1 and (await dm.get(key))['version']==1
     assert not await dm.regenerate(key,999,1)
 
@@ -541,3 +541,65 @@ async def test_santa_worker_passes_tagged_script_unchanged(credit_db,setup_dm):
     saved=await dm.read('SELECT text FROM ded_moroz_audio_versions WHERE order_id=?',(row['id'],))
     assert saved['text']==row['text'] and '[slowly]' in saved['text']
     worker.heygen.create_video.assert_not_awaited()
+
+
+async def test_admin_can_edit_and_regenerate_repeatedly_via_real_buttons(credit_db,setup_dm,caplog):
+    import logging
+    caplog.set_level(logging.INFO,logger=dm.__name__)
+    _,_,worker=setup_dm;row=await audio_order(worker);key=row['id']
+    context=await ready_context();router=create_router(admin_user_id=456)
+    for version in range(3):
+        worker.bot.send_message.return_value=SimpleNamespace(body=SimpleNamespace(mid='edit-preview-'+str(version)))
+        for _ in range(4):await step(worker,key)
+        current=await dm.get(key)
+        assert dm.can_regenerate(current,456)
+        event=callback_event('dm_audio_edit');event.message.body=SimpleNamespace(mid='edit-preview-'+str(version))
+        await dispatch_callback(router,event,context)
+        assert await context.get_state()==PosterStates.ded_moroz_edit
+        await call_handler(router,'ded_moroz_input',message_event('[warm] Новый текст '+str(version)),context)
+        saved=await dm.get(key)
+        assert saved['regeneration_attempts']==version+1
+        assert saved['status']=='audio_queued' and saved['edit_used']==1
+    assert [r.getMessage() for r in caplog.records if r.name==dm.__name__]==[
+        f'Перегенерация аудио для 456. Попытка: {n}' for n in (1,2,3)]
+    worker.heygen.create_video.assert_not_awaited()
+
+
+@pytest.mark.parametrize('admin',[456,None])
+@pytest.mark.parametrize('first_action',['regenerate','edit'])
+async def test_future_regular_user_has_one_shared_retry_across_restart(credit_db,admin,first_action,caplog):
+    import logging
+    caplog.set_level(logging.INFO,logger=dm.__name__)
+    row=await dm.begin(789);key=row['id'];await dm.update(key,status='audio_ready')
+    if first_action=='edit':
+        assert await dm.request_edit(key,789,0,admin=admin)
+        assert await dm.revised(key,789,'Новый текст',admin=admin)
+    else:
+        assert await dm.regenerate(key,789,0,admin=admin)
+    await dm.update(key,status='audio_ready')
+    await credit_db.init_db()  # Startup must not reset quota or increment it again.
+    saved=await dm.get(key)
+    assert saved['regeneration_attempts']==1 and saved['version']==1
+    assert [b.payload for r in dm.keyboard(saved,admin=admin).payload.buttons for b in r]==['dm_audio_approve']
+    assert not await dm.regenerate(key,789,1,admin=admin)
+    assert not await dm.request_edit(key,789,1,admin=admin)
+    assert not await dm.regenerate(key,456,1,admin=456)  # Admin cannot mutate another owner's order.
+    assert (await dm.get(key))['regeneration_attempts']==1
+    assert [r.getMessage() for r in caplog.records if r.name==dm.__name__]==[
+        'Перегенерация аудио для 789. Попытка: 1']
+
+
+async def test_retry_migration_preserves_prior_attempts_and_admin_exemption(credit_db):
+    import aiosqlite
+    row=await dm.begin(456);key=row['id']
+    await dm.update(key,status='audio_ready')
+    async with aiosqlite.connect(dm.database.DATABASE_PATH) as db:
+        await db.execute('ALTER TABLE ded_moroz_orders DROP COLUMN regeneration_attempts')
+        await db.execute('UPDATE ded_moroz_orders SET version=4,edit_used=1 WHERE id=?',(key,))
+        await dm.init_tables(db);await dm.init_tables(db);await db.commit()
+    saved=await dm.get(key)
+    assert saved['regeneration_attempts']==4 and saved['edit_used']==1
+    assert [b.payload for r in dm.keyboard(saved,admin=456).payload.buttons for b in r]==[
+        'dm_audio_approve','dm_audio_regenerate','dm_audio_edit']
+    assert await dm.regenerate(key,456,4,admin=456)
+    assert (await dm.get(key))['regeneration_attempts']==5

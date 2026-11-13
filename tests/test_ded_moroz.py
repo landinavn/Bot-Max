@@ -26,16 +26,19 @@ def setup_dm(tmp_path):
         (examples/name).write_bytes(b'fixture')
     config=Config(token='test',photo_path=tmp_path/'unused',admin_user_id=456,
                   storage_bucket='bucket',storage_public_base_url='https://storage.example/bucket')
-    settings=dm.Settings(tmp_path/'files',examples,heygen_key='secret-key',tts_key='tts-secret')
+    settings=dm.Settings(tmp_path/'files',examples,heygen_key='secret-key',voice_id='santa_voice')
     bot=SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(body=SimpleNamespace(mid='preview-current'))),upload_media=AsyncMock(
         return_value=AttachmentUpload(type='audio',payload={'token':'audio'})))
-    tts=SimpleNamespace(synthesize=AsyncMock(return_value=b'mp3'))
+    tts=SimpleNamespace(generate_speech=AsyncMock(return_value='https://cdn.example/voice.mp3'))
     heygen=SimpleNamespace(identifier=HeyGenAdapter.identifier,
         create_avatar=AsyncMock(return_value={'look_id':'look_santa','group_id':'group_santa'}),
         avatar_status=AsyncMock(return_value={'status':'completed'}),
         create_video=AsyncMock(return_value='video_santa'),
         video_status=AsyncMock(return_value={'status':'completed','video_url':'https://video.example/video.mp4'}))
     worker=dm.Worker(bot,456,config,settings,tts,heygen)
+    async def download(url,suffix,**kwargs):
+        return await worker.assets.write(b'mp3',suffix,job_id=kwargs['job_id'],name=kwargs['name'])
+    worker.assets.download=AsyncMock(side_effect=download)
     worker.assets.publish=AsyncMock(side_effect=lambda p:'https://storage.example/bucket/'+str(p))
     return config,settings,worker
 
@@ -90,10 +93,11 @@ async def test_non_admin_only_placeholder_no_order(credit_db,admin):
     assert not await dm.read('SELECT * FROM ded_moroz_orders')
 
 
-async def test_no_privileged_callbacks_or_inputs_for_other_user(credit_db):
+@pytest.mark.parametrize('action',['dm_audio_ok','dm_audio_approve','dm_audio_regenerate'])
+async def test_no_privileged_callbacks_or_inputs_for_other_user(credit_db,action):
     row=await audio_order();context=await ready_context()
     await context.update_data(dm_order=row['id']);await context.set_state(PosterStates.ded_moroz_edit)
-    await dm.callback(callback_event('dm_audio_ok:'+row['id']+':0'),context,999)
+    await dm.callback(callback_event(action+':'+row['id']+':0'),context,999)
     await dm.collect(message_event('attack'),context,999)
     assert (await dm.get(row['id']))['status']=='audio_queued'
 
@@ -113,37 +117,37 @@ async def test_photo_content_saved_normalized_to_local_alias_and_cloud(credit_db
     assert row['status']=='audio_queued' and row['photo_url']=='https://storage.example/child.png'
     for path in (worker.assets.path(row['photo_path']),settings.root/'ded_moroz_456/child_photo.png'):
         with Image.open(path) as image:assert image.format=='PNG' and image.size==(941,1672)
-    publish.assert_awaited_once();worker.tts.synthesize.assert_not_awaited()
+    publish.assert_awaited_once();worker.tts.generate_speech.assert_not_awaited()
     e.message.answer.assert_awaited_once_with(dm.AUDIO_GENERATING)
     assert 'Здравствуй, Мишенька!' in row['text'] and 'что ты любишь рисовать.' in row['text']
 
 
-async def test_audio_does_not_require_video_assets_heygen_or_ffmpeg(credit_db,setup_dm,monkeypatch):
+async def test_audio_does_not_require_video_assets_or_ffmpeg(credit_db,setup_dm,monkeypatch):
     from dataclasses import replace
     _,settings,worker=setup_dm;row=await audio_order(worker)
     for file in (*settings.files(),settings.examples/'fire_overlay.mp4',settings.examples/'ded_moroz_ref.png'):file.unlink()
-    worker.settings=replace(settings,heygen_key=None)
+    worker.settings=settings
     monkeypatch.setattr(dm.shutil,'which',lambda name:None)
-    for _ in range(3):await step(worker,row['id'])
+    for _ in range(4):await step(worker,row['id'])
     assert (await dm.get(row['id']))['status']=='audio_ready'
-    worker.tts.synthesize.assert_awaited_once()
+    worker.tts.generate_speech.assert_awaited_once()
     worker.heygen.create_avatar.assert_not_awaited();worker.heygen.create_video.assert_not_awaited()
-    with pytest.raises(ValueError,match='HEYGEN_API_KEY'):
+    with pytest.raises(ValueError,match='Добавьте файлы'):
         worker.settings.ready(worker.config,stage='video')
 
 
 async def test_audio_edit_once_stale_buttons_and_duplicate_approvals(credit_db,setup_dm):
     _,_,worker=setup_dm;row=await audio_order(worker);key=row['id']
-    await step(worker,key);await step(worker,key);row=await step(worker,key)
+    await step(worker,key);await step(worker,key);await step(worker,key);row=await step(worker,key)
     assert row['status']=='audio_ready' and row['preview_sent']==1
-    worker.tts.synthesize.assert_awaited_once_with(row['text'],'filipp','good',0.95)
+    worker.tts.generate_speech.assert_awaited_once_with(row['text'])
     assert len(dm.keyboard(row).payload.buttons)==2
     requests=await asyncio.gather(*(dm.request_edit(key,456,0) for _ in range(5)))
     assert sum(requests)==1
     assert await dm.revised(key,456,'Исправленный текст')
     assert not await dm.revised(key,456,'Повторная правка')
-    await step(worker,key);await step(worker,key);row=await step(worker,key)
-    assert row['version']==1 and row['edit_used']==1 and len(dm.keyboard(row).payload.buttons)==1
+    await step(worker,key);await step(worker,key);await step(worker,key);row=await step(worker,key)
+    assert row['version']==1 and row['edit_used']==1 and len(dm.keyboard(row).payload.buttons)==2
     assert row['audio_path'].endswith('speech-v1.mp3')
     assert worker.assets.path(key+'/speech-v0.mp3').read_bytes()==b'mp3'
     assert not await dm.transition(key,456,'audio_ready','video_queued',version=0)
@@ -153,7 +157,7 @@ async def test_audio_edit_once_stale_buttons_and_duplicate_approvals(credit_db,s
     assert row['status']=='download'
     worker.heygen.create_avatar.assert_awaited_once()
     worker.heygen.create_video.assert_awaited_once_with('look_santa',row['audio_url'],'dm-video-'+key)
-    assert worker.tts.synthesize.await_count==2
+    assert worker.tts.generate_speech.await_count==2
 
 
 async def test_avatar_reused_for_next_order_and_waits_until_ready(credit_db,setup_dm):
@@ -169,11 +173,11 @@ async def test_avatar_reused_for_next_order_and_waits_until_ready(credit_db,setu
 
 async def test_unknown_paid_post_and_restart_never_resubmit(credit_db,setup_dm):
     _,_,worker=setup_dm;row=await audio_order(worker)
-    worker.tts.synthesize.side_effect=httpx.ReadTimeout('timeout')
+    worker.tts.generate_speech.side_effect=httpx.ReadTimeout('timeout')
     await worker.tick();await worker.tick()
     saved=await dm.get(row['id']);assert saved['status']=='manual'
     with pytest.raises(ValueError,match='неизвестен'):await dm.resume(row['id'],456)
-    worker.tts.synthesize.assert_awaited_once()
+    worker.tts.generate_speech.assert_awaited_once()
     await dm.update(row['id'],status='video_submitting')
     await worker.recover_interrupted();await worker.tick()
     assert (await dm.get(row['id']))['status']=='manual'
@@ -181,12 +185,12 @@ async def test_unknown_paid_post_and_restart_never_resubmit(credit_db,setup_dm):
 
 
 async def test_audio_publish_retry_uses_saved_mp3(credit_db,setup_dm):
-    _,_,worker=setup_dm;row=await audio_order(worker);await step(worker,row['id'])
+    _,_,worker=setup_dm;row=await audio_order(worker);await step(worker,row['id']);await step(worker,row['id'])
     worker.assets.publish.side_effect=[RuntimeError('s3'), 'https://storage.example/voice.mp3']
     await worker.tick();assert (await dm.get(row['id']))['status']=='audio_publish'
     await dm.update(row['id'],next_attempt=0);await worker.tick()
     assert (await dm.get(row['id']))['status']=='audio_ready'
-    worker.tts.synthesize.assert_awaited_once()
+    worker.tts.generate_speech.assert_awaited_once()
 
 
 async def test_published_video_counter_is_atomic_and_delivery_retry_is_free(credit_db,setup_dm):
@@ -201,7 +205,7 @@ async def test_published_video_counter_is_atomic_and_delivery_retry_is_free(cred
     await dm.update(key,next_attempt=0);await worker.tick()
     assert (await dm.get(key))['status']=='done'
     assert (await credit_db.get_all_counters())['dm_video_created']==1
-    worker.heygen.create_video.assert_not_awaited();worker.tts.synthesize.assert_not_awaited()
+    worker.heygen.create_video.assert_not_awaited();worker.tts.generate_speech.assert_not_awaited()
     # Explicit recovery/re-publication cannot count the same MP4 twice.
     await dm.update(key,status='publish');await step(worker,key);await step(worker,key)
     assert (await credit_db.get_all_counters())['dm_video_created']==1
@@ -262,7 +266,7 @@ async def test_heygen_errors_not_retried_and_no_key_leak(status):
 
 async def test_real_callbacks_route_edit_and_reject_stale_audio(credit_db,setup_dm):
     _,_,worker=setup_dm;row=await audio_order(worker);key=row['id']
-    for _ in range(3):await step(worker,key)
+    for _ in range(4):await step(worker,key)
     router=create_router(admin_user_id=456);context=await ready_context()
     e=callback_event('dm_audio_edit:'+key+':0')
     await dispatch_callback(router,e,context)
@@ -271,7 +275,7 @@ async def test_real_callbacks_route_edit_and_reject_stale_audio(credit_db,setup_
     assert (await dm.get(key))['version']==1
     stale=callback_event('dm_audio_ok:'+key+':0');await dispatch_callback(router,stale,context)
     assert (await dm.get(key))['status']=='audio_queued'
-    for _ in range(3):await step(worker,key)
+    for _ in range(4):await step(worker,key)
     await dispatch_callback(router,callback_event('dm_audio_ok:'+key+':1'),context)
     assert (await dm.get(key))['status']=='video_queued'
     assert await context.get_state() is None
@@ -314,25 +318,26 @@ async def test_admin_production_counter_visible_in_stats(credit_db):
 async def test_long_edited_text_fits_max_preview_messages(credit_db,setup_dm):
     _,_,worker=setup_dm;row=await audio_order(worker)
     await dm.update(row['id'],text='а'*4400)
-    for _ in range(3):await step(worker,row['id'])
+    for _ in range(4):await step(worker,row['id'])
     messages=worker.bot.send_message.await_args_list
-    assert len(messages)==2 and all(len(m.kwargs['text'])<=3500 for m in messages)
-    assert ''.join(m.kwargs['text'] for m in messages)=='а'*4400
+    assert len(messages)==3 and all(len(m.kwargs['text'])<=3500 for m in messages)
+    assert ''.join(m.kwargs['text'] for m in messages[:-1])=='а'*4400
+    assert messages[-1].kwargs['text']=='🎧 Прослушайте озвучку Деда Мороза. Всё нравится?'
     assert len(messages[-1].kwargs['attachments'])==2
 
 
 async def test_exact_button_payloads_bound_to_saved_preview_message(credit_db,setup_dm):
     _,_,worker=setup_dm;row=await audio_order(worker);key=row['id']
     worker.bot.send_message.return_value=SimpleNamespace(body=SimpleNamespace(mid='old-preview'))
-    for _ in range(3):await step(worker,key)
+    for _ in range(4):await step(worker,key)
     row=await dm.get(key)
-    assert [b.payload for r in dm.keyboard(row).payload.buttons for b in r]==['dm_audio_ok','dm_audio_edit']
+    assert [b.payload for r in dm.keyboard(row).payload.buttons for b in r]==['dm_audio_approve','dm_audio_regenerate']
     router=create_router(admin_user_id=456);context=await ready_context()
     e=callback_event('dm_audio_edit');e.message.body=SimpleNamespace(mid='old-preview')
     await dispatch_callback(router,e,context)
     await call_handler(router,'ded_moroz_input',message_event('Новый текст'),context)
     worker.bot.send_message.return_value=SimpleNamespace(body=SimpleNamespace(mid='new-preview'))
-    for _ in range(3):await step(worker,key)
+    for _ in range(4):await step(worker,key)
     stale=callback_event('dm_audio_ok');stale.message.body=SimpleNamespace(mid='old-preview')
     await dispatch_callback(router,stale,context)
     assert (await dm.get(key))['status']=='audio_ready'
@@ -348,7 +353,7 @@ async def test_native_maxapi_sended_message_binds_audio_button(credit_db,setup_d
         'sender':{'user_id':999,'first_name':'Bot','is_bot':True},
         'recipient':{'chat_id':123,'chat_type':'dialog'},'timestamp':1,
         'body':{'mid':'native-preview','seq':1,'text':'Preview','attachments':[]}}})
-    for _ in range(3):await step(worker,key)
+    for _ in range(4):await step(worker,key)
     assert (await dm.get(key))['preview_mid']=='native-preview'
     e=callback_event('dm_audio_ok');e.message.body=SimpleNamespace(mid='native-preview')
     await dispatch_callback(create_router(admin_user_id=456),e,await ready_context())
@@ -371,7 +376,7 @@ async def test_video_preflight_ignores_absent_fire(credit_db,setup_dm):
     from dataclasses import replace
     config,settings,_=setup_dm
     (settings.examples/'fire_overlay.mp4').unlink()
-    replace(settings,tts_key=None).ready(config,stage='video')
+    replace(settings,voice_id=None).ready(config,stage='video')
     (settings.examples/'audio/ny_music.mp3').unlink()
     settings.ready(config,stage='audio')
     with pytest.raises(ValueError,match='ny_music.mp3'):
@@ -392,3 +397,124 @@ async def test_resume_at_photo_does_not_repeat_old_intro(credit_db):
     await dispatch_callback(create_router(admin_user_id=456),e,context)
     e.send.assert_awaited_once_with(dm.PHOTO_PROMPT)
     assert await context.get_state()==PosterStates.ded_moroz_photo
+
+
+async def test_heygen_speech_contract_russian_mp3_and_single_post():
+    seen=[]
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200,json={'data':{'audio_url':'https://cdn.example/santa.mp3'}})
+    adapter=HeyGenAdapter('test-key',httpx.MockTransport(handler),voice_id='elderly_male')
+    text='Охо-хо-хо! Здравствуй, Машенька!'
+    assert await adapter.generate_speech(text)=='https://cdn.example/santa.mp3'
+    assert len(seen)==1 and seen[0].url.path=='/v3/models/audio/tts'
+    assert seen[0].headers['X-Api-Key']=='test-key'
+    assert json.loads(seen[0].content)=={
+        'model':'heygen-voice-1','voice_id':'elderly_male','text':text,'language':'ru',
+        'output_format':{'encoding':'mp3','sample_rate_hertz':44100,'bitrate_bps':192000}}
+
+
+@pytest.mark.parametrize('data',[{}, {'audio_url':'http://cdn.example/file.mp3'}, {'audio_url':123}])
+async def test_heygen_speech_requires_valid_result_url(data):
+    adapter=HeyGenAdapter('key',httpx.MockTransport(lambda r:httpx.Response(200,json={'data':data})),voice_id='voice')
+    with pytest.raises((HeyGenError,ValueError)):
+        await adapter.generate_speech('Охо-хо-хо!')
+
+
+async def test_missing_santa_voice_does_not_send_paid_request():
+    seen=[]
+    adapter=HeyGenAdapter('key',httpx.MockTransport(lambda r:seen.append(r)))
+    with pytest.raises(ValueError,match='DED_MOROZ_VOICE_ID'):
+        await adapter.generate_speech('Охо-хо-хо!')
+    assert not seen
+
+
+async def test_unlimited_regenerations_archive_versions_and_approve_exact_file(credit_db,setup_dm):
+    _,_,worker=setup_dm;row=await audio_order(worker);key=row['id']
+    context=await ready_context();router=create_router(admin_user_id=456)
+    for version in range(4):
+        worker.bot.send_message.return_value=SimpleNamespace(body=SimpleNamespace(mid='preview-'+str(version)))
+        worker.tts.generate_speech.return_value=f'https://cdn.example/speech-{version}.mp3'
+        for _ in range(4):await step(worker,key)
+        row=await dm.get(key)
+        assert row['version']==version and row['preview_sent']==1
+        assert row['text'].startswith('Охо-хо-хо!')
+        assert [b.payload for r in dm.keyboard(row).payload.buttons for b in r]==['dm_audio_approve','dm_audio_regenerate']
+        assert worker.bot.upload_media.await_args.args[0].type.value=='audio'
+        worker.heygen.create_video.assert_not_awaited()
+        if version<3:
+            e=callback_event('dm_audio_regenerate');e.message.body=SimpleNamespace(mid='preview-'+str(version))
+            await dispatch_callback(router,e,context)
+            # A repeated click cannot enqueue another version.
+            await dispatch_callback(router,e,context)
+            assert (await dm.get(key))['version']==version+1
+    stale=callback_event('dm_audio_approve');stale.message.body=SimpleNamespace(mid='preview-2')
+    await dispatch_callback(router,stale,context)
+    assert (await dm.get(key))['status']=='audio_ready'
+    e=callback_event('dm_audio_approve');e.message.body=SimpleNamespace(mid='preview-3')
+    await dispatch_callback(router,e,context);await dispatch_callback(router,e,context)
+    approved=await dm.get(key)
+    assert approved['approved_audio_url']==row['audio_url']
+    assert approved['approved_audio_path']==row['audio_path']
+    assert not await dm.regenerate(key,456,3)
+    # Even accidental changes to the working URL cannot replace the approved URL.
+    await dm.update(key,audio_url='https://cdn.example/unapproved.mp3',audio_path=key+'/unapproved.mp3')
+    await step(worker,key)
+    worker.heygen.create_video.assert_awaited_once_with('look_santa',approved['approved_audio_url'],'dm-video-'+key)
+    versions=await dm.read('SELECT * FROM ded_moroz_audio_versions WHERE order_id=? ORDER BY version',(key,),all_rows=True)
+    assert len(versions)==4
+    assert [v['provider_url'] for v in versions]==[f'https://cdn.example/speech-{i}.mp3' for i in range(4)]
+    assert all(worker.assets.path(v['path']).is_file() and v['public_url'] for v in versions)
+    assert worker.tts.generate_speech.await_count==4
+
+
+async def test_regenerate_concurrent_clicks_only_one_new_version(credit_db,setup_dm):
+    _,_,worker=setup_dm;row=await audio_order(worker);key=row['id']
+    for _ in range(4):await step(worker,key)
+    results=await asyncio.gather(*(dm.regenerate(key,456,0) for _ in range(5)))
+    assert sum(results)==1 and (await dm.get(key))['version']==1
+    assert not await dm.regenerate(key,999,1)
+
+
+async def test_audio_download_retry_after_restart_does_not_repeat_tts(credit_db,setup_dm):
+    _,_,worker=setup_dm;row=await audio_order(worker);key=row['id']
+    await step(worker,key)
+    assert (await dm.get(key))['status']=='audio_download'
+    download=worker.assets.download.side_effect
+    worker.assets.download.side_effect=httpx.ReadTimeout('download')
+    await worker.tick();await worker.recover_interrupted()
+    assert (await dm.get(key))['status']=='audio_download'
+    worker.assets.download.side_effect=download
+    await dm.update(key,next_attempt=0);await worker.tick();await worker.tick()
+    assert (await dm.get(key))['status']=='audio_ready'
+    worker.tts.generate_speech.assert_awaited_once()
+
+
+async def test_additive_migration_preserves_existing_approved_audio(credit_db,setup_dm):
+    import aiosqlite
+    _,_,worker=setup_dm;row=await audio_order(worker);key=row['id']
+    await dm.update(key,status='audio_ready',audio_path=key+'/legacy.mp3',audio_url='https://cdn.example/legacy.mp3')
+    async with aiosqlite.connect(dm.database.DATABASE_PATH) as db:
+        for name in ('speech_provider_url','approved_audio_url','approved_audio_path'):
+            await db.execute('ALTER TABLE ded_moroz_orders DROP COLUMN '+name)
+        await db.execute('DROP TABLE ded_moroz_audio_versions')
+        await dm.init_tables(db);await dm.init_tables(db);await db.commit()
+    saved=await dm.get(key)
+    assert saved['status']=='audio_ready' and saved['audio_url']=='https://cdn.example/legacy.mp3'
+    versions=await dm.read('SELECT * FROM ded_moroz_audio_versions WHERE order_id=?',(key,),all_rows=True)
+    assert len(versions)==1 and versions[0]['path']==key+'/legacy.mp3'
+    assert await dm.approve(key,456,0)
+    assert (await dm.get(key))['approved_audio_url']==saved['audio_url']
+    worker.tts.generate_speech.assert_not_awaited()
+
+
+async def test_santa_settings_use_only_heygen_tts_config(monkeypatch,setup_dm):
+    config,_,_=setup_dm
+    monkeypatch.setenv('HEYGEN_API_KEY','heygen-key')
+    monkeypatch.setenv('DED_MOROZ_VOICE_ID','elderly_male')
+    monkeypatch.delenv('YANDEX_TTS_API_KEY',raising=False)
+    settings=dm.Settings.from_config(config)
+    settings.ready(config,stage='audio')
+    worker=dm.Worker(SimpleNamespace(),456,config,settings)
+    assert worker.tts is worker.heygen and isinstance(worker.tts,HeyGenAdapter)
+    assert worker.tts.voice_id=='elderly_male' and worker.tts.key=='heygen-key'

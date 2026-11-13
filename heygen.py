@@ -14,15 +14,16 @@ class HeyGenError(RuntimeError):
 class HeyGenAdapter:
     BASE = 'https://api.heygen.com'
 
-    def __init__(self, key, transport=None):
+    def __init__(self, key, transport=None, *, voice_id=None):
         self.key, self.transport = key, transport
+        self.voice_id = voice_id
 
-    async def request(self, method, path, *, payload=None, idempotency=None):
+    async def request(self, method, path, *, payload=None, idempotency=None, timeout=60):
         if not self.key:
             raise ValueError('Задайте HEYGEN_API_KEY.')
         headers = {'X-Api-Key': self.key}
         if idempotency: headers['Idempotency-Key'] = idempotency
-        async with httpx.AsyncClient(timeout=60, follow_redirects=False, trust_env=False,
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False,
                                      transport=self.transport) as client:
             response = await client.request(method, self.BASE+path, headers=headers, json=payload)
         if response.status_code not in (200,201,202):
@@ -39,6 +40,23 @@ class HeyGenAdapter:
         if not isinstance(value,str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,200}',value):
             raise HeyGenError('HeyGen не вернул корректный ID.')
         return value
+
+    async def generate_speech(self, text: str) -> str:
+        """Ded Moroz only: completed Russian MP3, one POST, no automatic retries."""
+        if not isinstance(text, str) or not text.strip() or len(text) > 10000:
+            raise ValueError('Введите текст озвучки от 1 до 10000 символов.')
+        if not self.voice_id:
+            raise ValueError('Задайте DED_MOROZ_VOICE_ID: активный мужской голос HeyGen.')
+        data = await self.request('POST', '/v3/models/audio/tts', payload={
+            'model': 'heygen-voice-1', 'voice_id': self.identifier(self.voice_id),
+            'text': text, 'language': 'ru',
+            'output_format': {'encoding': 'mp3', 'sample_rate_hertz': 44100,
+                              'bitrate_bps': 192000}}, timeout=180)
+        url = data.get('audio_url')
+        if not isinstance(url, str) or not url:
+            raise HeyGenError('HeyGen не вернул ссылку на озвучку.')
+        https_url(url)
+        return url
 
     async def create_avatar(self, url, key):
         https_url(url)

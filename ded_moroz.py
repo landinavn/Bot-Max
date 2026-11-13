@@ -16,13 +16,12 @@ from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 import database
 from config import Config, BASE_DIR
 from heygen import HeyGenAdapter
-from multstudio.adapters import YandexTTSAdapter
 from multstudio.assets import Assets, https_url
 from multstudio.uploads import png_bytes
 
 logger=logging.getLogger(__name__)
 STUB='🎅 Поздравление от Деда Мороза уже в разработке! Скоро здесь можно будет заказать персональное видео с вашим ребёнком.'
-TEMPLATE=('Здравствуй, {name}! Это я, Дедушка Мороз! Я весь год наблюдал за тобой. '
+TEMPLATE=('Охо-хо-хо! Здравствуй, {name}! Это я, Дедушка Мороз! Я весь год наблюдал за тобой. '
     'И знаешь что? Ты меня очень порадовал! Я слышал, что ты {fact1}. А ещё ты {fact2}. '
     'И особенно мне нравится, что ты {fact3}. Молодец! Я тобой очень горжусь! '
     'В новом году у меня для тебя будет маленькое задание: {task}. Я знаю, у тебя всё получится! '
@@ -33,7 +32,7 @@ GREETING=(
     'Давайте создадим персональное видео-поздравление для вашего ребёнка.\n\n'
     'Как зовут ребёнка или как вы ласково его называете? (Например: «Маша» или «Машенька»)')
 BLANK_TEMPLATE=(
-    'Здравствуй, [ИМЯ]! Это я, Дедушка Мороз!\n'
+    'Охо-хо-хо! Здравствуй, [ИМЯ]! Это я, Дедушка Мороз!\n'
     'Я весь год наблюдал за тобой. И знаешь что? Ты меня очень порадовал!\n'
     'Я слышал, что ты [УВЛЕЧЕНИЕ].\n'
     'А ещё ты [ДОСТИЖЕНИЕ].\n'
@@ -63,7 +62,7 @@ class Settings:
     root: Path
     examples: Path
     heygen_key: str | None=field(default=None,repr=False)
-    tts_key: str | None=field(default=None,repr=False)
+    voice_id: str | None=None
     avatar_id: str | None=None
     reference_url: str | None=None
 
@@ -71,7 +70,7 @@ class Settings:
     def from_config(cls,config):
         return cls(Path(os.getenv('STUDIO_FILES_DIR','').strip() or str(BASE_DIR/'studio_files')),BASE_DIR/'examples',
                    os.getenv('HEYGEN_API_KEY','').strip() or None,
-                   os.getenv('YANDEX_TTS_API_KEY','').strip() or None,
+                   os.getenv('DED_MOROZ_VOICE_ID','').strip() or None,
                    os.getenv('DED_MOROZ_AVATAR_ID','').strip() or None,
                    os.getenv('DED_MOROZ_REF_URL','').strip() or None)
 
@@ -83,7 +82,9 @@ class Settings:
         if stage not in ('audio','video'):raise ValueError('Неизвестный этап подготовки.')
         if not config.storage_bucket or not config.storage_public_base_url:raise ValueError('Настройте Yandex Cloud STORAGE_BUCKET и STORAGE_PUBLIC_BASE_URL.')
         if stage=='audio':
-            if not self.tts_key:raise ValueError('Задайте YANDEX_TTS_API_KEY.')
+            if not self.heygen_key:raise ValueError('Задайте HEYGEN_API_KEY.')
+            if not self.voice_id:raise ValueError('Задайте DED_MOROZ_VOICE_ID: активный мужской голос HeyGen.')
+            HeyGenAdapter.identifier(self.voice_id)
             return
         if not self.heygen_key:raise ValueError('Задайте HEYGEN_API_KEY.')
         required=self.files()
@@ -103,6 +104,21 @@ async def init_tables(db):
         video_id TEXT,video_url TEXT,raw_path TEXT,output_path TEXT,output_url TEXT,
         preview_sent INTEGER NOT NULL DEFAULT 0,preview_mid TEXT,preview_version INTEGER,notified INTEGER NOT NULL DEFAULT 0,error TEXT,
         next_attempt INTEGER NOT NULL DEFAULT 0,created_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
+    # Additive migration: existing previews and generated videos remain usable.
+    cursor = await db.execute('PRAGMA table_info(ded_moroz_orders)')
+    columns = {row[1] for row in await cursor.fetchall()}
+    for name in ('speech_provider_url', 'approved_audio_url', 'approved_audio_path'):
+        if name not in columns:
+            await db.execute(f'ALTER TABLE ded_moroz_orders ADD COLUMN {name} TEXT')
+    await db.execute("""CREATE TABLE IF NOT EXISTS ded_moroz_audio_versions (
+        order_id TEXT NOT NULL, version INTEGER NOT NULL, text TEXT NOT NULL,
+        voice_id TEXT, provider_url TEXT NOT NULL, path TEXT, public_url TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(order_id, version))""")
+    await db.execute("""INSERT OR IGNORE INTO ded_moroz_audio_versions
+        (order_id,version,text,voice_id,provider_url,path,public_url)
+        SELECT id,version,text,NULL,COALESCE(speech_provider_url,audio_url),audio_path,audio_url
+        FROM ded_moroz_orders WHERE audio_path IS NOT NULL AND audio_url IS NOT NULL
+        AND text IS NOT NULL""")
     await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS dm_active_user ON ded_moroz_orders(user_id) WHERE status NOT IN ('done','cancelled')")
     await db.execute('''CREATE TABLE IF NOT EXISTS ded_moroz_avatar (
         singleton INTEGER PRIMARY KEY CHECK(singleton=1),status TEXT NOT NULL,
@@ -121,7 +137,7 @@ async def get(key):return await read('SELECT * FROM ded_moroz_orders WHERE id=?'
 
 async def update(key,**values):
     allowed={'status','photo_path','photo_url','text','audio_path','audio_url','video_id','video_url',
-             'raw_path','output_path','output_url','preview_sent','preview_mid','preview_version','notified','error','next_attempt','details'}
+             'raw_path','output_path','output_url','preview_sent','preview_mid','preview_version','notified','error','next_attempt','details','speech_provider_url','approved_audio_url','approved_audio_path'}
     if not values or set(values)-allowed:raise ValueError('Некорректное поле заказа.')
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
         await db.execute('UPDATE ded_moroz_orders SET '+','.join(k+'=?' for k in values)+' WHERE id=?',(*values.values(),key));await db.commit()
@@ -145,9 +161,29 @@ async def begin(user):
 
 
 def keyboard(order):
-    b=InlineKeyboardBuilder().row(CallbackButton(text='✅ Всё верно, создать видео',payload='dm_audio_ok'))
-    if not order['edit_used']:b.row(CallbackButton(text='✏️ Изменить текст',payload='dm_audio_edit'))
+    b=InlineKeyboardBuilder().row(CallbackButton(text='✅ Всё верно, создать видео',payload='dm_audio_approve'))
+    b.row(CallbackButton(text='🔄 Перегенерировать озвучку',payload='dm_audio_regenerate'))
     return b.as_markup()
+
+
+async def regenerate(key, user, version):
+    """One new version per current preview; no administrator attempt limit."""
+    async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
+        cur=await db.execute("""UPDATE ded_moroz_orders SET version=version+1,
+            status='audio_queued',audio_path=NULL,audio_url=NULL,speech_provider_url=NULL,
+            approved_audio_url=NULL,approved_audio_path=NULL,
+            preview_sent=0,preview_mid=NULL,preview_version=NULL,error=NULL,next_attempt=0
+            WHERE id=? AND user_id=? AND version=? AND status='audio_ready'""",(key,user,version))
+        await db.commit();return cur.rowcount==1
+
+
+async def approve(key, user, version):
+    async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
+        cur=await db.execute("""UPDATE ded_moroz_orders SET status='video_queued',
+            approved_audio_url=audio_url,approved_audio_path=audio_path
+            WHERE id=? AND user_id=? AND version=? AND status='audio_ready'
+            AND audio_url IS NOT NULL AND audio_path IS NOT NULL""",(key,user,version))
+        await db.commit();return cur.rowcount==1
 
 
 async def resume(key,user):
@@ -157,7 +193,7 @@ async def resume(key,user):
     prior=(row['error'] or '').split(':',1)[0]
     if row['video_id']:
         target='polling'
-    elif prior in ('audio_queued','audio_publish','audio_ready','video_queued','download','render','publish','deliver'):
+    elif prior in ('audio_queued','audio_download','audio_publish','audio_ready','video_queued','download','render','publish','deliver'):
         target=prior
     else:
         raise ValueError('Результат платного запроса неизвестен. Сначала сверьте запрос у провайдера; повтор автоматически запрещён.')
@@ -175,7 +211,7 @@ async def request_edit(key,user,version):
 async def revised(key,user,text):
     if not text or not text.strip() or len(text)>4500:raise ValueError('Введите текст от 1 до 4500 символов.')
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
-        cur=await db.execute("UPDATE ded_moroz_orders SET text=?,version=version+1,status='audio_queued',audio_path=NULL,audio_url=NULL,preview_sent=0,preview_mid=NULL,preview_version=NULL WHERE id=? AND user_id=? AND status='editing' AND edit_used=1",(text.strip(),key,user))
+        cur=await db.execute("UPDATE ded_moroz_orders SET text=?,version=version+1,status='audio_queued',audio_path=NULL,audio_url=NULL,speech_provider_url=NULL,approved_audio_url=NULL,approved_audio_path=NULL,preview_sent=0,preview_mid=NULL,preview_version=NULL WHERE id=? AND user_id=? AND status='editing' AND edit_used=1",(text.strip(),key,user))
         await db.commit();return cur.rowcount==1
 
 
@@ -271,7 +307,9 @@ async def callback(event,context,admin):
     if action=='dm_audio_edit' and await request_edit(key,admin,version):
         await context.clear();await context.update_data(dm_order=key);await context.set_state(PosterStates.ded_moroz_edit)
         await tell(event,'Отправьте новый текст целиком. Перегенерация озвучки платная; правка доступна один раз.')
-    elif action=='dm_audio_ok' and await transition(key,admin,'audio_ready','video_queued',version=version):
+    elif action=='dm_audio_regenerate' and await regenerate(key,admin,version):
+        await context.clear();await tell(event,AUDIO_GENERATING)
+    elif action in ('dm_audio_ok','dm_audio_approve') and await approve(key,admin,version):
         await context.clear();await tell(event,'Утверждённая озвучка сохранена. Запускаю HeyGen Avatar IV и монтаж.')
     else:await tell(event,'Эта кнопка уже использована или относится к предыдущей версии озвучки.')
 
@@ -281,8 +319,8 @@ class Worker:
         self.bot,self.admin,self.config=bot,admin,config
         self.settings=settings or Settings.from_config(config)
         self.assets=Assets(self.settings.root,config)
-        self.tts=tts or YandexTTSAdapter(self.settings.tts_key)
-        self.heygen=heygen or HeyGenAdapter(self.settings.heygen_key)
+        self.heygen=heygen or HeyGenAdapter(self.settings.heygen_key,voice_id=self.settings.voice_id)
+        self.tts=tts or self.heygen
         self.uploads={}
 
     async def avatar(self):
@@ -319,11 +357,28 @@ class Worker:
             self.settings.ready(self.config,avatar_known=bool(await read('SELECT look_id FROM ded_moroz_avatar WHERE look_id IS NOT NULL')))
             if not row['photo_path'] or not self.assets.path(row['photo_path']).is_file():raise ValueError('Не найдено сохранённое фото ребёнка.')
             if not await transition(key,self.admin,'audio_queued','audio_submitting'):return
-            data=await self.tts.synthesize(row['text'],'filipp','good',0.95)
-            path,_=await self.assets.write(data,'mp3',job_id=key,name=f"speech-v{row['version']}.mp3")
-            await update(key,audio_path=path,status='audio_publish')
+            url=await self.tts.generate_speech(row['text'])
+            https_url(url)
+            # Persist the provider result BEFORE local/S3 I/O: retries never synthesize again.
+            async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
+                await db.execute("""INSERT INTO ded_moroz_audio_versions
+                    (order_id,version,text,voice_id,provider_url) VALUES (?,?,?,?,?)""",
+                    (key,row['version'],row['text'],self.settings.voice_id,url))
+                await db.execute("UPDATE ded_moroz_orders SET speech_provider_url=?,status='audio_download' WHERE id=?",(url,key))
+                await db.commit()
+        elif state=='audio_download':
+            path,_=await self.assets.download(row['speech_provider_url'],'mp3',job_id=key,
+                name=f"speech-v{row['version']}.mp3",limit=30*1024*1024)
+            async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
+                await db.execute('UPDATE ded_moroz_audio_versions SET path=? WHERE order_id=? AND version=?',(path,key,row['version']))
+                await db.execute("UPDATE ded_moroz_orders SET audio_path=?,status='audio_publish' WHERE id=?",(path,key))
+                await db.commit()
         elif state=='audio_publish':
-            url=await self.assets.publish(row['audio_path']);await update(key,audio_url=url,status='audio_ready',preview_sent=0)
+            url=await self.assets.publish(row['audio_path'])
+            async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
+                await db.execute('UPDATE ded_moroz_audio_versions SET public_url=? WHERE order_id=? AND version=?',(url,key,row['version']))
+                await db.execute("UPDATE ded_moroz_orders SET audio_url=?,status='audio_ready',preview_sent=0 WHERE id=?",(url,key))
+                await db.commit()
         elif state=='audio_ready' and not row['preview_sent']:
             token_key=('audio',key,row['version'])
             audio=self.uploads.get(token_key)
@@ -331,9 +386,9 @@ class Worker:
                 audio=await self.bot.upload_media(InputMedia(path=str(self.assets.path(row['audio_path'])),type=UploadType.AUDIO))
                 self.uploads[token_key]=audio
             chunks=[row['text'][i:i+3500] for i in range(0,len(row['text']),3500)]
-            for chunk in chunks[:-1]:
+            for chunk in chunks:
                 if await self.bot.send_message(user_id=self.admin,text=chunk) is None:raise ValueError('MAX не подтвердил текст.')
-            sent=await self.bot.send_message(user_id=self.admin,text=chunks[-1],attachments=[audio,keyboard(row)])
+            sent=await self.bot.send_message(user_id=self.admin,text='🎧 Прослушайте озвучку Деда Мороза. Всё нравится?',attachments=[audio,keyboard(row)])
             if sent is None:raise ValueError('MAX не подтвердил аудио.')
             message=getattr(sent,'message',sent)  # maxapi returns SendedMessage(message=Message(...)).
             mid=getattr(getattr(message,'body',None),'mid',None)
@@ -341,13 +396,16 @@ class Worker:
             await update(key,preview_sent=1,preview_mid=mid,preview_version=row['version'])
         elif state=='video_queued':
             self.settings.ready(self.config,avatar_known=bool(await read('SELECT look_id FROM ded_moroz_avatar WHERE look_id IS NOT NULL')),stage='video')
-            for field_name in ('photo_path','audio_path'):
-                if not row[field_name] or not self.assets.path(row[field_name]).is_file():raise ValueError('Не найден сохранённый исходник: '+field_name)
-            https_url(row['audio_url'])
+            sources={'photo_path':row['photo_path'],
+                     'audio_path':row['approved_audio_path'] or row['audio_path']}
+            for field_name,path in sources.items():
+                if not path or not self.assets.path(path).is_file():raise ValueError('Не найден сохранённый исходник: '+field_name)
+            approved_url=row['approved_audio_url'] or row['audio_url']  # Already-approved legacy orders.
+            https_url(approved_url)
             avatar=await self.avatar()
             if not avatar:return
             if not await transition(key,self.admin,'video_queued','video_submitting'):return
-            video=await self.heygen.create_video(avatar,row['audio_url'],'dm-video-'+key)
+            video=await self.heygen.create_video(avatar,approved_url,'dm-video-'+key)
             await update(key,video_id=video,status='polling')
         elif state=='polling':
             result=await self.heygen.video_status(row['video_id'])
@@ -366,7 +424,7 @@ class Worker:
             from video_service import render_ded_moroz
             target=self.assets.path(key+'/greeting.mp4')
             await render_ded_moroz(self.assets.path(row['raw_path']),self.assets.path(row['photo_path']),
-                self.assets.path(row['audio_path']),self.settings.examples,target,json.loads(row['details'])['name'])
+                self.assets.path(row['approved_audio_path'] or row['audio_path']),self.settings.examples,target,json.loads(row['details'])['name'])
             await update(key,output_path=target.relative_to(self.assets.root).as_posix(),status='publish')
         elif state=='publish':
             url=await self.assets.publish(row['output_path'])

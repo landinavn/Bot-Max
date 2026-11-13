@@ -12,15 +12,17 @@ logger = logging.getLogger(__name__)
 
 
 class HeyGenError(RuntimeError):
-    pass
+    def __init__(self,message,*,status_code=None):
+        super().__init__(message)
+        self.status_code=status_code
 
 
 class HeyGenAdapter:
     BASE = 'https://api.heygen.com'
 
-    def __init__(self, key, transport=None, *, voice_id=None):
+    def __init__(self, key, transport=None, *, voice_id=None, model="heygen-voice-1"):
         self.key, self.transport = key, transport
-        self.voice_id = voice_id
+        self.voice_id,self.model = voice_id,model
 
     async def request(self, method, path, *, payload=None, idempotency=None, timeout=60):
         if not self.key:
@@ -32,9 +34,9 @@ class HeyGenAdapter:
             response = await client.request(method, self.BASE+path, headers=headers, json=payload)
         if response.status_code not in (200,201,202):
             if method.upper() == 'POST' and path == '/v3/models/audio/tts' and response.status_code == 400:
-                logger.error(f"HeyGen TTS Error 400: {response.text}")
+                logger.error("HeyGen TTS Error 400: %s",response.text.replace(self.key,"[redacted]"))
             # Keep the exception generic; provider diagnostics stay in the server log.
-            raise HeyGenError(f'HeyGen HTTP {response.status_code}. Проверьте задание перед новым платным запросом.')
+            raise HeyGenError(f'HeyGen HTTP {response.status_code}. Проверьте задание перед новым платным запросом.',status_code=response.status_code)
         result=response.json()
         data=result.get('data',result)
         if not isinstance(data,dict) or result.get('error'):
@@ -47,20 +49,17 @@ class HeyGenAdapter:
             raise HeyGenError('HeyGen не вернул корректный ID.')
         return value
 
-    async def generate_speech(self, text: str) -> str:
-        """Ded Moroz only: completed Russian MP3, one POST, no automatic retries."""
-        if not isinstance(text, str) or not text.strip() or len(text) > 10000:
+    def speech_payload(self,text):
+        if not isinstance(text,str) or not text.strip() or len(text)>10000:
             raise ValueError('Введите текст озвучки от 1 до 10000 символов.')
-        if not self.voice_id:
-            raise ValueError('Задайте DED_MOROZ_VOICE_ID: активный мужской голос HeyGen.')
-        data = await self.request('POST', '/v3/models/audio/tts', payload={
-            'model': 'heygen-voice-1', 'voice_id': self.identifier(self.voice_id),
-            'text': text, 'language': 'ru',
-            # HeyGen names pitch in semitones; 'pitch' and -10 are invalid.
-            # Public/instant voices perform tags but ignore these professional controls.
-            'speed': 0.85, 'pitch_shift': -2.0,
-            'output_format': {'encoding': 'mp3', 'sample_rate_hertz': 44100,
-                              'bitrate_bps': 192000}}, timeout=180)
+        if not self.voice_id:raise ValueError('Задайте DED_MOROZ_HEYGEN_VOICE_ID.')
+        return {'model':self.model,'voice_id':self.identifier(self.voice_id),
+                'text':text,'language':'ru',
+                'output_format':{'encoding':'mp3','sample_rate_hertz':44100,'bitrate_bps':192000}}
+
+    async def generate_speech(self, text: str) -> str:
+        """One synchronous speech POST; Instant voices use tags, not speed/pitch controls."""
+        data=await self.request('POST','/v3/models/audio/tts',payload=self.speech_payload(text),timeout=180)
         url = data.get('audio_url')
         if not isinstance(url, str) or not url:
             raise HeyGenError('HeyGen не вернул ссылку на озвучку.')

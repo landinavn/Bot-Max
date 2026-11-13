@@ -15,7 +15,7 @@ import ded_moroz as dm
 from config import Config
 from handlers import create_router,PosterStates
 from heygen import HeyGenAdapter,HeyGenError
-from fish_audio_tts import FishAudioAdapter, DEFAULT_VOICE_ID, prepare_speech_text as clean_speech_text
+from heygen_tts import HeyGenTTSAdapter, DEFAULT_VOICE_ID, prepare_speech_text as clean_speech_text
 from test_handlers import (message_event,callback_event,call_handler,dispatch_callback,ready_context,
                            isolated_example_directory,event_replies)
 
@@ -27,7 +27,7 @@ def setup_dm(tmp_path):
         (examples/name).write_bytes(b'fixture')
     config=Config(token='test',photo_path=tmp_path/'unused',admin_user_id=456,
                   storage_bucket='bucket',storage_public_base_url='https://storage.example/bucket')
-    settings=dm.Settings(tmp_path/'files',examples,heygen_key='secret-key',voice_id=DEFAULT_VOICE_ID,fish_key='fish-key')
+    settings=dm.Settings(tmp_path/'files',examples,heygen_key='secret-key',voice_id=DEFAULT_VOICE_ID)
     bot=SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(body=SimpleNamespace(mid='preview-current'))),upload_media=AsyncMock(
         return_value=AttachmentUpload(type='audio',payload={'token':'audio'})))
     tts=SimpleNamespace(generate_speech=AsyncMock())
@@ -416,7 +416,6 @@ async def test_heygen_speech_contract_russian_mp3_and_single_post():
     assert seen[0].headers['X-Api-Key']=='test-key'
     assert json.loads(seen[0].content)=={
         'model':'heygen-voice-1','voice_id':'elderly_male','text':text,'language':'ru',
-        'speed':0.85,'pitch_shift':-2.0,
         'output_format':{'encoding':'mp3','sample_rate_hertz':44100,'bitrate_bps':192000}}
 
 
@@ -430,7 +429,7 @@ async def test_heygen_speech_requires_valid_result_url(data):
 async def test_missing_santa_voice_does_not_send_paid_request():
     seen=[]
     adapter=HeyGenAdapter('key',httpx.MockTransport(lambda r:seen.append(r)))
-    with pytest.raises(ValueError,match='DED_MOROZ_VOICE_ID'):
+    with pytest.raises(ValueError,match='DED_MOROZ_HEYGEN_VOICE_ID'):
         await adapter.generate_speech('Охо-хо-хо!')
     assert not seen
 
@@ -468,7 +467,7 @@ async def test_unlimited_regenerations_archive_versions_and_approve_exact_file(c
     worker.heygen.create_video.assert_awaited_once_with('look_santa',approved['approved_audio_url'],'dm-video-'+key)
     versions=await dm.read('SELECT * FROM ded_moroz_audio_versions WHERE order_id=? ORDER BY version',(key,),all_rows=True)
     assert len(versions)==4
-    assert all(v['provider']=='fish_audio' and v['provider_url']==v['public_url'] for v in versions)
+    assert all(v['provider']=='heygen' and v['provider_url']==v['public_url'] for v in versions)
     assert all(worker.assets.path(v['path']).is_file() and v['public_url'] for v in versions)
     assert worker.tts.generate_speech.await_count==4
 
@@ -512,20 +511,21 @@ async def test_additive_migration_preserves_existing_approved_audio(credit_db,se
     worker.tts.generate_speech.assert_not_awaited()
 
 
-async def test_santa_settings_use_only_fish_tts_config(monkeypatch,setup_dm):
+async def test_santa_settings_use_confirmed_heygen_clone(monkeypatch,setup_dm):
     config,_,_=setup_dm
-    monkeypatch.setenv('FISH_AUDIO_API_KEY','fish-key')
-    monkeypatch.delenv('FISH_AUDIO_VOICE_ID',raising=False)
-    monkeypatch.delenv('FISH_AUDIO_MODEL',raising=False)
+    monkeypatch.setenv('HEYGEN_API_KEY','heygen-key')
+    monkeypatch.delenv('DED_MOROZ_HEYGEN_VOICE_ID',raising=False)
+    monkeypatch.delenv('DED_MOROZ_TTS_MODEL',raising=False)
     monkeypatch.setenv('DED_MOROZ_VOICE_ID','old-eleven-id')
+    monkeypatch.setenv('FISH_AUDIO_VOICE_ID','old-fish-id')
+    monkeypatch.delenv('FISH_AUDIO_API_KEY',raising=False)
     monkeypatch.delenv('ELEVENLABS_API_KEY',raising=False)
-    monkeypatch.delenv('HEYGEN_API_KEY',raising=False)
     monkeypatch.delenv('YANDEX_TTS_API_KEY',raising=False)
     settings=dm.Settings.from_config(config)
     settings.ready(config,stage='audio')
     worker=dm.Worker(SimpleNamespace(),456,config,settings)
-    assert worker.tts is not worker.heygen and isinstance(worker.tts,FishAudioAdapter)
-    assert worker.tts.voice_id==DEFAULT_VOICE_ID and worker.tts.key=='fish-key' and worker.tts.model=='s2.1-pro'
+    assert worker.tts is not worker.heygen and isinstance(worker.tts,HeyGenTTSAdapter)
+    assert worker.tts.voice_id==DEFAULT_VOICE_ID and worker.tts.key=='heygen-key' and worker.tts.model=='heygen-voice-1'
 
 
 def test_santa_template_uses_documented_tags_and_preserves_personalization():
@@ -547,8 +547,8 @@ async def test_santa_worker_archives_original_and_submits_cleaned_script(credit_
     worker.tts.generate_speech.assert_awaited_once_with(clean_speech_text(row['text']),job_id=row['id'],version=row['version'])
     saved=await dm.read('SELECT text,submitted_text,provider FROM ded_moroz_audio_versions WHERE order_id=?',(row['id'],))
     assert saved['text']==row['text'] and '[slowly]' in saved['text']
-    assert saved['submitted_text']==clean_speech_text(row['text']) and '[' not in saved['submitted_text']
-    assert saved['provider']=='fish_audio'
+    assert saved['submitted_text']==clean_speech_text(row['text']) and '[warm]' in saved['submitted_text']
+    assert saved['provider']=='heygen'
     worker.heygen.create_video.assert_not_awaited()
 
 

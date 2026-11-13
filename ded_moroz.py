@@ -16,8 +16,8 @@ from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 import database
 from config import Config, BASE_DIR
 from heygen import HeyGenAdapter
-from fish_audio_tts import (FishAudioAdapter, FishAudioError, prepare_speech_text as clean_speech_text,
-                            DEFAULT_VOICE_ID, DEFAULT_MODEL)
+from heygen_tts import (HeyGenTTSAdapter, HeyGenSpeechError, prepare_speech_text, display_text,
+                        DEFAULT_VOICE_ID, DEFAULT_MODEL)
 from multstudio.assets import Assets, https_url
 from multstudio.uploads import png_bytes
 
@@ -69,18 +69,16 @@ class Settings:
     voice_id: str | None=DEFAULT_VOICE_ID
     avatar_id: str | None=None
     reference_url: str | None=None
-    fish_key: str | None=field(default=None,repr=False)
-    fish_model: str=DEFAULT_MODEL
+    tts_model: str=DEFAULT_MODEL
 
     @classmethod
     def from_config(cls,config):
         return cls(Path(os.getenv('STUDIO_FILES_DIR','').strip() or str(BASE_DIR/'studio_files')),BASE_DIR/'examples',
                    os.getenv('HEYGEN_API_KEY','').strip() or None,
-                   os.getenv('FISH_AUDIO_VOICE_ID','').strip() or DEFAULT_VOICE_ID,
+                   os.getenv('DED_MOROZ_HEYGEN_VOICE_ID','').strip() or DEFAULT_VOICE_ID,
                    os.getenv('DED_MOROZ_AVATAR_ID','').strip() or None,
                    os.getenv('DED_MOROZ_REF_URL','').strip() or None,
-                   os.getenv('FISH_AUDIO_API_KEY','').strip() or None,
-                   os.getenv('FISH_AUDIO_MODEL','').strip() or DEFAULT_MODEL)
+                   os.getenv('DED_MOROZ_TTS_MODEL','').strip() or DEFAULT_MODEL)
 
     def files(self):
         # Required audio decorations belong to the video phase, never to TTS.
@@ -90,9 +88,9 @@ class Settings:
         if stage not in ('audio','video'):raise ValueError('Неизвестный этап подготовки.')
         if not config.storage_bucket or not config.storage_public_base_url:raise ValueError('Настройте Yandex Cloud STORAGE_BUCKET и STORAGE_PUBLIC_BASE_URL.')
         if stage=='audio':
-            if not self.fish_key:raise ValueError('Задайте FISH_AUDIO_API_KEY.')
-            FishAudioAdapter.identifier(self.voice_id)
-            FishAudioAdapter.model_name(self.fish_model)
+            if not self.heygen_key:raise ValueError('Задайте HEYGEN_API_KEY.')
+            HeyGenTTSAdapter.identifier(self.voice_id)
+            HeyGenTTSAdapter.model_name(self.tts_model)
             return
         if not self.heygen_key:raise ValueError('Задайте HEYGEN_API_KEY.')
         required=self.files()
@@ -253,6 +251,29 @@ async def revised(key,user,text,*,admin=None):
         return await finish_regeneration(db,cur,key,user)
 
 
+def manual_audio_retry_allowed(row):
+    stage=(row['error'] or '').split(':',1)[0]
+    return (row['status']=='manual' and stage in ('audio_queued','audio_submitting','audio_download','audio_publish','audio_ready')
+            and bool(row['text'] and row['photo_path']) and not any(row[x] for x in ('video_id','raw_path','output_path','output_url')))
+
+
+async def retry_manual_audio(key,user,version,*,admin,config=None,settings=None):
+    if admin is None or user!=admin:return False
+    row=await get(key)
+    if not row or row['user_id']!=user or row['version']!=version or not manual_audio_retry_allowed(row):return False
+    config=config or Config.from_env();settings=settings or Settings.from_config(config)
+    settings.ready(config,stage='audio')
+    if not Assets(settings.root,config).path(row['photo_path']).is_file():raise ValueError('Не найдено сохранённое фото ребёнка.')
+    async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
+        cur=await db.execute("""UPDATE ded_moroz_orders SET status='audio_queued',version=version+1,
+            regeneration_attempts=regeneration_attempts+1,audio_path=NULL,audio_url=NULL,speech_provider_url=NULL,
+            approved_audio_path=NULL,approved_audio_url=NULL,preview_sent=0,preview_mid=NULL,preview_version=NULL,
+            error=NULL,next_attempt=0 WHERE id=? AND user_id=? AND status='manual' AND version=? AND error=?
+            AND video_id IS NULL AND raw_path IS NULL AND output_path IS NULL AND output_url IS NULL""",
+            (key,user,version,row['error']))
+        return await finish_regeneration(db,cur,key,user)
+
+
 async def tell(event,text=None,**kwargs):
     from handlers import _reply
     return await _reply(event,text,**kwargs)
@@ -276,6 +297,15 @@ async def enter(event,context,admin):
             await tell(event,PHOTO_PROMPT)
     elif row['status']=='editing':
         await context.set_state(PosterStates.ded_moroz_edit);await tell(event,'Отправьте исправленный текст целиком.')
+    elif row['status']=='manual':
+        b=InlineKeyboardBuilder()
+        text=f"⚠️ Поздравление приостановлено. Заказ: {row['id']}. Текст, фото и готовые файлы сохранены."
+        if manual_audio_retry_allowed(row):
+            text+='\n\nМожно запустить новую платную озвучку голосом «Дед мороз» в HeyGen. Предыдущий неизвестный результат запроса при необходимости сверьте у провайдера. Нажмите кнопку, чтобы начать новую попытку с сохранённым текстом и фото.'
+            b.row(CallbackButton(text='🎙 Перегенерировать озвучку',payload=f"dm_manual_regenerate:{row['id']}:{row['version']}"))
+        else:
+            text+='\nДля продолжения сохранённого этапа используйте /dm_resume '+row['id']
+        await tell(event,text,attachments=[b.as_markup()] if manual_audio_retry_allowed(row) else [])
     elif row['status']=='audio_ready':
         await update(row['id'],preview_sent=0);await tell(event,'Повторно отправляю сохранённую озвучку; новая генерация не запускается.')
     else:
@@ -326,7 +356,7 @@ async def collect(event,context,admin,config=None,settings=None):
             await context.clear();await tell(event,AUDIO_GENERATING)
 
 
-async def callback(event,context,admin):
+async def callback(event,context,admin,config=None,settings=None):
     from handlers import PosterStates
     if event.get_ids()[1]!=admin or admin is None:return
     parts=event.callback.payload.split(':')
@@ -342,7 +372,14 @@ async def callback(event,context,admin):
     except ValueError:return
     row=await get(key)
     if not row or row['user_id']!=admin:return
-    if action=='dm_audio_edit' and await request_edit(key,admin,version,admin=admin):
+    if action=='dm_manual_regenerate':
+        try:accepted=await retry_manual_audio(key,admin,version,admin=admin,config=config,settings=settings)
+        except ValueError as exc:
+            await tell(event,str(exc));return
+        if accepted:
+            await context.clear();await tell(event,AUDIO_GENERATING)
+        else:await tell(event,'Состояние заказа уже изменилось. Откройте раздел заново.')
+    elif action=='dm_audio_edit' and await request_edit(key,admin,version,admin=admin):
         await context.clear();await context.update_data(dm_order=key);await context.set_state(PosterStates.ded_moroz_edit)
         await tell(event,'Отправьте новый текст целиком. Перегенерация озвучки платная; для администратора число попыток не ограничено.')
     elif action=='dm_audio_regenerate' and await regenerate(key,admin,version,admin=admin):
@@ -358,7 +395,7 @@ class Worker:
         self.settings=settings or Settings.from_config(config)
         self.assets=Assets(self.settings.root,config)
         self.heygen=heygen or HeyGenAdapter(self.settings.heygen_key)
-        self.tts=tts or FishAudioAdapter(self.settings.fish_key,self.settings.voice_id,self.assets,model=self.settings.fish_model)
+        self.tts=tts or HeyGenTTSAdapter(self.settings.heygen_key,self.settings.voice_id,self.assets,model=self.settings.tts_model)
         self.uploads={}
 
     async def avatar(self):
@@ -389,13 +426,13 @@ class Worker:
         return row['look_id']
 
     async def store_audio_result(self,row,path):
-        key=row['id'];text=clean_speech_text(row['text'])
-        signature=FishAudioAdapter(None,self.settings.voice_id,self.assets,model=self.settings.fish_model).fingerprint(text)
+        key=row['id'];text=prepare_speech_text(row['text'])
+        signature=HeyGenTTSAdapter(None,self.settings.voice_id,self.assets,model=self.settings.tts_model).fingerprint(text)
         async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
             await db.execute("""INSERT INTO ded_moroz_audio_versions
                 (order_id,version,text,voice_id,provider_url,path,provider,submitted_text,model,request_sha256)
                 VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                (key,row['version'],row['text'],self.settings.voice_id,'',path,'fish_audio',text,self.settings.fish_model,signature))
+                (key,row['version'],row['text'],self.settings.voice_id,'',path,'heygen',text,self.settings.tts_model,signature))
             await db.execute("UPDATE ded_moroz_orders SET speech_provider_url=NULL,audio_path=?,status='audio_publish',error=NULL,next_attempt=0 WHERE id=?",(path,key))
             await db.commit()
 
@@ -405,11 +442,11 @@ class Worker:
         if state=='audio_queued':
             self.settings.ready(self.config,avatar_known=bool(await read('SELECT look_id FROM ded_moroz_avatar WHERE look_id IS NOT NULL')))
             if not row['photo_path'] or not self.assets.path(row['photo_path']).is_file():raise ValueError('Не найдено сохранённое фото ребёнка.')
-            text=clean_speech_text(row['text'])
+            text=prepare_speech_text(row['text'])
             if not text or len(text)>10000:raise ValueError('После очистки тегов текст озвучки должен содержать от 1 до 10000 символов.')
             if not await transition(key,self.admin,'audio_queued','audio_submitting'):return
             path=await self.tts.generate_speech(text,job_id=key,version=row['version'])
-            if not self.assets.path(path).is_file():raise ValueError('Fish Audio не сохранил MP3 этой версии.')
+            if not self.assets.path(path).is_file():raise ValueError('HeyGen не сохранил MP3 этой версии.')
             # Persisted MP3 and manifest can be reused after interruption; no second POST.
             await self.store_audio_result(row,path)
         elif state=='audio_download':
@@ -422,7 +459,7 @@ class Worker:
         elif state=='audio_publish':
             url=await self.assets.publish(row['audio_path'])
             async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
-                await db.execute("UPDATE ded_moroz_audio_versions SET public_url=?,provider_url=CASE WHEN provider IN ('elevenlabs','fish_audio') THEN ? ELSE provider_url END WHERE order_id=? AND version=?",(url,url,key,row['version']))
+                await db.execute("UPDATE ded_moroz_audio_versions SET public_url=?,provider_url=CASE WHEN provider IN ('elevenlabs','fish_audio','heygen') THEN ? ELSE provider_url END WHERE order_id=? AND version=?",(url,url,key,row['version']))
                 await db.execute("UPDATE ded_moroz_orders SET audio_url=?,status='audio_ready',preview_sent=0 WHERE id=?",(url,key))
                 await db.commit()
         elif state=='audio_ready' and not row['preview_sent']:
@@ -431,7 +468,7 @@ class Worker:
             if audio is None:
                 audio=await self.bot.upload_media(InputMedia(path=str(self.assets.path(row['audio_path'])),type=UploadType.AUDIO))
                 self.uploads[token_key]=audio
-            preview_text=clean_speech_text(row['text'])
+            preview_text=display_text(prepare_speech_text(row['text']))
             chunks=[preview_text[i:i+3500] for i in range(0,len(preview_text),3500)]
             for chunk in chunks:
                 if await self.bot.send_message(user_id=self.admin,text=chunk) is None:raise ValueError('MAX не подтвердил текст.')
@@ -506,21 +543,24 @@ class Worker:
                 ambiguous=current['status'] in ('audio_submitting','video_submitting')
                 avatar=await read('SELECT status FROM ded_moroz_avatar WHERE singleton=1')
                 terminal=ambiguous or (avatar and avatar['status'] in ('submitting','manual')) or isinstance(exc,ValueError)
-                prefix='audio_queued' if isinstance(exc,FishAudioError) and exc.safe_to_retry and current['status']=='audio_submitting' else current['status']
-                reason=exc.code if isinstance(exc,FishAudioError) else type(exc).__name__
+                prefix='audio_queued' if isinstance(exc,HeyGenSpeechError) and exc.safe_to_retry and current['status']=='audio_submitting' else current['status']
+                reason=exc.code if isinstance(exc,HeyGenSpeechError) else type(exc).__name__
                 await update(row['id'],status='manual' if terminal else current['status'],error=prefix+':'+reason,next_attempt=now+60)
                 if terminal:
-                    try:await self.bot.send_message(user_id=self.admin,text=f"⚠️ Заказ Деда Мороза {row['id']} требует проверки. Состояние и файлы сохранены; платный запрос автоматически не повторяется."+(f" Причина: {exc}" if isinstance(exc,FishAudioError) else ""))
+                    try:await self.bot.send_message(user_id=self.admin,text=f"⚠️ Заказ Деда Мороза {row['id']} требует проверки. Состояние и файлы сохранены; платный запрос автоматически не повторяется."+(f" Причина: {exc}" if isinstance(exc,HeyGenSpeechError) else ""))
                     except Exception:logger.exception('Дед Мороз: не удалось отправить предупреждение')
 
     async def recover_interrupted(self):
-        # Reuse a verified completed Fish MP3 if the process stopped before SQLite commit.
-        if isinstance(self.tts,FishAudioAdapter):
+        # Reuse a verified completed HeyGen MP3 if the process stopped before SQLite commit.
+        if isinstance(self.tts,HeyGenTTSAdapter):
             rows=await read("SELECT * FROM ded_moroz_orders WHERE user_id=? AND status='audio_submitting'",(self.admin,),all_rows=True)
             for row in rows:
                 try:
                     path=await self.tts.cached_speech(row['text'],job_id=row['id'],version=row['version'])
-                    if path:await self.store_audio_result(row,path)
+                    if path:
+                        await self.store_audio_result(row,path)
+                    elif await self.tts.read_source(row['text'],job_id=row['id'],version=row['version']):
+                        await update(row['id'],status='audio_queued',error=None,next_attempt=0)
                 except Exception:
                     logger.exception('Дед Мороз: проверка сохранённой озвучки заказа %s',row['id'])
         # An interrupted paid POST without a verified file is never sent again after restart.

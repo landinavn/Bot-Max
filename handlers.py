@@ -2402,7 +2402,7 @@ def create_router(
             logger.exception('Не удалось сохранить данные Деда Мороза:')
             await _reply(event,'Не удалось завершить обработку. Данные сохранены; попробуйте ещё раз.')
 
-    @router.message_callback(F.callback.payload.in_({'dm_audio_ok','dm_audio_edit'}) | F.callback.payload.startswith('dm_audio_ok:') | F.callback.payload.startswith('dm_audio_edit:'))
+    @router.message_callback(F.callback.payload.in_({'dm_audio_ok','dm_audio_edit','dm_audio_approve','dm_audio_regenerate'}) | F.callback.payload.startswith('dm_audio_ok:') | F.callback.payload.startswith('dm_audio_edit:') | F.callback.payload.startswith('dm_audio_approve:') | F.callback.payload.startswith('dm_audio_regenerate:'))
     async def ded_moroz_audio_action(event: MessageCallback, context: MemoryContext):
         await event.ack(notification='Дед Мороз')
         from ded_moroz import callback

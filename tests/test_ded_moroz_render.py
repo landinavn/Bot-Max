@@ -46,3 +46,21 @@ async def test_real_landscape_render_overlay_pip_audio_and_safe_name(tmp_path,ph
         assert max(background[0])<30
         assert 'fire_overlay.mp4' in caplog.text and 'пропущено' in caplog.text
     assert (tmp_path/'title.txt').read_text()=="Для Маша: 100% 'солнышко' от Деда Мороза"
+
+
+@pytest.mark.parametrize('video_seconds,speech_seconds',[(0.6,2.1),(2.2,0.7)])
+async def test_render_follows_actual_narration_duration_after_provider_change(tmp_path,video_seconds,speech_seconds):
+    from media_service import audio_duration
+    examples=tmp_path/'examples';(examples/'audio').mkdir(parents=True)
+    video=tmp_path/'source.mp4';speech=tmp_path/'fish.mp3';child=tmp_path/'child.png';out=tmp_path/'out.mp4'
+    ff('-f','lavfi','-i',f'color=c=black:s=320x180:r=30:d={video_seconds}',
+       '-c:v','libx264','-pix_fmt','yuv420p',video)
+    for path in (speech,examples/'audio/ny_music.mp3',examples/'audio/jingle_bells.mp3'):
+        ff('-f','lavfi','-i',f'sine=frequency=440:duration={speech_seconds}','-c:a','libmp3lame',path)
+    Image.new('RGB',(100,100),'blue').save(child)
+    expected=await audio_duration(speech)
+    await render_ded_moroz(video,child,speech,examples,out,'Машенька')
+    result=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams','-show_format','-of','json',str(out)]))
+    assert abs(float(result['format']['duration'])-expected)<0.15
+    assert all(abs(float(s.get('start_time',0)))<0.05 for s in result['streams'])
+    assert next(s for s in result['streams'] if s['codec_type']=='audio')['codec_name']=='aac'

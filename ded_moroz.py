@@ -17,20 +17,26 @@ import database
 from config import Config, BASE_DIR
 from heygen import HeyGenAdapter
 from heygen_tts import (HeyGenTTSAdapter, HeyGenSpeechError, prepare_speech_text, display_text,
-                        DEFAULT_VOICE_ID, DEFAULT_MODEL)
+                        DEFAULT_VOICE_ID, DEFAULT_MODEL, DEFAULT_SPEED, DEFAULT_ECHO_DELAY_MS, DEFAULT_ECHO_DECAY)
 from multstudio.assets import Assets, https_url
 from multstudio.uploads import png_bytes
 
 logger=logging.getLogger(__name__)
 STUB='🎅 Поздравление от Деда Мороза уже в разработке! Скоро здесь можно будет заказать персональное видео с вашим ребёнком.'
-TEMPLATE=('[warm] Охо-хо-хо! [chuckles] Здравствуй, [pause] {name}! Это я, Дедушка Мороз! '
+TEMPLATE=('[deep voice] Охо-хо-хо! [chuckles] [raspy] Здравствуй, [pause] {name}! Это я, Дедушка Мороз! '
     '[slowly] Я весь год наблюдал за тобой. [pause] И знаешь что? '
-    '[excited] Ты меня очень порадовал! [warm] Я слышал, что ты {fact1}. '
+    '[excited] Ты меня очень порадовал! [raspy] Я слышал, что ты {fact1}. '
     '[pause] А ещё ты {fact2}. [happy] И особенно мне нравится, что ты {fact3}. '
-    '[laughs] Молодец! Я тобой очень горжусь! [serious] В новом году у меня для тебя '
+    '[laughs] Молодец! [deep voice] Я тобой очень горжусь! [serious] В новом году у меня для тебя '
     'будет маленькое задание: {task}. [warm] Я знаю, у тебя всё получится! '
     '[pause] Я получил твоё письмо, {name}. [excited] И приготовил для тебя кое-что '
-    'очень особенное! [happy] С Новым годом, {name}! [pause] До встречи!')
+    'очень особенное! [deep voice] С Новым годом, {name}! [pause] [raspy] До встречи!')
+LEGACY_DEFAULT_TEMPLATE=('[warm] Охо-хо-хо! [chuckles] Здравствуй, [pause] {name}! Это я, Дедушка Мороз! [slowly] Я весь год '
+ 'наблюдал за тобой. [pause] И знаешь что? [excited] Ты меня очень порадовал! [warm] Я слышал, что ты '
+ '{fact1}. [pause] А ещё ты {fact2}. [happy] И особенно мне нравится, что ты {fact3}. [laughs] Молодец! Я '
+ 'тобой очень горжусь! [serious] В новом году у меня для тебя будет маленькое задание: {task}. [warm] Я '
+ 'знаю, у тебя всё получится! [pause] Я получил твоё письмо, {name}. [excited] И приготовил для тебя кое-что '
+ 'очень особенное! [happy] С Новым годом, {name}! [pause] До встречи!')
 GREETING=(
     '🎅 Добро пожаловать в мастерскую Деда Мороза!\n\n'
     'Давайте создадим персональное видео-поздравление для вашего ребёнка.\n\n'
@@ -70,6 +76,9 @@ class Settings:
     avatar_id: str | None=None
     reference_url: str | None=None
     tts_model: str=DEFAULT_MODEL
+    speech_speed: float=DEFAULT_SPEED
+    echo_delay_ms: float=DEFAULT_ECHO_DELAY_MS
+    echo_decay: float=DEFAULT_ECHO_DECAY
 
     @classmethod
     def from_config(cls,config):
@@ -78,7 +87,10 @@ class Settings:
                    os.getenv('DED_MOROZ_HEYGEN_VOICE_ID','').strip() or DEFAULT_VOICE_ID,
                    os.getenv('DED_MOROZ_AVATAR_ID','').strip() or None,
                    os.getenv('DED_MOROZ_REF_URL','').strip() or None,
-                   os.getenv('DED_MOROZ_TTS_MODEL','').strip() or DEFAULT_MODEL)
+                   os.getenv('DED_MOROZ_TTS_MODEL','').strip() or DEFAULT_MODEL,
+                   float((os.getenv('DED_MOROZ_SPEECH_SPEED') or str(DEFAULT_SPEED)).replace(',','.')),
+                   float((os.getenv('DED_MOROZ_ECHO_DELAY_MS') or str(DEFAULT_ECHO_DELAY_MS)).replace(',','.')),
+                   float((os.getenv('DED_MOROZ_ECHO_DECAY') or str(DEFAULT_ECHO_DECAY)).replace(',','.')))
 
     def files(self):
         # Required audio decorations belong to the video phase, never to TTS.
@@ -91,6 +103,7 @@ class Settings:
             if not self.heygen_key:raise ValueError('Задайте HEYGEN_API_KEY.')
             HeyGenTTSAdapter.identifier(self.voice_id)
             HeyGenTTSAdapter.model_name(self.tts_model)
+            HeyGenTTSAdapter.delivery_settings(self.speech_speed,self.echo_delay_ms,self.echo_decay)
             return
         if not self.heygen_key:raise ValueError('Задайте HEYGEN_API_KEY.')
         required=self.files()
@@ -201,15 +214,29 @@ def keyboard(order, *, admin=None):
     return b.as_markup()
 
 
+def default_text_for_retry(row):
+    try:
+        details=json.loads(row['details'])
+        candidate=TEMPLATE.format(**details)
+        if row['text'] in (candidate,LEGACY_DEFAULT_TEMPLATE.format(**details)):
+            return candidate
+    except (ValueError,KeyError,TypeError):
+        pass
+    return row['text']
+
+
 async def regenerate(key, user, version, *, admin=None):
     """One accepted request per preview; admin unlimited, ordinary users one retry."""
+    row=await get(key)
+    if not row or row['user_id']!=user:return False
+    text=default_text_for_retry(row)
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
-        cur=await db.execute("""UPDATE ded_moroz_orders SET version=version+1,regeneration_attempts=regeneration_attempts+1,
+        cur=await db.execute("""UPDATE ded_moroz_orders SET text=?,version=version+1,regeneration_attempts=regeneration_attempts+1,
             status='audio_queued',audio_path=NULL,audio_url=NULL,speech_provider_url=NULL,
             approved_audio_url=NULL,approved_audio_path=NULL,
             preview_sent=0,preview_mid=NULL,preview_version=NULL,error=NULL,next_attempt=0
             WHERE id=? AND user_id=? AND version=? AND status='audio_ready'
-            AND (? OR regeneration_attempts<1)""",(key,user,version,admin is not None and user==admin))
+            AND (? OR regeneration_attempts<1)""",(text,key,user,version,admin is not None and user==admin))
         return await finish_regeneration(db,cur,key,user)
 
 
@@ -265,12 +292,12 @@ async def retry_manual_audio(key,user,version,*,admin,config=None,settings=None)
     settings.ready(config,stage='audio')
     if not Assets(settings.root,config).path(row['photo_path']).is_file():raise ValueError('Не найдено сохранённое фото ребёнка.')
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
-        cur=await db.execute("""UPDATE ded_moroz_orders SET status='audio_queued',version=version+1,
+        cur=await db.execute("""UPDATE ded_moroz_orders SET text=?,status='audio_queued',version=version+1,
             regeneration_attempts=regeneration_attempts+1,audio_path=NULL,audio_url=NULL,speech_provider_url=NULL,
             approved_audio_path=NULL,approved_audio_url=NULL,preview_sent=0,preview_mid=NULL,preview_version=NULL,
             error=NULL,next_attempt=0 WHERE id=? AND user_id=? AND status='manual' AND version=? AND error=?
             AND video_id IS NULL AND raw_path IS NULL AND output_path IS NULL AND output_url IS NULL""",
-            (key,user,version,row['error']))
+            (default_text_for_retry(row),key,user,version,row['error']))
         return await finish_regeneration(db,cur,key,user)
 
 
@@ -395,7 +422,8 @@ class Worker:
         self.settings=settings or Settings.from_config(config)
         self.assets=Assets(self.settings.root,config)
         self.heygen=heygen or HeyGenAdapter(self.settings.heygen_key)
-        self.tts=tts or HeyGenTTSAdapter(self.settings.heygen_key,self.settings.voice_id,self.assets,model=self.settings.tts_model)
+        self.tts=tts or HeyGenTTSAdapter(self.settings.heygen_key,self.settings.voice_id,self.assets,model=self.settings.tts_model,
+            speed=self.settings.speech_speed,echo_delay_ms=self.settings.echo_delay_ms,echo_decay=self.settings.echo_decay)
         self.uploads={}
 
     async def avatar(self):
@@ -427,7 +455,8 @@ class Worker:
 
     async def store_audio_result(self,row,path):
         key=row['id'];text=prepare_speech_text(row['text'])
-        signature=HeyGenTTSAdapter(None,self.settings.voice_id,self.assets,model=self.settings.tts_model).fingerprint(text)
+        signature=HeyGenTTSAdapter(None,self.settings.voice_id,self.assets,model=self.settings.tts_model,
+            speed=self.settings.speech_speed,echo_delay_ms=self.settings.echo_delay_ms,echo_decay=self.settings.echo_decay).fingerprint(text)
         async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
             await db.execute("""INSERT INTO ded_moroz_audio_versions
                 (order_id,version,text,voice_id,provider_url,path,provider,submitted_text,model,request_sha256)

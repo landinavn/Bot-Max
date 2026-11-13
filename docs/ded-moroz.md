@@ -69,9 +69,26 @@ examples/audio/ny_music.mp3
    Заказ использует собственную неизменяемую копию `studio_files/{order_id}/...`,
    поэтому новая фотография не подменяет старую в выполняющемся монтаже.
 6. После фото приходит «🎙 Генерирую озвучку Деда Мороза. Это займет около минуты...».
-   Текст начинается с «Охо-хо-хо! Здравствуй, …». Только эта ветка использует
+   Текст начинается с `[warm] Охо-хо-хо! [chuckles] Здравствуй, [pause] …`. Только эта ветка использует
    HeyGen Voice: `POST /v3/models/audio/tts`, `model=heygen-voice-1`,
    `language=ru`, `output_format={encoding: mp3, sample_rate_hertz: 44100, bitrate_bps: 192000}`.
+   В запросе задаются `speed=0.85` и `pitch_shift=-2.0` (полутона).
+   Поле `pitch` не поддерживается; значение `-10` выходит за допустимый
+   диапазон `pitch_shift` от −4 до 4. −2 полутона дают умеренное понижение
+   частоты примерно на 11%, а не почти на октаву.
+
+   Шаблон содержит только документированные теги: `[warm]`, `[chuckles]`,
+   `[pause]`, `[slowly]`, `[excited]`, `[happy]`, `[laughs]`, `[serious]`.
+   При подстановке имени и фактов теги сохраняются в тексте задания и архиве.
+   Важно: публичные/instant-голоса выполняют аудио-теги, но игнорируют
+   числовые `speed`/`pitch_shift`. Эти параметры действуют только у professional
+   clones, которые, в свою очередь, не выполняют эмоциональные аудио-теги.
+   Одновременное точное выполнение обоих видов управления HeyGen не обещает.
+   Фактический результат проверяется в существующем предпрослушивании;
+   локальная обработка аудио и автоматическая смена голоса не добавлены.
+   Сохраняется `heygen-voice-1`: переключение на Turbo Free не улучшает
+   поддержку скорости/тона, поскольку эти параметры он тоже игнорирует.
+
    Это синхронный endpoint: ответ содержит `audio_url`, опрос не требуется.
    `POST /v3/voices/speech` из первоначального примера не используется,
    поскольку актуальная документация указывает endpoint Model API.
@@ -117,7 +134,9 @@ API v3, `X-Api-Key`, `Idempotency-Key` для мутаций:
 одном процессе сервиса и не блокирует обычные пользовательские разделы.
 Кнопки подтверждения и перегенерации используют атомарные переходы SQLite.
 
-Документация контрактов: [HeyGen TTS](https://developers.heygen.com/docs/voices/heygen-voice-speech.md),
+Документация контрактов: [Audio Tags](https://developers.heygen.com/docs/voices/heygen-voice-audio-tags),
+[Generate Speech: параметры](https://developers.heygen.com/reference/generate-model-speech),
+[HeyGen TTS](https://developers.heygen.com/docs/voices/heygen-voice-speech.md),
 [Photo to Avatar](https://developers.heygen.com/docs/avatar-from-photo),
 [Audio to Video](https://developers.heygen.com/audio-to-video.md),
 [Create Video](https://developers.heygen.com/reference/create-video.md),

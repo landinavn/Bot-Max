@@ -50,6 +50,9 @@ class HeyGenAdapter:
         data = await self.request('POST', '/v3/models/audio/tts', payload={
             'model': 'heygen-voice-1', 'voice_id': self.identifier(self.voice_id),
             'text': text, 'language': 'ru',
+            # HeyGen names pitch in semitones; 'pitch' and -10 are invalid.
+            # Public/instant voices perform tags but ignore these professional controls.
+            'speed': 0.85, 'pitch_shift': -2.0,
             'output_format': {'encoding': 'mp3', 'sample_rate_hertz': 44100,
                               'bitrate_bps': 192000}}, timeout=180)
         url = data.get('audio_url')

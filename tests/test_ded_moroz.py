@@ -119,7 +119,7 @@ async def test_photo_content_saved_normalized_to_local_alias_and_cloud(credit_db
         with Image.open(path) as image:assert image.format=='PNG' and image.size==(941,1672)
     publish.assert_awaited_once();worker.tts.generate_speech.assert_not_awaited()
     e.message.answer.assert_awaited_once_with(dm.AUDIO_GENERATING)
-    assert 'Здравствуй, Мишенька!' in row['text'] and 'что ты любишь рисовать.' in row['text']
+    assert 'Здравствуй, [pause] Мишенька!' in row['text'] and 'что ты любишь рисовать.' in row['text']
 
 
 async def test_audio_does_not_require_video_assets_or_ffmpeg(credit_db,setup_dm,monkeypatch):
@@ -411,6 +411,7 @@ async def test_heygen_speech_contract_russian_mp3_and_single_post():
     assert seen[0].headers['X-Api-Key']=='test-key'
     assert json.loads(seen[0].content)=={
         'model':'heygen-voice-1','voice_id':'elderly_male','text':text,'language':'ru',
+        'speed':0.85,'pitch_shift':-2.0,
         'output_format':{'encoding':'mp3','sample_rate_hertz':44100,'bitrate_bps':192000}}
 
 
@@ -438,7 +439,7 @@ async def test_unlimited_regenerations_archive_versions_and_approve_exact_file(c
         for _ in range(4):await step(worker,key)
         row=await dm.get(key)
         assert row['version']==version and row['preview_sent']==1
-        assert row['text'].startswith('Охо-хо-хо!')
+        assert row['text'].startswith('[warm] Охо-хо-хо!')
         assert [b.payload for r in dm.keyboard(row).payload.buttons for b in r]==['dm_audio_approve','dm_audio_regenerate']
         assert worker.bot.upload_media.await_args.args[0].type.value=='audio'
         worker.heygen.create_video.assert_not_awaited()
@@ -518,3 +519,25 @@ async def test_santa_settings_use_only_heygen_tts_config(monkeypatch,setup_dm):
     worker=dm.Worker(SimpleNamespace(),456,config,settings)
     assert worker.tts is worker.heygen and isinstance(worker.tts,HeyGenAdapter)
     assert worker.tts.voice_id=='elderly_male' and worker.tts.key=='heygen-key'
+
+
+def test_santa_template_uses_documented_tags_and_preserves_personalization():
+    import re
+    # Documented HeyGen tags; check spellings/case so a typo cannot enter the default script.
+    tags=re.findall(r'\[([^\]]+)\]',dm.TEMPLATE)
+    assert set(tags)=={'warm','chuckles','pause','slowly','excited','happy','laughs','serious'}
+    facts=dict(name='Машенька',fact1='любишь рисовать',fact2='научилась плавать',fact3='добрая',task='читать перед сном')
+    text=dm.TEMPLATE.format(**facts)
+    assert text.count('Машенька')==3
+    assert all(v in text for v in facts.values()) and '{' not in text
+    assert re.findall(r'\[([^\]]+)\]',text)==tags
+
+
+async def test_santa_worker_passes_tagged_script_unchanged(credit_db,setup_dm):
+    _,_,worker=setup_dm
+    row=await audio_order(worker)
+    await step(worker,row['id'])
+    worker.tts.generate_speech.assert_awaited_once_with(row['text'])
+    saved=await dm.read('SELECT text FROM ded_moroz_audio_versions WHERE order_id=?',(row['id'],))
+    assert saved['text']==row['text'] and '[slowly]' in saved['text']
+    worker.heygen.create_video.assert_not_awaited()

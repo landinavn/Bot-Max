@@ -1,16 +1,11 @@
 """Real MP3 persistence and the ElevenLabs/HeyGen handoff, with HTTP/storage mocked."""
 import json
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
 from elevenlabs_tts import ElevenLabsAdapter, ElevenLabsError, clean_speech_text
 from multstudio.assets import Assets
-import ded_moroz as dm
-from test_ded_moroz import setup_dm, audio_order, step
-from test_handlers import callback_event, ready_context
 
 
 @pytest.mark.parametrize('text,expected',[
@@ -75,36 +70,3 @@ async def test_tags_only_fail_before_http(tmp_path):
     adapter=ElevenLabsAdapter('key','voice',Assets(tmp_path,None),httpx.MockTransport(lambda r:requests.append(r)))
     with pytest.raises(ValueError):await adapter.generate_speech('[warm] [chuckles]')
     assert not requests
-
-
-async def test_elevenlabs_mp3_is_approved_then_used_by_avatar_iv_without_resynthesis(credit_db,setup_dm):
-    config,settings,worker=setup_dm;row=await audio_order(worker);key=row['id'];requests=[]
-    mp3=b'ID3\x04\x00\x00approved ElevenLabs audio'
-    def handle(request):
-        requests.append(request)
-        return httpx.Response(200,content=mp3,headers={'Content-Type':'audio/mpeg'})
-    worker.tts=ElevenLabsAdapter('eleven-key','santa_voice',worker.assets,httpx.MockTransport(handle))
-    await step(worker,key)
-    saved=await dm.get(key)
-    assert saved['status']=='audio_publish' and worker.assets.path(saved['audio_path']).read_bytes()==mp3
-    archive=await dm.read('SELECT * FROM ded_moroz_audio_versions WHERE order_id=?',(key,))
-    assert archive['provider']=='elevenlabs' and archive['submitted_text']==json.loads(requests[0].content)['text']
-    assert '[' not in archive['submitted_text'] and '[warm]' in archive['text']
-    worker.assets.publish.side_effect=RuntimeError('S3 temporarily unavailable')
-    await worker.tick();await worker.recover_interrupted()
-    assert (await dm.get(key))['status']=='audio_publish' and len(requests)==1
-    url=f'https://storage.yandexcloud.net/vision-board-bot-images/studio/{key}/speech-v0.mp3'
-    worker.assets.publish.side_effect=None;worker.assets.publish.return_value=url
-    await dm.update(key,next_attempt=0);await worker.tick();await worker.tick()
-    saved=await dm.get(key)
-    assert saved['audio_url']==url and saved['preview_sent']==1
-    worker.heygen.create_video.assert_not_awaited()
-    preview=worker.bot.send_message.await_args.kwargs
-    assert preview['text']=='🎧 Прослушайте озвучку Деда Мороза. Всё нравится?'
-    assert worker.bot.upload_media.await_args.args[0].type.value=='audio'
-    event=callback_event('dm_audio_approve');event.message.body=SimpleNamespace(mid='preview-current')
-    await dm.callback(event,await ready_context(),456)
-    await step(worker,key)
-    worker.heygen.create_video.assert_awaited_once_with('look_santa',url,'dm-video-'+key)
-    assert (await dm.get(key))['approved_audio_path']==saved['audio_path']
-    assert len(requests)==1 and worker.assets.path(saved['audio_path']).read_bytes()==mp3

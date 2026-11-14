@@ -442,7 +442,7 @@ async def test_unlimited_regenerations_archive_versions_and_approve_exact_file(c
         for _ in range(4):await step(worker,key)
         row=await dm.get(key)
         assert row['version']==version and row['preview_sent']==1
-        assert row['text'].startswith('[warm] Охо-хо-хо!')
+        assert row['text'].startswith('[deep voice] Охо-хо-хо!')
         assert [b.payload for r in dm.keyboard(row,admin=456).payload.buttons for b in r]==['dm_audio_approve','dm_audio_regenerate','dm_audio_edit']
         assert worker.bot.upload_media.await_args.args[0].type.value=='audio'
         worker.heygen.create_video.assert_not_awaited()
@@ -532,7 +532,7 @@ def test_santa_template_uses_documented_tags_and_preserves_personalization():
     import re
     # Documented HeyGen tags; check spellings/case so a typo cannot enter the default script.
     tags=re.findall(r'\[([^\]]+)\]',dm.TEMPLATE)
-    assert set(tags)=={'warm','chuckles','pause','slowly','excited','happy','laughs','serious'}
+    assert set(tags)=={'warm','chuckles','pause','slowly','excited','happy','laughs','serious','deep voice','raspy'}
     facts=dict(name='Машенька',fact1='любишь рисовать',fact2='научилась плавать',fact3='добрая',task='читать перед сном')
     text=dm.TEMPLATE.format(**facts)
     assert text.count('Машенька')==3
@@ -612,3 +612,24 @@ async def test_retry_migration_preserves_prior_attempts_and_admin_exemption(cred
         'dm_audio_approve','dm_audio_regenerate','dm_audio_edit']
     assert await dm.regenerate(key,456,4,admin=456)
     assert (await dm.get(key))['regeneration_attempts']==5
+
+
+async def test_standard_legacy_script_gets_new_delivery_tags_on_explicit_retry_only(credit_db,setup_dm):
+    _,_,worker=setup_dm;row=await audio_order(worker);key=row['id']
+    details=json.loads(row['details']);legacy=dm.LEGACY_DEFAULT_TEMPLATE.format(**details)
+    await dm.update(key,text=legacy,status='audio_ready')
+    assert (await dm.get(key))['text']==legacy
+    assert await dm.regenerate(key,456,0,admin=456)
+    updated=await dm.get(key)
+    assert updated['text']==dm.TEMPLATE.format(**details)
+    assert '[raspy]' in updated['text'] and updated['text'].startswith('[deep voice] Охо-хо-хо!')
+    assert 'Мишенька' in updated['text'] and updated['photo_path']==row['photo_path']
+    worker.tts.generate_speech.assert_not_awaited()
+
+
+async def test_retry_preserves_custom_text_and_custom_tags(credit_db,setup_dm):
+    _,_,worker=setup_dm;row=await audio_order(worker);key=row['id']
+    custom=dm.LEGACY_DEFAULT_TEMPLATE.format(**json.loads(row['details'])).replace('[warm]','[whispers]')
+    await dm.update(key,text=custom,status='audio_ready')
+    assert await dm.regenerate(key,456,0,admin=456)
+    assert (await dm.get(key))['text']==custom

@@ -48,22 +48,23 @@ async def test_confirmed_instant_clone_russian_tags_and_mp3_contract(tmp_path,mp
         'text':'[warm] Охо-хо-хо! Здравствуй, Машенька! Ты молодец!','language':'ru',
         'output_format':{'encoding':'mp3','sample_rate_hertz':44100,'bitrate_bps':192000}}
     assert all(r.headers['X-Api-Key']=='secret-key' for r in calls)
-    assert assets.path(path).read_bytes()==mp3_bytes
+    assert assets.path(key+'/speech-v0.raw.mp3').read_bytes()==mp3_bytes
+    assert assets.path(path).is_file() and assets.path(path).read_bytes()!=mp3_bytes
     assert await adapter.generate_speech(text,job_id=key)==path and len(calls)==2
-    assert 'secret-key' not in assets.path(key+'/speech-v0.heygen.json').read_text()
+    assert 'secret-key' not in assets.path(adapter.names(key,0)[1]).read_text()
 
 
 @pytest.mark.parametrize('change',['text','voice','model','file'])
 async def test_cache_rejects_changed_request_or_corrupted_file(tmp_path,mp3_bytes,change):
     calls=[];assets=Assets(tmp_path,None);adapter=make_adapter(assets,mp3_bytes,calls);key='b'*32
-    await adapter.generate_speech('Привет, Маша!',job_id=key)
+    saved_path=await adapter.generate_speech('Привет, Маша!',job_id=key)
     text='Привет, Маша!'
     if change=='text':text='Привет, Дима!'
     if change=='voice':
         adapter.voice_id='c'*32;adapter.client.voice_id=adapter.voice_id
     if change=='model':
         adapter.model='heygen-voice-1-turbo';adapter.client.model=adapter.model
-    if change=='file':assets.path(key+'/speech-v0.mp3').write_bytes(b'broken')
+    if change=='file':assets.path(saved_path).write_bytes(b'broken')
     with pytest.raises(HeyGenSpeechError):await adapter.generate_speech(text,job_id=key)
     assert len(calls)==2
 
@@ -96,7 +97,7 @@ async def test_saved_speech_url_survives_download_failure_without_another_post(t
     with pytest.raises(HeyGenSpeechError) as exc:await adapter.generate_speech('Привет',job_id=key)
     assert exc.value.safe_to_retry and assets.path(key+'/speech-v0.heygen-source.json').is_file()
     assets.download.side_effect=download
-    assert await adapter.generate_speech('Привет',job_id=key)==key+'/speech-v0.mp3'
+    assert await adapter.generate_speech('Привет',job_id=key)==adapter.names(key,0)[0]
     assert len(calls)==2
 
 
@@ -115,7 +116,8 @@ async def test_restart_restores_completed_clone_mp3_and_video_uses_approved_url(
     event=callback_event('dm_audio_approve');event.message.body=SimpleNamespace(mid='preview-current')
     await dm.callback(event,await ready_context(),456);await step(worker,key)
     worker.heygen.create_video.assert_awaited_once_with('look_santa',saved['audio_url'],'dm-video-'+key)
-    assert len(calls)==2 and worker.assets.path(path).read_bytes()==mp3_bytes
+    assert len(calls)==2 and worker.assets.path(path).is_file()
+    assert worker.assets.path(key+'/speech-v0.raw.mp3').read_bytes()==mp3_bytes
 
 
 async def test_manual_old_audio_order_can_be_explicitly_retried_once_without_reentering_photo(credit_db,setup_dm,monkeypatch):
@@ -158,3 +160,37 @@ async def test_full_tts_400_diagnostic_redacts_key(caplog):
     with pytest.raises(HeyGenError):await adapter.generate_speech('Привет')
     assert 'HeyGen TTS Error 400: error [redacted] details' in caplog.text
     assert 'actual-key' not in caplog.text
+
+
+async def test_delivery_slows_speech_and_reprocessing_reuses_raw_audio_without_post(tmp_path,mp3_bytes):
+    from media_service import audio_duration
+    calls=[];assets=Assets(tmp_path,None);adapter=make_adapter(assets,mp3_bytes,calls);key='e'*32
+    adapter.delivery=adapter.delivery_settings(1.0,0,0)
+    dry=await adapter.generate_speech('Охо-хо-хо! Здравствуй, Маша!',job_id=key)
+    adapter.delivery=adapter.delivery_settings(0.90,55,0.10)
+    wet=await adapter.generate_speech('Охо-хо-хо! Здравствуй, Маша!',job_id=key)
+    assert dry!=wet and assets.path(dry).is_file() and assets.path(wet).is_file()
+    assert await audio_duration(assets.path(wet))>await audio_duration(assets.path(dry))+0.04
+    assert assets.path(key+'/speech-v0.raw.mp3').read_bytes()==mp3_bytes
+    manifest=json.loads(assets.path(adapter.names(key,0)[1]).read_text())
+    assert manifest['delivery']['speed']==0.90 and manifest['delivery']['echo_decay']==0.10
+    assert await adapter.generate_speech('Охо-хо-хо! Здравствуй, Маша!',job_id=key)==wet
+    assert len(calls)==2 and assets.download.await_count==1
+
+
+async def test_light_echo_adds_a_short_audible_tail(tmp_path,mp3_bytes):
+    import array,math
+    calls=[];assets=Assets(tmp_path,None);adapter=make_adapter(assets,mp3_bytes,calls);key='f'*32
+    adapter.delivery=adapter.delivery_settings(1.0,55,0.10)
+    path=await adapter.generate_speech('Охо-хо-хо!',job_id=key)
+    def decode(name):
+        result=subprocess.check_output(['ffmpeg','-nostdin','-v','error','-i',str(assets.path(name)),
+                                       '-ar','44100','-ac','1','-f','f32le','-'])
+        data=array.array('f');data.frombytes(result);return data
+    dry=decode(key+'/speech-v0.raw.mp3');wet=decode(path)
+    # The raw sine ends at 0.4 s; only the quiet delayed reflection remains here.
+    tail=wet[int(0.42*44100):int(0.44*44100)]
+    assert len(dry)<=int(0.405*44100)
+    assert tail and math.sqrt(sum(x*x for x in tail)/len(tail))>0.001
+    assert len(wet)<len(dry)+int(0.12*44100)
+    assert len(calls)==2

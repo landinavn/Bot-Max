@@ -23,14 +23,24 @@ from multstudio.uploads import png_bytes
 
 logger=logging.getLogger(__name__)
 STUB='🎅 Поздравление от Деда Мороза уже в разработке! Скоро здесь можно будет заказать персональное видео с вашим ребёнком.'
-TEMPLATE=('[deep voice] Охо-хо-хо! [chuckles] [raspy] Здравствуй, [pause] {name}! Это я, Дедушка Мороз! '
-    '[slowly] Я весь год наблюдал за тобой. [pause] И знаешь что? '
-    '[excited] Ты меня очень порадовал! [raspy] Я слышал, что ты {fact1}. '
-    '[pause] А ещё ты {fact2}. [happy] И особенно мне нравится, что ты {fact3}. '
-    '[laughs] Молодец! [deep voice] Я тобой очень горжусь! [serious] В новом году у меня для тебя '
-    'будет маленькое задание: {task}. [warm] Я знаю, у тебя всё получится! '
-    '[pause] Я получил твоё письмо, {name}. [excited] И приготовил для тебя кое-что '
-    'очень особенное! [deep voice] С Новым годом, {name}! [pause] [raspy] До встречи!')
+TEMPLATE=('[deep voice] Охо-хо-хо! '
+    '[raspy] Здравствуй, [drawls] {name}! '
+    '[warm] Это я, Дедушка Мороз! Я весь год наблюдал за тобой. '
+    '[pause] И знаешь что? [slightly excited] Ты меня [drawls] очень порадовал! '
+    '[raspy] Я слышал, что ты {fact1}. [warm] А ещё ты {fact2}. '
+    'И особенно мне нравится, что ты {fact3}. '
+    '[proud] Молодец! Я тобой [drawls] очень горжусь! '
+    '[serious] В новом году у меня для тебя будет маленькое задание: {task}. '
+    '[reassuring] Я знаю, у тебя [drawls] всё получится! '
+    '[pause] Я получил твоё письмо, {name}. '
+    '[warm] И приготовил для тебя кое-что [drawls] очень особенное! '
+    '[deep voice] С Новым годом, [drawls] {name}! [warm] До [drawls] встречи!')
+PREVIOUS_DEFAULT_TEMPLATE=('[deep voice] Охо-хо-хо! [chuckles] [raspy] Здравствуй, [pause] {name}! Это я, Дедушка Мороз! [slowly] Я '
+ 'весь год наблюдал за тобой. [pause] И знаешь что? [excited] Ты меня очень порадовал! [raspy] Я слышал, что '
+ 'ты {fact1}. [pause] А ещё ты {fact2}. [happy] И особенно мне нравится, что ты {fact3}. [laughs] Молодец! '
+ '[deep voice] Я тобой очень горжусь! [serious] В новом году у меня для тебя будет маленькое задание: '
+ '{task}. [warm] Я знаю, у тебя всё получится! [pause] Я получил твоё письмо, {name}. [excited] И приготовил '
+ 'для тебя кое-что очень особенное! [deep voice] С Новым годом, {name}! [pause] [raspy] До встречи!')
 LEGACY_DEFAULT_TEMPLATE=('[warm] Охо-хо-хо! [chuckles] Здравствуй, [pause] {name}! Это я, Дедушка Мороз! [slowly] Я весь год '
  'наблюдал за тобой. [pause] И знаешь что? [excited] Ты меня очень порадовал! [warm] Я слышал, что ты '
  '{fact1}. [pause] А ещё ты {fact2}. [happy] И особенно мне нравится, что ты {fact3}. [laughs] Молодец! Я '
@@ -218,7 +228,7 @@ def default_text_for_retry(row):
     try:
         details=json.loads(row['details'])
         candidate=TEMPLATE.format(**details)
-        if row['text'] in (candidate,LEGACY_DEFAULT_TEMPLATE.format(**details)):
+        if row['text'] in (candidate,PREVIOUS_DEFAULT_TEMPLATE.format(**details),LEGACY_DEFAULT_TEMPLATE.format(**details)):
             return candidate
     except (ValueError,KeyError,TypeError):
         pass

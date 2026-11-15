@@ -9,7 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import aiosqlite
-from maxapi.types import CallbackButton, InputMedia
+from maxapi.types import CallbackButton, LinkButton, InputMedia
 from maxapi.enums import UploadType
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
@@ -19,7 +19,8 @@ from heygen import HeyGenAdapter
 from heygen_tts import (HeyGenTTSAdapter, HeyGenSpeechError, prepare_speech_text, display_text,
                         DEFAULT_VOICE_ID, DEFAULT_MODEL, DEFAULT_SPEED, DEFAULT_PITCH_SEMITONES, DEFAULT_ECHO_DELAY_MS, DEFAULT_ECHO_DECAY)
 from multstudio.assets import Assets, https_url
-from multstudio.uploads import png_bytes
+from ded_moroz_media import child_png as png_bytes
+import ded_moroz_sales as sales
 
 logger=logging.getLogger(__name__)
 STUB='🎅 Поздравление от Деда Мороза уже в разработке! Скоро здесь можно будет заказать персональное видео с вашим ребёнком.'
@@ -75,6 +76,20 @@ QUESTIONS=[
     ('fact3','Заполните: «И особенно мне нравится, что ты [КАЧЕСТВО]».\n\nНапишите качество в нужной форме. Например: «добрый», «любознательный», «смелый», «весёлый», «заботливый».'),
     ('task','Заполните: «В новом году у меня для тебя будет маленькое задание: [ЗАДАНИЕ]».\n\nНапример: «помогать маме», «читать перед сном», «делать зарядку».'),
 ]
+FACT_LABELS={'name':'Имя ребёнка','fact1':'Увлечение','fact2':'Достижение','fact3':'Качество','task':'Задание на год'}
+
+
+def fact_value(field,value):
+    if field not in FACT_LABELS:raise ValueError('Выберите поле для изменения.')
+    if not isinstance(value,str) or not value.strip() or len(value.strip())>300:
+        raise ValueError('Введите только выбранное имя или факт: от 1 до 300 символов.')
+    if any(char in value for char in '[]{}'):
+        raise ValueError('Введите только значение без тегов и фигурных или квадратных скобок. Теги добавит бот.')
+    return value.strip()
+
+
+def tagged_text(details):
+    return TEMPLATE.format(**{key:fact_value(key,details.get(key)) for key in FACT_LABELS})
 
 
 @dataclass(frozen=True)
@@ -139,9 +154,11 @@ async def init_tables(db):
     # Additive migration: existing previews and generated videos remain usable.
     cursor = await db.execute('PRAGMA table_info(ded_moroz_orders)')
     columns = {row[1] for row in await cursor.fetchall()}
-    for name in ('speech_provider_url', 'approved_audio_url', 'approved_audio_path'):
+    for name in ('speech_provider_url', 'approved_audio_url', 'approved_audio_path','edit_details','edit_field','payment_order_id','progress_stage','result_mid'):
         if name not in columns:
             await db.execute(f'ALTER TABLE ded_moroz_orders ADD COLUMN {name} TEXT')
+    if 'progress_next' not in columns:
+        await db.execute('ALTER TABLE ded_moroz_orders ADD COLUMN progress_next INTEGER NOT NULL DEFAULT 0')
     if 'regeneration_attempts' not in columns:
         await db.execute('ALTER TABLE ded_moroz_orders ADD COLUMN regeneration_attempts INTEGER NOT NULL DEFAULT 0')
         # Each previous version was an explicitly requested regeneration or text revision.
@@ -153,7 +170,7 @@ async def init_tables(db):
     cursor=await db.execute('PRAGMA table_info(ded_moroz_audio_versions)')
     audio_columns={row[1] for row in await cursor.fetchall()}
     for name,definition in (('provider',"TEXT NOT NULL DEFAULT 'legacy'"),('submitted_text','TEXT'),
-                            ('model','TEXT'),('request_sha256','TEXT')):
+                            ('model','TEXT'),('request_sha256','TEXT'),('details','TEXT'),('duration','REAL')):
         if name not in audio_columns:
             await db.execute(f'ALTER TABLE ded_moroz_audio_versions ADD COLUMN {name} {definition}')
     await db.execute("""INSERT OR IGNORE INTO ded_moroz_audio_versions
@@ -162,6 +179,8 @@ async def init_tables(db):
         FROM ded_moroz_orders WHERE audio_path IS NOT NULL AND audio_url IS NOT NULL
         AND text IS NOT NULL""")
     await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS dm_active_user ON ded_moroz_orders(user_id) WHERE status NOT IN ('done','cancelled')")
+    from ded_moroz_sales import init_tables as init_sales
+    await init_sales(db)
     await db.execute('''CREATE TABLE IF NOT EXISTS ded_moroz_avatar (
         singleton INTEGER PRIMARY KEY CHECK(singleton=1),status TEXT NOT NULL,
         request_key TEXT NOT NULL,look_id TEXT,group_id TEXT,reference_url TEXT)''')
@@ -179,7 +198,7 @@ async def get(key):return await read('SELECT * FROM ded_moroz_orders WHERE id=?'
 
 async def update(key,**values):
     allowed={'status','photo_path','photo_url','text','audio_path','audio_url','video_id','video_url',
-             'raw_path','output_path','output_url','preview_sent','preview_mid','preview_version','notified','error','next_attempt','details','speech_provider_url','approved_audio_url','approved_audio_path'}
+             'raw_path','output_path','output_url','preview_sent','preview_mid','preview_version','notified','error','next_attempt','details','speech_provider_url','approved_audio_url','approved_audio_path','progress_stage','progress_next','result_mid'}
     if not values or set(values)-allowed:raise ValueError('Некорректное поле заказа.')
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
         await db.execute('UPDATE ded_moroz_orders SET '+','.join(k+'=?' for k in values)+' WHERE id=?',(*values.values(),key));await db.commit()
@@ -204,7 +223,7 @@ async def begin(user):
 
 def can_regenerate(order, admin):
     # admin is the trusted config.admin_user_id passed by the router/worker, never callback data.
-    return (admin is not None and order['user_id']==admin) or order.get('regeneration_attempts',0)<1
+    return (admin is not None and order['user_id']==admin and not order.get('payment_order_id')) or order.get('regeneration_attempts',0)<1
 
 
 async def finish_regeneration(db, cursor, key, user_id):
@@ -221,27 +240,22 @@ async def finish_regeneration(db, cursor, key, user_id):
 def keyboard(order, *, admin=None):
     b=InlineKeyboardBuilder().row(CallbackButton(text='✅ Всё верно, создать видео',payload='dm_audio_approve'))
     if can_regenerate(order,admin):
-        b.row(CallbackButton(text='🔄 Перегенерировать озвучку',payload='dm_audio_regenerate'))
         if order['user_id']==admin:
-            b.row(CallbackButton(text='✏️ Изменить текст',payload='dm_audio_edit'))
+            b.row(CallbackButton(text='🔄 Перегенерировать озвучку',payload='dm_audio_regenerate'))
+        b.row(CallbackButton(text='✏️ Изменить данные ребёнка',payload='dm_audio_edit'))
     return b.as_markup()
 
 
 def default_text_for_retry(row):
-    try:
-        details=json.loads(row['details'])
-        candidate=TEMPLATE.format(**details)
-        if row['text'] in (candidate,PREVIOUS_DEFAULT_TEMPLATE.format(**details),LEGACY_DEFAULT_TEMPLATE.format(**details)):
-            return candidate
-    except (ValueError,KeyError,TypeError):
-        pass
-    return row['text']
+    # Only explicit new synthesis rebuilds the template. Saved audio is never rewritten.
+    return tagged_text(json.loads(row['details']))
 
 
 async def regenerate(key, user, version, *, admin=None):
     """One accepted request per preview; admin unlimited, ordinary users one retry."""
     row=await get(key)
-    if not row or row['user_id']!=user:return False
+    if (not row or row['user_id']!=user or row['version']!=version
+        or row['status']!='audio_ready' or not can_regenerate(row,admin)):return False
     text=default_text_for_retry(row)
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
         cur=await db.execute("""UPDATE ded_moroz_orders SET text=?,version=version+1,regeneration_attempts=regeneration_attempts+1,
@@ -249,22 +263,44 @@ async def regenerate(key, user, version, *, admin=None):
             approved_audio_url=NULL,approved_audio_path=NULL,
             preview_sent=0,preview_mid=NULL,preview_version=NULL,error=NULL,next_attempt=0
             WHERE id=? AND user_id=? AND version=? AND status='audio_ready'
-            AND (? OR regeneration_attempts<1)""",(text,key,user,version,admin is not None and user==admin))
+            AND ((? AND payment_order_id IS NULL) OR regeneration_attempts<1)""",(text,key,user,version,admin is not None and user==admin))
         return await finish_regeneration(db,cur,key,user)
 
 
 async def approve(key, user, version):
+    row=await get(key)
+    if row and row.get('payment_order_id'):
+        take=await read('SELECT duration FROM ded_moroz_audio_versions WHERE order_id=? AND version=?',(key,version))
+        if not take or take['duration'] is None or take['duration']>sales.MAX_SPEECH_SECONDS:
+            raise ValueError('Эта озвучка слишком длинная. Сократите данные ребёнка или выберите другой вариант.')
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
         cur=await db.execute("""UPDATE ded_moroz_orders SET status='video_queued',
-            approved_audio_url=audio_url,approved_audio_path=audio_path
+            approved_audio_url=audio_url,approved_audio_path=audio_path,progress_stage='video',progress_next=?
             WHERE id=? AND user_id=? AND version=? AND status='audio_ready'
-            AND audio_url IS NOT NULL AND audio_path IS NOT NULL""",(key,user,version))
+            AND audio_url IS NOT NULL AND audio_path IS NOT NULL""",(database._now_ts()+120,key,user,version))
         await db.commit();return cur.rowcount==1
 
 
-async def resume(key,user):
+async def choose_audio(key,user,version,take,admin=None):
     row=await get(key)
-    if not row or row['user_id']!=user or row['status']!='manual':
+    if not row or row['user_id']!=user or not await sales.allowed(row,admin):return False
+    audio=await read('SELECT * FROM ded_moroz_audio_versions WHERE order_id=? AND version=?',(key,take))
+    if (not audio or not audio['path'] or not audio['public_url'] or not audio['details']
+        or audio['duration'] is None or audio['duration']>sales.MAX_SPEECH_SECONDS):
+        raise ValueError('Этот вариант недоступен или длиннее 70 секунд с заставкой. Выберите другой вариант.')
+    https_url(audio['public_url'])
+    async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
+        cur=await db.execute("""UPDATE ded_moroz_orders SET status='video_queued',approved_audio_path=?,
+            approved_audio_url=?,text=?,details=?,progress_stage='video',progress_next=? WHERE id=? AND user_id=? AND version=? AND status='audio_ready'""",
+            (audio['path'],audio['public_url'],audio['text'],audio['details'],database._now_ts()+120,key,user,version))
+        if cur.rowcount==1:
+            await database.increment_counter('dm_audio_choice_'+str(take+1),user_id=user,connection=db)
+        await db.commit();return cur.rowcount==1
+
+
+async def resume(key,user,*,admin=None):
+    row=await get(key)
+    if not row or (row['user_id']!=user and user!=admin) or row['status']!='manual':
         raise ValueError('Нет приостановленного заказа этого администратора.')
     prior=(row['error'] or '').split(':',1)[0]
     if row['video_id']:
@@ -273,22 +309,92 @@ async def resume(key,user):
         target=prior
     else:
         raise ValueError('Результат платного запроса неизвестен. Сначала сверьте запрос у провайдера; повтор автоматически запрещён.')
-    if not await transition(key,user,'manual',target):raise ValueError('Статус заказа уже изменился.')
+    if not await transition(key,row['user_id'],'manual',target):raise ValueError('Статус заказа уже изменился.')
     await update(key,error=None,next_attempt=0)
     return target
 
 
 async def request_edit(key,user,version,*,admin=None):
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
-        cur=await db.execute("UPDATE ded_moroz_orders SET edit_used=1,status='editing' WHERE id=? AND user_id=? AND version=? AND status='audio_ready' AND (? OR (edit_used=0 AND regeneration_attempts<1))",(key,user,version,admin is not None and user==admin))
+        cur=await db.execute("UPDATE ded_moroz_orders SET edit_details=details,edit_field=NULL,status='editing' WHERE id=? AND user_id=? AND version=? AND status='audio_ready' AND ((? AND payment_order_id IS NULL) OR (edit_used=0 AND regeneration_attempts<1))",(key,user,version,admin is not None and user==admin))
         await db.commit();return cur.rowcount==1
 
 
 async def revised(key,user,text,*,admin=None):
-    if not text or not text.strip() or len(text)>4500:raise ValueError('Введите текст от 1 до 4500 символов.')
+    row=await get(key)
+    if not row or row['user_id']!=user or row['status']!='editing':return False
+    if not row['edit_field']:raise ValueError('Сначала выберите, какое имя или факт изменить кнопкой ниже.')
+    value=fact_value(row['edit_field'],text)
+    if user!=admin or row.get('payment_order_id'):sales.validate_field(row['edit_field'],value)
+    draft=json.loads(row['edit_details'] or row['details']);draft[row['edit_field']]=value
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
-        cur=await db.execute("UPDATE ded_moroz_orders SET text=?,version=version+1,regeneration_attempts=regeneration_attempts+1,status='audio_queued',audio_path=NULL,audio_url=NULL,speech_provider_url=NULL,approved_audio_url=NULL,approved_audio_path=NULL,preview_sent=0,preview_mid=NULL,preview_version=NULL WHERE id=? AND user_id=? AND status='editing' AND edit_used=1 AND (? OR regeneration_attempts<1)",(text.strip(),key,user,admin is not None and user==admin))
+        cur=await db.execute("UPDATE ded_moroz_orders SET edit_details=?,edit_field=NULL WHERE id=? AND user_id=? AND version=? AND status='editing' AND edit_field=? AND edit_details IS ?",
+            (json.dumps(draft,ensure_ascii=False),key,user,row['version'],row['edit_field'],row['edit_details']))
+        await db.commit();return cur.rowcount==1
+
+
+async def select_fact(key,user,version,field):
+    if field not in FACT_LABELS:return False
+    async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
+        cur=await db.execute("UPDATE ded_moroz_orders SET edit_field=?,edit_details=COALESCE(edit_details,details) WHERE id=? AND user_id=? AND version=? AND status='editing'",(field,key,user,version))
+        await db.commit();return cur.rowcount==1
+
+
+async def apply_facts(key,user,version,*,admin=None):
+    row=await get(key)
+    if not row or row['user_id']!=user or row['version']!=version or row['status']!='editing' or row['edit_field']:return False
+    details=row['edit_details'] or row['details'];text=tagged_text(json.loads(details))
+    if user!=admin or row.get('payment_order_id'):
+        for field,value in json.loads(details).items():
+            if field in sales.LIMITS:sales.validate_field(field,value)
+    async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
+        cur=await db.execute("""UPDATE ded_moroz_orders SET details=?,text=?,edit_details=NULL,edit_field=NULL,edit_used=1,
+            version=version+1,regeneration_attempts=regeneration_attempts+1,status='audio_queued',
+            audio_path=NULL,audio_url=NULL,speech_provider_url=NULL,approved_audio_url=NULL,approved_audio_path=NULL,
+            preview_sent=0,preview_mid=NULL,preview_version=NULL,error=NULL,next_attempt=0
+            WHERE id=? AND user_id=? AND version=? AND status='editing' AND edit_field IS NULL
+            AND edit_details IS ? AND ((? AND payment_order_id IS NULL) OR regeneration_attempts<1)""",
+            (details,text,key,user,version,row['edit_details'],admin is not None and user==admin))
         return await finish_regeneration(db,cur,key,user)
+
+
+async def cancel_facts(key,user,version):
+    async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
+        cur=await db.execute("UPDATE ded_moroz_orders SET status='audio_ready',edit_details=NULL,edit_field=NULL,preview_sent=0,preview_mid=NULL,preview_version=NULL WHERE id=? AND user_id=? AND version=? AND status='editing'",(key,user,version))
+        await db.commit();return cur.rowcount==1
+
+
+async def show_facts(event,context,row):
+    from handlers import PosterStates
+    await context.clear();await context.update_data(dm_order=row['id'])
+    await context.set_state(PosterStates.ded_moroz_edit)
+    draft=json.loads(row['edit_details'] or row['details'])
+    b=InlineKeyboardBuilder()
+    for field,label in FACT_LABELS.items():
+        b.row(CallbackButton(text='✏️ '+label,payload=f"dm_fact_edit:{row['id']}:{row['version']}:{field}"))
+    label='🎙 Сохранить и озвучить (платно)' if not row.get('payment_order_id') else '🎙 Создать второй вариант озвучки'
+    b.row(CallbackButton(text=label,payload=f"dm_facts_apply:{row['id']}:{row['version']}"))
+    b.row(CallbackButton(text='⬅️ Отменить изменения',payload=f"dm_facts_cancel:{row['id']}:{row['version']}"))
+    text='Можно изменить только данные ребёнка. Шаблон и теги голоса бот сохранит.\n\n'
+    text+='\n'.join(label+': '+draft.get(field,'—') for field,label in FACT_LABELS.items())
+    text+=('\n\nОдна правка данных и второй вариант озвучки уже входят в стоимость. Выберите поле, затем нажмите «Создать второй вариант озвучки».'
+        if row.get('payment_order_id') else '\n\nВыберите поле. Новая платная озвучка начнётся только после «Сохранить и озвучить».')
+    if row['edit_field']:
+        text+='\n\n'+edit_prompt(row['edit_field'])
+    await tell(event,text,attachments=[b.as_markup()])
+
+
+def edit_prompt(field):
+    if field=='name':return 'Как зовут ребёнка или как вы ласково его называете? Например: «Маша» или «Машенька».'
+    return dict(QUESTIONS)[field]
+
+
+def question(field,user,admin):
+    text=dict(QUESTIONS)[field]
+    if user!=admin:
+        chars,words=sales.LIMITS[field]
+        text+=f'\n\nДо {chars} символов и {words} слов, чтобы видео уложилось в 70 секунд.'
+    return text
 
 
 def manual_audio_retry_allowed(row):
@@ -322,12 +428,12 @@ async def tell(event,text=None,**kwargs):
 async def enter(event,context,admin):
     from handlers import PosterStates,navigation_keyboard
     user=event.get_ids()[1]
-    if user!=admin or admin is None:
-        await tell(event,STUB,attachments=[navigation_keyboard((('⬅️ Назад','back_to_main'),))]);return
-    row=await begin(user)
+    row=await begin(user) if admin is not None and user==admin else await sales.claim(user,admin)
+    if not row:
+        await tell(event,'Сначала оплатите поздравление. Если оплата уже прошла, подождите немного и нажмите «Продолжить» снова.',attachments=[navigation_keyboard((('🎅 К поздравлению','cat_ded_moroz'),))]);return
     await context.clear();await context.update_data(dm_order=row['id'])
     if row['status']=='input':
-        data=json.loads(row['details']);remaining=[q for k,q in QUESTIONS if k not in data]
+        data=json.loads(row['details']);remaining=[question(k,user,admin) for k,q in QUESTIONS if k not in data]
         if remaining:
             await context.set_state(PosterStates.ded_moroz_input)
             if set(data)=={'name'}:await tell(event,EXPLANATION)
@@ -336,12 +442,14 @@ async def enter(event,context,admin):
             await context.set_state(PosterStates.ded_moroz_photo)
             await tell(event,PHOTO_PROMPT)
     elif row['status']=='editing':
-        await context.set_state(PosterStates.ded_moroz_edit);await tell(event,'Отправьте исправленный текст целиком.')
+        await show_facts(event,context,row)
+    elif row['status']=='manual' and user!=admin:
+        await tell(event,'Дедушка Мороз пока не смог закончить поздравление. Мы уже получили сообщение и поможем продолжить. Повторная оплата не нужна.',attachments=[navigation_keyboard((('🆘 Поддержка','help_support'),))])
     elif row['status']=='manual':
         b=InlineKeyboardBuilder()
         text=f"⚠️ Поздравление приостановлено. Заказ: {row['id']}. Текст, фото и готовые файлы сохранены."
         if manual_audio_retry_allowed(row):
-            text+='\n\nМожно запустить новую платную озвучку голосом «Дед мороз» в HeyGen. Предыдущий неизвестный результат запроса при необходимости сверьте у провайдера. Нажмите кнопку, чтобы начать новую попытку с сохранённым текстом и фото.'
+            text+='\n\nМожно запустить новую платную озвучку голосом «Дед мороз». Предыдущий неизвестный результат сначала проверьте в журнале. Нажмите кнопку, чтобы начать новую попытку с сохранённым текстом и фото.'
             b.row(CallbackButton(text='🎙 Перегенерировать озвучку',payload=f"dm_manual_regenerate:{row['id']}:{row['version']}"))
         else:
             text+='\nДля продолжения сохранённого этапа используйте /dm_resume '+row['id']
@@ -349,27 +457,32 @@ async def enter(event,context,admin):
     elif row['status']=='audio_ready':
         await update(row['id'],preview_sent=0);await tell(event,'Повторно отправляю сохранённую озвучку; новая генерация не запускается.')
     else:
-        await tell(event,f"Заказ {row['id']}: {row['status']}. Состояние сохранено.")
+        await tell(event,('🎅 Дедушка Мороз готовит ваше поздравление. Как только оно будет готово, пришлю видео сюда.'
+            if row.get('payment_order_id') else f"Заказ {row['id']}: {row['status']}. Состояние сохранено."))
+    if row.get('payment_order_id'):
+        async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
+            await db.execute('UPDATE ded_moroz_payments SET notified=1 WHERE order_id=? AND user_id=?',(row['payment_order_id'],user));await db.commit()
 
 
 async def collect(event,context,admin,config=None,settings=None):
     from handlers import PosterStates,is_bot_message
-    if event.get_ids()[1]!=admin or admin is None or is_bot_message(event):return
+    user=event.get_ids()[1]
+    if is_bot_message(event):return
     row=await get((await context.get_data()).get('dm_order'))
-    if not row or row['user_id']!=admin:return
+    if not row or row['user_id']!=user or not await sales.allowed(row,admin):return
     text=(event.message.body.text or '').strip()
     state=await context.get_state()
     if state==PosterStates.ded_moroz_edit:
-        if await revised(row['id'],admin,text,admin=admin):
-            await context.clear();await tell(event,'Создаю новую озвучку. После прослушивания можно снова изменить текст или перегенерировать аудио.')
+        if await revised(row['id'],user,text,admin=admin):
+            await show_facts(event,context,await get(row['id']))
         return
     if state==PosterStates.ded_moroz_input and row['status']=='input':
-        if not text or len(text)>300:raise ValueError('Введите фразу от 1 до 300 символов.')
         data=json.loads(row['details']);key=next((k for k,_ in QUESTIONS if k not in data),None)
         if key is None:return
-        data[key]=text
+        data[key]=fact_value(key,text)
+        if user!=admin or row.get('payment_order_id'):sales.validate_field(key,data[key])
         await update(row['id'],details=json.dumps(data,ensure_ascii=False))
-        next_question=next((q for k,q in QUESTIONS if k not in data),None)
+        next_question=next((question(k,user,admin) for k,q in QUESTIONS if k not in data),None)
         if key=='name':await tell(event,EXPLANATION)
         if next_question:await tell(event,next_question)
         else:
@@ -378,54 +491,96 @@ async def collect(event,context,admin,config=None,settings=None):
     elif state==PosterStates.ded_moroz_photo and row['status']=='input':
         config=config or Config.from_env();settings=settings or Settings.from_config(config)
         avatar=await read('SELECT * FROM ded_moroz_avatar WHERE singleton=1')
-        settings.ready(config,avatar_known=bool(avatar and avatar['look_id']))
+        try:settings.ready(config,avatar_known=bool(avatar and avatar['look_id']))
+        except ValueError:
+            if user==admin:raise
+            logger.exception('Недоступна мастерская для оплаченного поздравления')
+            raise ValueError('Мастерская временно недоступна. Ваш заказ и оплата сохранены; повторно оплачивать не нужно.') from None
         attachments=event.message.body.attachments or []
         images=[a for a in attachments if a.type in ('image','file') and getattr(a.payload,'url',None)]
-        if len(images)!=1:raise ValueError('Отправьте один JPG/PNG через «Файл».')
+        if len(images)!=1:raise ValueError('Отправьте одну фотографию ребёнка — как фото или файл JPG/PNG.')
         assets=Assets(settings.root,config)
         attempt=uuid4().hex
-        source,_=await assets.download(images[0].payload.url,'bin',job_id=row['id'],name='child-source-'+attempt+'.bin',limit=20*1024*1024,accept='image/jpeg, image/png')
+        source,_=await assets.download(images[0].payload.url,'bin',job_id=row['id'],name='child-source-'+attempt+'.bin',limit=20*1024*1024,accept='image/jpeg, image/png, image/webp')
         png=await asyncio.to_thread(png_bytes,assets.path(source))
         path,_=await assets.write(png,'png',job_id=row['id'],name='child-photo-'+attempt+'.png')
-        alias=assets.path(f'ded_moroz_{admin}/child_photo.png');alias.parent.mkdir(parents=True,exist_ok=True)
+        alias=assets.path(f'ded_moroz_{user}/child_photo.png');alias.parent.mkdir(parents=True,exist_ok=True)
         tmp=alias.with_name('.child-'+uuid4().hex+'.png');await asyncio.to_thread(tmp.write_bytes,png);await asyncio.to_thread(os.replace,tmp,alias)
         url=await assets.publish(path)
-        text=TEMPLATE.format(**json.loads(row['details']))
+        text=tagged_text(json.loads(row['details']))
         await update(row['id'],photo_path=path,photo_url=url,text=text)
-        if await transition(row['id'],admin,'input','audio_queued'):
+        if await transition(row['id'],user,'input','audio_queued'):
             await context.clear();await tell(event,AUDIO_GENERATING)
 
 
 async def callback(event,context,admin,config=None,settings=None):
     from handlers import PosterStates
-    if event.get_ids()[1]!=admin or admin is None:return
+    user=event.get_ids()[1]
     parts=event.callback.payload.split(':')
     if len(parts)==1:
         mid=getattr(getattr(event.message,'body',None),'mid',None)
-        row=await read("SELECT * FROM ded_moroz_orders WHERE user_id=? AND preview_mid=? AND preview_version=version AND status='audio_ready' AND preview_sent=1",(admin,mid))
+        row=await read("SELECT * FROM ded_moroz_orders WHERE user_id=? AND preview_mid=? AND preview_version=version AND status='audio_ready' AND preview_sent=1",(user,mid))
         if not row:
             await tell(event,'Эта кнопка уже использована или относится к предыдущей версии озвучки.');return
         parts=[parts[0],row['id'],str(row['version'])]
-    if len(parts)!=3:return
-    action,key,version=parts
+    if len(parts) not in (3,4):return
+    action,key,version=parts[:3]
     try:version=int(version)
     except ValueError:return
     row=await get(key)
-    if not row or row['user_id']!=admin:return
+    if not row or row['user_id']!=user or not await sales.allowed(row,admin):return
+    if action=='dm_audio_choose' and len(parts)==4:
+        try:accepted=await choose_audio(key,user,version,int(parts[3]),admin=admin)
+        except ValueError as exc:
+            await tell(event,str(exc));return
+        if accepted:
+            await context.clear();await tell(event,'🎅 Дедушка Мороз записывает для вас поздравление! Нужно немного подождать. Когда видео будет готово, я пришлю его сюда.')
+        else:await tell(event,'Этот выбор уже сохранён или относится к предыдущей версии.')
+        return
+    if action=='dm_fact_edit' and len(parts)==4:
+        if await select_fact(key,user,version,parts[3]):
+            await context.clear();await context.update_data(dm_order=key)
+            await context.set_state(PosterStates.ded_moroz_edit)
+            await tell(event,edit_prompt(parts[3]))
+        else:await tell(event,'Эта кнопка относится к предыдущей версии. Откройте раздел заново.')
+        return
+    if len(parts)!=3:return
+    if action=='dm_facts_apply':
+        try:accepted=await apply_facts(key,user,version,admin=admin)
+        except ValueError as exc:
+            await tell(event,str(exc));return
+        if accepted:
+            await context.clear();await tell(event,AUDIO_GENERATING)
+        else:await tell(event,'Изменения не отправлены. Завершите ввод выбранного поля или откройте раздел заново.')
+        return
+    if action=='dm_facts_cancel':
+        if await cancel_facts(key,user,version):
+            await context.clear();await tell(event,'Изменения отменены. Отправляю сохранённую озвучку без новой генерации.')
+        else:await tell(event,'Эта кнопка относится к предыдущей версии.')
+        return
     if action=='dm_manual_regenerate':
-        try:accepted=await retry_manual_audio(key,admin,version,admin=admin,config=config,settings=settings)
+        try:accepted=await retry_manual_audio(key,user,version,admin=admin,config=config,settings=settings)
         except ValueError as exc:
             await tell(event,str(exc));return
         if accepted:
             await context.clear();await tell(event,AUDIO_GENERATING)
         else:await tell(event,'Состояние заказа уже изменилось. Откройте раздел заново.')
-    elif action=='dm_audio_edit' and await request_edit(key,admin,version,admin=admin):
-        await context.clear();await context.update_data(dm_order=key);await context.set_state(PosterStates.ded_moroz_edit)
-        await tell(event,'Отправьте новый текст целиком. Перегенерация озвучки платная; для администратора число попыток не ограничено.')
-    elif action=='dm_audio_regenerate' and await regenerate(key,admin,version,admin=admin):
-        await context.clear();await tell(event,AUDIO_GENERATING)
-    elif action in ('dm_audio_ok','dm_audio_approve') and await approve(key,admin,version):
-        await context.clear();await tell(event,'Утверждённая озвучка сохранена. Запускаю HeyGen Avatar IV и монтаж.')
+    elif action=='dm_audio_edit' and await request_edit(key,user,version,admin=admin):
+        await show_facts(event,context,await get(key))
+    elif action=='dm_audio_regenerate':
+        try:accepted=await regenerate(key,user,version,admin=admin)
+        except ValueError as exc:
+            await tell(event,str(exc));return
+        if accepted:
+            await context.clear();await tell(event,AUDIO_GENERATING)
+        else:await tell(event,'Эта кнопка относится к предыдущей версии озвучки.')
+    elif action in ('dm_audio_ok','dm_audio_approve'):
+        try:accepted=await approve(key,user,version)
+        except ValueError as exc:
+            await tell(event,str(exc));return
+        if accepted:
+            await context.clear();await tell(event,'🎅 Дедушка Мороз записывает для вас поздравление! Нужно немного подождать. Когда видео будет готово, я пришлю его сюда.')
+        else:await tell(event,'Эта кнопка уже использована или относится к предыдущей версии.')
     else:await tell(event,'Эта кнопка уже использована или относится к предыдущей версии озвучки.')
 
 
@@ -438,6 +593,13 @@ class Worker:
         self.tts=tts or HeyGenTTSAdapter(self.settings.heygen_key,self.settings.voice_id,self.assets,model=self.settings.tts_model,
             speed=self.settings.speech_speed,echo_delay_ms=self.settings.echo_delay_ms,echo_decay=self.settings.echo_decay,pitch_semitones=self.settings.pitch_semitones)
         self.uploads={}
+
+    async def announce(self,row,stage,text):
+        if not row.get('payment_order_id'):return
+        now=database._now_ts()
+        if row.get('progress_stage')==stage and row.get('progress_next',0)>now:return
+        if await self.bot.send_message(user_id=row['user_id'],text=text) is None:return
+        await update(row['id'],progress_stage=stage,progress_next=now+120)
 
     async def avatar(self):
         row=await read('SELECT * FROM ded_moroz_avatar WHERE singleton=1')
@@ -468,25 +630,34 @@ class Worker:
 
     async def store_audio_result(self,row,path):
         key=row['id'];text=prepare_speech_text(row['text'])
+        seconds=None
+        if row.get('payment_order_id'):
+            from media_service import audio_duration
+            seconds=await audio_duration(self.assets.path(path))
         signature=HeyGenTTSAdapter(None,self.settings.voice_id,self.assets,model=self.settings.tts_model,
             speed=self.settings.speech_speed,echo_delay_ms=self.settings.echo_delay_ms,echo_decay=self.settings.echo_decay,pitch_semitones=self.settings.pitch_semitones).fingerprint(text)
         async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
             await db.execute("""INSERT INTO ded_moroz_audio_versions
-                (order_id,version,text,voice_id,provider_url,path,provider,submitted_text,model,request_sha256)
-                VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                (key,row['version'],row['text'],self.settings.voice_id,'',path,'heygen',text,self.settings.tts_model,signature))
+                (order_id,version,text,voice_id,provider_url,path,provider,submitted_text,model,request_sha256,details,duration)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (key,row['version'],row['text'],self.settings.voice_id,'',path,'heygen',text,self.settings.tts_model,signature,row['details'],seconds))
             await db.execute("UPDATE ded_moroz_orders SET speech_provider_url=NULL,audio_path=?,status='audio_publish',error=NULL,next_attempt=0 WHERE id=?",(path,key))
             await db.commit()
 
     async def process(self,row):
         key=row['id'];state=row['status']
-        if row['user_id']!=self.admin:return
+        if not await sales.allowed(row,self.admin):return
+        user=row['user_id']
+        if state in ('video_queued','polling','download'):
+            await self.announce(row,'video','🎅 Дедушка Мороз записывает для вас персональное поздравление. Нужно немного подождать — я пришлю видео сюда, как только оно будет готово.')
+        elif state in ('render','publish'):
+            await self.announce(row,'render','✨ Поздравление записано! Добавляю фотографию ребёнка, новогоднюю заставку и музыку. Осталось немного подождать.')
         if state=='audio_queued':
             self.settings.ready(self.config,avatar_known=bool(await read('SELECT look_id FROM ded_moroz_avatar WHERE look_id IS NOT NULL')))
             if not row['photo_path'] or not self.assets.path(row['photo_path']).is_file():raise ValueError('Не найдено сохранённое фото ребёнка.')
             text=prepare_speech_text(row['text'])
             if not text or len(text)>10000:raise ValueError('После очистки тегов текст озвучки должен содержать от 1 до 10000 символов.')
-            if not await transition(key,self.admin,'audio_queued','audio_submitting'):return
+            if not await transition(key,user,'audio_queued','audio_submitting'):return
             path=await self.tts.generate_speech(text,job_id=key,version=row['version'])
             if not self.assets.path(path).is_file():raise ValueError('HeyGen не сохранил MP3 этой версии.')
             # Persisted MP3 and manifest can be reused after interruption; no second POST.
@@ -505,6 +676,7 @@ class Worker:
                 await db.execute("UPDATE ded_moroz_orders SET audio_url=?,status='audio_ready',preview_sent=0 WHERE id=?",(url,key))
                 await db.commit()
         elif state=='audio_ready' and not row['preview_sent']:
+            needs_help=False
             token_key=('audio',key,row['version'])
             audio=self.uploads.get(token_key)
             if audio is None:
@@ -513,13 +685,35 @@ class Worker:
             preview_text=display_text(prepare_speech_text(row['text']))
             chunks=[preview_text[i:i+3500] for i in range(0,len(preview_text),3500)]
             for chunk in chunks:
-                if await self.bot.send_message(user_id=self.admin,text=chunk) is None:raise ValueError('MAX не подтвердил текст.')
-            sent=await self.bot.send_message(user_id=self.admin,text='🎧 Прослушайте озвучку Деда Мороза. Всё нравится?',attachments=[audio,keyboard(row,admin=self.admin)])
+                if await self.bot.send_message(user_id=user,text=chunk) is None:raise ValueError('MAX не подтвердил текст.')
+            buttons=keyboard(row,admin=self.admin)
+            caption='🎧 Прослушайте озвучку Деда Мороза. Всё нравится?'
+            if row.get('payment_order_id'):
+                takes=await read('SELECT * FROM ded_moroz_audio_versions WHERE order_id=? AND public_url IS NOT NULL ORDER BY version LIMIT 2',(key,),all_rows=True)
+                b=InlineKeyboardBuilder()
+                for number,take in enumerate(takes,1):
+                    if take['duration'] is not None and take['duration']<=sales.MAX_SPEECH_SECONDS:
+                        b.row(CallbackButton(text=f'✅ Оставить озвучку {number}',payload=f"dm_audio_choose:{key}:{row['version']}:{take['version']}"))
+                if can_regenerate(row,self.admin):b.row(CallbackButton(text='✏️ Изменить данные ребёнка',payload='dm_audio_edit'))
+                b.row(CallbackButton(text='🆘 Поддержка',payload='help_support'))
+                buttons=b.as_markup()
+                if len(takes)>1:
+                    previous=await self.bot.upload_media(InputMedia(path=str(self.assets.path(takes[0]['path'])),type=UploadType.AUDIO))
+                    if await self.bot.send_message(user_id=user,text='🎧 Вариант 1 — с первоначальными данными ребёнка.',attachments=[previous]) is None:raise RuntimeError('MAX не подтвердил вариант 1.')
+                    caption='🎧 Вариант 2 — с изменёнными данными. Какую озвучку оставить для видео: 1 или 2?'
+                current=next((take for take in takes if take['version']==row['version']),None)
+                if current and current['duration'] is not None and current['duration']>sales.MAX_SPEECH_SECONDS:
+                    caption+='\nЭтот вариант длиннее допустимого: сократите данные или выберите другой доступный вариант. Доплачивать не нужно.'
+                    if not any(take['duration'] is not None and take['duration']<=sales.MAX_SPEECH_SECONDS for take in takes) and not can_regenerate(row,self.admin):
+                        needs_help=True
+                        await self.bot.send_message(user_id=self.admin,text=f'⚠️ Нужна помощь с длительностью озвучки Деда Мороза: заказ {key}, пользователь {user}. Обе попытки сохранены, видео не запускалось.')
+            sent=await self.bot.send_message(user_id=user,text=caption,attachments=[audio,buttons])
             if sent is None:raise ValueError('MAX не подтвердил аудио.')
             message=getattr(sent,'message',sent)  # maxapi returns SendedMessage(message=Message(...)).
             mid=getattr(getattr(message,'body',None),'mid',None)
             if not isinstance(mid,str) or not mid:raise RuntimeError('MAX не вернул ID сообщения с озвучкой.')
             await update(key,preview_sent=1,preview_mid=mid,preview_version=row['version'])
+            if needs_help:await update(key,status='manual',error='audio_ready:duration_limit')
         elif state=='video_queued':
             self.settings.ready(self.config,avatar_known=bool(await read('SELECT look_id FROM ded_moroz_avatar WHERE look_id IS NOT NULL')),stage='video')
             sources={'photo_path':row['photo_path'],
@@ -528,9 +722,13 @@ class Worker:
                 if not path or not self.assets.path(path).is_file():raise ValueError('Не найден сохранённый исходник: '+field_name)
             approved_url=row['approved_audio_url'] or row['audio_url']  # Already-approved legacy orders.
             https_url(approved_url)
+            if row.get('payment_order_id'):
+                from media_service import audio_duration
+                if await audio_duration(self.assets.path(row['approved_audio_path'] or row['audio_path']))>sales.MAX_SPEECH_SECONDS:
+                    raise ValueError('Утверждённая озвучка не укладывается в 70 секунд с заставкой.')
             avatar=await self.avatar()
             if not avatar:return
-            if not await transition(key,self.admin,'video_queued','video_submitting'):return
+            if not await transition(key,user,'video_queued','video_submitting'):return
             video=await self.heygen.create_video(avatar,approved_url,'dm-video-'+key)
             await update(key,video_id=video,status='polling')
         elif state=='polling':
@@ -556,6 +754,9 @@ class Worker:
                 if details.get('title_name_source')==details['name'] and details.get('title_name_genitive') else {})
             await render_ded_moroz(self.assets.path(row['raw_path']),self.assets.path(row['photo_path']),
                 self.assets.path(row['approved_audio_path'] or row['audio_path']),self.settings.examples,target,details['name'],**title_options)
+            if row.get('payment_order_id'):
+                from media_service import audio_duration
+                if await audio_duration(target)>70:raise ValueError('Итоговое поздравление длиннее 70 секунд.')
             await update(key,output_path=target.relative_to(self.assets.root).as_posix(),status='publish')
         elif state=='publish':
             url=await self.assets.publish(row['output_path'])
@@ -566,21 +767,37 @@ class Worker:
             if video is None:
                 video=await self.bot.upload_media(InputMedia(path=str(self.assets.path(row['output_path'])),type=UploadType.VIDEO))
                 self.uploads[token_key]=video
-            sent=await self.bot.send_message(user_id=self.admin,text='🎉 Поздравление от Деда Мороза готово! Можете скачать видео.',attachments=[video])
+            if getattr(video,'type',None)!='video':raise RuntimeError('MAX вернул вложение другого типа вместо видео.')
+            from ded_moroz_customer import result_keyboard
+            caption=('🎉 Поздравление от Деда Мороза готово! Можете скачать видео.\n\n'
+                     'На iPhone: «Поделиться» → «Сохранить видео». Если доступно только сохранение в «Файлы», '
+                     'откройте MP4 в «Файлах» и выберите «Поделиться» → «Сохранить видео». '
+                     'Ниже есть более компактная версия для телефона.')
+            sent=await self.bot.send_message(user_id=user,text=caption,attachments=[video,result_keyboard(row,self.config.bot_link)])
             if sent is None:raise ValueError('MAX не подтвердил видео.')
+            message=getattr(sent,'message',sent)
+            mid=getattr(getattr(message,'body',None),'mid',None)
+            if isinstance(mid,str):await update(key,result_mid=mid)
             async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
                 await db.execute('BEGIN IMMEDIATE')
                 cursor=await db.execute('SELECT notified,status FROM ded_moroz_orders WHERE id=?',(key,))
                 prior=await cursor.fetchone()
                 if prior and prior[1]=='deliver':
                     await db.execute("UPDATE ded_moroz_orders SET status='done',notified=1,error=NULL WHERE id=?",(key,))
-                    if not prior[0]:await database.increment_counter('dm_video_created',user_id=self.admin,connection=db)
+                    if not prior[0]:await database.increment_counter('dm_video_created',user_id=user,connection=db)
                 await db.commit()
             self.uploads={k:v for k,v in self.uploads.items() if k[1]!=key}
 
     async def tick(self):
         now=database._now_ts()
-        rows=await read("SELECT * FROM ded_moroz_orders WHERE user_id=? AND status NOT IN ('input','editing','done','cancelled','manual','audio_submitting','video_submitting') AND next_attempt<=? AND (status!='audio_ready' OR preview_sent=0) ORDER BY created_at LIMIT 1",(self.admin,now),all_rows=True)
+        await sales.paid_notifications(self.bot)
+        from ded_moroz_customer import process_auxiliary
+        await process_auxiliary(self)
+        rows=await read("""SELECT o.* FROM ded_moroz_orders o WHERE
+            (o.user_id=? OR EXISTS(SELECT 1 FROM ded_moroz_payments p WHERE p.order_id=o.payment_order_id
+                AND p.user_id=o.user_id AND p.claimed_id=o.id AND p.status='paid'))
+            AND o.status NOT IN ('input','editing','done','cancelled','manual','audio_submitting','video_submitting')
+            AND o.next_attempt<=? AND (o.status!='audio_ready' OR o.preview_sent=0) ORDER BY o.created_at LIMIT 1""",(self.admin,now),all_rows=True)
         for row in rows:
             try:await self.process(row)
             except asyncio.CancelledError:raise
@@ -596,11 +813,14 @@ class Worker:
                 if terminal:
                     try:await self.bot.send_message(user_id=self.admin,text=f"⚠️ Заказ Деда Мороза {row['id']} требует проверки. Состояние и файлы сохранены; платный запрос автоматически не повторяется."+(f" Причина: {exc}" if isinstance(exc,HeyGenSpeechError) else ""))
                     except Exception:logger.exception('Дед Мороз: не удалось отправить предупреждение')
+                    if row['user_id']!=self.admin:
+                        try:await self.bot.send_message(user_id=row['user_id'],text='🎅 Поздравление пока не удалось закончить. Мы получили сообщение и поможем продолжить. Ваши данные и оплата сохранены; доплачивать не нужно.')
+                        except Exception:logger.exception('Не удалось предупредить клиента Деда Мороза')
 
     async def recover_interrupted(self):
         # Reuse a verified completed HeyGen MP3 if the process stopped before SQLite commit.
         if isinstance(self.tts,HeyGenTTSAdapter):
-            rows=await read("SELECT * FROM ded_moroz_orders WHERE user_id=? AND status='audio_submitting'",(self.admin,),all_rows=True)
+            rows=await read("SELECT * FROM ded_moroz_orders WHERE (user_id=? OR payment_order_id IN (SELECT order_id FROM ded_moroz_payments WHERE status='paid')) AND status='audio_submitting'",(self.admin,),all_rows=True)
             for row in rows:
                 try:
                     path=await self.tts.cached_speech(row['text'],job_id=row['id'],version=row['version'])

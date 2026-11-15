@@ -74,6 +74,10 @@ def create_webhook_app(payments: ProdamusPayments, *, audio_worker=None, musical
                 return web.Response(text="OK")
             signed_success = True
             order, payment_id = await payments.validate_payment(data)
+            if order.get('order_type')=='ded_moroz':
+                from ded_moroz_sales import mark_paid
+                await mark_paid(order['order_id'],payment_id)
+                return await accepted_payment(payment_id)
             if order.get('order_type') == 'animation':
                 accepted = await mark_animation_paid(order['order_id'], payment_id)
                 logger.info('Prodamus: %s.', 'пакет оживления фото оплачен' if accepted else 'повтор оплаты оживления фото')

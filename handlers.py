@@ -30,7 +30,7 @@ from maxapi.types import (
 )
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
-from config import DEFAULT_BOT_LINK, validate_bot_link
+from config import Config, DEFAULT_BOT_LINK, validate_bot_link
 import promo1111
 from video_service import build_video_prompt, generate_video_from_avatar, CARTOON_VIDEO_PROMPTS, create_video_task_with_retry as create_video_task, poll_video_task
 from media_service import VIDEO_MERGE_POLICY, MUSICAL_VIDEO_POLICY, MUSICAL_VIDEO_WAIT_MESSAGE, merge_video_and_audio, create_musical_video, upload_video_for_max, upload_audio_for_max
@@ -837,6 +837,7 @@ class PosterStates(StatesGroup):
     ded_moroz_input = State()
     ded_moroz_photo = State()
     ded_moroz_edit = State()
+    ded_moroz_review = State()
     waiting_for_birthday_number = State()
     waiting_for_recovery_email = State()
     waiting_for_animation_photo = State()
@@ -1728,6 +1729,8 @@ def create_router(
         activity = await get_advanced_stats(admin_id=admin_user_id)
         counters = await get_all_counters(admin_id=admin_user_id)
         dm_counters = await get_all_counters()
+        from ded_moroz_sales import statistics as dm_statistics
+        dm_stats=await dm_statistics(admin_user_id)
         sources = await get_source_stats(admin_id=admin_user_id)
         ad_sources = await get_ad_source_counts(admin_id=admin_user_id)
         admin = await get_user(admin_user_id)
@@ -1811,7 +1814,12 @@ def create_router(
             f"- Эксклюзив (ручная работа): {c('click_custom_order')}\n"
             f"- Оживление фотографий: {c('click_animation')}\n"
             f"- Дед Мороз: {c('click_ded_moroz')}\n"
-            f"🎅 Готовых поздравлений Деда Мороза: {dm_counters.get('dm_video_created',0)}\n"
+            f"🎅 Готовых поздравлений клиентов: {c('dm_video_created')}\n"
+            f"🛠 Проверки администратора — нажатия: {dm_counters.get('click_ded_moroz',0)-c('click_ded_moroz')}, готовые видео: {dm_counters.get('dm_video_created',0)-c('dm_video_created')}\n"
+            f"🎅 Поздравления Деда Мороза — оплачено: {dm_stats['paid']} / выдано: {dm_stats['ready']} / нужна помощь: {dm_stats['attention']}\n"
+            f"- Покупки 990 ₽: {c('buy_ded_moroz_990')} | 1490 ₽: {c('buy_ded_moroz_1490')} | 1990 ₽: {c('buy_ded_moroz_1990')}\n"
+            f"- Выручка: {dm_stats['revenue']//100} ₽ | Счета: {c('dm_checkout')}\n"
+            f"- Из рассылки: {c('dm_launch_click')} | Поделиться: {c('dm_share_click')} | Отзывы: {c('dm_review_received')}\n"
             f"- Медитации: {c('click_meditation')}\n\n"
             "👩‍👧 Фотосессия «Мама + дочка»:\n"
             f"- Выбор сюжета (клики): {c('select_photo_mom_daughter')}\n"
@@ -2325,6 +2333,18 @@ def create_router(
         trial_granted = await grant_free_trial(user_id)
         await context.clear()
         await context.set_state(PosterStates.waiting_for_mode)
+        if isinstance(payload,str) and payload.startswith('dm_paid_'):
+            from ded_moroz import enter
+            await enter(event,context,admin_user_id);return
+        if payload=='ded_moroz':
+            from ded_moroz_sales import offer
+            await offer(event,admin=admin_user_id);return
+        if not isinstance(event,MessageCallback) and user_id!=admin_user_id:
+            from ded_moroz_sales import claim
+            active=await claim(user_id,admin_user_id)
+            if active:
+                from ded_moroz import enter
+                await enter(event,context,admin_user_id);return
         if isinstance(payload, str) and payload.startswith("share_"):
             image_url = await get_shared_image(unquote(payload.removeprefix("share_")))
             if image_url is not None:
@@ -2386,8 +2406,78 @@ def create_router(
         if event.message is None or user_id is None:
             return
         await increment_counter('click_ded_moroz', user_id=user_id)
+        await context.clear();await context.set_state(PosterStates.waiting_for_mode)
+        from ded_moroz_sales import offer
+        await offer(event,admin=admin_user_id)
+
+    @router.message_callback(F.callback.payload.in_({'dm_start','dm_another','dm_continue','dm_launch_start'}))
+    async def ded_moroz_start(event: MessageCallback,context:MemoryContext):
+        await event.ack(notification='Мастерская Деда Мороза')
+        if event.get_ids()[1] is None:return
+        from ded_moroz_sales import start
+        try:
+            if event.callback.payload=='dm_launch_start':await increment_counter('dm_launch_click',user_id=event.get_ids()[1])
+            if event.callback.payload=='dm_continue':
+                from ded_moroz import enter
+                await enter(event,context,admin_user_id)
+            else:await start(event,context,admin_user_id,payments)
+        except Exception:
+            logger.exception('Не удалось открыть заказ Деда Мороза')
+            await _reply(event,'Сейчас не удалось открыть заказ. Если оплата уже прошла, повторно платить не нужно — нажмите «Продолжить» позже.')
+
+    @router.message_created(Command('dm_test'))
+    async def ded_moroz_test(event:MessageCreated,context:MemoryContext):
+        if is_bot_message(event) or admin_user_id is None or event.get_ids()[1]!=admin_user_id:return
         from ded_moroz import enter
         await enter(event,context,admin_user_id)
+
+    @router.message_callback(F.callback.payload=='dm_test')
+    async def ded_moroz_test_callback(event:MessageCallback,context:MemoryContext):
+        await event.ack(notification='Мастерская Деда Мороза')
+        if admin_user_id is None or event.get_ids()[1]!=admin_user_id:return
+        from ded_moroz import enter
+        await enter(event,context,admin_user_id)
+
+    @router.message_callback(F.callback.payload.startswith('dm_share:') | F.callback.payload.startswith('dm_review:') | F.callback.payload.startswith('dm_mobile:'))
+    async def ded_moroz_result_action(event:MessageCallback,context:MemoryContext):
+        await event.ack(notification='Поздравление')
+        from ded_moroz_customer import action
+        await action(event,context,admin_user_id,Config.from_env())
+
+    @router.message_created(Command('dm_last'))
+    async def ded_moroz_last(event:MessageCreated):
+        if is_bot_message(event):return
+        from ded_moroz_customer import last_result
+        await last_result(event,admin_user_id,Config.from_env())
+
+    @router.message_callback(F.callback.payload=='dm_last')
+    async def ded_moroz_last_callback(event:MessageCallback):
+        await event.ack(notification='Готовое поздравление')
+        from ded_moroz_customer import last_result
+        await last_result(event,admin_user_id,Config.from_env())
+
+    @router.message_created(PosterStates.ded_moroz_review)
+    async def ded_moroz_review(event:MessageCreated,context:MemoryContext):
+        if is_bot_message(event):return
+        from ded_moroz_customer import review
+        await review(event,context,admin_user_id)
+
+    @router.message_created(Command('broadcast_ded_moroz_preview'))
+    @router.message_created(Command('broadcast_ded_moroz'))
+    async def ded_moroz_broadcast_preview(event:MessageCreated):
+        if is_bot_message(event) or admin_user_id is None or event.get_ids()[1]!=admin_user_id:return
+        from ded_moroz_broadcast import preview
+        try:await preview(event,confirm=(event.message.body.text or '').split()[0]=='/broadcast_ded_moroz')
+        except Exception:
+            logger.exception('Не удалось подготовить анонс Деда Мороза')
+            await _reply(event,'Рассылка не запущена. Сначала подготовьте короткий видео-пример командой ded_moroz_prepare_example.')
+
+    @router.message_callback(F.callback.payload=='dm_broadcast_confirm')
+    async def ded_moroz_broadcast_confirm(event:MessageCallback):
+        await event.ack(notification='Рассылка')
+        if admin_user_id is None or event.get_ids()[1]!=admin_user_id:return
+        from ded_moroz_broadcast import send
+        await send(event,broadcast_lock)
 
     @router.message_created(PosterStates.ded_moroz_input)
     @router.message_created(PosterStates.ded_moroz_photo)
@@ -2402,7 +2492,7 @@ def create_router(
             logger.exception('Не удалось сохранить данные Деда Мороза:')
             await _reply(event,'Не удалось завершить обработку. Данные сохранены; попробуйте ещё раз.')
 
-    @router.message_callback(F.callback.payload.in_({'dm_audio_ok','dm_audio_edit','dm_audio_approve','dm_audio_regenerate'}) | F.callback.payload.startswith('dm_audio_ok:') | F.callback.payload.startswith('dm_audio_edit:') | F.callback.payload.startswith('dm_audio_approve:') | F.callback.payload.startswith('dm_audio_regenerate:') | F.callback.payload.startswith('dm_manual_regenerate:'))
+    @router.message_callback(F.callback.payload.in_({'dm_audio_ok','dm_audio_edit','dm_audio_approve','dm_audio_regenerate'}) | F.callback.payload.startswith('dm_audio_ok:') | F.callback.payload.startswith('dm_audio_edit:') | F.callback.payload.startswith('dm_audio_approve:') | F.callback.payload.startswith('dm_audio_regenerate:') | F.callback.payload.startswith('dm_manual_regenerate:') | F.callback.payload.startswith('dm_fact_edit:') | F.callback.payload.startswith('dm_facts_apply:') | F.callback.payload.startswith('dm_facts_cancel:') | F.callback.payload.startswith('dm_audio_choose:'))
     async def ded_moroz_audio_action(event: MessageCallback, context: MemoryContext):
         await event.ack(notification='Дед Мороз')
         from ded_moroz import callback
@@ -2416,7 +2506,7 @@ def create_router(
         parts=(event.message.body.text or '').split()
         try:
             if len(parts)!=2:raise ValueError('Используйте /dm_resume ID_заказа')
-            state=await resume(parts[1],admin_user_id)
+            state=await resume(parts[1],admin_user_id,admin=admin_user_id)
             await _reply(event,'Заказ восстановлен на этапе '+state+'.')
         except ValueError as exc:
             await _reply(event,str(exc))

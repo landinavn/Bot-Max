@@ -124,7 +124,7 @@ async def test_manual_old_audio_order_can_be_explicitly_retried_once_without_ree
     config,settings,worker=setup_dm;row=await audio_order(worker);key=row['id']
     await dm.update(key,status='manual',error='audio_submitting:HeyGenError')
     router=create_router(admin_user_id=456);context=await ready_context()
-    opening=callback_event('cat_ded_moroz');await dispatch_callback(router,opening,context)
+    opening=callback_event('dm_test');await dispatch_callback(router,opening,context)
     button=opening.bot.send_message.await_args.kwargs['attachments'][0].payload.buttons[0][0]
     assert button.payload==f'dm_manual_regenerate:{key}:0'
     assert 'платную' in opening.bot.send_message.await_args.kwargs['text']

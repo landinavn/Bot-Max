@@ -124,7 +124,7 @@ async def test_photo_content_saved_normalized_to_local_alias_and_cloud(credit_db
         with Image.open(path) as image:assert image.format=='PNG' and image.size==(941,1672)
     publish.assert_awaited_once();worker.tts.generate_speech.assert_not_awaited()
     e.message.answer.assert_awaited_once_with(dm.AUDIO_GENERATING)
-    assert 'Здравствуй, [pause] Мишенька!' in row['text'] and 'что ты любишь рисовать.' in row['text']
+    assert 'Здравствуй, Мишенька!' in dm.display_text(row['text']) and 'что ты любишь рисовать.' in row['text']
 
 
 async def test_audio_does_not_require_video_assets_or_ffmpeg(credit_db,setup_dm,monkeypatch):
@@ -532,7 +532,7 @@ def test_santa_template_uses_documented_tags_and_preserves_personalization():
     import re
     # Documented HeyGen tags; check spellings/case so a typo cannot enter the default script.
     tags=re.findall(r'\[([^\]]+)\]',dm.TEMPLATE)
-    assert set(tags)=={'warm','chuckles','pause','slowly','excited','happy','laughs','serious','deep voice','raspy'}
+    assert set(tags)=={'deep voice','raspy','drawls','warm','pause','slightly excited','proud','serious','reassuring'}
     facts=dict(name='Машенька',fact1='любишь рисовать',fact2='научилась плавать',fact3='добрая',task='читать перед сном')
     text=dm.TEMPLATE.format(**facts)
     assert text.count('Машенька')==3
@@ -546,7 +546,7 @@ async def test_santa_worker_archives_original_and_submits_cleaned_script(credit_
     await step(worker,row['id'])
     worker.tts.generate_speech.assert_awaited_once_with(clean_speech_text(row['text']),job_id=row['id'],version=row['version'])
     saved=await dm.read('SELECT text,submitted_text,provider FROM ded_moroz_audio_versions WHERE order_id=?',(row['id'],))
-    assert saved['text']==row['text'] and '[slowly]' in saved['text']
+    assert saved['text']==row['text'] and '[drawls]' in saved['text']
     assert saved['submitted_text']==clean_speech_text(row['text']) and '[warm]' in saved['submitted_text']
     assert saved['provider']=='heygen'
     worker.heygen.create_video.assert_not_awaited()
@@ -633,3 +633,28 @@ async def test_retry_preserves_custom_text_and_custom_tags(credit_db,setup_dm):
     await dm.update(key,text=custom,status='audio_ready')
     assert await dm.regenerate(key,456,0,admin=456)
     assert (await dm.get(key))['text']==custom
+
+
+def test_phrase_tags_preserve_all_template_words_punctuation_and_fields():
+    import re,string
+    def spoken(text):
+        return ' '.join(re.sub(r'\[[^\]]+\]', '',text).split())
+    assert spoken(dm.TEMPLATE)==spoken(dm.PREVIOUS_DEFAULT_TEMPLATE)
+    assert not re.search(r'\]\s*\[',dm.TEMPLATE)
+    assert dm.TEMPLATE.startswith('[deep voice] Охо-хо-хо!')
+    assert '[drawls] очень порадовал!' in dm.TEMPLATE
+    assert '[drawls] очень горжусь!' in dm.TEMPLATE
+    assert '[drawls] всё получится!' in dm.TEMPLATE
+    assert {name for _,name,_,_ in string.Formatter().parse(dm.TEMPLATE) if name}=={'name','fact1','fact2','fact3','task'}
+
+
+async def test_previous_standard_prompt_is_retagged_only_on_requested_new_version(credit_db,setup_dm):
+    _,_,worker=setup_dm;row=await audio_order(worker);key=row['id']
+    details=json.loads(row['details']);old=dm.PREVIOUS_DEFAULT_TEMPLATE.format(**details)
+    await dm.update(key,text=old,status='audio_ready')
+    assert (await dm.get(key))['text']==old
+    assert await dm.regenerate(key,456,0,admin=456)
+    current=await dm.get(key)
+    assert current['text']==dm.TEMPLATE.format(**details) and current['version']==1
+    assert current['photo_path']==row['photo_path']
+    worker.tts.generate_speech.assert_not_awaited()

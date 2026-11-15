@@ -1,5 +1,6 @@
 """Rebuild completed greetings from saved inputs without another paid request."""
 from unittest.mock import AsyncMock
+import json
 
 import pytest
 
@@ -18,17 +19,19 @@ async def completed(worker):
     return await dm.get(key)
 
 
-async def test_rebuild_uses_saved_video_and_approved_audio_and_delivers_new_mp4(credit_db,setup_dm,monkeypatch):
+@pytest.mark.parametrize('form',[None,'Мишеньки'])
+async def test_rebuild_uses_saved_video_and_approved_audio_and_delivers_new_mp4(credit_db,setup_dm,monkeypatch,form):
     import video_service
     _,_,worker=setup_dm;row=await completed(worker);key=row['id']
     old=worker.assets.path(row['output_path'])
-    result=queue_rebuild(worker.config,worker.settings)
+    result=queue_rebuild(worker.config,worker.settings,name_genitive=form)
     saved=await dm.get(key)
     assert result['order_id']==key and result['paid_requests']==0 and saved['status']=='render'
     assert saved['output_path']!=row['output_path'] and old.read_bytes()==b'old montage'
     assert saved['video_id']==row['video_id'] and saved['notified']==1
     assert list(old.parent.glob('rebuild-*.json'))
-    async def render(video,photo,speech,examples,target,name):
+    async def render(video,photo,speech,examples,target,name,**options):
+        assert options==({"name_genitive":form} if form else {})
         assert video==worker.assets.path(row['raw_path'])
         assert speech==worker.assets.path(row['approved_audio_path'])
         target.write_bytes(b'new montage without overlay');return target

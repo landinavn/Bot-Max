@@ -75,6 +75,20 @@ QUESTIONS=[
     ('fact3','Заполните: «И особенно мне нравится, что ты [КАЧЕСТВО]».\n\nНапишите качество в нужной форме. Например: «добрый», «любознательный», «смелый», «весёлый», «заботливый».'),
     ('task','Заполните: «В новом году у меня для тебя будет маленькое задание: [ЗАДАНИЕ]».\n\nНапример: «помогать маме», «читать перед сном», «делать зарядку».'),
 ]
+FACT_LABELS={'name':'Имя ребёнка','fact1':'Увлечение','fact2':'Достижение','fact3':'Качество','task':'Задание на год'}
+
+
+def fact_value(field,value):
+    if field not in FACT_LABELS:raise ValueError('Выберите поле для изменения.')
+    if not isinstance(value,str) or not value.strip() or len(value.strip())>300:
+        raise ValueError('Введите только выбранное имя или факт: от 1 до 300 символов.')
+    if any(char in value for char in '[]{}'):
+        raise ValueError('Введите только значение без тегов и фигурных или квадратных скобок. Теги добавит бот.')
+    return value.strip()
+
+
+def tagged_text(details):
+    return TEMPLATE.format(**{key:fact_value(key,details.get(key)) for key in FACT_LABELS})
 
 
 @dataclass(frozen=True)
@@ -139,7 +153,7 @@ async def init_tables(db):
     # Additive migration: existing previews and generated videos remain usable.
     cursor = await db.execute('PRAGMA table_info(ded_moroz_orders)')
     columns = {row[1] for row in await cursor.fetchall()}
-    for name in ('speech_provider_url', 'approved_audio_url', 'approved_audio_path'):
+    for name in ('speech_provider_url', 'approved_audio_url', 'approved_audio_path','edit_details','edit_field'):
         if name not in columns:
             await db.execute(f'ALTER TABLE ded_moroz_orders ADD COLUMN {name} TEXT')
     if 'regeneration_attempts' not in columns:
@@ -223,25 +237,20 @@ def keyboard(order, *, admin=None):
     if can_regenerate(order,admin):
         b.row(CallbackButton(text='🔄 Перегенерировать озвучку',payload='dm_audio_regenerate'))
         if order['user_id']==admin:
-            b.row(CallbackButton(text='✏️ Изменить текст',payload='dm_audio_edit'))
+            b.row(CallbackButton(text='✏️ Изменить данные ребёнка',payload='dm_audio_edit'))
     return b.as_markup()
 
 
 def default_text_for_retry(row):
-    try:
-        details=json.loads(row['details'])
-        candidate=TEMPLATE.format(**details)
-        if row['text'] in (candidate,PREVIOUS_DEFAULT_TEMPLATE.format(**details),LEGACY_DEFAULT_TEMPLATE.format(**details)):
-            return candidate
-    except (ValueError,KeyError,TypeError):
-        pass
-    return row['text']
+    # Only explicit new synthesis rebuilds the template. Saved audio is never rewritten.
+    return tagged_text(json.loads(row['details']))
 
 
 async def regenerate(key, user, version, *, admin=None):
     """One accepted request per preview; admin unlimited, ordinary users one retry."""
     row=await get(key)
-    if not row or row['user_id']!=user:return False
+    if (not row or row['user_id']!=user or row['version']!=version
+        or row['status']!='audio_ready' or not can_regenerate(row,admin)):return False
     text=default_text_for_retry(row)
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
         cur=await db.execute("""UPDATE ded_moroz_orders SET text=?,version=version+1,regeneration_attempts=regeneration_attempts+1,
@@ -280,15 +289,71 @@ async def resume(key,user):
 
 async def request_edit(key,user,version,*,admin=None):
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
-        cur=await db.execute("UPDATE ded_moroz_orders SET edit_used=1,status='editing' WHERE id=? AND user_id=? AND version=? AND status='audio_ready' AND (? OR (edit_used=0 AND regeneration_attempts<1))",(key,user,version,admin is not None and user==admin))
+        cur=await db.execute("UPDATE ded_moroz_orders SET edit_details=details,edit_field=NULL,status='editing' WHERE id=? AND user_id=? AND version=? AND status='audio_ready' AND (? OR (edit_used=0 AND regeneration_attempts<1))",(key,user,version,admin is not None and user==admin))
         await db.commit();return cur.rowcount==1
 
 
 async def revised(key,user,text,*,admin=None):
-    if not text or not text.strip() or len(text)>4500:raise ValueError('Введите текст от 1 до 4500 символов.')
+    row=await get(key)
+    if not row or row['user_id']!=user or row['status']!='editing':return False
+    if not row['edit_field']:raise ValueError('Сначала выберите, какое имя или факт изменить кнопкой ниже.')
+    value=fact_value(row['edit_field'],text)
+    draft=json.loads(row['edit_details'] or row['details']);draft[row['edit_field']]=value
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
-        cur=await db.execute("UPDATE ded_moroz_orders SET text=?,version=version+1,regeneration_attempts=regeneration_attempts+1,status='audio_queued',audio_path=NULL,audio_url=NULL,speech_provider_url=NULL,approved_audio_url=NULL,approved_audio_path=NULL,preview_sent=0,preview_mid=NULL,preview_version=NULL WHERE id=? AND user_id=? AND status='editing' AND edit_used=1 AND (? OR regeneration_attempts<1)",(text.strip(),key,user,admin is not None and user==admin))
+        cur=await db.execute("UPDATE ded_moroz_orders SET edit_details=?,edit_field=NULL WHERE id=? AND user_id=? AND version=? AND status='editing' AND edit_field=? AND edit_details IS ?",
+            (json.dumps(draft,ensure_ascii=False),key,user,row['version'],row['edit_field'],row['edit_details']))
+        await db.commit();return cur.rowcount==1
+
+
+async def select_fact(key,user,version,field):
+    if field not in FACT_LABELS:return False
+    async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
+        cur=await db.execute("UPDATE ded_moroz_orders SET edit_field=?,edit_details=COALESCE(edit_details,details) WHERE id=? AND user_id=? AND version=? AND status='editing'",(field,key,user,version))
+        await db.commit();return cur.rowcount==1
+
+
+async def apply_facts(key,user,version,*,admin=None):
+    row=await get(key)
+    if not row or row['user_id']!=user or row['version']!=version or row['status']!='editing' or row['edit_field']:return False
+    details=row['edit_details'] or row['details'];text=tagged_text(json.loads(details))
+    async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
+        cur=await db.execute("""UPDATE ded_moroz_orders SET details=?,text=?,edit_details=NULL,edit_field=NULL,edit_used=1,
+            version=version+1,regeneration_attempts=regeneration_attempts+1,status='audio_queued',
+            audio_path=NULL,audio_url=NULL,speech_provider_url=NULL,approved_audio_url=NULL,approved_audio_path=NULL,
+            preview_sent=0,preview_mid=NULL,preview_version=NULL,error=NULL,next_attempt=0
+            WHERE id=? AND user_id=? AND version=? AND status='editing' AND edit_field IS NULL
+            AND edit_details IS ? AND (? OR regeneration_attempts<1)""",
+            (details,text,key,user,version,row['edit_details'],admin is not None and user==admin))
         return await finish_regeneration(db,cur,key,user)
+
+
+async def cancel_facts(key,user,version):
+    async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
+        cur=await db.execute("UPDATE ded_moroz_orders SET status='audio_ready',edit_details=NULL,edit_field=NULL,preview_sent=0,preview_mid=NULL,preview_version=NULL WHERE id=? AND user_id=? AND version=? AND status='editing'",(key,user,version))
+        await db.commit();return cur.rowcount==1
+
+
+async def show_facts(event,context,row):
+    from handlers import PosterStates
+    await context.clear();await context.update_data(dm_order=row['id'])
+    await context.set_state(PosterStates.ded_moroz_edit)
+    draft=json.loads(row['edit_details'] or row['details'])
+    b=InlineKeyboardBuilder()
+    for field,label in FACT_LABELS.items():
+        b.row(CallbackButton(text='✏️ '+label,payload=f"dm_fact_edit:{row['id']}:{row['version']}:{field}"))
+    b.row(CallbackButton(text='🎙 Сохранить и озвучить (платно)',payload=f"dm_facts_apply:{row['id']}:{row['version']}"))
+    b.row(CallbackButton(text='⬅️ Отменить изменения',payload=f"dm_facts_cancel:{row['id']}:{row['version']}"))
+    text='Можно изменить только данные ребёнка. Шаблон и теги голоса бот сохранит.\n\n'
+    text+='\n'.join(label+': '+draft.get(field,'—') for field,label in FACT_LABELS.items())
+    text+='\n\nВыберите поле. Новая платная озвучка начнётся только после «Сохранить и озвучить».'
+    if row['edit_field']:
+        text+='\n\n'+edit_prompt(row['edit_field'])
+    await tell(event,text,attachments=[b.as_markup()])
+
+
+def edit_prompt(field):
+    if field=='name':return 'Как зовут ребёнка или как вы ласково его называете? Например: «Маша» или «Машенька».'
+    return dict(QUESTIONS)[field]
 
 
 def manual_audio_retry_allowed(row):
@@ -336,7 +401,7 @@ async def enter(event,context,admin):
             await context.set_state(PosterStates.ded_moroz_photo)
             await tell(event,PHOTO_PROMPT)
     elif row['status']=='editing':
-        await context.set_state(PosterStates.ded_moroz_edit);await tell(event,'Отправьте исправленный текст целиком.')
+        await show_facts(event,context,row)
     elif row['status']=='manual':
         b=InlineKeyboardBuilder()
         text=f"⚠️ Поздравление приостановлено. Заказ: {row['id']}. Текст, фото и готовые файлы сохранены."
@@ -361,13 +426,12 @@ async def collect(event,context,admin,config=None,settings=None):
     state=await context.get_state()
     if state==PosterStates.ded_moroz_edit:
         if await revised(row['id'],admin,text,admin=admin):
-            await context.clear();await tell(event,'Создаю новую озвучку. После прослушивания можно снова изменить текст или перегенерировать аудио.')
+            await show_facts(event,context,await get(row['id']))
         return
     if state==PosterStates.ded_moroz_input and row['status']=='input':
-        if not text or len(text)>300:raise ValueError('Введите фразу от 1 до 300 символов.')
         data=json.loads(row['details']);key=next((k for k,_ in QUESTIONS if k not in data),None)
         if key is None:return
-        data[key]=text
+        data[key]=fact_value(key,text)
         await update(row['id'],details=json.dumps(data,ensure_ascii=False))
         next_question=next((q for k,q in QUESTIONS if k not in data),None)
         if key=='name':await tell(event,EXPLANATION)
@@ -390,7 +454,7 @@ async def collect(event,context,admin,config=None,settings=None):
         alias=assets.path(f'ded_moroz_{admin}/child_photo.png');alias.parent.mkdir(parents=True,exist_ok=True)
         tmp=alias.with_name('.child-'+uuid4().hex+'.png');await asyncio.to_thread(tmp.write_bytes,png);await asyncio.to_thread(os.replace,tmp,alias)
         url=await assets.publish(path)
-        text=TEMPLATE.format(**json.loads(row['details']))
+        text=tagged_text(json.loads(row['details']))
         await update(row['id'],photo_path=path,photo_url=url,text=text)
         if await transition(row['id'],admin,'input','audio_queued'):
             await context.clear();await tell(event,AUDIO_GENERATING)
@@ -406,12 +470,33 @@ async def callback(event,context,admin,config=None,settings=None):
         if not row:
             await tell(event,'Эта кнопка уже использована или относится к предыдущей версии озвучки.');return
         parts=[parts[0],row['id'],str(row['version'])]
-    if len(parts)!=3:return
-    action,key,version=parts
+    if len(parts) not in (3,4):return
+    action,key,version=parts[:3]
     try:version=int(version)
     except ValueError:return
     row=await get(key)
     if not row or row['user_id']!=admin:return
+    if action=='dm_fact_edit' and len(parts)==4:
+        if await select_fact(key,admin,version,parts[3]):
+            await context.clear();await context.update_data(dm_order=key)
+            await context.set_state(PosterStates.ded_moroz_edit)
+            await tell(event,edit_prompt(parts[3]))
+        else:await tell(event,'Эта кнопка относится к предыдущей версии. Откройте раздел заново.')
+        return
+    if len(parts)!=3:return
+    if action=='dm_facts_apply':
+        try:accepted=await apply_facts(key,admin,version,admin=admin)
+        except ValueError as exc:
+            await tell(event,str(exc));return
+        if accepted:
+            await context.clear();await tell(event,AUDIO_GENERATING)
+        else:await tell(event,'Изменения не отправлены. Завершите ввод выбранного поля или откройте раздел заново.')
+        return
+    if action=='dm_facts_cancel':
+        if await cancel_facts(key,admin,version):
+            await context.clear();await tell(event,'Изменения отменены. Отправляю сохранённую озвучку без новой генерации.')
+        else:await tell(event,'Эта кнопка относится к предыдущей версии.')
+        return
     if action=='dm_manual_regenerate':
         try:accepted=await retry_manual_audio(key,admin,version,admin=admin,config=config,settings=settings)
         except ValueError as exc:
@@ -420,10 +505,14 @@ async def callback(event,context,admin,config=None,settings=None):
             await context.clear();await tell(event,AUDIO_GENERATING)
         else:await tell(event,'Состояние заказа уже изменилось. Откройте раздел заново.')
     elif action=='dm_audio_edit' and await request_edit(key,admin,version,admin=admin):
-        await context.clear();await context.update_data(dm_order=key);await context.set_state(PosterStates.ded_moroz_edit)
-        await tell(event,'Отправьте новый текст целиком. Перегенерация озвучки платная; для администратора число попыток не ограничено.')
-    elif action=='dm_audio_regenerate' and await regenerate(key,admin,version,admin=admin):
-        await context.clear();await tell(event,AUDIO_GENERATING)
+        await show_facts(event,context,await get(key))
+    elif action=='dm_audio_regenerate':
+        try:accepted=await regenerate(key,admin,version,admin=admin)
+        except ValueError as exc:
+            await tell(event,str(exc));return
+        if accepted:
+            await context.clear();await tell(event,AUDIO_GENERATING)
+        else:await tell(event,'Эта кнопка относится к предыдущей версии озвучки.')
     elif action in ('dm_audio_ok','dm_audio_approve') and await approve(key,admin,version):
         await context.clear();await tell(event,'Утверждённая озвучка сохранена. Запускаю HeyGen Avatar IV и монтаж.')
     else:await tell(event,'Эта кнопка уже использована или относится к предыдущей версии озвучки.')

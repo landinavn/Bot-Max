@@ -13,6 +13,15 @@ from heygen_tts import HeyGenTTSAdapter, display_text
 from multstudio.assets import Assets
 
 
+def comparable_words(text):
+    """Allow two known template changes; keep all names, facts and other words strict."""
+    words = re.findall(r'\w+', display_text(text).casefold())
+    if words[:3] == ['охо', 'хо', 'хо']:
+        words = words[3:]
+    return [word for i, word in enumerate(words)
+            if not (word == 'ты' and i and words[i-1] == 'ты')]
+
+
 async def reprocess(order_id, config, settings, *, source_version=None):
     assets = Assets(settings.root, config)
     adapter = HeyGenTTSAdapter(None, settings.voice_id, assets, model=settings.tts_model,
@@ -33,9 +42,8 @@ async def reprocess(order_id, config, settings, *, source_version=None):
                                 (order_id, source_version)).fetchone()
             if not source or not source['path'] or source['provider'] != 'heygen':
                 raise ValueError('Сохранённая версия HeyGen не найдена в этом заказе.')
-            # Tags/punctuation may differ, but do not restore another child's words/facts.
-            words = lambda text: re.findall(r'\w+', display_text(text).casefold())
-            if words(source['text']) != words(row['text']):
+            # Ignore only known template drift; never restore another child's words/facts.
+            if comparable_words(source['text']) != comparable_words(row['text']):
                 raise ValueError('В выбранной версии другой текст поздравления.')
             if source['voice_id'] != settings.voice_id or source['model'] != settings.tts_model:
                 raise ValueError('Голос или модель выбранной версии не совпадают с настройками.')

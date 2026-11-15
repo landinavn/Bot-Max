@@ -270,18 +270,24 @@ def test_invalid_pitch_rejected(pitch):
     with pytest.raises(ValueError):HeyGenTTSAdapter.delivery_settings(.85,100,.18,pitch)
 
 
-async def test_restore_specific_archive_slows_its_final_mp3_without_new_synthesis(credit_db,setup_dm,mp3_bytes,monkeypatch):
+@pytest.mark.parametrize('legacy_text',[False,True])
+async def test_restore_specific_archive_slows_its_final_mp3_without_new_synthesis(credit_db,setup_dm,mp3_bytes,monkeypatch,legacy_text):
     from dataclasses import replace
     from ded_moroz_reprocess import reprocess
     from media_service import audio_duration
     _,_,worker=setup_dm;row=await audio_order(worker);key=row['id']
+    current_text=row['text']
+    if legacy_text:
+        row=dict(row)
+        row['text']=row['text'].replace('Охо-хо-хо!','',1).replace('что ты','что ты ты',1)
+        await dm.update(key,text=row['text'])
     adapter=make_adapter(worker.assets,mp3_bytes,[])
     adapter.delivery=adapter.delivery_settings(1,0,0,0)
     source=await adapter.generate_speech(row['text'],job_id=key,version=row['version'])
     await worker.store_audio_result(row,source)
     await dm.update(key,status='audio_ready')
     await reprocess(key,worker.config,worker.settings)
-    await dm.update(key,status='audio_ready',text='[warm] '+row['text'])
+    await dm.update(key,status='audio_ready',text='[warm] '+current_text)
     # The selected preview is sufficient, even when its original provider download is gone.
     worker.assets.path(key+f"/speech-v{row['version']}.raw.mp3").unlink()
     forbidden=AsyncMock(side_effect=AssertionError('Paid synthesis must never be called'))
@@ -303,3 +309,23 @@ async def test_restore_specific_archive_slows_its_final_mp3_without_new_synthesi
     with pytest.raises(ValueError,match='другой текст'):
         await reprocess(key,worker.config,settings,source_version=row['version'])
     forbidden.assert_not_awaited()
+
+
+@pytest.mark.parametrize('old,new',[
+    ('Здравствуй, Маша! Ты молодец!','Охо-хо-хо! Здравствуй, Маша! Ты молодец!'),
+    ('[raspy] Я слышал, что ты ты любишь рисовать.','Я слышал, что ты любишь рисовать.'),
+])
+def test_known_template_differences_only(old,new):
+    from ded_moroz_reprocess import comparable_words
+    assert comparable_words(old)==comparable_words(new)
+
+
+@pytest.mark.parametrize('new',[
+    'Здравствуй, Дима! Ты любишь рисовать.',
+    'Здравствуй, Маша! Ты любишь плавать.',
+    'Здравствуй, Маша! Ты не любишь рисовать.',
+    'Здравствуй, Маша! Ты любишь рисовать. Охо-хо-хо!',
+])
+def test_other_spoken_words_are_still_strict(new):
+    from ded_moroz_reprocess import comparable_words
+    assert comparable_words('Здравствуй, Маша! Ты любишь рисовать.')!=comparable_words(new)

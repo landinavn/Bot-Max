@@ -479,6 +479,11 @@ async def get_user(user_id: int) -> aiosqlite.Row | None:
             return await cursor.fetchone()
 
 
+async def _reject_ded_payment(db,payment_id):
+    async with db.execute('SELECT 1 FROM ded_moroz_payments WHERE provider_payment_id=?',(payment_id,)) as cur:
+        if await cur.fetchone():raise ValueError('Платёж уже использован для поздравления Деда Мороза.')
+
+
 async def add_credits(
     user_id: int, amount: int, *, payment_order_id: str | None = None,
     provider_payment_id: str | None = None,
@@ -495,6 +500,7 @@ async def add_credits(
             if not provider_payment_id:
                 raise ValueError("Не указан номер платежа Prodamus.")
             await db.execute("BEGIN IMMEDIATE")
+            await _reject_ded_payment(db,provider_payment_id)
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 "SELECT * FROM payment_orders WHERE order_id = ?", (payment_order_id,)
@@ -845,6 +851,8 @@ async def get_source_stats(admin_id: int | None = None) -> list[dict]:
                    SELECT user_id, amount_kopecks FROM photo_orders WHERE status = 'paid'
                    UNION ALL
                    SELECT user_id, amount_kopecks FROM animation_orders WHERE status = 'paid' AND is_admin=0
+                   UNION ALL
+                   SELECT user_id, amount_kopecks FROM ded_moroz_payments WHERE status='paid'
                  ) GROUP BY user_id
                ) p ON p.user_id = u.user_id
                WHERE (? IS NULL OR u.user_id != ?)
@@ -1011,6 +1019,7 @@ async def mark_audio_paid(order_id: str, payment_id: str) -> bool:
         raise ValueError('Не указан платёж.')
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         await db.execute('BEGIN IMMEDIATE')
+        await _reject_ded_payment(db,payment_id)
         db.row_factory = aiosqlite.Row
         async with db.execute('SELECT * FROM audio_orders WHERE order_id = ?', (order_id,)) as cursor:
             order = await cursor.fetchone()
@@ -1203,6 +1212,7 @@ async def mark_musical_paid(order_id: str, payment_id: str) -> bool:
         raise ValueError('Не указан платёж.')
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         await db.execute('BEGIN IMMEDIATE')
+        await _reject_ded_payment(db,payment_id)
         db.row_factory = aiosqlite.Row
         async with db.execute('SELECT * FROM musical_orders WHERE order_id=?', (order_id,)) as cursor:
             order = await cursor.fetchone()
@@ -1293,6 +1303,7 @@ async def mark_cartoon_paid(order_id: str, payment_id: str) -> bool:
         raise ValueError('Не указан платёж.')
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         await db.execute('BEGIN IMMEDIATE')
+        await _reject_ded_payment(db,payment_id)
         db.row_factory = aiosqlite.Row
         async with db.execute('SELECT * FROM cartoon_orders WHERE order_id=?', (order_id,)) as cursor:
             order = await cursor.fetchone()
@@ -1363,6 +1374,8 @@ def _base_sale_counter_keys(kind: str, order: dict) -> tuple[str, ...]:
         return (f"buy_photo_{order['tariff']}",)
     if kind == 'animation':
         return (f"buy_animation_{order['tariff']}",)
+    if kind == 'ded_moroz':
+        return ('buy_ded_moroz','buy_ded_moroz_'+str(order['amount_kopecks']//100))
     raise ValueError('Неизвестный тип продажи.')
 
 
@@ -1385,6 +1398,7 @@ async def _backfill_sale_counters(db, *, force=False) -> None:
         ('cartoon', 'cartoon_orders', 'tariff,promo_token', "status IN ('paid','completed','manual')"),
         ('photo', 'photo_orders', 'tariff,promo_token', "status='paid'"),
         ('animation', 'animation_orders', 'tariff', "status='paid' AND is_admin=0 AND promo_bonus=0"),
+        ('ded_moroz','ded_moroz_payments','amount_kopecks',"status='paid'"),
     ):
         async with db.execute(f'SELECT user_id,{fields},COUNT(*) FROM {table} WHERE {status} GROUP BY user_id,{fields}') as cursor:
             names = [column[0] for column in cursor.description]
@@ -1440,6 +1454,7 @@ async def mark_photo_paid(order_id: str, payment_id: str) -> bool:
         raise ValueError('Не указан платёж.')
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         await db.execute('BEGIN IMMEDIATE')
+        await _reject_ded_payment(db,payment_id)
         db.row_factory = aiosqlite.Row
         async with db.execute('SELECT * FROM photo_orders WHERE order_id=?', (order_id,)) as cursor:
             order = await cursor.fetchone()
@@ -1902,7 +1917,8 @@ async def update_animation_order(order_id,**fields):
 async def mark_animation_paid(order_id,payment_id):
     if not payment_id: raise ValueError('Не указан платёж.')
     async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
-        await db.execute('BEGIN IMMEDIATE');db.row_factory=aiosqlite.Row
+        await db.execute('BEGIN IMMEDIATE')
+        await _reject_ded_payment(db,payment_id);db.row_factory=aiosqlite.Row
         async with db.execute('SELECT * FROM animation_orders WHERE order_id=?',(order_id,)) as cursor:
             order=await cursor.fetchone()
         if not order or order['is_admin']: raise ValueError('Заказ не найден.')

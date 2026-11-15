@@ -81,14 +81,19 @@ async def test_promo_click_count_and_legacy_navigation_do_not_duplicate_trial(cr
     assert (await credit_db.get_user(456))['balance']==0
 
 
-async def test_ded_moroz_placeholder_and_back(credit_db,welcome_image):
+async def test_ded_moroz_offer_and_back_without_unpaid_generation(credit_db,welcome_image):
     e=callback_event('cat_ded_moroz');router=create_router();context=await ready_context()
     await dispatch_callback(router,e,context)
     e.ack.assert_awaited_once()
-    assert e.send.await_args.args[0]==handlers.DED_MOROZ_TEXT
-    button=e.send.await_args.kwargs['attachments'][0].payload.buttons[0][0]
+    from ded_moroz_sales import DESCRIPTION
+    assert e.send.await_args.args[0]==DESCRIPTION
+    buttons=[button for row in e.send.await_args.kwargs['attachments'][0].payload.buttons for button in row]
+    assert any(button.payload=='dm_start' for button in buttons)
+    button=next(button for button in buttons if button.payload=='back_to_main')
     assert (button.text,button.payload)==('⬅️ Назад','back_to_main')
     assert (await credit_db.get_all_counters())['click_ded_moroz']==1
+    import ded_moroz
+    assert not await ded_moroz.read('SELECT * FROM ded_moroz_orders')
     await dispatch_callback(router,callback_event(button.payload),context)
     assert await context.get_state()==PosterStates.waiting_for_mode
 

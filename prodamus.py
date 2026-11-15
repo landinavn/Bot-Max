@@ -182,6 +182,8 @@ class ProdamusPayments:
         if webhook.path != "/prodamus/webhook" or webhook.query:
             raise ValueError("PRODAMUS_WEBHOOK_URL должен оканчиваться на /prodamus/webhook.")
         self.secret = config.prodamus_secret_key
+        self.bot_link = config.bot_link
+        self.config = config
 
     async def create_payment_link(self, user_id: int, credits: int | None = None, *, promo: bool = False,
                                   order_id: str | None = None, amount: int | None = None,
@@ -189,6 +191,8 @@ class ProdamusPayments:
         if order_id is not None:
             if credits is not None or promo:
                 raise ValueError('Нельзя смешивать мульт-заказ и пакет кредитов.')
+            if order_id.startswith('dm_'):
+                return await self._create_ded_moroz_link(user_id,order_id,amount,description)
             if order_id.startswith('animate_'):
                 return await self._create_animation_payment_link(user_id, order_id, amount, description)
             if order_id.startswith(('photo_','promo_photo_')):
@@ -399,6 +403,23 @@ class ProdamusPayments:
         await update_musical_order(order_id, payment_link=link)
         return link
 
+    async def _create_ded_moroz_link(self,user_id,order_id,amount,description):
+        from ded_moroz_sales import payment,validate_order,set_link
+        row=await payment(order_id)
+        if (not row or row['user_id']!=user_id or row['status']!='pending' or isinstance(amount,bool)
+            or not isinstance(amount,int) or amount*100!=row['amount_kopecks'] or description!=row['product_name']):
+            raise ValueError('Параметры оплаты не совпадают с заказом Деда Мороза.')
+        validate_order(row)
+        if row['payment_link']:return row['payment_link']
+        back=self.bot_link+('&' if '?' in self.bot_link else '?')+'start=dm_paid_'+order_id
+        data={'do':'link','order_id':order_id,'products':[{'name':description,'price':f'{amount}.00','quantity':'1'}],
+            '_param_user_id':str(user_id),'_param_credits':'0','_param_package_id':row['package_id'],
+            'customer_extra':json.dumps({'user_id':user_id,'credits':0,'package_id':row['package_id']},ensure_ascii=False),
+            'urlReturn':back,'urlSuccess':back,'urlNotification':self.webhook_url,'payments_limit':'1'}
+        data['sign']=sign_link_payload(data,self.secret)
+        link=await self._request_payment_link(data)
+        await set_link(order_id,link);return link
+
     async def validate_payment(self, data: dict):
         order_id = data.get("order_num")
         payment_id = data.get("order_id")
@@ -406,6 +427,9 @@ class ProdamusPayments:
             raise ValueError("Нет номера заказа или платежа.")
         # A saved family identifies the product; identical prices are never dispatch keys.
         candidates = [await get_payment_order(order_id), await get_audio_order(order_id)]
+        if order_id.startswith('dm_'):
+            from ded_moroz_sales import payment
+            candidates.append(await payment(order_id))
         for prefixes,getter in ((('photo_','promo_photo_'),get_photo_order),
                                 (('cartoon_','promo_cartoon_'),get_cartoon_order),
                                 (('music_','promo_music_card_'),get_musical_order),
@@ -445,7 +469,10 @@ class ProdamusPayments:
             _validate_customer_metadata(data, order, package_id)
         # Сумма уже сверена с сохранённым заказом выше: смена прайса не должна
         # блокировать оплату ссылки, выданной до изменения цены.
-        if order.get('order_type') == 'animation':
+        if order.get('order_type') == 'ded_moroz':
+            from ded_moroz_sales import validate_order
+            validate_order(order)
+        elif order.get('order_type') == 'animation':
             if (order['is_admin'] or ANIMATION_TARIFFS.get(order['tariff']) !=
                     (order['amount_kopecks'], order['quantity'], order['product_name'])):
                 raise ValueError('Неизвестный тариф оживления фото.')

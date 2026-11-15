@@ -233,6 +233,9 @@ async def render_ded_moroz(video, child, speech, examples, target, name):
     for path in (video,child,speech,examples/'audio/ny_music.mp3',examples/'audio/jingle_bells.mp3'):
         if not path.is_file():raise ValueError('Не найден файл монтажа: '+path.name)
     target.parent.mkdir(parents=True,exist_ok=True)
+    from ded_moroz_frame import create_child_frame, FRAME_PAD
+    frame_path=target.with_name(target.stem+'-frame.png')
+    photo_width,photo_height=await asyncio.to_thread(create_child_frame,child,frame_path)
     # Text is data in a separate file; never interpolate child names into FFmpeg expressions.
     title=target.with_name('title.txt');title.write_text('Для '+name+' от Деда Мороза',encoding='utf-8')
     temporary=target.with_name('rendering.mp4')
@@ -240,7 +243,12 @@ async def render_ded_moroz(video, child, speech, examples, target, name):
     filters=(
         f'[0:v]setpts=PTS-STARTPTS,scale=1920:1080:force_original_aspect_ratio=increase,'
         f'crop=1920:1080,setsar=1,fps=30,tpad=stop_mode=clone:stop_duration={seconds:.6f},trim=duration={seconds:.6f}[lit];'
-        + f'[{child_index}:v]scale=480:900:force_original_aspect_ratio=decrease,pad=iw+12:ih+12:6:6:color=white[pip];'
+        + f'[{child_index}:v]scale={photo_width}:{photo_height}:flags=lanczos,setsar=1,format=rgba,'
+        f'pad=iw+{2*FRAME_PAD}:ih+{2*FRAME_PAD}:{FRAME_PAD}:{FRAME_PAD}:color=black@0[photo];'
+        '[5:v]format=rgba[border];'
+        '[photo][border]overlay=0:0:format=auto:shortest=1,'
+        "drawbox=x=12:y=ih/2:w=3:h=3:color=white@0.9:t=fill:enable='lt(mod(t,1.6),0.18)',"
+        "drawbox=x=iw/2:y=12:w=3:h=3:color=white@0.9:t=fill:enable='lt(mod(t+0.7,1.9),0.18)'[pip];"
         f"[lit][pip]overlay=x=W-w-48:y=H-h-48:enable='between(t,{seconds*.3:.6f},{seconds*.7:.6f})':shortest=1[framed];"
         "[framed]drawtext=textfile=title.txt:expansion=none:fontcolor=white:fontsize=54:"
         "borderw=3:bordercolor=black:x=(w-text_w)/2:y=55:enable='lt(t,5)'[v];"
@@ -252,7 +260,8 @@ async def render_ded_moroz(video, child, speech, examples, target, name):
     inputs=['-i',str(video.resolve())]
     inputs+=['-loop','1','-framerate','30','-i',str(child.resolve()),'-i',str(speech.resolve()),
         '-stream_loop','-1','-i',str((examples/'audio/ny_music.mp3').resolve()),
-        '-i',str((examples/'audio/jingle_bells.mp3').resolve())]
+        '-i',str((examples/'audio/jingle_bells.mp3').resolve()),
+        '-loop','1','-framerate','30','-i',str(frame_path.resolve())]
     await render_process('ffmpeg','-nostdin','-v','error','-y','-filter_complex_threads','1',
         *inputs,'-filter_complex',filters,
         '-map','[v]','-map','[a]','-t',f'{seconds:.6f}','-r','30','-c:v','libx264','-preset','fast','-crf','20',

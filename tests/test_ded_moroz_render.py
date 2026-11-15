@@ -15,7 +15,7 @@ def ff(*args):
 
 
 @pytest.mark.parametrize('with_fire',[True,False])
-@pytest.mark.parametrize('photo_size,border_pixel',[((500,500),(1382,542)),((941,1672),(1382,170))])
+@pytest.mark.parametrize('photo_size,border_pixel',[((500,500),(1426,800)),((941,1672),(1426,800))])
 async def test_real_landscape_render_overlay_pip_audio_and_safe_name(tmp_path,photo_size,border_pixel,with_fire,caplog):
     if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):pytest.skip('FFmpeg required')
     examples=tmp_path/'examples';(examples/'audio').mkdir(parents=True)
@@ -37,8 +37,13 @@ async def test_real_landscape_render_overlay_pip_audio_and_safe_name(tmp_path,ph
         frame=tmp_path/f'frame{n}.png';ff('-ss',t,'-i',out,'-frames:v','1',frame)
         with Image.open(frame) as im:
             rgb=im.convert('RGB');values.append(rgb.getpixel(border_pixel));background.append(rgb.getpixel((100,900)))
-    # The white 6px rectangular frame appears only during the middle interval.
-    assert min(values[1])>200
+            if n==1:
+                # The old left edge is clear: the photo/frame now takes less space.
+                assert max(rgb.getpixel((1382,800)))<30
+                assert rgb.getpixel((1600,800))[2]>150
+    # A wider gold frame appears only during the middle interval.
+    red,green,blue=values[1]
+    assert red>100 and green>60 and red>blue*1.3
     assert min(values[0])<50 and min(values[2])<50
     # A red fire_overlay file exists in half the cases, but must NEVER change the background.
     assert all(max(pixel)<30 for pixel in background)

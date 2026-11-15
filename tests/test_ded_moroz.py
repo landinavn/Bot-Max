@@ -149,7 +149,9 @@ async def test_audio_edit_once_stale_buttons_and_duplicate_approvals(credit_db,s
     assert len(dm.keyboard(row,admin=456).payload.buttons)==3
     requests=await asyncio.gather(*(dm.request_edit(key,456,0,admin=456) for _ in range(5)))
     assert sum(requests)==1
-    assert await dm.revised(key,456,'Исправленный текст',admin=456)
+    assert await dm.select_fact(key,456,0,'fact1')
+    assert await dm.revised(key,456,'обожаешь конструкторы',admin=456)
+    assert await dm.apply_facts(key,456,0,admin=456)
     assert not await dm.revised(key,456,'Повторная правка',admin=456)
     await step(worker,key);await step(worker,key);await step(worker,key);row=await step(worker,key)
     assert row['version']==1 and row['edit_used']==1 and len(dm.keyboard(row,admin=456).payload.buttons)==3
@@ -277,6 +279,11 @@ async def test_real_callbacks_route_edit_and_reject_stale_audio(credit_db,setup_
     await dispatch_callback(router,e,context)
     assert await context.get_state()==PosterStates.ded_moroz_edit
     await call_handler(router,'ded_moroz_input',message_event('Новый текст'),context)
+    assert (await dm.get(key))['version']==0
+    await dispatch_callback(router,callback_event('dm_fact_edit:'+key+':0:fact1'),context)
+    await call_handler(router,'ded_moroz_input',message_event('любишь футбол'),context)
+    assert (await dm.get(key))['version']==0
+    await dispatch_callback(router,callback_event('dm_facts_apply:'+key+':0'),context)
     assert (await dm.get(key))['version']==1
     stale=callback_event('dm_audio_ok:'+key+':0');await dispatch_callback(router,stale,context)
     assert (await dm.get(key))['status']=='audio_queued'
@@ -340,7 +347,9 @@ async def test_exact_button_payloads_bound_to_saved_preview_message(credit_db,se
     router=create_router(admin_user_id=456);context=await ready_context()
     e=callback_event('dm_audio_edit');e.message.body=SimpleNamespace(mid='old-preview')
     await dispatch_callback(router,e,context)
-    await call_handler(router,'ded_moroz_input',message_event('Новый текст'),context)
+    await dispatch_callback(router,callback_event('dm_fact_edit:'+key+':0:fact1'),context)
+    await call_handler(router,'ded_moroz_input',message_event('любишь футбол'),context)
+    await dispatch_callback(router,callback_event('dm_facts_apply:'+key+':0'),context)
     worker.bot.send_message.return_value=SimpleNamespace(body=SimpleNamespace(mid='new-preview'))
     for _ in range(4):await step(worker,key)
     stale=callback_event('dm_audio_ok');stale.message.body=SimpleNamespace(mid='old-preview')
@@ -565,7 +574,10 @@ async def test_admin_can_edit_and_regenerate_repeatedly_via_real_buttons(credit_
         event=callback_event('dm_audio_edit');event.message.body=SimpleNamespace(mid='edit-preview-'+str(version))
         await dispatch_callback(router,event,context)
         assert await context.get_state()==PosterStates.ded_moroz_edit
-        await call_handler(router,'ded_moroz_input',message_event('[warm] Новый текст '+str(version)),context)
+        await dispatch_callback(router,callback_event(f'dm_fact_edit:{key}:{version}:fact1'),context)
+        await call_handler(router,'ded_moroz_input',message_event('любишь рисовать '+str(version)),context)
+        assert (await dm.get(key))['status']=='editing'
+        await dispatch_callback(router,callback_event(f'dm_facts_apply:{key}:{version}'),context)
         saved=await dm.get(key)
         assert saved['regeneration_attempts']==version+1
         assert saved['status']=='audio_queued' and saved['edit_used']==1
@@ -579,10 +591,13 @@ async def test_admin_can_edit_and_regenerate_repeatedly_via_real_buttons(credit_
 async def test_future_regular_user_has_one_shared_retry_across_restart(credit_db,admin,first_action,caplog):
     import logging
     caplog.set_level(logging.INFO,logger=dm.__name__)
-    row=await dm.begin(789);key=row['id'];await dm.update(key,status='audio_ready')
+    row=await dm.begin(789);key=row['id']
+    await dm.update(key,status='audio_ready',details=json.dumps(dict(name='Маша',fact1='рисуешь',fact2='научилась плавать',fact3='добрая',task='читать')))
     if first_action=='edit':
         assert await dm.request_edit(key,789,0,admin=admin)
-        assert await dm.revised(key,789,'Новый текст',admin=admin)
+        assert await dm.select_fact(key,789,0,'fact1')
+        assert await dm.revised(key,789,'любишь футбол',admin=admin)
+        assert await dm.apply_facts(key,789,0,admin=admin)
     else:
         assert await dm.regenerate(key,789,0,admin=admin)
     await dm.update(key,status='audio_ready')
@@ -601,7 +616,7 @@ async def test_future_regular_user_has_one_shared_retry_across_restart(credit_db
 async def test_retry_migration_preserves_prior_attempts_and_admin_exemption(credit_db):
     import aiosqlite
     row=await dm.begin(456);key=row['id']
-    await dm.update(key,status='audio_ready')
+    await dm.update(key,status='audio_ready',details=json.dumps(dict(name='Маша',fact1='рисуешь',fact2='научилась плавать',fact3='добрая',task='читать')))
     async with aiosqlite.connect(dm.database.DATABASE_PATH) as db:
         await db.execute('ALTER TABLE ded_moroz_orders DROP COLUMN regeneration_attempts')
         await db.execute('UPDATE ded_moroz_orders SET version=4,edit_used=1 WHERE id=?',(key,))
@@ -627,12 +642,12 @@ async def test_standard_legacy_script_gets_new_delivery_tags_on_explicit_retry_o
     worker.tts.generate_speech.assert_not_awaited()
 
 
-async def test_retry_preserves_custom_text_and_custom_tags(credit_db,setup_dm):
+async def test_retry_restores_fixed_template_tags_from_stored_facts(credit_db,setup_dm):
     _,_,worker=setup_dm;row=await audio_order(worker);key=row['id']
     custom=dm.LEGACY_DEFAULT_TEMPLATE.format(**json.loads(row['details'])).replace('[warm]','[whispers]')
     await dm.update(key,text=custom,status='audio_ready')
     assert await dm.regenerate(key,456,0,admin=456)
-    assert (await dm.get(key))['text']==custom
+    assert (await dm.get(key))['text']==dm.tagged_text(json.loads(row['details']))
 
 
 def test_phrase_tags_preserve_all_template_words_punctuation_and_fields():

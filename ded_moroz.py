@@ -551,8 +551,11 @@ class Worker:
             # Rebuilds use a fresh output/S3 key; never replace an already delivered MP4.
             target=self.assets.path(row['output_path'] or key+'/greeting-'+uuid4().hex+'.mp4')
             if target.exists():target=self.assets.path(key+'/greeting-'+uuid4().hex+'.mp4')
+            details=json.loads(row['details'])
+            title_options=({'name_genitive':details['title_name_genitive']}
+                if details.get('title_name_source')==details['name'] and details.get('title_name_genitive') else {})
             await render_ded_moroz(self.assets.path(row['raw_path']),self.assets.path(row['photo_path']),
-                self.assets.path(row['approved_audio_path'] or row['audio_path']),self.settings.examples,target,json.loads(row['details'])['name'])
+                self.assets.path(row['approved_audio_path'] or row['audio_path']),self.settings.examples,target,details['name'],**title_options)
             await update(key,output_path=target.relative_to(self.assets.root).as_posix(),status='publish')
         elif state=='publish':
             url=await self.assets.publish(row['output_path'])

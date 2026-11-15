@@ -11,7 +11,7 @@ from ded_moroz import Settings
 from multstudio.assets import Assets
 
 
-def queue_rebuild(config, settings, order_id=None):
+def queue_rebuild(config, settings, order_id=None, *, name_genitive=None):
     if config.admin_user_id is None:
         raise ValueError('Настройте ADMIN_USER_ID.')
     assets = Assets(settings.root, config)
@@ -30,8 +30,14 @@ def queue_rebuild(config, settings, order_id=None):
         for name in ('ny_music.mp3','jingle_bells.mp3'):
             if not (settings.examples / 'audio' / name).is_file():
                 raise ValueError('Не найден файл монтажа: ' + name)
-        if not isinstance(json.loads(row['details']).get('name'), str):
+        details=json.loads(row['details'])
+        if not isinstance(details.get('name'), str):
             raise ValueError('Не найдено сохранённое имя ребёнка.')
+        if name_genitive is not None:
+            from ded_moroz_intro import recipient_line
+            recipient_line(details['name'],name_genitive)
+            details['title_name_source']=details['name']
+            details['title_name_genitive']=name_genitive.strip()
         stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S-%f')
         backup = database.DATABASE_PATH.with_name('database.before-dm-rebuild-' + stamp + '.sqlite3')
         with sqlite3.connect(backup) as copy:
@@ -44,16 +50,16 @@ def queue_rebuild(config, settings, order_id=None):
             json.dump({'order_id':row['id'], 'previous_output_path':row['output_path'],
                 'previous_output_url':row['output_url'], 'video_id':row['video_id'],
                 'raw_path':row['raw_path'], 'approved_audio_path':row['approved_audio_path'] or row['audio_path'],
-                'target':target, 'reason':'remove_fire_overlay', 'created_at_utc':stamp}, output, ensure_ascii=False)
+                'target':target, 'reason':'montage_update', 'created_at_utc':stamp}, output, ensure_ascii=False)
         db.execute('BEGIN IMMEDIATE')
         active = db.execute("SELECT id FROM ded_moroz_orders WHERE user_id=? AND id<>? AND status NOT IN ('done','cancelled')",
                             (config.admin_user_id, row['id'])).fetchone()
         if active:
             raise ValueError('Есть другой незавершённый заказ. Пересборка не поставлена в очередь.')
-        cursor = db.execute("""UPDATE ded_moroz_orders SET status='render',output_path=?,output_url=NULL,
+        cursor = db.execute("""UPDATE ded_moroz_orders SET status='render',output_path=?,output_url=NULL,details=?,
             error=NULL,next_attempt=0 WHERE id=? AND user_id=? AND status='done'
-            AND output_path IS ? AND raw_path IS ? AND approved_audio_path IS ? AND audio_path IS ?""",
-            (target,row['id'],config.admin_user_id,row['output_path'],row['raw_path'],row['approved_audio_path'],row['audio_path']))
+            AND output_path IS ? AND raw_path IS ? AND approved_audio_path IS ? AND audio_path IS ? AND details=?""",
+            (target,json.dumps(details,ensure_ascii=False),row['id'],config.admin_user_id,row['output_path'],row['raw_path'],row['approved_audio_path'],row['audio_path'],row['details']))
         if cursor.rowcount != 1:
             raise ValueError('Заказ изменился. Пересборка не поставлена в очередь.')
         db.commit()
@@ -64,9 +70,10 @@ def queue_rebuild(config, settings, order_id=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('order_id', nargs='?', help='Order ID; otherwise the latest admin order (must be completed)')
+    parser.add_argument('--recipient-genitive', help='Exact Russian genitive form, e.g. Машеньки (title only)')
     args = parser.parse_args()
     config = Config.from_env()
-    print(json.dumps(queue_rebuild(config,Settings.from_config(config),args.order_id), ensure_ascii=False, indent=2))
+    print(json.dumps(queue_rebuild(config,Settings.from_config(config),args.order_id,name_genitive=args.recipient_genitive), ensure_ascii=False, indent=2))
 
 
 if __name__ == '__main__':

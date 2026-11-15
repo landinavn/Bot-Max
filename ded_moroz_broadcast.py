@@ -29,7 +29,10 @@ async def messages(bot):
     await sales.check_example()
     video=await bot.upload_media(InputMedia(path=str(sales.EXAMPLE),type=UploadType.VIDEO))
     if getattr(video,'type',None)!='video':raise ValueError('MAX не вернул видео-пример.')
-    b=InlineKeyboardBuilder().row(CallbackButton(text='🎅 Старт',payload='dm_launch_start'))
+    b=InlineKeyboardBuilder().row(
+        CallbackButton(text='🎅 Старт',payload='dm_launch_start'),
+        CallbackButton(text='🏠 Главный экран',payload='back_to_main'),
+    )
     return [('🎬 Начало поздравления Деда Мороза:',[video]),(TEXT,[b.as_markup()])]
 
 

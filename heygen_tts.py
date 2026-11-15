@@ -16,9 +16,10 @@ from multstudio.assets import https_url
 
 DEFAULT_VOICE_ID='3146577ad1e544c1a4658ded1090740c'
 DEFAULT_MODEL='heygen-voice-1'
-DEFAULT_SPEED=0.90
-DEFAULT_ECHO_DELAY_MS=55
-DEFAULT_ECHO_DECAY=0.10
+DEFAULT_SPEED=0.85
+DEFAULT_PITCH_SEMITONES=-1.5
+DEFAULT_ECHO_DELAY_MS=100
+DEFAULT_ECHO_DECAY=0.18
 
 
 def prepare_speech_text(text):
@@ -34,27 +35,36 @@ class HeyGenSpeechError(RuntimeError):
 
 class HeyGenTTSAdapter:
     def __init__(self,key,voice_id,assets,*,model=DEFAULT_MODEL,transport=None,
-                 speed=DEFAULT_SPEED,echo_delay_ms=DEFAULT_ECHO_DELAY_MS,echo_decay=DEFAULT_ECHO_DECAY):
+                 speed=DEFAULT_SPEED,echo_delay_ms=DEFAULT_ECHO_DELAY_MS,echo_decay=DEFAULT_ECHO_DECAY,
+                 pitch_semitones=DEFAULT_PITCH_SEMITONES):
         self.key,self.voice_id,self.assets,self.model=key,voice_id,assets,model
         self.client=HeyGenAdapter(key,transport,voice_id=voice_id,model=model)
-        self.delivery=self.delivery_settings(speed,echo_delay_ms,echo_decay)
+        self.delivery=self.delivery_settings(speed,echo_delay_ms,echo_decay,pitch_semitones)
 
     @staticmethod
-    def delivery_settings(speed,delay,decay):
-        speed,delay,decay=map(float,(speed,delay,decay))
-        if (not all(math.isfinite(v) for v in (speed,delay,decay))
-            or not 0.5<=speed<=2 or not 0<=delay<=150 or not 0<=decay<=0.3):
-            raise ValueError('Проверьте DED_MOROZ_SPEECH_SPEED (0.5–2), ECHO_DELAY_MS (0–150), ECHO_DECAY (0–0.3).')
-        return {'version':'ded-voice-delivery-v1','speed':speed,'echo_delay_ms':delay,'echo_decay':decay}
+    def delivery_settings(speed,delay,decay,pitch=0):
+        speed,delay,decay,pitch=map(float,(speed,delay,decay,pitch))
+        if (not all(math.isfinite(v) for v in (speed,delay,decay,pitch))
+            or not -3<=pitch<=3 or not 0.5<=speed<=2 or not 0<=delay<=150 or not 0<=decay<=0.3):
+            raise ValueError('Проверьте DED_MOROZ_SPEECH_SPEED (0.5–2), ECHO_DELAY_MS (0–150), ECHO_DECAY (0–0.3), PITCH_SEMITONES (−3–3).')
+        return {'version':'ded-voice-delivery-v1','speed':speed,'echo_delay_ms':delay,'echo_decay':decay,'pitch_semitones':pitch}
 
     def delivery_hash(self):
         return hashlib.sha256(json.dumps(self.delivery,sort_keys=True).encode()).hexdigest()
 
     async def process_delivery(self,raw,output,meta,*,job_id,signature):
-        # Dry signal 0.9 + 10% short delayed reflection: modest room echo, no long tail.
-        filters=[f"atempo={self.delivery['speed']:.6f}"]
+        # Shift pitch locally; compensate its tempo change before applying target speed.
+        ratio=2**(self.delivery['pitch_semitones']/12)
+        tempo=self.delivery['speed']/ratio
+        filters=['aresample=44100',f'asetrate={44100*ratio:.6f}', 'aresample=44100']
+        # Keep each atempo stage within 0.5–2, including extreme valid settings.
+        while tempo<0.5:
+            filters.append('atempo=0.5');tempo/=0.5
+        while tempo>2:
+            filters.append('atempo=2');tempo/=2
+        filters.append(f'atempo={tempo:.6f}')
         if self.delivery['echo_delay_ms'] and self.delivery['echo_decay']:
-            filters.append(f"aecho=0.9:1.0:{self.delivery['echo_delay_ms']:.3f}:{self.delivery['echo_decay']:.6f}")
+            filters.append(f"aecho=0.8:1.0:{self.delivery['echo_delay_ms']:.3f}:{self.delivery['echo_decay']:.6f}")
         destination=self.assets.path(output)
         temporary=destination.with_name('.delivery-'+uuid4().hex+'.mp3')
         try:

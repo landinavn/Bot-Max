@@ -194,3 +194,62 @@ async def test_light_echo_adds_a_short_audible_tail(tmp_path,mp3_bytes):
     assert tail and math.sqrt(sum(x*x for x in tail)/len(tail))>0.001
     assert len(wet)<len(dry)+int(0.12*44100)
     assert len(calls)==2
+
+
+async def test_pitch_is_lowered_without_changing_target_tempo(tmp_path,mp3_bytes):
+    import array
+    from media_service import audio_duration
+    calls=[];assets=Assets(tmp_path,None);adapter=make_adapter(assets,mp3_bytes,calls);key='1'*32
+    adapter.delivery=adapter.delivery_settings(0.85,0,0,0)
+    dry=await adapter.generate_speech('Привет!',job_id=key)
+    adapter.delivery=adapter.delivery_settings(0.85,0,0,-1.5)
+    lower=await adapter.generate_speech('Привет!',job_id=key)
+    def frequency(path):
+        data=array.array('f')
+        data.frombytes(subprocess.check_output(['ffmpeg','-v','error','-i',str(assets.path(path)),
+            '-ss','0.05','-t','0.25','-ar','44100','-ac','1','-f','f32le','-']))
+        return sum(a<=0<b for a,b in zip(data,data[1:]))/0.25
+    assert abs(frequency(lower)/frequency(dry)-2**(-1.5/12))<0.03
+    assert abs(await audio_duration(assets.path(lower))-await audio_duration(assets.path(dry)))<0.06
+    assert len(calls)==2
+
+
+async def test_offline_reprocess_preserves_versions_and_never_calls_tts(credit_db,setup_dm,mp3_bytes,monkeypatch):
+    from dataclasses import replace
+    from ded_moroz_reprocess import reprocess
+    _,_,worker=setup_dm;row=await audio_order(worker);key=row['id']
+    calls=[];adapter=make_adapter(worker.assets,mp3_bytes,calls)
+    adapter.delivery=adapter.delivery_settings(0.9,55,0.1,0)
+    old=await adapter.generate_speech(row['text'],job_id=key,version=row['version'])
+    await worker.store_audio_result(row,old)
+    await dm.update(key,status='audio_ready',audio_url='https://cdn.example/old.mp3')
+    forbidden=AsyncMock(side_effect=AssertionError('No TTS calls allowed'))
+    monkeypatch.setattr(HeyGenTTSAdapter,'generate_speech',forbidden)
+    monkeypatch.setattr(HeyGenTTSAdapter,'check_voice',forbidden)
+    settings=replace(worker.settings,speech_speed=.85,pitch_semitones=-1.5,echo_delay_ms=100,echo_decay=.18)
+    raw=worker.assets.path(key+f"/speech-v{row['version']}.raw.mp3")
+    original=raw.read_bytes();raw.unlink()
+    with pytest.raises(ValueError,match='Исходный MP3 отсутствует'):
+        await reprocess(key,worker.config,settings)
+    assert (await dm.get(key))['version']==row['version']
+    raw.write_bytes(original)
+    await dm.update(key,text='Другой текст')
+    with pytest.raises(ValueError,match='не совпадают'):
+        await reprocess(key,worker.config,settings)
+    await dm.update(key,text=row['text'])
+    result=await reprocess(key,worker.config,settings)
+    current=await dm.get(key)
+    assert result['changed'] and current['version']==row['version']+1
+    assert current['status']=='audio_publish' and not current['audio_url'] and not current['preview_mid']
+    assert worker.assets.path(old).is_file() and worker.assets.path(current['audio_path']).is_file()
+    assert len(await dm.read('SELECT * FROM ded_moroz_audio_versions WHERE order_id=?',(key,),all_rows=True))==2
+    await dm.update(key,status='audio_ready')
+    assert not (await reprocess(key,worker.config,settings))['changed']
+    await dm.update(key,approved_audio_path=current['audio_path'])
+    with pytest.raises(ValueError):await reprocess(key,worker.config,settings)
+    forbidden.assert_not_awaited()
+
+
+@pytest.mark.parametrize('pitch',[float('nan'),float('inf'),-4,4])
+def test_invalid_pitch_rejected(pitch):
+    with pytest.raises(ValueError):HeyGenTTSAdapter.delivery_settings(.85,100,.18,pitch)

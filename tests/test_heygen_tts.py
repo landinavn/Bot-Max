@@ -250,6 +250,56 @@ async def test_offline_reprocess_preserves_versions_and_never_calls_tts(credit_d
     forbidden.assert_not_awaited()
 
 
+def test_archive_cli_preserves_timbre_and_echo_by_default(tmp_path,monkeypatch):
+    import ded_moroz_reprocess as tool
+    from config import Config
+    config=Config(token="test",photo_path=tmp_path,admin_user_id=456)
+    monkeypatch.setattr(tool.Config,'from_env',lambda:config)
+    monkeypatch.setattr(tool.Settings,'from_config',lambda _:dm.Settings(tmp_path,tmp_path))
+    monkeypatch.setattr('sys.argv',['ded_moroz_reprocess','a'*32,'--source-version','5','--speed','0.8'])
+    fake=AsyncMock(return_value={'changed':True});monkeypatch.setattr(tool,'reprocess',fake)
+    tool.main()
+    settings=fake.await_args.args[2]
+    assert settings.speech_speed==.8 and settings.pitch_semitones==0
+    assert settings.echo_delay_ms==0 and settings.echo_decay==0
+    assert fake.await_args.kwargs=={'source_version':5}
+
+
 @pytest.mark.parametrize('pitch',[float('nan'),float('inf'),-4,4])
 def test_invalid_pitch_rejected(pitch):
     with pytest.raises(ValueError):HeyGenTTSAdapter.delivery_settings(.85,100,.18,pitch)
+
+
+async def test_restore_specific_archive_slows_its_final_mp3_without_new_synthesis(credit_db,setup_dm,mp3_bytes,monkeypatch):
+    from dataclasses import replace
+    from ded_moroz_reprocess import reprocess
+    from media_service import audio_duration
+    _,_,worker=setup_dm;row=await audio_order(worker);key=row['id']
+    adapter=make_adapter(worker.assets,mp3_bytes,[])
+    adapter.delivery=adapter.delivery_settings(1,0,0,0)
+    source=await adapter.generate_speech(row['text'],job_id=key,version=row['version'])
+    await worker.store_audio_result(row,source)
+    await dm.update(key,status='audio_ready')
+    await reprocess(key,worker.config,worker.settings)
+    await dm.update(key,status='audio_ready',text='[warm] '+row['text'])
+    # The selected preview is sufficient, even when its original provider download is gone.
+    worker.assets.path(key+f"/speech-v{row['version']}.raw.mp3").unlink()
+    forbidden=AsyncMock(side_effect=AssertionError('Paid synthesis must never be called'))
+    monkeypatch.setattr(HeyGenTTSAdapter,'generate_speech',forbidden)
+    monkeypatch.setattr(HeyGenTTSAdapter,'check_voice',forbidden)
+    settings=replace(worker.settings,speech_speed=.8,pitch_semitones=0,echo_delay_ms=0,echo_decay=0)
+    with pytest.raises(ValueError,match='не найдена'):
+        await reprocess(key,worker.config,settings,source_version=999)
+    result=await reprocess(key,worker.config,settings,source_version=row['version'])
+    saved=await dm.get(key)
+    assert result['source_version']==row['version'] and saved['text']==row['text']
+    assert worker.assets.path(key+f"/speech-v{saved['version']}.raw.mp3").read_bytes()==worker.assets.path(source).read_bytes()
+    assert await audio_duration(worker.assets.path(saved['audio_path'])) > await audio_duration(worker.assets.path(source))*1.17
+    assert worker.assets.path(source).is_file()
+    await dm.update(key,status='audio_ready')
+    again=await reprocess(key,worker.config,settings,source_version=row['version'])
+    assert not again['changed'] and again['version']==saved['version']
+    await dm.update(key,text='Поздравление другого ребёнка')
+    with pytest.raises(ValueError,match='другой текст'):
+        await reprocess(key,worker.config,settings,source_version=row['version'])
+    forbidden.assert_not_awaited()

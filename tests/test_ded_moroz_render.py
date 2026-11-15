@@ -1,4 +1,4 @@
-"""Real offline FFmpeg: landscape, screen overlay, timed rectangular PiP and AAC."""
+"""Real offline FFmpeg: preserve HeyGen background, timed rectangular PiP and AAC."""
 import json
 import shutil
 import subprocess
@@ -40,11 +40,8 @@ async def test_real_landscape_render_overlay_pip_audio_and_safe_name(tmp_path,ph
     # The white 6px rectangular frame appears only during the middle interval.
     assert min(values[1])>200
     assert min(values[0])<50 and min(values[2])<50
-    if with_fire:
-        assert background[0][0]>180
-    else:
-        assert max(background[0])<30
-        assert 'fire_overlay.mp4' in caplog.text and 'пропущено' in caplog.text
+    # A red fire_overlay file exists in half the cases, but must NEVER change the background.
+    assert all(max(pixel)<30 for pixel in background)
     assert (tmp_path/'title.txt').read_text()=="Для Маша: 100% 'солнышко' от Деда Мороза"
 
 

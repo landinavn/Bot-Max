@@ -548,7 +548,9 @@ class Worker:
             await update(key,raw_path=path,status='render')
         elif state=='render':
             from video_service import render_ded_moroz
-            target=self.assets.path(key+'/greeting.mp4')
+            # Rebuilds use a fresh output/S3 key; never replace an already delivered MP4.
+            target=self.assets.path(row['output_path'] or key+'/greeting-'+uuid4().hex+'.mp4')
+            if target.exists():target=self.assets.path(key+'/greeting-'+uuid4().hex+'.mp4')
             await render_ded_moroz(self.assets.path(row['raw_path']),self.assets.path(row['photo_path']),
                 self.assets.path(row['approved_audio_path'] or row['audio_path']),self.settings.examples,target,json.loads(row['details'])['name'])
             await update(key,output_path=target.relative_to(self.assets.root).as_posix(),status='publish')

@@ -17,7 +17,7 @@ import database
 from config import Config, BASE_DIR
 from heygen import HeyGenAdapter
 from heygen_tts import (HeyGenTTSAdapter, HeyGenSpeechError, prepare_speech_text, display_text,
-                        DEFAULT_VOICE_ID, DEFAULT_MODEL, DEFAULT_SPEED, DEFAULT_ECHO_DELAY_MS, DEFAULT_ECHO_DECAY)
+                        DEFAULT_VOICE_ID, DEFAULT_MODEL, DEFAULT_SPEED, DEFAULT_PITCH_SEMITONES, DEFAULT_ECHO_DELAY_MS, DEFAULT_ECHO_DECAY)
 from multstudio.assets import Assets, https_url
 from multstudio.uploads import png_bytes
 
@@ -90,6 +90,8 @@ class Settings:
     echo_delay_ms: float=DEFAULT_ECHO_DELAY_MS
     echo_decay: float=DEFAULT_ECHO_DECAY
 
+    pitch_semitones: float=DEFAULT_PITCH_SEMITONES
+
     @classmethod
     def from_config(cls,config):
         return cls(Path(os.getenv('STUDIO_FILES_DIR','').strip() or str(BASE_DIR/'studio_files')),BASE_DIR/'examples',
@@ -100,7 +102,8 @@ class Settings:
                    os.getenv('DED_MOROZ_TTS_MODEL','').strip() or DEFAULT_MODEL,
                    float((os.getenv('DED_MOROZ_SPEECH_SPEED') or str(DEFAULT_SPEED)).replace(',','.')),
                    float((os.getenv('DED_MOROZ_ECHO_DELAY_MS') or str(DEFAULT_ECHO_DELAY_MS)).replace(',','.')),
-                   float((os.getenv('DED_MOROZ_ECHO_DECAY') or str(DEFAULT_ECHO_DECAY)).replace(',','.')))
+                   float((os.getenv('DED_MOROZ_ECHO_DECAY') or str(DEFAULT_ECHO_DECAY)).replace(',','.')),
+                   float((os.getenv('DED_MOROZ_PITCH_SEMITONES') or str(DEFAULT_PITCH_SEMITONES)).replace(',','.')))
 
     def files(self):
         # Required audio decorations belong to the video phase, never to TTS.
@@ -113,7 +116,7 @@ class Settings:
             if not self.heygen_key:raise ValueError('Задайте HEYGEN_API_KEY.')
             HeyGenTTSAdapter.identifier(self.voice_id)
             HeyGenTTSAdapter.model_name(self.tts_model)
-            HeyGenTTSAdapter.delivery_settings(self.speech_speed,self.echo_delay_ms,self.echo_decay)
+            HeyGenTTSAdapter.delivery_settings(self.speech_speed,self.echo_delay_ms,self.echo_decay,self.pitch_semitones)
             return
         if not self.heygen_key:raise ValueError('Задайте HEYGEN_API_KEY.')
         required=self.files()
@@ -433,7 +436,7 @@ class Worker:
         self.assets=Assets(self.settings.root,config)
         self.heygen=heygen or HeyGenAdapter(self.settings.heygen_key)
         self.tts=tts or HeyGenTTSAdapter(self.settings.heygen_key,self.settings.voice_id,self.assets,model=self.settings.tts_model,
-            speed=self.settings.speech_speed,echo_delay_ms=self.settings.echo_delay_ms,echo_decay=self.settings.echo_decay)
+            speed=self.settings.speech_speed,echo_delay_ms=self.settings.echo_delay_ms,echo_decay=self.settings.echo_decay,pitch_semitones=self.settings.pitch_semitones)
         self.uploads={}
 
     async def avatar(self):
@@ -466,7 +469,7 @@ class Worker:
     async def store_audio_result(self,row,path):
         key=row['id'];text=prepare_speech_text(row['text'])
         signature=HeyGenTTSAdapter(None,self.settings.voice_id,self.assets,model=self.settings.tts_model,
-            speed=self.settings.speech_speed,echo_delay_ms=self.settings.echo_delay_ms,echo_decay=self.settings.echo_decay).fingerprint(text)
+            speed=self.settings.speech_speed,echo_delay_ms=self.settings.echo_delay_ms,echo_decay=self.settings.echo_decay,pitch_semitones=self.settings.pitch_semitones).fingerprint(text)
         async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
             await db.execute("""INSERT INTO ded_moroz_audio_versions
                 (order_id,version,text,voice_id,provider_url,path,provider,submitted_text,model,request_sha256)

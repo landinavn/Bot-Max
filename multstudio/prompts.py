@@ -27,7 +27,8 @@ def validate_scene_image_references(snap):
     """Also guard frozen/legacy jobs before a paid submission, not just quotes."""
     if snap['target'] != 'scene':
         return
-    if not snap.get('cast') or any(
+    from .rules import strict
+    if (not snap.get('cast') and not strict(snap['spec'])) or any(
         not c.get('assets', {}).get('image', {}).get('approved') for c in snap['cast']
     ):
         raise ValueError('Сначала создайте и утвердите эталоны всех персонажей сцены.')
@@ -39,6 +40,9 @@ def scene_image_prompt(snap, location_reference_url=None):
     spec = snap['spec']
     moment = spec.get('visual', '')
     camera = 'One fixed medium-wide camera view showing the cast together in one space.'
+    from .rules import strict
+    if strict(spec) and spec.get('speaker_id'):
+        camera = 'One close-up or medium shot of ONLY the speaking character. Everyone else stays off screen. Animate only this mouth.'
     for original, keyframe in zip(SCENES, KEYFRAMES):
         if spec.get('title') == original[0] and moment == original[3]:
             moment, camera = keyframe

@@ -43,6 +43,8 @@ class Settings:
     video_price: int = 0  # Estimate per 5 seconds; must be configured by owner.
     speech_price: int = 0  # Estimate per 1000 characters.
     speech_v3_price: int = 0  # Estimate per 250 characters per utterance.
+    heygen_key: str = field(default='', repr=False)
+    heygen_price: int = 0  # Total estimate: Photo Avatar + one Avatar IV video.
     concurrency: int = 1
     enabled: bool = False
 
@@ -57,6 +59,8 @@ class Settings:
                    video_price=price_from_env('STUDIO_KLING_5S_USD'),
                    speech_price=price_from_env('STUDIO_TTS_1000_CHARS_USD'),
                    speech_v3_price=price_from_env('STUDIO_TTS_V3_250_CHARS_USD'),
+                   heygen_key=os.getenv('HEYGEN_API_KEY','').strip(),
+                   heygen_price=price_from_env('STUDIO_HEYGEN_SCENE_USD'),
                    concurrency=max(1, min(3, int(os.getenv('STUDIO_CONCURRENCY', '1')))),
                    enabled=os.getenv('STUDIO_ENABLED', '0') == '1')
 
@@ -66,7 +70,12 @@ class Settings:
             price, model, size = self.image_price, self.image_model, '1024x1536'
         elif kind == 'video':
             duration = 5 if duration <= 5 else 10
-            price, model, size = self.video_price * (duration // 5), 'kling/3.0/std', '9:16; итог 1080x1920'
+            if snapshot.get('spec',{}).get('video_provider')=='heygen':
+                if self.heygen_price<=0:
+                    raise ValueError('Задайте STUDIO_HEYGEN_SCENE_USD: оценка USD за Photo Avatar и одно видео Avatar IV.')
+                price,model,size=self.heygen_price,'heygen/avatar_iv','9:16 / 1080p; итог 1080x1920'
+            else:
+                price, model, size = self.video_price * (duration // 5), 'kling/3.0/std', '9:16; итог 1080x1920'
         elif kind == 'speech':
             profiles = speech_profiles or {}
             lines = snapshot['spec'].get('dialogue', [])

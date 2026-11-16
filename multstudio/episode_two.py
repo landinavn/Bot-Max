@@ -106,10 +106,11 @@ async def speech_profiles(snap):
 
 async def plan(episode_id, settings):
     episode = await repo.snapshot('episode', episode_id)
-    result = dict(images=0, videos=0, utterances=0, services={}, errors=[], total=0)
+    result = dict(images=0, videos=0, utterances=0, silent=0, services={}, errors=[], total=0)
     for scene in episode['scenes']:
         result['images'] += 1; result['videos'] += 1
         result['utterances'] += len(scene['spec'].get('dialogue', []))
+        if not scene['spec'].get('dialogue'): result['silent'] += 1
         for kind in ('image', 'video', 'speech'):
             if kind == 'speech' and not scene['spec'].get('dialogue'): continue
             try:
@@ -128,6 +129,7 @@ async def prepare_jobs(episode_id, settings):
     for snap in [*episode['scenes'], episode]:
         kinds = ('image', 'video', 'speech') if snap['target'] == 'scene' else ('assemble',)
         for kind in kinds:
+            if kind=='speech' and not snap['spec'].get('dialogue'): continue
             profiles = await speech_profiles(snap) if kind == 'speech' else None
             try:
                 q = settings.quote(kind, snap, speech_profiles=profiles)

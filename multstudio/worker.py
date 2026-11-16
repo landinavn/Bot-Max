@@ -10,6 +10,7 @@ from .render import Renderer
 from .diagnostics import log_preflight_failure
 from .prompts import validate_scene_image_references
 from .tts import validate_speech_snapshot
+from . import rules
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +30,12 @@ class Worker:
             await asyncio.sleep(30)
             await repo.update_job(key, lease_until=int(time.time())+120)
 
-    async def save_result(self, job, snap, *, data=None, url=None, suffix='png'):
-        await self.assets.retain(snap, job['kind'], data=data, url=url, suffix=suffix, job_id=job['id'])
+    async def save_result(self, job, snap, *, data=None, url=None, suffix='png', metadata=None):
+        asset_id = await self.assets.retain(snap, job['kind'], data=data, url=url, suffix=suffix, job_id=job['id'])
+        if metadata is not None:
+            async with repo.connect() as db:
+                await db.execute('UPDATE cartoon_assets SET metadata=? WHERE id=?',(repo.encoded(metadata),asset_id))
+                await db.commit()
         await repo.update_job(job['id'],status='publishing')
         await self.publish_result(job)
 
@@ -52,19 +57,48 @@ class Worker:
             if item['status']=='publishing':
                 await self.publish_result(item)
                 return
+            strict = rules.strict(snap['spec']) if item['target']=='scene' else False
+            heygen = kind=='video' and snap['spec'].get('video_provider')=='heygen'
+            if strict:
+                rules.validate(snap['spec'])
+            if heygen and item['status']=='avatar_polling':
+                result=await self.providers.studio_heygen.poll(item['provider_id'],avatar=True)
+                if result is None:
+                    await repo.update_job(key,lease_until=0,next_attempt=int(time.time())+15)
+                else:
+                    await repo.update_job(key,status='video_preparing',lease_until=0,next_attempt=0)
+                return
+            if heygen and item['status']=='video_preparing':
+                await self.validate_scene_audio(snap)
+                speech_url=await self.assets.asset_url(snap['assets']['speech'])
+                if not await repo.begin_submission(key): return
+                preflight=False
+                task=await self.providers.studio_heygen.scene_video(item['provider_id'],speech_url,key+'-video')
+                await asyncio.shield(repo.update_job(key,status='polling',provider_id=task,usage=repo.encoded({'provider':'heygen','stage':'video'}),lease_until=0,next_attempt=int(time.time())+15))
+                return
             if kind == 'video' and item['status'] == 'polling':
-                result = dict(url=item['result_url']) if item['result_url'] else await self.providers.kling.poll(item['provider_id'])
+                result = dict(url=item['result_url']) if item['result_url'] else await (
+                    self.providers.studio_heygen.poll(item['provider_id']) if heygen else self.providers.kling.poll(item['provider_id']))
                 if result is None:
                     await repo.update_job(key, lease_until=0, next_attempt=int(time.time())+15)
                     return
                 await repo.update_job(key, result_url=result['url'], usage=repo.encoded(result.get('usage', {})))
-                await self.save_result(item,snap,url=result['url'],suffix='mp4')
+                if strict:
+                    relative,_=await self.assets.download(result['url'],'mp4',job_id=key,name='provider-video.mp4')
+                    await self.assets.retain(snap,'video_source',data=self.assets.path(relative).read_bytes(),suffix='mp4',job_id=key)
+                    path=await self.renderer.normalize_video(snap,self.assets.path(relative))
+                    await self.save_result(item,snap,data=path.read_bytes(),suffix='mp4',metadata={'duration_seconds':5,'production_rules':rules.VERSION,'image_id':snap['assets']['image']['id'],'speech_id':snap['assets'].get('speech',{}).get('id')})
+                    await repo.scene_validation(snap,'video_ready')
+                else:
+                    await self.save_result(item,snap,url=result['url'],suffix='mp4')
                 return
             if kind == 'assemble':
                 path = await self.renderer.assemble(snap)
                 await self.save_result(item,snap,data=path.read_bytes(),suffix='mp4')
                 return
-            self.providers.preflight(kind)
+            if heygen: self.providers.studio_heygen.ready()
+            self.providers.preflight('heygen_video' if heygen else kind)
+            if strict and kind=='video': await self.validate_scene_audio(snap)
             if kind == 'image':
                 validate_scene_image_references(snap)
             if kind == 'speech':
@@ -80,6 +114,9 @@ class Worker:
             if kind == 'image':
                 data = await self.providers.image(snap)
                 await self.save_result(item,snap,data=data)
+            elif kind == 'video' and heygen:
+                task=await self.providers.studio_heygen.create_scene_avatar(image_url,key+'-avatar')
+                await asyncio.shield(repo.update_job(key,status='avatar_polling',provider_id=task,usage=repo.encoded({'provider':'heygen','stage':'avatar'}),lease_until=0,next_attempt=int(time.time())+15))
             elif kind == 'video':
                 task = await self.providers.kling.submit(image_url, repo.encoded(snap['spec']) +
                     f" Complete the main action within {snap['spec']['duration']} seconds, then hold naturally. "
@@ -92,14 +129,28 @@ class Worker:
                     data = await self.providers.speech_line(snap,line)
                     relative, checksum = await self.assets.write(data,'mp3',job_id=key,name=f'speech-line-{len(paths)+1}.mp3')
                     measured = {}
-                    if snap['spec'].get('speech_speeds'):
+                    if strict or snap['spec'].get('speech_speeds'):
                         from .render import duration
                         measured['duration_seconds'] = await duration(self.assets.path(relative))
                     await repo.add_asset(snap['project_id'],snap['target'],snap['id'],'speech_line',
                         snap['context_hash'],relative,checksum,job_id=key,metadata=repo.encoded(dict(line,**measured)))
                     paths.append(self.assets.path(relative))
                 result = await self.renderer.speech(paths)
-                await self.save_result(item,snap,data=result.read_bytes(),suffix='mp3')
+                if strict:
+                    from .render import duration
+                    seconds=await duration(result)
+                    profile=snap['quote']['speech_profiles'][snap['spec']['speaker_id']]
+                    try:
+                        rules.audio_seconds(seconds)
+                    except ValueError as exc:
+                        await self.assets.retain(snap,'speech_rejected',data=result.read_bytes(),suffix='mp3',job_id=key)
+                        message=str(exc)+' Предложение: '+rules.shorter_suggestion(snap['spec']['dialogue'][0]['text'])
+                        await repo.scene_validation(snap,'audio_too_long',seconds=seconds,error=message,profile=profile)
+                        raise ValueError(message) from None
+                    await self.save_result(item,snap,data=result.read_bytes(),suffix='mp3',metadata=rules.speech_metadata(snap,seconds))
+                    await repo.scene_validation(snap,'audio_ready',seconds=seconds,profile=profile)
+                else:
+                    await self.save_result(item,snap,data=result.read_bytes(),suffix='mp3')
         except asyncio.CancelledError:
             # Keep submitting + lease as durable evidence; recovery never resubmits it.
             raise
@@ -109,17 +160,17 @@ class Worker:
                 log_preflight_failure(logger,key,exc,self.settings,self.providers)
             current = await repo.job(key)
             attempts = current['attempts']+1
-            polling = current['status']=='polling' and current['provider_id']
+            polling = current['status'] in ('polling','avatar_polling') and current['provider_id']
             if current['status']=='publishing' and attempts < 5:
                 await repo.update_job(key,status='publishing',attempts=attempts,lease_until=0,
                     next_attempt=int(time.time())+min(300,15*2**attempts),error='temporary_publication_failure')
             elif polling and attempts < 5 and (isinstance(exc, TemporaryPollError) or current['result_url']):
-                await repo.update_job(key,status='polling',attempts=attempts,lease_until=0,
+                await repo.update_job(key,status=current['status'],attempts=attempts,lease_until=0,
                     next_attempt=int(time.time())+min(300,15*2**attempts),error='temporary_poll_or_download')
             else:
                 state = ('failed' if isinstance(exc,KlingTaskFailed) else
                          'preflight_failed' if current['status']=='preparing' else 'manual')
-                await repo.update_job(key,status=state,error=type(exc).__name__,lease_until=0,notified=0)
+                await repo.update_job(key,status=state,error=str(exc)[:1500] if rules.strict(snap['spec']) and isinstance(exc,ValueError) else type(exc).__name__,lease_until=0,notified=0)
             # Do not log exception contents: provider errors may contain credentials/personal text.
             if not preflight:
                 logger.warning('Мультстудия: задание %s требует проверки (%s).',key,type(exc).__name__)
@@ -129,6 +180,20 @@ class Worker:
                 await beat
             except asyncio.CancelledError:
                 pass
+
+    async def validate_scene_audio(self, snap):
+        rules.validate_audio_asset(snap)
+        if snap['spec'].get('dialogue'):
+            from .episode_two import speech_profiles
+            if await speech_profiles(snap)!=snap['quote']['speech_profiles']:
+                raise ValueError('Голос или скорость изменились после подтверждения. Видео не отправлено.')
+            from .render import duration
+            voice=snap['assets']['speech']
+            seconds=await duration(self.assets.path(voice['path']))
+            rules.audio_seconds(seconds)
+            recorded=json.loads(voice['metadata'])['audio_duration_seconds']
+            if abs(seconds-recorded)>0.05:
+                raise ValueError('Длительность файла не совпадает с сохранённой проверкой озвучки.')
 
     async def notices(self):
         if not callable(getattr(self.bot,'send_message',None)):
@@ -143,6 +208,8 @@ class Worker:
             text = f"Мультстудия: {item['kind']}, задание {item['id']}, статус {item['status']}. "
             if item['actual'] is None and item['status'] != 'preflight_failed':
                 text += 'Фактическую стоимость сверьте с провайдером; резерв бюджета сохранён. '
+            if item.get('error') and rules.VERSION in item['snapshot']:
+                text += item['error']+' '
             text += 'Откройте /multstudio → проект → Сцены → Задания и расходы.'
             try:
                 if item['status']=='done' and repo.is_media_job(item):

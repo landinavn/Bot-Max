@@ -23,6 +23,13 @@ async def configure(bot, dispatcher, config):
     except ValueError:
         import logging
         logging.getLogger(__name__).exception('Не удалось подготовить серию 2; существующие серии сохранены:')
+    from .episode_three import prepare as prepare_three
+    try:
+        episode_three = await prepare_three(project,config.admin_user_id)
+        await prepare_jobs(episode_three,settings)
+    except ValueError:
+        import logging
+        logging.getLogger(__name__).exception('Не удалось подготовить серию 3; существующие серии сохранены:')
     await repository.prepare_drafts(project,settings)
     assets = Assets(settings.root,config)
     dispatcher.include_routers(create_router(config.admin_user_id,settings,assets))

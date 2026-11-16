@@ -97,6 +97,10 @@ CREATE TABLE IF NOT EXISTS cartoon_scene_editing (
  video_start REAL NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS cartoon_editing_migrations (
  name TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES cartoon_projects(id));
+CREATE TABLE IF NOT EXISTS cartoon_scene_validation (
+ scene_id TEXT NOT NULL REFERENCES cartoon_scenes(id),context_hash TEXT NOT NULL,
+ speaker_id TEXT,voice_id TEXT,voice_speed REAL,audio_duration_seconds REAL,
+ scene_validation_status TEXT NOT NULL,error TEXT,PRIMARY KEY(scene_id,context_hash));
 CREATE INDEX IF NOT EXISTS cartoon_jobs_queue ON cartoon_jobs(status,next_attempt,lease_until);
 ''')
         columns = await rows(db,'PRAGMA table_info(cartoon_jobs)')
@@ -171,6 +175,9 @@ async def set_character_speech(key,actor,profile):
 
 
 async def create(entity, spec, **fields):
+    legacy = fields.pop('_legacy', False)
+    if entity == 'scene' and not legacy:
+        return (await create_scene_sequence(spec, **fields))[0]
     key = uuid4().hex
     async with connect() as db:
         await db.execute('BEGIN IMMEDIATE')
@@ -184,6 +191,12 @@ async def create(entity, spec, **fields):
 
 
 async def edit(entity, key, spec):
+    from .rules import strict, validate
+    old = await get(entity, key)
+    if entity == 'scene' and old and strict(old['spec']):
+        if not strict(spec):
+            raise ValueError('Нельзя удалить правила пятисекундной сцены.')
+        validate(spec)
     async with connect() as db:
         await db.execute('BEGIN IMMEDIATE')
         row = await one(db, f'SELECT * FROM {TABLES[entity]} WHERE id=?', (key,))
@@ -250,7 +263,7 @@ async def update_scene_visual(key, actor, visual):
 
 async def liability(db, project):
     row = await one(db, '''SELECT COALESCE(SUM(CASE WHEN actual IS NOT NULL THEN actual ELSE estimate END),0) AS total
-      FROM cartoon_jobs WHERE project_id=? AND status NOT IN ('quoted','cancelled','stale','preflight_failed')''', (project,))
+      FROM cartoon_jobs WHERE project_id=? AND status NOT IN ('draft','quoted','cancelled','stale','preflight_failed')''', (project,))
     return row['total']
 
 
@@ -594,8 +607,10 @@ async def quote(target, key, kind, settings):
     if (target, kind) not in {('character','image'),('scene','image'),('scene','video'),('scene','speech'),('episode','assemble')}:
         raise ValueError('Недопустимый тип задания.')
     snap = await snapshot(target, key)
+    from .rules import strict, validate, validate_audio_asset
+    if target == 'scene': validate(snap['spec'])
     if kind == 'image' and target == 'scene':
-        if not snap['spec'].get('approved') or not snap.get('cast'):
+        if not snap['spec'].get('approved') or (not snap.get('cast') and not strict(snap['spec'])):
             raise ValueError('Сначала утвердите сценарий и укажите персонажей.')
         if any(not c['assets'].get('image') or not c['assets']['image']['approved'] for c in snap['cast']):
             raise ValueError('Сначала создайте и утвердите эталоны всех персонажей сцены.')
@@ -612,7 +627,7 @@ async def quote(target, key, kind, settings):
              or (s['spec'].get('dialogue') and not s['assets'].get('speech')) for s in snap['scenes']):
             raise ValueError('Для каждой сцены нужны изображение/видео и озвучка всех реплик.')
     profiles = None
-    if kind == 'speech':
+    if kind == 'speech' or (kind == 'video' and strict(snap['spec']) and snap['spec'].get('dialogue')):
         profiles = {}
         from .episode_two import speech_profiles
         profiles = await speech_profiles(snap)
@@ -622,11 +637,23 @@ async def quote(target, key, kind, settings):
     if kind=='assemble':
         cost['render_version']=4
     snap['quote'] = cost
+    if kind == 'video' and strict(snap['spec']): validate_audio_asset(snap)
+    if kind == 'assemble':
+        for scene in snap['scenes']:
+            if strict(scene['spec']):
+                validate(scene['spec'])
+                if not scene['assets'].get('video') or not scene['assets']['video']['approved']:
+                    raise ValueError('Утвердите проверенное пятисекундное видео каждой новой сцены.')
+                from .episode_two import speech_profiles
+                scene['quote'] = dict(speech_profiles=await speech_profiles(scene))
+                validate_audio_asset(scene)
+                from .rules import validate_video_asset
+                validate_video_asset(scene)
     fingerprint = digest(snap)
     async with connect() as db:
         await db.execute('BEGIN IMMEDIATE')
         prior = await one(db, '''SELECT * FROM cartoon_jobs WHERE target=? AND target_id=? AND kind=? AND fingerprint=?
-            AND status IN ('quoted','queued','preparing','submitting','polling') AND expires>? ORDER BY rowid DESC LIMIT 1''',
+            AND status IN ('quoted','queued','preparing','submitting','polling','avatar_polling','video_preparing') AND expires>? ORDER BY rowid DESC LIMIT 1''',
                           (target, key, kind, fingerprint, int(time.time())))
         if prior:
             return prior
@@ -751,6 +778,17 @@ async def confirm(key, actor):
             return item
         snap = await _snapshot(db, item['target'], item['target_id'])
         snap['quote'] = json.loads(item['snapshot'])['quote']
+        from .rules import strict
+        if item['target']=='scene' and strict(snap['spec']) and item['kind'] in ('speech','video'):
+            from .episode_two import speech_profiles
+            current_profiles=await speech_profiles(snap)
+            if snap['quote'].get('speech_profiles') is not None and current_profiles!=snap['quote']['speech_profiles']:
+                raise ValueError('Изменился голос персонажа. Получите новую оценку и озвучку.')
+        if item['kind']=='assemble':
+            from .episode_two import speech_profiles
+            from .rules import strict
+            for scene in snap['scenes']:
+                if strict(scene['spec']): scene['quote']=dict(speech_profiles=await speech_profiles(scene))
         if item['expires'] < time.time() or digest(snap) != item['fingerprint']:
             await db.execute("UPDATE cartoon_jobs SET status='stale' WHERE id=?", (key,))
             await db.commit()
@@ -800,7 +838,7 @@ async def reconcile(key, actor, actual):
 
 async def video_busy(db, exclude):
     return await one(db, '''SELECT id FROM cartoon_jobs WHERE kind='video' AND id!=? AND
-      (status IN ('preparing','submitting','polling') OR (status='manual' AND result_url IS NULL)) LIMIT 1''', (exclude,))
+      (status IN ('preparing','submitting','polling','avatar_polling','video_preparing') OR (status='manual' AND result_url IS NULL)) LIMIT 1''', (exclude,))
 
 
 async def claim():
@@ -809,13 +847,13 @@ async def claim():
         await db.execute('BEGIN IMMEDIATE')
         await db.execute("UPDATE cartoon_jobs SET status='manual',error='unknown_submission',lease_until=0 WHERE status='submitting' AND lease_until<?", (now,))
         await db.execute("UPDATE cartoon_jobs SET status='queued',lease_until=0 WHERE status='preparing' AND lease_until<?", (now,))
-        candidates = await rows(db, "SELECT * FROM cartoon_jobs WHERE status IN ('queued','polling','publishing') AND lease_until<? AND next_attempt<=? ORDER BY rowid LIMIT 20", (now, now))
+        candidates = await rows(db, "SELECT * FROM cartoon_jobs WHERE status IN ('queued','polling','publishing','avatar_polling','video_preparing') AND lease_until<? AND next_attempt<=? ORDER BY rowid LIMIT 20", (now, now))
         for item in candidates:
             # One studio Kling task IN FLIGHT, not just one concurrent HTTP POST.
             if item['kind']=='video' and item['status']=='queued' and await video_busy(db,item['id']):
                 continue
             project = await one(db, 'SELECT * FROM cartoon_projects WHERE id=?', (item['project_id'],))
-            if item['status'] == 'queued' and item['estimate'] and await liability(db, project['id']) > project['budget']:
+            if item['status'] in ('queued','video_preparing') and item['estimate'] and await liability(db, project['id']) > project['budget']:
                 continue
             status = 'preparing' if item['status'] == 'queued' else item['status']
             await db.execute('UPDATE cartoon_jobs SET status=?,lease_until=? WHERE id=?', (status, now+120, item['id']))
@@ -828,15 +866,15 @@ async def begin_submission(key):
     async with connect() as db:
         await db.execute('BEGIN IMMEDIATE')
         item = await one(db, 'SELECT * FROM cartoon_jobs WHERE id=?', (key,))
-        if not item or item['status'] != 'preparing' or not item['approved_by']:
+        if not item or item['status'] not in ('preparing','video_preparing') or not item['approved_by']:
             raise ValueError('Нет подтверждения на платный запрос.')
         project = await one(db, 'SELECT * FROM cartoon_projects WHERE id=?', (item['project_id'],))
         if item['kind']=='video' and await video_busy(db,key):
-            await db.execute("UPDATE cartoon_jobs SET status='queued',lease_until=0 WHERE id=?", (key,))
+            await db.execute("UPDATE cartoon_jobs SET status=?,lease_until=0 WHERE id=?", ('video_preparing' if item['status']=='video_preparing' else 'queued',key))
             await db.commit()
             return False
         if await liability(db, project['id']) > project['budget']:
-            await db.execute("UPDATE cartoon_jobs SET status='queued',lease_until=0 WHERE id=?", (key,))
+            await db.execute("UPDATE cartoon_jobs SET status=?,lease_until=0 WHERE id=?", ('video_preparing' if item['status']=='video_preparing' else 'queued',key))
             await db.commit()
             return False
         await db.execute("UPDATE cartoon_jobs SET status='submitting' WHERE id=?", (key,))
@@ -895,11 +933,13 @@ async def prepare_drafts(project, settings):
 
 async def retry_poll(key, actor):
     async with connect() as db:
-        result = await db.execute('''UPDATE cartoon_jobs SET status='polling',attempts=0,next_attempt=0,lease_until=0,error=NULL
-          WHERE id=? AND kind='video' AND provider_id IS NOT NULL AND status='manual'
-          AND project_id IN (SELECT id FROM cartoon_projects WHERE owner_id=?)''', (key,actor))
-        if not result.rowcount:
-            raise ValueError('Нет известной задачи Kling для безопасного опроса.')
+        await db.execute('BEGIN IMMEDIATE')
+        item=await one(db,'SELECT j.*,p.owner_id FROM cartoon_jobs j JOIN cartoon_projects p ON p.id=j.project_id WHERE j.id=?',(key,))
+        if not item or item['owner_id']!=actor or item['kind']!='video' or not item['provider_id'] or item['status']!='manual':
+            raise ValueError('Нет известной задачи провайдера для безопасного опроса.')
+        usage=json.loads(item['usage'] or '{}')
+        state='avatar_polling' if usage.get('provider')=='heygen' and usage.get('stage')=='avatar' else 'polling'
+        await db.execute("UPDATE cartoon_jobs SET status=?,attempts=0,next_attempt=0,lease_until=0,error=NULL WHERE id=?",(state,key))
         await db.commit()
 
 
@@ -909,10 +949,71 @@ async def resolve_video(key, actor):
         item=await one(db, '''SELECT j.*,p.owner_id FROM cartoon_jobs j JOIN cartoon_projects p ON p.id=j.project_id
           WHERE j.id=?''', (key,))
         if not item or item['owner_id']!=actor or item['kind']!='video' or item['status']!='manual':
-            raise ValueError('Нет ручного задания Kling для сверки.')
+            raise ValueError('Нет ручного видеозадания для сверки.')
         if item['actual'] is None:
             raise ValueError('Сначала сверьте фактическую стоимость задания.')
         await db.execute("UPDATE cartoon_jobs SET status='failed',error='provider_reviewed_by_admin' WHERE id=?",(key,))
         await db.execute('INSERT INTO cartoon_job_events(job_id,event,details) VALUES (?,?,?)',
                          (key,'provider_resolved',encoded({'actor':actor,'provider_no_longer_running':True})))
+        await db.commit()
+
+
+async def create_scene_sequence(spec, *, episode_id, number):
+    from .rules import split_dialogue
+    shots = split_dialogue(spec)
+    keys=[]
+    async with connect() as db:
+        await db.execute('BEGIN IMMEDIATE')
+        last=await one(db,'SELECT MAX(number) AS n FROM cartoon_scenes WHERE episode_id=?',(episode_id,))
+        if len(shots)>1 and number <= (last['n'] or 0):
+            raise ValueError('Разделённый диалог можно добавить только в конец серии.')
+        for offset,shot in enumerate(shots):
+            key=uuid4().hex; keys.append(key)
+            await db.execute('INSERT INTO cartoon_scenes(id,episode_id,number,spec) VALUES (?,?,?,?)',
+                             (key,episode_id,number+offset,encoded(shot)))
+            await db.execute('INSERT INTO cartoon_versions VALUES (?,?,?,?,CURRENT_TIMESTAMP)',
+                             ('scene',key,1,encoded(dict(spec=shot,episode_id=episode_id,number=number+offset))))
+        await db.commit()
+    return keys
+
+
+async def scene_validation(snap, status, *, seconds=None, error=None, profile=None):
+    from .rules import strict
+    if not strict(snap['spec']): return
+    profile=profile or {}
+    async with connect() as db:
+        await db.execute('''INSERT INTO cartoon_scene_validation
+          (scene_id,context_hash,speaker_id,voice_id,voice_speed,audio_duration_seconds,scene_validation_status,error)
+          VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(scene_id,context_hash) DO UPDATE SET
+          voice_id=COALESCE(excluded.voice_id,voice_id),voice_speed=COALESCE(excluded.voice_speed,voice_speed),
+          audio_duration_seconds=COALESCE(excluded.audio_duration_seconds,audio_duration_seconds),
+          scene_validation_status=excluded.scene_validation_status,error=excluded.error''',
+          (snap['id'],snap['context_hash'],snap['spec'].get('speaker_id'),profile.get('voice'),profile.get('speed'),seconds,status,error))
+        await db.commit()
+
+
+async def update_scene_line(key, actor, text):
+    """Text-only revision reuses its approved still; never reuse old speech/video."""
+    from .rules import strict, validate
+    if not isinstance(text,str) or not text.strip() or len(text)>2000:
+        raise ValueError('Введите реплику от 1 до 2000 символов.')
+    async with connect() as db:
+        await db.execute('BEGIN IMMEDIATE')
+        row=unpack(await one(db,'''SELECT s.*,p.owner_id FROM cartoon_scenes s
+            JOIN cartoon_episodes e ON e.id=s.episode_id JOIN cartoon_projects p ON p.id=e.project_id
+            WHERE s.id=?''',(key,)))
+        if not row or row['owner_id']!=actor or not strict(row['spec']) or not row['spec'].get('dialogue'):
+            raise ValueError('Нет доступа к отдельной реплике сцены.')
+        before=await _snapshot(db,'scene',key)
+        spec=row['spec'];spec['dialogue'][0]['text']=text.strip();validate(spec)
+        if spec==before['spec']:return
+        revision=row['revision']+1
+        await db.execute('UPDATE cartoon_scenes SET spec=?,revision=? WHERE id=?',(encoded(spec),revision,key))
+        await db.execute('INSERT INTO cartoon_versions VALUES (?,?,?,?,CURRENT_TIMESTAMP)',('scene',key,revision,encoded(spec)))
+        current=await _snapshot(db,'scene',key)
+        image=before['assets'].get('image')
+        if image and image['approved']:
+            watermark=await one(db,"SELECT COALESCE(MAX(rowid),0) AS n FROM cartoon_assets WHERE target='scene' AND target_id=?",(key,))
+            await db.execute('INSERT OR REPLACE INTO cartoon_scene_asset_restorations VALUES (?,?,?,?,?)',
+                             (key,current['context_hash'],'image',image['id'],watermark['n']))
         await db.commit()

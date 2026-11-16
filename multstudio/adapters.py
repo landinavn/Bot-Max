@@ -200,6 +200,8 @@ class Providers:
     def __init__(self, settings, config, assets):
         self.settings, self.config, self.assets = settings, config, assets
         self.kling = KlingAdapter(settings.kling_key)
+        from .heygen_video import StudioHeyGen
+        self.studio_heygen = StudioHeyGen(settings.heygen_key)
         self.tts = YandexTTSAdapter(settings.tts_key)
 
     def preflight(self, kind):
@@ -209,6 +211,8 @@ class Providers:
             raise ValueError('Задайте STORAGE_PUBLIC_BASE_URL для студийных референсов и результатов.')
         if kind=='image':
             self.assets.canonical_image_url('multstudio/preflight.png')
+        if kind == 'heygen_video':
+            self.studio_heygen.ready()
         if kind == 'speech':
             self.tts.ready()
             from .render import Renderer

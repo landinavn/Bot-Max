@@ -73,8 +73,8 @@ class Worker:
                 speech_url=await self.assets.asset_url(snap['assets']['speech'])
                 if not await repo.begin_submission(key): return
                 preflight=False
-                task=await self.providers.studio_heygen.scene_video(item['provider_id'],speech_url,key+'-video')
-                await asyncio.shield(repo.update_job(key,status='polling',provider_id=task,usage=repo.encoded({'provider':'heygen','stage':'video'}),lease_until=0,next_attempt=int(time.time())+15))
+                task=await self.providers.studio_heygen.avatar_video(item['provider_id'],speech_url,key+'-video')
+                await asyncio.shield(repo.update_job(key,status='polling',provider_id=task,usage=repo.encoded({'provider':'heygen','stage':'video','input_type':'avatar'}),lease_until=0,next_attempt=int(time.time())+15))
                 return
             if kind == 'video' and item['status'] == 'polling':
                 result = dict(url=item['result_url']) if item['result_url'] else await (
@@ -105,9 +105,11 @@ class Worker:
                 validate_speech_snapshot(snap)
             # Persist exact approved inputs before the paid request.
             await self.assets.retain(snap,'job_source',data=repo.encoded(snap).encode(),suffix='json',job_id=key)
-            image_url = None
+            image_url = speech_url = None
             if kind == 'video':
                 image_url = await self.assets.asset_url(snap['assets']['image'])
+                if heygen:
+                    speech_url = await self.assets.asset_url(snap['assets']['speech'])
             if not await repo.begin_submission(key):
                 return
             preflight = False
@@ -115,8 +117,8 @@ class Worker:
                 data = await self.providers.image(snap)
                 await self.save_result(item,snap,data=data)
             elif kind == 'video' and heygen:
-                task=await self.providers.studio_heygen.create_scene_avatar(image_url,key+'-avatar')
-                await asyncio.shield(repo.update_job(key,status='avatar_polling',provider_id=task,usage=repo.encoded({'provider':'heygen','stage':'avatar'}),lease_until=0,next_attempt=int(time.time())+15))
+                task=await self.providers.studio_heygen.scene_video(image_url,speech_url,key+'-video')
+                await asyncio.shield(repo.update_job(key,status='polling',provider_id=task,usage=repo.encoded({'provider':'heygen','stage':'video','input_type':'image'}),lease_until=0,next_attempt=int(time.time())+15))
             elif kind == 'video':
                 task = await self.providers.kling.submit(image_url, repo.encoded(snap['spec']) +
                     f" Complete the main action within {snap['spec']['duration']} seconds, then hold naturally. "

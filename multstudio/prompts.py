@@ -3,6 +3,22 @@ from .repository import encoded
 from .seed import SCENES
 
 
+CLOSED_MOUTH_KEYFRAME = (
+    '\nCRITICAL SOURCE-IMAGE REQUIREMENT: Every visible character must have their '
+    'mouth fully closed, with lips gently touching and a relaxed jaw. '
+    'No visible teeth, tongue or open mouth; no toothy grin, laughing mouth, '
+    'shouting or mid-speech mouth shape. A subtle closed-lip smile is allowed. '
+    'Express surprise, joy and excitement through eyes, eyebrows, gaze and body pose, '
+    'never by opening the mouth. This requirement overrides any open-mouth expression '
+    'in the visual description, world description or reference images. '
+    'Preserve the exact character identity, face proportions, hairstyle and outfit; '
+    'change only the mouth pose when a reference shows an open mouth. '
+    'This is the resting pose of the SOURCE STILL IMAGE for later lip-sync, '
+    'not an instruction to keep the mouth closed throughout the generated video. '
+    'If the scene has no characters, keep it empty; do not add a person.'
+)
+
+
 # Match the original title AND visual: existing databases need no seed migration,
 # and an administrator's changed scene must not silently receive stale direction.
 KEYFRAMES = (
@@ -42,7 +58,8 @@ def scene_image_prompt(snap, location_reference_url=None):
     camera = 'One fixed medium-wide camera view showing the cast together in one space.'
     from .rules import strict
     if strict(spec) and spec.get('speaker_id'):
-        camera = 'One close-up or medium shot of ONLY the speaking character. Everyone else stays off screen. Animate only this mouth.'
+        camera = ('One close-up or medium shot of ONLY the character who will speak in the later video. '
+                  'Everyone else stays off screen. In this source still, the lips are gently closed.')
     for original, keyframe in zip(SCENES, KEYFRAMES):
         if spec.get('title') == original[0] and moment == original[3]:
             moment, camera = keyframe
@@ -83,4 +100,5 @@ def scene_image_prompt(snap, location_reference_url=None):
         + '\nWORLD:\n' + encoded(snap['world'])
         + '\nCAST IN IMAGE ORDER:\n' + encoded(cast)
         + location_direction
+        + CLOSED_MOUTH_KEYFRAME
     )

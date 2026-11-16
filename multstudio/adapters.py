@@ -10,7 +10,7 @@ import httpx
 
 from image_service import _image_api_client, _generate_image_bytes
 from .repository import encoded
-from .prompts import scene_image_prompt, validate_scene_image_references
+from .prompts import scene_image_prompt, validate_scene_image_references, CLOSED_MOUTH_KEYFRAME
 from .tts import normalize_speed, validate_speech_snapshot, speech_settings, VOICES, EMOTIONS
 
 logger = logging.getLogger(__name__)
@@ -228,7 +228,8 @@ class Providers:
         if snap['target'] == 'character':
             prompt = ('Create a single canonical character reference portrait, full body and clear face. '
                       'Family-friendly high-quality 3D animation. Keep specified age, outfit and proportions. '
-                      'Neutral background, no text. ' + encoded(snap['world']) + '\n' + encoded(snap['spec']))
+                      'Neutral background, no text. ' + encoded(snap['world']) + '\n' + encoded(snap['spec'])
+                      + CLOSED_MOUTH_KEYFRAME)
             refs = [snap['assets']['image']] if snap['assets'].get('image') else []
         else:
             refs = [c['assets']['image'] for c in snap['cast']]

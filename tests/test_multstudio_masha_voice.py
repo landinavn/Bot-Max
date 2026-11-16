@@ -149,11 +149,11 @@ async def test_new_quote_freezes_v3_profile_and_provider_uses_it(studio):
     assert len(v3.calls)==1
 
 
-async def test_v3_cost_is_required_and_rounds_each_utterance(studio):
+async def test_v3_estimate_is_optional_and_rounds_each_utterance(studio):
     _,settings,_=studio
     scene=await scene_five(studio)
-    with pytest.raises(ValueError,match='STUDIO_TTS_V3_250_CHARS_USD'):
-        await repo.quote('scene',scene['id'],'speech',replace(settings,speech_v3_price=0))
+    job=await repo.quote('scene',scene['id'],'speech',replace(settings,speech_v3_price=0))
+    assert job['status']=='quoted' and job['estimate']==0
     snap=await repo.snapshot('scene',scene['id'])
     char=snap['spec']['dialogue'][0]['character_id']
     snap['spec']['dialogue']=[dict(character_id=char,text='x'*251),dict(character_id=char,text='x')]
@@ -187,14 +187,15 @@ async def test_other_projects_and_adult_voices_are_unchanged(studio):
             assert (await repo.character_speech(person['id']))['voice']==person['spec']['voice']
 
 
-async def test_approval_shows_masha_pitch_model_and_cost(studio):
+async def test_approval_shows_masha_model_without_required_cost(studio):
     _,settings,assets=studio
     scene=await scene_five(studio)
     pressed=event('studio:make:speech:scene:'+scene['id'])
     await dispatch_callback(create_router(456,settings,assets),pressed,await ready_context())
     text=pressed.bot.send_message.await_args.kwargs['text']
     assert 'yandex-speechkit-v3' in text and 'masha' in text and 'pitch_shift=80.0' in text
-    assert '0.025000 USD' in text
+    assert '0.025000 USD' not in text
+    assert 'по тарифу провайдера' in text
     assert await repo.claim() is None
 
 

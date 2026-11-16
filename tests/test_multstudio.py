@@ -75,18 +75,14 @@ async def test_seed_is_exact_idempotent_and_never_queues_paid_calls(studio):
     assert await repo.budget(project)=={'limit':0,'committed':0}
 
 
-async def test_paid_confirmation_reserves_atomically_and_is_idempotent(studio):
+async def test_paid_confirmation_is_idempotent_without_budget(studio):
     project,settings,_=studio
     chars=await repo.children('character',project)
     jobs=[await repo.quote('character',c['id'],'image',settings) for c in chars[:2]]
-    with pytest.raises(ValueError,match='бюджета'):
-        await repo.confirm(jobs[0]['id'],456)
-    await repo.budget(project,1000000)
-    results=await asyncio.gather(*(repo.confirm(j['id'],456) for j in jobs),return_exceptions=True)
-    assert sum(isinstance(x,ValueError) for x in results)==1
-    success=next(x for x in results if isinstance(x,dict))
-    await repo.confirm(success['id'],456)
-    assert (await repo.budget(project))['committed']==1000000
+    results=await asyncio.gather(*(repo.confirm(j['id'],456) for j in jobs))
+    assert all(j['status']=='queued' for j in results)
+    await repo.confirm(jobs[0]['id'],456)
+    assert (await repo.budget(project))=={'limit':0,'committed':2000000}
 
 
 async def test_stale_quote_and_wrong_actor_cannot_start_paid_request(studio):
@@ -185,7 +181,7 @@ async def test_known_kling_task_retries_poll_without_second_post(studio):
     kling.poll.assert_awaited_once_with('known-task')
 
 
-async def test_excess_actual_cost_stops_new_queued_paid_requests(studio):
+async def test_historical_costs_do_not_stop_new_confirmed_requests(studio):
     project,settings,assets=studio
     chars=await repo.children('character',project)
     jobs=[await repo.quote('character',c['id'],'image',settings) for c in chars[:2]]
@@ -194,8 +190,6 @@ async def test_excess_actual_cost_stops_new_queued_paid_requests(studio):
     first=await repo.claim()
     await repo.update_job(first['id'],status='done',lease_until=0)
     await repo.reconcile(first['id'],456,3000000)
-    assert await repo.claim() is None
-    await repo.budget(project,5000000)
     assert (await repo.claim())['id']==jobs[1]['id']
 
 
@@ -280,14 +274,13 @@ async def test_real_ffmpeg_normalizes_video_audio_and_does_not_speed_speech(stud
     assert image.exists() and voice.exists()
 
 
-async def test_budget_is_rechecked_immediately_before_paid_post(studio):
+async def test_paid_post_does_not_require_budget(studio):
     project,settings,assets=studio
     item=await queued_image(studio)
     await repo.claim()
     await repo.budget(project,0)
-    assert await repo.begin_submission(item['id']) is False
-    assert (await repo.job(item['id']))['status']=='queued'
-    assert await repo.claim() is None
+    assert await repo.begin_submission(item['id']) is True
+    assert (await repo.job(item['id']))['status']=='submitting'
 
 
 async def test_complete_local_edit_with_music_and_final_title(studio):
@@ -405,8 +398,6 @@ async def test_unknown_piapi_outcome_blocks_queue_until_explicit_provider_review
     await repo.begin_submission(first['id'])
     await repo.update_job(first['id'],status='manual',lease_until=0,error='unknown_submission')
     assert await repo.claim() is None
-    with pytest.raises(ValueError,match='стоимость'):
-        await repo.resolve_video(first['id'],456)
     await repo.reconcile(first['id'],456,0)
     assert await repo.claim() is None  # Billing review alone does not prove rendering ended.
     with pytest.raises(ValueError):

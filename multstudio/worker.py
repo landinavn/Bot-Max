@@ -206,11 +206,9 @@ class Worker:
             items = await repo.rows(db, "SELECT * FROM cartoon_jobs WHERE status IN ('done','manual','failed','preflight_failed') AND notified=0 LIMIT 10")
         for item in items:
             text = f"Мультстудия: {item['kind']}, задание {item['id']}, статус {item['status']}. "
-            if item['actual'] is None and item['status'] != 'preflight_failed':
-                text += 'Фактическую стоимость сверьте с провайдером; резерв бюджета сохранён. '
             if item.get('error') and rules.VERSION in item['snapshot']:
                 text += item['error']+' '
-            text += 'Откройте /multstudio → проект → Сцены → Задания и расходы.'
+            text += 'Откройте /multstudio → проект → Сцены → Задания.'
             try:
                 if item['status']=='done' and repo.is_media_job(item):
                     _,url=await self.assets.result_for_job(item)

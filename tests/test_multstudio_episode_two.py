@@ -131,7 +131,7 @@ async def test_plan_includes_all_services_and_reports_missing_prices(studio):
     assert result['services']['video']['duration']==70  # Seven provider clips of 10s; final cuts target 44s.
     assert not result['errors']
     missing=await plan(key,replace(settings,image_price=0,speech_v3_price=0))
-    assert missing['errors'] and missing['total']<result['total']
+    assert not missing['errors'] and missing['total']<result['total']
     assert await repo.claim() is None
 
 
@@ -202,7 +202,7 @@ async def test_second_episode_card_and_plan_preserve_first_episode_ui(studio):
     await dispatch_callback(router,e,context)
     text=e.bot.send_message.await_args.kwargs['text']
     assert 'Изображений: 7; видео: 7; отдельных реплик: 9' in text
-    assert 'Всего ориентировочно:' in text
+    assert 'Каждый запуск подтверждается отдельно.' in text
     assert await repo.claim() is None
 
 

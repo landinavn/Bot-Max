@@ -15,7 +15,6 @@ from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 from handlers import _reply
 from . import repository as repo
 from .seed import seed
-from .settings import dollars, money
 from .tts import VOICES, speech_settings, MASHA_PROFILE
 
 
@@ -121,7 +120,7 @@ def create_router(admin_id, settings, assets):
         await repo.prepare_drafts(project,settings)
         projects = [p for p in await repo.children('project') if p['owner_id']==admin_id]
         await tell(event,'🎬 Мультстудия — только для администратора. Все платные действия требуют отдельного подтверждения.\n'
-                   'Расценки — оценки в USD, бюджет по умолчанию 0. /start — выйти в обычное меню.',
+                   'Каждый запуск подтверждается отдельно. /start — выйти в обычное меню.',
                    [(p['title']+f" / сезон {p['season']}",'project:'+p['id']) for p in projects]
                    +[('➕ Создать мультсериал','new:project:root')])
 
@@ -130,12 +129,9 @@ def create_router(admin_id, settings, assets):
             logger.info('Открываю проект %s', key)
         row,project = await owner(entity,key)
         if entity=='project':
-            state = await repo.budget(key)
-            buttons = [('💰 Установить бюджет','budget:'+key),('👥 Персонажи','characters:'+key),
+            buttons = [('👥 Персонажи','characters:'+key),
                        ('🎬 Сцены','scenes:'+key),('⬅️ Назад','home')]
-            amount = dollars(state['limit']).removesuffix(' USD')
-            await tell(event,f"📁 Проект: {row['title']}\nБюджет: {amount}$\n"
-                       f"Расход + резервы: {dollars(state['committed'])}",buttons)
+            await tell(event,f"📁 Проект: {row['title']}",buttons)
         elif entity=='character':
             profile=await repo.character_speech(key)
             await tell(event,row['name']+'\nID: '+key+f"\nSpeechKit {'v3' if profile['voice']=='masha' else 'v1'}: {profile['voice']}, emotion={profile['emotion']}, speed={profile['speed']}"
@@ -153,7 +149,7 @@ def create_router(admin_id, settings, assets):
                         ('📥 Получить MP4','view:episode:'+key),('⬅️ Проект','p:'+project['id'])]
             timing = '\nЕстественная речь без ускорения; целевая длительность 40 секунд, допустимо 42–45.\n'
             if row['spec'].get('production',{}).get('audio_first'):
-                buttons.insert(-2,('💵 План и стоимость','episode_plan:'+key))
+                buttons.insert(-2,('📋 План серии','episode_plan:'+key))
                 timing = f"\nЕстественная речь без ускорения; целевая длительность {row['spec']['target_seconds']} секунд; сцены продлеваются под речь.\n"
             if row['spec'].get('production',{}).get('strict_five_seconds'):
                 timing=f"\n{len(await repo.children('scene',key))} сцен × 5 секунд. Один кадр — один голос. Аудио до 4,5 с; без растяжения и ускорения.\n"
@@ -217,12 +213,12 @@ def create_router(admin_id, settings, assets):
                 result=await plan(parts[1],settings)
                 lines=[f"Изображений: {result['images']}; видео: {result['videos']}; отдельных реплик: {result['utterances']}; немых сцен: {result['silent']}."]
                 for kind,value in result['services'].items():
-                    lines.append(f"{kind}: {', '.join(sorted(value['models']))}; {', '.join(sorted(value['resolutions']))}; длительность по плану {value['duration']} сек; {dollars(value['estimate'])}")
-                lines.append(('Частичная оценка: ' if result['errors'] else 'Всего ориентировочно: ')+dollars(result['total']))
+                    lines.append(f"{kind}: {', '.join(sorted(value['models']))}; {', '.join(sorted(value['resolutions']))}; длительность по плану {value['duration']} сек")
+                lines.append('Каждый запуск подтверждается отдельно.')
                 lines.extend(result['errors'])
                 episode=await repo.get('episode',parts[1])
                 fixed=episode['spec'].get('production',{}).get('strict_five_seconds')
-                lines.append('Оплата не запущена. Каждый кадр, видео и озвучка требуют отдельной оценки и подтверждения. '+('Речь проверяется до запуска видео; длительность сцены строго 5 секунд. ' if fixed else 'После измерения речи оценка видео может увеличиться. ')+'Музыка требует предоставленного исходника; точная артикуляция требует просмотра.')
+                lines.append('Оплата не запущена. Каждый кадр, видео и озвучка требуют подтверждения запуска. '+('Речь проверяется до запуска видео; длительность сцены строго 5 секунд. ' if fixed else 'Сначала проверяется озвучка. ')+'Музыка требует предоставленного исходника; точная артикуляция требует просмотра.')
                 await tell(event,'\n'.join(lines),[('⬅️ Серия','e:'+parts[1])])
             elif action=='characters':
                 key=parts[1]
@@ -236,7 +232,7 @@ def create_router(admin_id, settings, assets):
                 buttons=[(f"Серия {e['number']}: {e['title']}",'e:'+e['id']) for e in await repo.children('episode',key)]
                 await tell(event,'🎬 Сцены и серии проекта',buttons+[
                     ('➕ Создать серию','new:episode:'+key),('✏️ Локация / стиль','edit:project:'+key),
-                    ('📋 Задания и расходы','jobs:'+key),('📦 Архив исходников','export:'+key),
+                    ('📋 Задания','jobs:'+key),('📦 Архив исходников','export:'+key),
                     ('⬅️ Назад','project:'+key)])
             elif action=='edit' and len(parts)>2 and parts[1]=='character':
                 key=parts[2]
@@ -262,7 +258,7 @@ def create_router(admin_id, settings, assets):
                 line=scene['spec']['dialogue'][0]['text']
                 await context.update_data(studio_input=dict(action='line_edit',entity='scene',key=key))
                 await context.set_state(StudioStates.input)
-                await tell(event,'Введите новую короткую реплику обычным текстом. Затем потребуется отдельное подтверждение стоимости озвучки.\nСейчас: '+line+'\nПредложение: '+shorter_suggestion(line),[('Отмена','s:'+key)])
+                await tell(event,'Введите новую короткую реплику обычным текстом. Затем потребуется подтверждение запуска озвучки.\nСейчас: '+line+'\nПредложение: '+shorter_suggestion(line),[('Отмена','s:'+key)])
             elif action=='scene_upload':
                 key=parts[1]
                 await owner('scene',key)
@@ -332,18 +328,15 @@ def create_router(admin_id, settings, assets):
                 await context.set_state(StudioStates.input)
                 await tell(event,'Пришлите JSON. Для новой сцены подставьте ID персонажей из карточек; approved=true утверждает сценарий, но не запускает генерацию.\n'
                            +json.dumps(sample,ensure_ascii=False,indent=2),[('Отмена','home')])
-            elif action in ('budget','cost','reference','music'):
+            elif action in ('budget','cost'):
+                await context.clear()
+                await tell(event,'Бюджет и сверка расходов больше не используются. Откройте задание и подтвердите запуск.',[('Проекты','home')])
+            elif action in ('reference','music'):
                 key=parts[1]
-                if action=='cost':
-                    item=await repo.job(key)
-                    if not item: raise ValueError('Задание не найдено.')
-                    await owner('project',item['project_id'])
-                else:
-                    await owner('character' if action=='reference' else 'episode' if action=='music' else 'project',key)
+                await owner('character' if action=='reference' else 'episode',key)
                 await context.update_data(studio_input=dict(action=action,key=key))
                 await context.set_state(StudioStates.input)
-                await tell(event, 'Пришлите публичную HTTPS-ссылку на файл (для референса можно отправить фотографию).'
-                           if action in ('reference','music') else 'Введите сумму в USD. Фактический расход берите из кабинета провайдера; оценку нельзя выдавать за факт.',[('Отмена','home')])
+                await tell(event,'Пришлите публичную HTTPS-ссылку на файл (для референса можно отправить фотографию).',[('Отмена','home')])
             elif action=='make':
                 kind,entity,key=parts[1:4]
                 await owner(entity,key)
@@ -356,14 +349,14 @@ def create_router(admin_id, settings, assets):
                     +(f", pitch_shift={p['pitch_shift']} Гц; SpeechKit v3" if p['voice']=='masha' else '')
                     for p in q.get('speech_profiles',{}).values())+'\n') if kind=='speech' else ''
                 await tell(event, f"Подтверждение задания {item['id']}\nМодель: {q['model']}\nРазрешение: {q['resolution']}\n"
-                    f"Длительность: {q['duration']} сек (озвучка — по естественной речи)\nОценка: {dollars(q['estimate'])}\n"
+                    f"Длительность: {q['duration']} сек (озвучка — по естественной речи)\n"
                     +speech_info+
-                    'Это оценка, не подтверждённый расход. Если провайдер не вернёт цену, сверка будет ручной, резерв сохранится. '
+                    'Платная генерация выполняется по тарифу провайдера после вашего подтверждения. '
                     'При перегенерации предыдущий результат останется в архиве.',
                     [('✅ Подтвердить запуск','confirm:'+item['id']),('Отмена','cancel:'+item['id'])])
             elif action=='cancel':
                 await repo.cancel_quote(parts[1],admin_id)
-                await tell(event,'Оценка отменена, запуск по её старой кнопке недоступен.',[('Проекты','home')])
+                await tell(event,'Запуск отменён, старая кнопка подтверждения больше не действует.',[('Проекты','home')])
             elif action=='confirm':
                 item=await repo.confirm(parts[1],admin_id)
                 await tell(event,'Статус задания: '+item['status']+'. ID: '+item['id'],[('Проект','p:'+item['project_id'])])
@@ -400,15 +393,14 @@ def create_router(admin_id, settings, assets):
             elif action=='jobs':
                 await owner('project',parts[1])
                 jobs=await repo.job_list(parts[1])
-                text='\n'.join(f"{j['id']} · {j['kind']} · {j['status']} · оценка {dollars(j['estimate'])} · факт "
-                     +(dollars(j['actual']) if j['actual'] is not None else 'не сверено') for j in jobs)
+                text='\n'.join(f"{j['id']} · {j['kind']} · {j['status']}" for j in jobs)
                 await tell(event,text or 'Нет заданий.',[(j['kind']+' · '+j['status']+' · '+j['id'][:6],'job:'+j['id']) for j in jobs]+[('Проект','p:'+parts[1])])
             elif action in ('job','poll'):
                 item=await repo.job(parts[1])
                 if not item: raise ValueError('Задание не найдено.')
                 await owner('project',item['project_id'])
                 if action=='poll': await repo.retry_poll(item['id'],admin_id)
-                buttons=[('💰 Сверить фактический расход','cost:'+item['id'])] if item['status'] in ('done','manual','failed') else []
+                buttons=[]
                 links=[]
                 if item['status']=='done' and repo.is_image_job(item):
                     _,url=await result_for_job(item)
@@ -436,10 +428,10 @@ def create_router(admin_id, settings, assets):
                 if item['status']=='manual' and item['provider_id']:
                     buttons.append(('Повторить только опрос провайдера','poll:'+item['id']))
                 if item['status']=='manual' and item['kind']=='video':
-                    buttons.append(('Завершить ручную сверку видео','resolve:'+item['id']))
-                await tell(event,json.dumps({k:item[k] for k in ('id','kind','status','provider_id','result_url','error','estimate','actual','attempts')},ensure_ascii=False,indent=2)
+                    buttons.append(('Завершить проверку задачи','resolve:'+item['id']))
+                await tell(event,json.dumps({k:item[k] for k in ('id','kind','status','provider_id','result_url','error','attempts')},ensure_ascii=False,indent=2)
                            + ('\nРезультат: '+item['result_url'] if links else '')
-                           +'\nПри неизвестном результате платного запроса сначала сверьте расход в кабинете. Новый запрос — только с новым подтверждением.',
+                           +'\nПри неизвестном результате платного запроса сначала проверьте статус задачи в кабинете. Новый запрос — только с новым подтверждением.',
                            buttons+[('Проект','p:'+item['project_id'])],links)
             elif action=='show_image':
                 item=await repo.job(parts[1])
@@ -473,11 +465,11 @@ def create_router(admin_id, settings, assets):
                 if not item: raise ValueError('Задание не найдено.')
                 await owner('project',item['project_id'])
                 await tell(event,'Подтвердите, что проверили кабинет провайдера и эта задача больше НЕ выполняется. '
-                           'Это разблокирует следующую задачу очереди. Перед подтверждением сверьте фактический расход.',
+                           'Это разблокирует следующую задачу очереди. Повторная платная генерация автоматически не запускается.',
                            [('✅ Задача больше не выполняется','resolved:'+item['id']),('Отмена','job:'+item['id'])])
             elif action=='resolved':
                 await repo.resolve_video(parts[1],admin_id)
-                await tell(event,'Ручная сверка завершена. Повторный POST не отправлен.',[('Проекты','home')])
+                await tell(event,'Проверка задачи завершена. Повторный POST не отправлен.',[('Проекты','home')])
             elif action=='export':
                 await owner('project',parts[1])
                 url=await export_project(parts[1],assets)
@@ -508,7 +500,7 @@ def create_router(admin_id, settings, assets):
                 if not text or len(text)>2000: raise ValueError('Введите реплику от 1 до 2000 символов.')
                 await repo.update_scene_line(key,admin_id,text)
                 await context.clear()
-                await tell(event,'Реплика сохранена. Старые файлы в архиве. Получите новую оценку озвучки и подтвердите её.',[('Сцена','s:'+key)])
+                await tell(event,'Реплика сохранена. Старые файлы в архиве. Подтвердите запуск новой озвучки.',[('Сцена','s:'+key)])
                 return
             elif action=='scene_upload':
                 await owner('scene',key)
@@ -531,10 +523,10 @@ def create_router(admin_id, settings, assets):
                 await tell(event,'Описание сцены сохранено. Платные задания автоматически не запускаются.',
                            [('🎬 Сцена','s:'+key)])
                 return
-            elif action=='budget':
-                await owner('project',key); await repo.budget(key,money(text))
-            elif action=='cost':
-                await repo.reconcile(key,admin_id,money(text))
+            elif action in ('budget','cost'):
+                await context.clear()
+                await tell(event,'Бюджет и сверка расходов больше не используются.',[('Проекты','home')])
+                return
             elif action in ('reference','music'):
                 entity='character' if action=='reference' else 'episode'
                 row,project=await owner(entity,key)

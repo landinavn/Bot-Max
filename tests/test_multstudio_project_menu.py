@@ -45,11 +45,10 @@ async def test_real_project_button_from_bot_message_acks_logs_and_opens_card(stu
     pressed.bot.send_callback.assert_awaited_once()
     sent=pressed.bot.send_message.await_args.kwargs
     assert sent['user_id']==456
-    assert sent['text'].startswith('📁 Проект: Маленькие чудеса Ани\nБюджет: 12.500000$')
+    assert sent['text']=='📁 Проект: Маленькие чудеса Ани'
     assert len(sent['attachments'])==1
     buttons=[b for row in sent['attachments'][0].payload.buttons for b in row]
     assert [(b.text,b.payload) for b in buttons]==[
-        ('💰 Установить бюджет','studio:budget:'+project),
         ('👥 Персонажи','studio:characters:'+project),
         ('🎬 Сцены','studio:scenes:'+project),('⬅️ Назад','studio:home')]
     assert 'Открываю проект '+project in caplog.text
@@ -76,9 +75,9 @@ async def test_project_navigation_buttons_dispatch_correctly(studio,payload):
         assert all(name in labels for name in ('Аня','Дима','Маша'))
     elif payload=='scenes':
         assert 'Опять Новый год?!' in str(sent['attachments'])
-        assert 'Задания и расходы' in str(sent['attachments'])
+        assert 'Задания' in str(sent['attachments'])
     else:
-        assert 'USD' in sent['text']
+        assert 'больше не используются' in sent['text']
 
 
 @pytest.mark.parametrize('actor,actor_bot', [(999,False),(456,True)])

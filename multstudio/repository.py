@@ -1,4 +1,4 @@
-"""Only cartoon_* tables. Immutable revisions and transactional budget reservations."""
+"""Only cartoon_* tables. Immutable revisions and explicitly confirmed generation jobs."""
 import hashlib
 import json
 import logging
@@ -793,8 +793,6 @@ async def confirm(key, actor):
             await db.execute("UPDATE cartoon_jobs SET status='stale' WHERE id=?", (key,))
             await db.commit()
             raise ValueError('Оценка устарела. Откройте действие заново.')
-        if await liability(db, project['id']) + item['estimate'] > project['budget']:
-            raise ValueError('Недостаточно бюджета с учётом резервов и несверенных расходов.')
         await db.execute("UPDATE cartoon_jobs SET status='queued',approved_by=? WHERE id=?", (actor, key))
         await db.execute('INSERT INTO cartoon_job_events(job_id,event,details) VALUES (?,?,?)',
                          (key, 'confirmed', encoded(dict(actor=actor, estimate=item['estimate']))))
@@ -853,8 +851,6 @@ async def claim():
             if item['kind']=='video' and item['status']=='queued' and await video_busy(db,item['id']):
                 continue
             project = await one(db, 'SELECT * FROM cartoon_projects WHERE id=?', (item['project_id'],))
-            if item['status'] in ('queued','video_preparing') and item['estimate'] and await liability(db, project['id']) > project['budget']:
-                continue
             status = 'preparing' if item['status'] == 'queued' else item['status']
             await db.execute('UPDATE cartoon_jobs SET status=?,lease_until=? WHERE id=?', (status, now+120, item['id']))
             await db.commit()
@@ -870,10 +866,6 @@ async def begin_submission(key):
             raise ValueError('Нет подтверждения на платный запрос.')
         project = await one(db, 'SELECT * FROM cartoon_projects WHERE id=?', (item['project_id'],))
         if item['kind']=='video' and await video_busy(db,key):
-            await db.execute("UPDATE cartoon_jobs SET status=?,lease_until=0 WHERE id=?", ('video_preparing' if item['status']=='video_preparing' else 'queued',key))
-            await db.commit()
-            return False
-        if await liability(db, project['id']) > project['budget']:
             await db.execute("UPDATE cartoon_jobs SET status=?,lease_until=0 WHERE id=?", ('video_preparing' if item['status']=='video_preparing' else 'queued',key))
             await db.commit()
             return False
@@ -950,8 +942,6 @@ async def resolve_video(key, actor):
           WHERE j.id=?''', (key,))
         if not item or item['owner_id']!=actor or item['kind']!='video' or item['status']!='manual':
             raise ValueError('Нет ручного видеозадания для сверки.')
-        if item['actual'] is None:
-            raise ValueError('Сначала сверьте фактическую стоимость задания.')
         await db.execute("UPDATE cartoon_jobs SET status='failed',error='provider_reviewed_by_admin' WHERE id=?",(key,))
         await db.execute('INSERT INTO cartoon_job_events(job_id,event,details) VALUES (?,?,?)',
                          (key,'provider_resolved',encoded({'actor':actor,'provider_no_longer_running':True})))

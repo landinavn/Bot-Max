@@ -71,8 +71,6 @@ class Settings:
         elif kind == 'video':
             duration = 5 if duration <= 5 else 10
             if snapshot.get('spec',{}).get('video_provider')=='heygen':
-                if self.heygen_price<=0:
-                    raise ValueError('Задайте STUDIO_HEYGEN_SCENE_USD: оценка USD за Photo Avatar и одно видео Avatar IV.')
                 price,model,size=self.heygen_price,'heygen/avatar_iv','9:16 / 1080p; итог 1080x1920'
             else:
                 price, model, size = self.video_price * (duration // 5), 'kling/3.0/std', '9:16; итог 1080x1920'
@@ -81,10 +79,6 @@ class Settings:
             lines = snapshot['spec'].get('dialogue', [])
             v3 = [line for line in lines if profiles.get(line['character_id'],{}).get('voice')=='masha']
             v1 = [line for line in lines if line not in v3]
-            if v3 and self.speech_v3_price <= 0:
-                raise ValueError('Для голоса Маши задайте оценку STUDIO_TTS_V3_250_CHARS_USD в USD за 250 символов SpeechKit v3.')
-            if v1 and self.speech_price <= 0:
-                raise ValueError('Задайте STUDIO_TTS_1000_CHARS_USD для SpeechKit v1.')
             chars = sum(len(x['text']) for x in v1)
             price = (self.speech_price * chars + 999) // 1000
             price += sum(((len(x['text'])+249)//250)*self.speech_v3_price for x in v3)
@@ -94,7 +88,7 @@ class Settings:
             price, model, size = 0, 'FFmpeg/local', '1080x1920 / 30 FPS / H.264 + AAC'
         else:
             raise ValueError('Неизвестное задание.')
-        if kind != 'assemble' and (price <= 0 or not model):
-            raise ValueError('Сначала настройте модель и ненулевую оценку стоимости STUDIO_*_USD.')
+        if not model:
+            raise ValueError('Сначала настройте модель генерации.')
         return dict(estimate=price, model=model, resolution=size, duration=duration,
-                    image_quality=self.image_quality, currency='USD')
+                    image_quality=self.image_quality, currency='USD',estimate_available=(price>0 or kind=='assemble'))

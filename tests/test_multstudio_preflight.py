@@ -120,8 +120,7 @@ async def test_004_usd_estimate_and_budget_match_as_integer_40000_micros(studio)
     item=await repo.quote('character',char['id'],'image',settings)
     assert item['estimate']==40000 and type(item['estimate']) is int
     await repo.budget(project,money('0.039999'))
-    with pytest.raises(ValueError,match='бюджета'):
-        await repo.confirm(item['id'],456)
+    assert (await repo.confirm(item['id'],456))['status']=='queued'
     await repo.budget(project,money('0,04'))
     await repo.confirm(item['id'],456)
     assert (await repo.budget(project))=={'limit':40000,'committed':40000}

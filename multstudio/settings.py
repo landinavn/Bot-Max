@@ -44,7 +44,7 @@ class Settings:
     speech_price: int = 0  # Estimate per 1000 characters.
     speech_v3_price: int = 0  # Estimate per 250 characters per utterance.
     heygen_key: str = field(default='', repr=False)
-    heygen_price: int = 0  # Total estimate: Photo Avatar + one Avatar IV video.
+    heygen_price: int = 0  # Optional estimate for one Talking Photo video, no avatar setup.
     concurrency: int = 1
     enabled: bool = False
 

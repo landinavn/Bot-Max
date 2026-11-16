@@ -1,4 +1,4 @@
-"""Studio-only use of the project's existing Photo Avatar / Avatar IV API contract."""
+"""Studio Talking Photo: one video POST with an image and existing speech audio."""
 import httpx
 
 from heygen import HeyGenAdapter, HeyGenError
@@ -11,14 +11,16 @@ class StudioHeyGen(HeyGenAdapter):
         if not self.key:
             raise ValueError('Задайте HEYGEN_API_KEY для говорящих сцен мультстудии.')
 
-    async def create_scene_avatar(self, image_url, key):
-        self.ready(); https_url(image_url)
-        data=await self.request('POST','/v3/avatars',payload={
-            'type':'photo','name':'Multstudio scene','file':{'type':'url','url':image_url}},idempotency=key)
-        avatar=data.get('avatar_item') or {}
-        return self.identifier(avatar.get('id') or data.get('look_id') or data.get('avatar_id'))
+    async def scene_video(self, image_url, audio_url, key):
+        """Avatar IV Talking Photo; no avatar, voice creation or TTS request."""
+        self.ready(); https_url(image_url); https_url(audio_url)
+        data=await self.request('POST','/v3/videos',payload={
+            'type':'image','image':{'type':'url','url':image_url},'audio_url':audio_url,
+            'aspect_ratio':'9:16','resolution':'1080p','expressiveness':'medium'},idempotency=key)
+        return self.identifier(data.get('video_id') or data.get('id'))
 
-    async def scene_video(self, avatar_id, audio_url, key):
+    async def avatar_video(self, avatar_id, audio_url, key):
+        """Finish only an old job whose Photo Avatar was already created and paid."""
         self.ready(); https_url(audio_url)
         data=await self.request('POST','/v3/videos',payload={
             'type':'avatar','avatar_id':self.identifier(avatar_id),'audio_url':audio_url,
@@ -36,7 +38,7 @@ class StudioHeyGen(HeyGenAdapter):
         except httpx.RequestError:
             raise TemporaryPollError('Временный сбой соединения при опросе HeyGen.') from None
         if data.get('status') in ('failed','error'):
-            raise ProviderFailed('HeyGen сообщил об ошибке сцены. Проверьте расход до повторной генерации.')
+            raise ProviderFailed('HeyGen сообщил об ошибке сцены. Проверьте статус задачи перед повторной генерацией.')
         if data.get('status')!='completed': return None
         if avatar: return dict(avatar_id=provider_id)
         https_url(data.get('video_url',''))

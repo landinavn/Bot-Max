@@ -114,36 +114,38 @@ async def test_no_video_before_measured_audio_and_no_voice_substitution(studio):
     with pytest.raises(ValueError,match='голос'):await repo.confirm(job['id'],456)
 
 
-async def test_heygen_contract_is_one_avatar_then_one_vertical_video():
+async def test_heygen_contract_is_one_direct_image_audio_request():
     requests=[]
     def handler(request):
         requests.append(request)
-        return httpx.Response(200,json={'data':{'avatar_item':{'id':'scene-look'}}} if request.url.path=='/v3/avatars' else {'data':{'video_id':'scene-video'}})
+        return httpx.Response(200,json={'data':{'video_id':'scene-video'}})
     adapter=StudioHeyGen('test-key',httpx.MockTransport(handler))
-    assert await adapter.create_scene_avatar('https://example.org/frame.png','job-avatar')=='scene-look'
-    assert await adapter.scene_video('scene-look','https://example.org/speech.mp3','job-video')=='scene-video'
-    payload=json.loads(requests[1].content)
+    assert await adapter.scene_video('https://example.org/frame.png','https://example.org/speech.mp3','job-video')=='scene-video'
+    assert len(requests)==1 and requests[0].url.path=='/v3/videos'
+    payload=json.loads(requests[0].content)
+    assert payload['type']=='image' and payload['image']=={'type':'url','url':'https://example.org/frame.png'}
     assert payload['audio_url']=='https://example.org/speech.mp3' and payload['aspect_ratio']=='9:16'
-    assert payload['engine']=={'type':'avatar_iv'} and 'voice_id' not in payload
+    assert payload['resolution']=='1080p' and payload['expressiveness']=='medium'
+    assert not {'avatar_id','voice_id','script','engine'} & payload.keys()
 
 
-async def test_avatar_phase_survives_restart_and_never_repeats_paid_post(studio):
+async def test_old_avatar_phase_survives_restart_without_creating_another_avatar(studio):
     snap=await attach_audio(studio,await ready(studio))
     job=await repo.quote('scene',snap['id'],'video',replace(studio[1],heygen_price=100000))
-    await repo.budget(studio[0],10000000);await repo.confirm(job['id'],456)
-    adapter=SimpleNamespace(ready=lambda:None,create_scene_avatar=AsyncMock(return_value='look'),poll=AsyncMock(return_value={'avatar_id':'look'}),scene_video=AsyncMock(return_value='vid'))
+    await repo.confirm(job['id'],456)
+    await repo.update_job(job['id'],status='avatar_polling',provider_id='look',usage=repo.encoded({'provider':'heygen','stage':'avatar'}))
+    adapter=SimpleNamespace(ready=lambda:None,poll=AsyncMock(return_value={'avatar_id':'look'}),
+        avatar_video=AsyncMock(return_value='vid'),scene_video=AsyncMock())
     providers=SimpleNamespace(studio_heygen=adapter,preflight=lambda k:None)
     assets=studio[2];assets.asset_url=AsyncMock(return_value='https://example.org/media')
     worker=Worker(SimpleNamespace(),456,studio[1],providers,assets)
-    await worker.execute(await repo.claim())
-    assert (await repo.job(job['id']))['status']=='avatar_polling'
-    await repo.update_job(job['id'],next_attempt=0)
     await worker.execute(await repo.claim())
     assert (await repo.job(job['id']))['status']=='video_preparing'
     worker=Worker(SimpleNamespace(),456,studio[1],providers,assets)
     await worker.execute(await repo.claim())
     assert (await repo.job(job['id']))['status']=='polling'
-    adapter.create_scene_avatar.assert_awaited_once();adapter.scene_video.assert_awaited_once()
+    adapter.avatar_video.assert_awaited_once_with('look','https://example.org/media',job['id']+'-video')
+    adapter.scene_video.assert_not_awaited()
     assert (await repo.job(job['id']))['provider_id']=='vid'
 
 

@@ -5,7 +5,7 @@ from urllib.parse import unquote, urlsplit
 
 
 def secrets_from(settings, providers):
-    values = [getattr(settings,'kling_key',None), getattr(settings,'tts_key',None)]
+    values = [getattr(settings,'kling_key',None), getattr(settings,'tts_key',None),getattr(settings,'heygen_key',None)]
     config = getattr(providers,'config',None)
     for key in ('token','image_api_key','piapi_key','ttapi_key','storage_access_key_id','storage_secret_access_key'):
         values.append(getattr(config,key,None))

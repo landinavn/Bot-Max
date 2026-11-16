@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from PIL import Image, ImageDraw, ImageFont
 from . import repository as repo
+from . import rules
 
 logger = logging.getLogger(__name__)
 FPS = 30
@@ -119,6 +120,13 @@ class Renderer:
 
     async def scene(self, scene, ending=None):
         self.ready()
+        strict=rules.strict(scene['spec'])
+        if strict:
+            rules.validate(scene['spec'])
+            rules.validate_audio_asset(scene)
+            rules.validate_video_asset(scene)
+            if not scene['assets'].get('video') or not scene['assets']['video']['approved']:
+                raise ValueError('Утвердите готовое пятисекундное видео сцены перед сборкой.')
         assets = scene['assets']
         source = assets.get('video') or assets['image']
         voice = assets.get('speech')
@@ -130,11 +138,18 @@ class Renderer:
         if trim and trim>=source_seconds:
             raise ValueError('Начало видео находится за концом ролика. Укажите время меньше его длительности.')
         video_seconds=max(0.0,source_seconds-trim)
-        voice_trim,voice_seconds=await self.speech_timing(self.assets.path(voice['path'])) if voice else (0.0,0.0)
+        if strict:
+            if trim: raise ValueError('В новой пятисекундной сцене нельзя обрезать начало видео.')
+            if offset: raise ValueError('У говорящей пятисекундной сцены нельзя сдвигать озвучку относительно HeyGen. Паузы сохраняются в исходном MP3.')
+            rules.video_seconds(source_seconds)
+            voice_trim,voice_seconds=0.0,await duration(self.assets.path(voice['path'])) if voice else 0.0
+            if voice: rules.audio_seconds(voice_seconds,offset)
+        else:
+            voice_trim,voice_seconds=await self.speech_timing(self.assets.path(voice['path'])) if voice else (0.0,0.0)
         keep_video = 0 if scene['spec'].get('trim_video_to_script') else video_seconds
         longest=max(max(0.0,float(scene['spec']['duration'])-trim),keep_video,offset+voice_seconds+0.2 if voice else 0)
         # An integral video frame count also gives an integral 48 kHz sample count.
-        seconds=math.ceil(longest*FPS-1e-9)/FPS
+        seconds=5.0 if strict else math.ceil(longest*FPS-1e-9)/FPS
         extension=max(0.0,seconds-video_seconds) if source['kind']!='image' else 0.0
         logger.info('Монтаж сцены %s: video=%.3f speech=%.3f start=%.3f output=%.3f freeze=%.3f cut=%.3f',
                     scene.get('number',scene.get('id','?')),video_seconds,voice_seconds,offset,seconds,extension,trim)
@@ -221,7 +236,8 @@ class Renderer:
                 voice=scene['assets'].get('speech')
                 start=repo.speech_start(scene.get('editing',{}).get('speech_start',0)) if voice else 0
                 if voice:
-                    _,voice_seconds=await self.speech_timing(self.assets.path(voice['path']))
+                    if rules.strict(scene['spec']): voice_seconds=await duration(self.assets.path(voice['path']))
+                    else: _,voice_seconds=await self.speech_timing(self.assets.path(voice['path']))
                     end=min(seconds,start+voice_seconds)
                 else:
                     end=seconds
@@ -257,9 +273,69 @@ class Renderer:
             args += ['-stream_loop','-1','-i',str(self.assets.path(music['path']))]
             filters.append(f'[{len(paths)+1}:a:0]asetpts=PTS-STARTPTS,aresample=48000,'
                 'aformat=sample_rates=48000:channel_layouts=stereo,volume=0.12[m]')
-            filters.append('[voice][m]amix=inputs=2:duration=first:normalize=0[a]')
+            if all(rules.strict(s['spec']) for s in snapshot['scenes']):
+                filters.append('[voice]asplit=2[speech][control]')
+                filters.append('[m][control]sidechaincompress=threshold=0.02:ratio=8:attack=10:release=250[ducked]')
+                filters.append('[speech][ducked]amix=inputs=2:duration=first:normalize=0[a]')
+            else:
+                filters.append('[voice][m]amix=inputs=2:duration=first:normalize=0[a]')
             current='a'
         await process(*args,'-filter_complex',';'.join(filters),'-map','0:v:0','-map',f'[{current}]',
             '-c:v','copy','-c:a','aac','-ar','48000','-ac','2','-t',f'{elapsed:.9f}',
             '-movflags','+faststart',result,cwd=self.assets.root)
+        if all(rules.strict(s['spec']) for s in snapshot['scenes']):
+            rules.video_seconds(await duration(result),len(paths))
         return result
+
+
+    async def normalize_video(self, snap, source):
+        """Pad still tail / trim verified silent tail only. Never change speech rate."""
+        self.ready()
+        rules.validate(snap['spec'])
+        rules.validate_audio_asset(snap)
+        info=await probe(source); seconds=await duration(source)
+        speaking=bool(snap['spec'].get('dialogue'))
+        if speaking:
+            speech=self.assets.path(snap['assets']['speech']['path'])
+            rules.audio_seconds(await duration(speech))
+            if not any(s.get('codec_type')=='audio' for s in info['streams']):
+                raise ValueError('HeyGen не вернул аудиодорожку для проверки синхронизации. Проверьте ролик вручную.')
+            first,last=await self.speech_bounds(source)
+            voice_first,voice_last=await self.speech_bounds(speech)
+            if abs(first-voice_first)>0.1:
+                raise ValueError('HeyGen сдвинул начало речи. Видео сохранено, но нужна проверка синхронизации.')
+            if last>min(5.0,seconds)+0.01:
+                raise ValueError('Речь HeyGen выходит за 5 секунд. Обрезка слов запрещена; видео сохранено для проверки.')
+            if abs(last-voice_last)>0.15:
+                raise ValueError('HeyGen изменил или обрезал конец речи. Видео не принято; повторный платный запрос автоматически не запускается.')
+        extension=max(0,5-seconds)
+        result=self.assets.path(uuid4().hex+'.mp4')
+        args=['ffmpeg','-nostdin','-v','error','-y','-i',str(source)]
+        if speaking: args+=['-i',str(speech)]
+        else: args+=['-f','lavfi','-i','anullsrc=r=48000:cl=stereo']
+        filters=(f'[0:v:0]setpts=PTS-STARTPTS,fps=30,tpad=stop_mode=clone:stop_duration={extension:.9f},'
+            'trim=duration=5,setpts=PTS-STARTPTS[v];'
+            '[1:a:0]asetpts=N/SR/TB,aresample=48000,apad,atrim=duration=5,asetpts=N/SR/TB[a]')
+        await process(*args,'-filter_complex',filters,'-map','[v]','-map','[a]','-t','5',
+            '-c:v','libx264','-preset','veryfast','-threads','2','-pix_fmt','yuv420p',
+            '-c:a','aac','-ar','48000','-ac','2','-movflags','+faststart',result)
+        rules.video_seconds(await duration(result))
+        return result
+
+    async def speech_bounds(self, path):
+        info=await probe(path)
+        track=next((s for s in info['streams'] if s.get('codec_type')=='audio'),None)
+        if not track: raise ValueError('Нет звуковой дорожки для проверки речи.')
+        seconds=float(track.get('duration') or info.get('format',{}).get('duration') or 0)
+        if not math.isfinite(seconds) or seconds<=0: raise ValueError('Не измерена длина звуковой дорожки.')
+        report=(await process('ffmpeg','-nostdin','-hide_banner','-i',path,'-map','0:a:0',
+            '-af','asetpts=N/SR/TB,silencedetect=noise=-50dB:d=0.02','-f','null','-',return_stderr=True)).decode(errors='replace')
+        events=list(re.finditer(r'silence_(start|end):\s*([-+0-9.eE]+)',report))
+        first=0.0; last=seconds
+        if events and events[0].group(1)=='start' and float(events[0].group(2))<0.001:
+            if len(events)<2: raise ValueError('В озвучке не найдена речь.')
+            first=float(events[1].group(2))
+        if len(events)>=2 and events[-1].group(1)=='end' and float(events[-1].group(2))>=seconds-0.05:
+            last=float(events[-2].group(2))
+        if last<=first: raise ValueError('В озвучке не найдена речь.')
+        return first,last

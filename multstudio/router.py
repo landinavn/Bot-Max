@@ -40,8 +40,8 @@ def validate_spec(entity, spec):
         if type(spec.get('duration')) not in (int,float) or not 1 <= spec['duration'] <= 10:
             raise ValueError('Длительность сцены: 1–10 секунд; Kling генерирует 5 или 10, монтаж подгоняет длительность.')
         people = spec.get('characters')
-        if not isinstance(people,list) or not 1 <= len(people) <= 2 or len(set(people)) != len(people):
-            raise ValueError('Для MVP укажите 1–2 ID постоянных персонажей.')
+        if not isinstance(people,list) or not (0 if spec.get('production_rules') else 1) <= len(people) <= 20 or len(set(people)) != len(people):
+            raise ValueError('Укажите ID персонажей; диалог будет разделён на отдельные кадры. У немой сцены допустим пустой список.')
         dialogue = spec.get('dialogue', [])
         if not isinstance(dialogue,list) or len(dialogue) > 20:
             raise ValueError('Некорректные реплики.')
@@ -50,6 +50,8 @@ def validate_spec(entity, spec):
                 raise ValueError('Каждая реплика: character_id из characters и непустой text до 2000 символов.')
         if type(spec.get('approved',False)) is not bool:
             raise ValueError('approved — true или false.')
+        from .rules import validate
+        validate(spec)
     if entity == 'episode':
         ending = spec.get('ending', [])
         if not isinstance(ending,list) or len(ending)>4 or any(not isinstance(s,str) or len(s)>100 for s in ending):
@@ -153,6 +155,8 @@ def create_router(admin_id, settings, assets):
             if row['spec'].get('production',{}).get('audio_first'):
                 buttons.insert(-2,('💵 План и стоимость','episode_plan:'+key))
                 timing = f"\nЕстественная речь без ускорения; целевая длительность {row['spec']['target_seconds']} секунд; сцены продлеваются под речь.\n"
+            if row['spec'].get('production',{}).get('strict_five_seconds'):
+                timing=f"\n{len(await repo.children('scene',key))} сцен × 5 секунд. Один кадр — один голос. Аудио до 4,5 с; без растяжения и ускорения.\n"
             await tell(event,row['title']+timing+
                        'Звуковые эффекты и отдельная музыка сцен в MVP сохраняются как режиссёрские указания; можно загрузить общий музыкальный трек.',buttons)
         else:
@@ -165,11 +169,16 @@ def create_router(admin_id, settings, assets):
                         links.append((title,await assets.asset_url(snap['assets'][kind])))
                     except Exception as exc:
                         logger.warning('Не удалось получить ссылку сцены %s kind=%s (%s)',key,kind,type(exc).__name__)
+            async with repo.connect() as db:
+                validation=await repo.one(db,'SELECT * FROM cartoon_scene_validation WHERE scene_id=? AND context_hash=?',(key,snap['context_hash']))
+            if validation:
+                notice+='\nПроверка: '+validation['scene_validation_status']+'; речь: '+str(validation['audio_duration_seconds'])+' с. '+(validation['error'] or '')
             await tell(event,(notice+'\n' if notice else '')+f"Сцена {row['number']} · версия {row['revision']}\nНачало речи: {editing['speech_start']:g} с\nНачало исходного видео: {editing['video_start']:g} с\n"+json.dumps(row['spec'],ensure_ascii=False,indent=2),[
                 ('✏️ Изменить сцену','edit:scene:'+key),('⏱ Начало речи','speech_start:'+key),('✂️ Начало видео','video_start:'+key),('🎨 Изображение / перегенерировать','make:image:scene:'+key),
                 ('♻️ Восстановить картинку и видео','restore_assets:'+key),
                 ('📤 Загрузить своё изображение','scene_upload:'+key),
                 ('⚙️ Параметры сцены (JSON)','scene_settings:'+key),
+                *([('✏️ Изменить реплику','line_edit:'+key)] if row['spec'].get('speaker_id') else []),
                 ('🎥 Оживить','make:video:scene:'+key),('🎙 Озвучить','make:speech:scene:'+key),
                 ('👁 Результаты / утвердить изображение','view:scene:'+key),('⬅️ Серия','e:'+row['episode_id'])],links,replace=replace)
 
@@ -206,12 +215,14 @@ def create_router(admin_id, settings, assets):
                 from .episode_two import plan
                 await owner('episode',parts[1])
                 result=await plan(parts[1],settings)
-                lines=[f"Изображений: {result['images']}; видео: {result['videos']}; отдельных реплик: {result['utterances']}."]
+                lines=[f"Изображений: {result['images']}; видео: {result['videos']}; отдельных реплик: {result['utterances']}; немых сцен: {result['silent']}."]
                 for kind,value in result['services'].items():
                     lines.append(f"{kind}: {', '.join(sorted(value['models']))}; {', '.join(sorted(value['resolutions']))}; длительность по плану {value['duration']} сек; {dollars(value['estimate'])}")
                 lines.append(('Частичная оценка: ' if result['errors'] else 'Всего ориентировочно: ')+dollars(result['total']))
                 lines.extend(result['errors'])
-                lines.append('Оплата не запущена. Каждый кадр, видео и озвучка требуют отдельной актуальной оценки и подтверждения. После измерения речи оценка видео может увеличиться. Музыка и эффекты требуют предоставленных исходников; точная артикуляция требует просмотра.')
+                episode=await repo.get('episode',parts[1])
+                fixed=episode['spec'].get('production',{}).get('strict_five_seconds')
+                lines.append('Оплата не запущена. Каждый кадр, видео и озвучка требуют отдельной оценки и подтверждения. '+('Речь проверяется до запуска видео; длительность сцены строго 5 секунд. ' if fixed else 'После измерения речи оценка видео может увеличиться. ')+'Музыка требует предоставленного исходника; точная артикуляция требует просмотра.')
                 await tell(event,'\n'.join(lines),[('⬅️ Серия','e:'+parts[1])])
             elif action=='characters':
                 key=parts[1]
@@ -242,6 +253,16 @@ def create_router(admin_id, settings, assets):
                 await tell(event,'Опишите словами, что изменить в сцене (например: Аня сидит на диване)'
                            +'\nТекст заменит визуальное описание целиком.\n\nТекущее описание:\n'
                            +row['spec'].get('visual',''),[('Отмена','home')])
+            elif action=='line_edit':
+                key=parts[1]
+                scene,_=await owner('scene',key)
+                from .rules import strict, shorter_suggestion
+                if not strict(scene['spec']) or not scene['spec'].get('dialogue'):
+                    raise ValueError('У этой сцены нет отдельной реплики.')
+                line=scene['spec']['dialogue'][0]['text']
+                await context.update_data(studio_input=dict(action='line_edit',entity='scene',key=key))
+                await context.set_state(StudioStates.input)
+                await tell(event,'Введите новую короткую реплику обычным текстом. Затем потребуется отдельное подтверждение стоимости озвучки.\nСейчас: '+line+'\nПредложение: '+shorter_suggestion(line),[('Отмена','s:'+key)])
             elif action=='scene_upload':
                 key=parts[1]
                 await owner('scene',key)
@@ -413,9 +434,9 @@ def create_router(admin_id, settings, assets):
                 if item['status']=='manual' and await repo.job_result(item['id']):
                     buttons.append(('Опубликовать сохранённый результат','publish_result:'+item['id']))
                 if item['status']=='manual' and item['provider_id']:
-                    buttons.append(('Повторить только опрос Kling','poll:'+item['id']))
+                    buttons.append(('Повторить только опрос провайдера','poll:'+item['id']))
                 if item['status']=='manual' and item['kind']=='video':
-                    buttons.append(('Завершить ручную сверку Kling','resolve:'+item['id']))
+                    buttons.append(('Завершить ручную сверку видео','resolve:'+item['id']))
                 await tell(event,json.dumps({k:item[k] for k in ('id','kind','status','provider_id','result_url','error','estimate','actual','attempts')},ensure_ascii=False,indent=2)
                            + ('\nРезультат: '+item['result_url'] if links else '')
                            +'\nПри неизвестном результате платного запроса сначала сверьте расход в кабинете. Новый запрос — только с новым подтверждением.',
@@ -451,7 +472,7 @@ def create_router(admin_id, settings, assets):
                 item=await repo.job(parts[1])
                 if not item: raise ValueError('Задание не найдено.')
                 await owner('project',item['project_id'])
-                await tell(event,'Подтвердите, что проверили кабинет PiAPI и эта задача больше НЕ выполняется. '
+                await tell(event,'Подтвердите, что проверили кабинет провайдера и эта задача больше НЕ выполняется. '
                            'Это разблокирует следующую задачу очереди. Перед подтверждением сверьте фактический расход.',
                            [('✅ Задача больше не выполняется','resolved:'+item['id']),('Отмена','job:'+item['id'])])
             elif action=='resolved':
@@ -481,6 +502,13 @@ def create_router(admin_id, settings, assets):
                 logger.info('Обновлено описание персонажа %s: %s',key,text)
                 await context.clear()
                 await tell(event,'Описание персонажа сохранено.',[('👤 Персонаж','c:'+key)])
+                return
+            elif action=='line_edit':
+                row,_=await owner('scene',key)
+                if not text or len(text)>2000: raise ValueError('Введите реплику от 1 до 2000 символов.')
+                await repo.update_scene_line(key,admin_id,text)
+                await context.clear()
+                await tell(event,'Реплика сохранена. Старые файлы в архиве. Получите новую оценку озвучки и подтвердите её.',[('Сцена','s:'+key)])
                 return
             elif action=='scene_upload':
                 await owner('scene',key)
@@ -537,7 +565,12 @@ def create_router(admin_id, settings, assets):
                     raise ValueError('Пришлите только voice, emotion, speed и pitch_shift (для masha).')
                 await repo.set_character_speech(key,admin_id,profile)
             elif action in ('new','edit','scene_settings'):
-                entity=task['entity']; spec=validate_spec(entity,json.loads(text))
+                entity=task['entity']; spec=json.loads(text)
+                if entity=='scene' and action=='new':
+                    from .rules import split_dialogue
+                    for shot in split_dialogue(spec): validate_spec(entity,shot)
+                else:
+                    spec=validate_spec(entity,spec)
                 if action in ('edit','character_settings','scene_settings'):
                     _,project=await owner(entity,key)
                     if entity=='scene':

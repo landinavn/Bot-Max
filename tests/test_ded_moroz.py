@@ -658,10 +658,10 @@ def test_phrase_tags_preserve_all_template_words_punctuation_and_fields():
     import re,string
     def spoken(text):
         return ' '.join(re.sub(r'\[[^\]]+\]', '',text).split())
-    assert spoken(dm.TEMPLATE)==spoken(dm.PREVIOUS_DEFAULT_TEMPLATE)
+    assert spoken(dm.TEMPLATE)==spoken(dm.PREVIOUS_DEFAULT_TEMPLATE).replace('Ты меня очень порадовал!', 'Ты меня очень радуешь!')
     assert not re.search(r'\]\s*\[',dm.TEMPLATE)
     assert dm.TEMPLATE.startswith('[deep voice] Охо-хо-хо!')
-    assert '[drawls] очень порадовал!' in dm.TEMPLATE
+    assert '[drawls] очень радуешь!' in dm.TEMPLATE
     assert '[drawls] очень горжусь!' in dm.TEMPLATE
     assert '[drawls] всё получится!' in dm.TEMPLATE
     assert {name for _,name,_,_ in string.Formatter().parse(dm.TEMPLATE) if name}=={'name','fact1','fact2','fact3','task'}

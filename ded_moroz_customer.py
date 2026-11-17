@@ -46,12 +46,12 @@ async def compact_video(source,target,*,preview_seconds=None):
     return target
 
 
-async def last_result(event,admin,config):
+async def last_result(event,admin,config,*,order_id=None):
     from ded_moroz import read,tell
     from multstudio.assets import Assets
     from ded_moroz import Settings
     user=event.get_ids()[1]
-    row=await read("SELECT * FROM ded_moroz_orders WHERE user_id=? AND status='done' ORDER BY rowid DESC LIMIT 1",(user,))
+    row=await read("SELECT * FROM ded_moroz_orders WHERE user_id=? AND status='done'"+(' AND id=?' if order_id else '')+' ORDER BY rowid DESC LIMIT 1',(user,order_id) if order_id else (user,))
     if not row or not await sales.allowed(row,admin):
         await tell(event,'У вас пока нет готового поздравления.');return
     assets=Assets(Settings.from_config(config).root,config)

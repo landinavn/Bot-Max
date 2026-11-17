@@ -56,10 +56,6 @@ def queue_rebuild(config, settings, order_id=None, *, name_genitive=None):
                 'raw_path':row['raw_path'], 'approved_audio_path':row['approved_audio_path'] or row['audio_path'],
                 'target':target, 'reason':'montage_update', 'created_at_utc':stamp}, output, ensure_ascii=False)
         db.execute('BEGIN IMMEDIATE')
-        active = db.execute("SELECT id FROM ded_moroz_orders WHERE user_id=? AND id<>? AND status NOT IN ('done','cancelled')",
-                            (config.admin_user_id, row['id'])).fetchone()
-        if active:
-            raise ValueError('Есть другой незавершённый заказ. Пересборка не поставлена в очередь.')
         cursor = db.execute("""UPDATE ded_moroz_orders SET status='render',output_path=?,output_url=NULL,details=?,
             error=NULL,next_attempt=0 WHERE id=? AND user_id=? AND status='done'
             AND output_path IS ? AND raw_path IS ? AND approved_audio_path IS ? AND audio_path IS ? AND details=?""",

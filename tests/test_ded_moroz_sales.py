@@ -94,18 +94,15 @@ async def test_repricing_issues_new_quote_but_honors_old_signed_invoice(credit_d
     assert (await sales.payment(old['order_num']))['amount_kopecks']==99000
 
 
-async def test_two_paid_invoices_are_durable_entitlements_not_duplicate_active_orders(credit_db,monkeypatch):
-    first=await sales.checkout(789)
-    await sales.mark_paid(first['order_id'],'first')
-    second=await sales.checkout(789)
-    assert second['order_id']!=first['order_id']
-    await sales.mark_paid(second['order_id'],'second')
-    active=await sales.claim(789,456)
-    assert active['payment_order_id']==first['order_id']
-    assert (await sales.payment(second['order_id']))['claimed_id'] is None
-    await dm.update(active['id'],status='done')
-    next_order=await sales.claim(789,456)
-    assert next_order['payment_order_id']==second['order_id'] and next_order['id']!=active['id']
+async def test_two_paid_invoices_create_independent_bound_orders_without_waiting(credit_db,monkeypatch):
+    first=await sales.checkout(789);await sales.mark_paid(first['order_id'],'first')
+    second=await sales.checkout(789);await sales.mark_paid(second['order_id'],'second')
+    one=await sales.claim(789,456,payment_key=first['order_id'])
+    two=await sales.claim(789,456,payment_key=second['order_id'])
+    assert one['id']!=two['id'] and one['status']==two['status']=='input'
+    assert one['payment_order_id']==first['order_id'] and two['payment_order_id']==second['order_id']
+    assert (await sales.payment(second['order_id']))['claimed_id']==two['id']
+    assert (await sales.claim(789,456,payment_key=first['order_id']))['id']==one['id']
 
 
 async def test_ded_receipt_cannot_be_reused_for_animation_or_credit_package(credit_db):

@@ -1,6 +1,7 @@
 """Admin pilot for family greetings; deterministic tagged text, no extra model calls."""
 import json
 import re
+from uuid import uuid4
 
 from maxapi.types import CallbackButton
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
@@ -134,18 +135,17 @@ async def entry(event,context,admin):
         await context.clear();await context.set_state(PosterStates.waiting_for_mode)
         b=InlineKeyboardBuilder().row(CallbackButton(text='⬅️ Главный экран',payload='back_to_main'))
         await tell(event,STUB,attachments=[b.as_markup()]);return
-    prior=await read("SELECT * FROM ded_moroz_orders WHERE user_id=? AND status NOT IN ('done','cancelled')",(user,))
-    if prior:
-        if not is_family(prior['details']):
-            await tell(event,'Сначала завершите текущее поздравление для одного ребёнка. Его данные и файлы сохранены.',attachments=[InlineKeyboardBuilder().row(CallbackButton(text='Продолжить заказ',payload='dm_continue')).as_markup()]);return
-        await enter(event,context,admin);return
     from handlers import PosterStates
     await context.clear();await context.set_state(PosterStates.waiting_for_mode)
     b=InlineKeyboardBuilder()
+    token=uuid4().hex
     for label,n in (('2 ребёнка','2'),('3 ребёнка','3'),('4 и больше','more')):
-        b.row(CallbackButton(text=label,payload='dm_family_count:'+n))
+        b.row(CallbackButton(text=label,payload='dm_family_count:'+n+':'+token))
+    active=await read("SELECT * FROM ded_moroz_orders WHERE user_id=? AND json_extract(details,'$.variant')='family' AND status NOT IN ('done','cancelled') ORDER BY rowid DESC LIMIT 5",(user,),all_rows=True)
+    for row in active:
+        b.row(CallbackButton(text='Продолжить семейное · '+row['id'][:8]+' · '+row['status'],payload='dm_open:'+row['id']))
     b.row(CallbackButton(text='⬅️ Главный экран',payload='back_to_main'))
-    await tell(event,'🎅 Одно поздравление для всей семьи!\n\nСначала выберите количество детей. Затем заполним каждого по очереди: имя, возраст, пол, один факт и пожелание. В конце — общий факт и необязательное общее фото. Перед озвучкой всё можно проверить и исправить. Пока доступно для 2–6 детей.',attachments=[b.as_markup()])
+    await tell(event,'🎅 Одно поздравление для всей семьи!\n\nЧтобы начать новое поздравление, выберите количество детей. Сохранённые заказы можно продолжить отдельными кнопками ниже. Затем заполним каждого по очереди: имя, возраст, пол, один факт и пожелание. В конце — общий факт и необязательное общее фото. Перед озвучкой всё можно проверить и исправить. Пока доступно для 2–6 детей.',attachments=[b.as_markup()])
 
 
 async def review(event,context,row):
@@ -224,16 +224,17 @@ async def callback(event,context,admin):
         await entry(event,context,admin);return
     action,key,*extra=event.callback.payload.split(':')
     if action=='dm_family_count':
-        if extra:raise ValueError('Выберите количество детей кнопкой.')
+        if len(extra)>1 or (extra and not re.fullmatch(r'[a-f0-9]{32}',extra[0])):raise ValueError('Откройте семейное поздравление заново.')
+        token=extra[0] if extra else None
         if key=='more':
             b=InlineKeyboardBuilder()
-            for n in range(4,MAX_CHILDREN+1):b.row(CallbackButton(text=str(n)+' детей',payload='dm_family_count:'+str(n)))
+            for n in range(4,MAX_CHILDREN+1):b.row(CallbackButton(text=str(n)+' детей',payload='dm_family_count:'+str(n)+(':'+token if token else '')))
             await tell(event,'Сколько детей поздравим? Для каждого будет короткий факт и отдельное пожелание.',attachments=[b.as_markup()]);return
         if key not in tuple(map(str,range(2,MAX_CHILDREN+1))):raise ValueError('Выберите количество детей кнопкой.')
-        row=await begin(user,details={'variant':VARIANT,'children_count':int(key)})
+        row=await begin(user,details={'variant':VARIANT,'children_count':int(key)},new=bool(token),creation_key='family:'+token if token else None)
         if not is_family(row['details']):
             await entry(event,context,admin);return
-        await enter(event,context,admin);return
+        await enter(event,context,admin,key=row['id']);return
     row=await get(key)
     if not row or row['user_id']!=user or not is_family(row['details']) or row['status']!='input':
         await tell(event,'Эта кнопка уже использована. Откройте семейное поздравление снова.');return

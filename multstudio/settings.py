@@ -69,8 +69,14 @@ class Settings:
         if kind == 'image':
             price, model, size = self.image_price, self.image_model, '1024x1536'
         elif kind == 'video':
+            from .rules import strict
+            spec=snapshot.get('spec',{})
+            provider=spec.get('video_provider','kling')
+            if strict(spec) and not spec.get('dialogue'): provider='heygen_video'
             duration = 5 if duration <= 5 else 10
-            if snapshot.get('spec',{}).get('video_provider')=='heygen':
+            if provider=='heygen_video':
+                price,model,size=0,'heygen-video-1','1080p; итог 1080x1920 / 30 FPS'
+            elif provider=='heygen':
                 price,model,size=self.heygen_price,'heygen/avatar_iv','9:16 / 1080p; итог 1080x1920'
             else:
                 price, model, size = self.video_price * (duration // 5), 'kling/3.0/std', '9:16; итог 1080x1920'
@@ -90,5 +96,7 @@ class Settings:
             raise ValueError('Неизвестное задание.')
         if not model:
             raise ValueError('Сначала настройте модель генерации.')
-        return dict(estimate=price, model=model, resolution=size, duration=duration,
+        result=dict(estimate=price, model=model, resolution=size, duration=duration,
                     image_quality=self.image_quality, currency='USD',estimate_available=(price>0 or kind=='assemble'))
+        if kind=='video': result['video_provider']=provider
+        return result

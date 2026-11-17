@@ -28,9 +28,11 @@ def normalize(spec):
             raise ValueError('Говорящий должен присутствовать в characters.')
         result['characters'] = [speaker]
         result['video_provider'] = 'heygen'
-        result['camera'] = 'Один крупный или средний план только говорящего персонажа. Остальные за кадром.'
+        result['camera'] = ('Один средний план по пояс: только говорящий персонаж, обе руки, телефон и край стола.'
+                            if result.get('framing')=='medium' else
+                            'Один крупный или средний план только говорящего персонажа. Остальные за кадром.')
     else:
-        result['video_provider'] = 'kling'
+        result['video_provider'] = 'heygen_video'
     validate(result)
     return result
 

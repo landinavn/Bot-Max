@@ -135,7 +135,12 @@ async def children(entity, parent=None):
     async with connect() as db:
         result = await rows(db, f'SELECT * FROM {table}' + (f' WHERE {parent_field}=?' if parent_field else '')
                             + ' ORDER BY rowid', (parent,) if parent_field else ())
-    return [unpack(r) for r in result]
+    result=[unpack(r) for r in result]
+    if entity=='scene' and parent:
+        from .timeline import ordered
+        episode=await get('episode',parent)
+        result=ordered(result,episode['spec'])
+    return result
 
 
 async def _ensure_masha_voice(db):
@@ -434,7 +439,9 @@ async def _snapshot(db, target, key):
     snap = dict(target=target, id=key, project_id=project_id, revision=row['revision'], spec=row['spec'],
                 world=project['spec'], world_revision=project['revision'])
     if target == 'episode':
-        scene_rows = await rows(db, 'SELECT id FROM cartoon_scenes WHERE episode_id=? ORDER BY number', (key,))
+        scene_rows = await rows(db, 'SELECT id,number FROM cartoon_scenes WHERE episode_id=? ORDER BY number', (key,))
+        from .timeline import ordered
+        scene_rows=ordered(scene_rows,row['spec'])
         snap['scenes'] = [await _snapshot(db, 'scene', s['id']) for s in scene_rows]
         # Editing is attached only to episode snapshots, after each scene's visual hash.
         for scene in snap['scenes']:
@@ -638,6 +645,9 @@ async def quote(target, key, kind, settings):
         cost['render_version']=4
     snap['quote'] = cost
     if kind == 'video' and strict(snap['spec']): validate_audio_asset(snap)
+    if kind=='video' and snap['spec'].get('video_provider')=='heygen':
+        from .heygen_subjects import validate as validate_subjects
+        validate_subjects(snap)
     if kind == 'assemble':
         for scene in snap['scenes']:
             if strict(scene['spec']):

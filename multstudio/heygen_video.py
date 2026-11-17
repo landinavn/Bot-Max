@@ -28,6 +28,38 @@ class StudioHeyGen(HeyGenAdapter):
             'expressiveness':'medium'},idempotency=key)
         return self.identifier(data.get('video_id') or data.get('id'))
 
+    async def silent_video(self, image_url, spec, key):
+        """Whole-scene animation, not a speaking avatar; output is muted locally."""
+        self.ready(); https_url(image_url)
+        if spec.get('dialogue') or spec.get('speaker_id') is not None:
+            raise ValueError('Для немой анимации не должно быть реплик или говорящего.')
+        prompt=('Animate the supplied first frame as ONE coherent family-friendly 3D cartoon shot. '
+                'Preserve exact faces, ages, outfits, proportions, room layout, furniture and lighting. '
+                'No added people, split screen, captions, logos or invented phone interface. '
+                'No dialogue, speech, voice-over, singing, lip-sync or music. All mouths stay closed. '
+                'Only gentle visual motion. Camera: '+spec.get('camera','')+
+                '\nAction: '+spec.get('motion','Gentle camera movement; preserve the existing composition.'))
+        data=await self.request('POST','/v3/models/videos',payload={
+            'model':'heygen-video-1','mode':'image_to_video',
+            'image':{'type':'url','url':image_url},'prompt':prompt,
+            'duration':5,'resolution':'1080p','prompt_enhancement':'disabled'},idempotency=key)
+        return self.identifier(data.get('video_id') or data.get('id'))
+
+    async def poll_silent(self, provider_id):
+        try:
+            data=await self.request('GET','/v3/models/videos/'+self.identifier(provider_id))
+        except HeyGenError as exc:
+            if exc.status_code==429 or (exc.status_code and exc.status_code>=500):
+                raise TemporaryPollError('Временный сбой опроса HeyGen Video.') from None
+            raise
+        except httpx.RequestError:
+            raise TemporaryPollError('Временный сбой соединения при опросе HeyGen Video.') from None
+        if data.get('status') in ('failed','cancelled','error'):
+            raise ProviderFailed('HeyGen Video не завершил немую сцену. Проверьте задачу перед новым запуском.')
+        if data.get('status')!='completed': return None
+        https_url(data.get('video_url',''))
+        return dict(url=data['video_url'])
+
     async def poll(self, provider_id, *, avatar=False):
         try:
             data=await (self.avatar_status(provider_id) if avatar else self.video_status(provider_id))

@@ -446,6 +446,8 @@ async def _snapshot(db, target, key):
         # Editing is attached only to episode snapshots, after each scene's visual hash.
         for scene in snap['scenes']:
             scene['editing']=await _scene_editing(db,scene['id'])
+        from .assembly_editing import attach
+        await attach(db,snap)
     elif target == 'scene':
         snap['number'] = row['number']
         cast = []
@@ -642,7 +644,7 @@ async def quote(target, key, kind, settings):
     if profiles is not None:
         cost['speech_profiles'] = profiles
     if kind=='assemble':
-        cost['render_version']=4
+        cost['render_version']=5 if snap['spec'].get('heygen_end_trim_seconds') or snap['spec'].get('closing_card') else 4
     snap['quote'] = cost
     if kind == 'video' and strict(snap['spec']): validate_audio_asset(snap)
     if kind=='video' and snap['spec'].get('video_provider')=='heygen':

@@ -150,6 +150,16 @@ class Renderer:
         longest=max(max(0.0,float(scene['spec']['duration'])-trim),keep_video,offset+voice_seconds+0.2 if voice else 0)
         # An integral video frame count also gives an integral 48 kHz sample count.
         seconds=5.0 if strict else math.ceil(longest*FPS-1e-9)/FPS
+        montage=scene.get('assembly_editing',{})
+        if montage and not ending and source['kind']=='video' and montage.get('source_video_provider') in ('heygen','heygen_video'):
+            from .assembly_editing import trim_seconds
+            requested=trim_seconds(montage.get('video_end_trim',0))
+            # Preserve the complete approved MP3, including soft consonants; round UP to a video frame.
+            shortest=max(1/FPS,offset+voice_seconds if voice else 0,video_seconds-requested)
+            shortened=math.ceil(shortest*FPS-1e-9)/FPS
+            old_seconds=seconds;seconds=min(seconds,shortened)
+            logger.info('Монтаж HeyGen %s: запрошено %.3f с с конца, убрано %.3f с; конец MP3 %.3f с сохранён',
+                        scene.get('number',scene.get('id','?')),requested,old_seconds-seconds,offset+voice_seconds)
         extension=max(0.0,seconds-video_seconds) if source['kind']!='image' else 0.0
         logger.info('Монтаж сцены %s: video=%.3f speech=%.3f start=%.3f output=%.3f freeze=%.3f cut=%.3f',
                     scene.get('number',scene.get('id','?')),video_seconds,voice_seconds,offset,seconds,extension,trim)
@@ -222,12 +232,32 @@ class Renderer:
             y+=line_height
         image.save(destination)
 
+    async def closing(self,scene,options):
+        from .closing_card import create,SECONDS
+        if options.get('style')!='anya-russian-qr-v1' or options.get('seconds')!=SECONDS:
+            raise ValueError('Неизвестная финальная заставка серии.')
+        if scene['spec'].get('dialogue'):
+            raise ValueError('Для финальной заставки нужна отдельная сцена без реплики.')
+        image=scene['assets'].get('image')
+        background=self.assets.path(image['path']) if image and image.get('approved') else None
+        poster=self.assets.path(uuid4().hex+'.png')
+        await asyncio.to_thread(create,poster,options['bot_url'],background)
+        output=self.assets.path(uuid4().hex+'.mp4')
+        await process('ffmpeg','-nostdin','-v','error','-y','-loop','1','-framerate','30','-threads','1','-i',poster,
+                      '-f','lavfi','-i','anullsrc=r=48000:cl=stereo','-t',str(SECONDS),
+                      '-c:v','libx264','-preset','veryfast','-threads','2','-pix_fmt','yuv420p','-r','30',
+                      '-c:a','aac','-ar','48000','-ac','2','-movflags','+faststart',output)
+        rules.video_seconds(await duration(output))
+        return output
+
     async def assemble(self, snapshot):
         self.ready()
         paths, lengths, cues, elapsed = [], [], [], 0.0
         for index, scene in enumerate(snapshot['scenes']):
             ending = snapshot['spec'].get('ending') if index == len(snapshot['scenes'])-1 else None
-            path=await self.scene(dict(scene,assembly_job_id=snapshot.get('job_id')), ending)
+            path=(await self.closing(scene,snapshot['spec']['closing_card'])
+                  if index==len(snapshot['scenes'])-1 and snapshot['spec'].get('closing_card')
+                  else await self.scene(dict(scene,assembly_job_id=snapshot.get('job_id')), ending))
             paths.append(path)
             seconds=await duration(path)
             lengths.append(seconds)
@@ -284,7 +314,12 @@ class Renderer:
             '-c:v','copy','-c:a','aac','-ar','48000','-ac','2','-t',f'{elapsed:.9f}',
             '-movflags','+faststart',result,cwd=self.assets.root)
         if all(rules.strict(s['spec']) for s in snapshot['scenes']):
-            rules.video_seconds(await duration(result),len(paths))
+            actual=await duration(result)
+            expected=sum(lengths)
+            if abs(actual-expected)>rules.TOLERANCE:
+                raise ValueError(f'Итоговая длина монтажа {actual:.3f} с не совпадает с суммой сцен {expected:.3f} с.')
+            if not any(s.get('assembly_editing',{}).get('video_end_trim') for s in snapshot['scenes']):
+                rules.video_seconds(actual,len(paths))
         return result
 
 

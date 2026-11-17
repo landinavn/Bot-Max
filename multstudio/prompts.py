@@ -60,6 +60,19 @@ def scene_image_prompt(snap, location_reference_url=None):
     if strict(spec) and spec.get('speaker_id'):
         camera = ('One close-up or medium shot of ONLY the character who will speak in the later video. '
                   'Everyone else stays off screen. In this source still, the lips are gently closed.')
+    if strict(spec) and spec.get('speaker_id') and spec.get('framing')=='medium':
+        camera=('ONE waist-up MEDIUM SHOT of the adult speaking character alone. '
+                'Show head, upper torso, both forearms, complete hands holding the phone, and part of the table. '
+                'Keep visible space around the shoulders. Do not crop to a headshot, facial close-up, '
+                'or extreme close-up. Keep the full hands and phone inside the central 80 percent of the image width, '
+                'with clear side margins for vertical 9:16 export. Everyone else stays off screen. Lips gently closed.')
+    if strict(spec) and not spec.get('speaker_id') and spec.get('framing')=='medium':
+        camera=('ONE waist-up '+('MEDIUM TWO-SHOT' if len(snap.get('cast',[]))==2 else 'MEDIUM SHOT')+
+                ', not separate close-ups. The specified characters, hands and phone fit completely inside '
+                'the central 80 percent of the image width. Keep the table edge visible and clear side margins '
+                'for vertical 9:16 export. One still moment, one camera.')
+    if strict(spec) and spec.get('framing')=='wide':
+        camera='ONE WIDE ESTABLISHING SHOT of the whole apartment, table, sofa and snowy window. No close-up.'
     for original, keyframe in zip(SCENES, KEYFRAMES):
         if spec.get('title') == original[0] and moment == original[3]:
             moment, camera = keyframe

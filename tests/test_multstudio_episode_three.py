@@ -24,7 +24,7 @@ async def episode(studio):
     return key,await repo.children('scene',key)
 
 
-async def ready(studio, number=1):
+async def ready(studio, number=2):
     key,scenes=await episode(studio)
     for char in await repo.children('character',studio[0]):
         await add_image(studio[2],await repo.snapshot('character',char['id']))

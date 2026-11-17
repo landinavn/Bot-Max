@@ -58,7 +58,9 @@ class Worker:
                 await self.publish_result(item)
                 return
             strict = rules.strict(snap['spec']) if item['target']=='scene' else False
-            heygen = kind=='video' and snap['spec'].get('video_provider')=='heygen'
+            video_provider=snap.get('quote',{}).get('video_provider',snap['spec'].get('video_provider'))
+            heygen = kind=='video' and video_provider=='heygen'
+            silent_heygen = kind=='video' and video_provider=='heygen_video'
             if strict:
                 rules.validate(snap['spec'])
             if heygen and item['status']=='avatar_polling':
@@ -78,7 +80,8 @@ class Worker:
                 return
             if kind == 'video' and item['status'] == 'polling':
                 result = dict(url=item['result_url']) if item['result_url'] else await (
-                    self.providers.studio_heygen.poll(item['provider_id']) if heygen else self.providers.kling.poll(item['provider_id']))
+                    self.providers.studio_heygen.poll(item['provider_id']) if heygen else
+                    self.providers.studio_heygen.poll_silent(item['provider_id']) if silent_heygen else self.providers.kling.poll(item['provider_id']))
                 if result is None:
                     await repo.update_job(key, lease_until=0, next_attempt=int(time.time())+15)
                     return
@@ -96,8 +99,9 @@ class Worker:
                 path = await self.renderer.assemble(snap)
                 await self.save_result(item,snap,data=path.read_bytes(),suffix='mp4')
                 return
-            if heygen: self.providers.studio_heygen.ready()
-            self.providers.preflight('heygen_video' if heygen else kind)
+            if heygen or silent_heygen: self.providers.studio_heygen.ready()
+            self.providers.preflight('heygen_video' if heygen or silent_heygen else kind)
+            if strict and kind=='video': self.renderer.ready()
             if strict and kind=='video': await self.validate_scene_audio(snap)
             if kind == 'image':
                 validate_scene_image_references(snap)
@@ -116,6 +120,9 @@ class Worker:
             if kind == 'image':
                 data = await self.providers.image(snap)
                 await self.save_result(item,snap,data=data)
+            elif kind == 'video' and silent_heygen:
+                task=await self.providers.studio_heygen.silent_video(image_url,snap['spec'],key+'-video')
+                await asyncio.shield(repo.update_job(key,status='polling',provider_id=task,usage=repo.encoded({'provider':'heygen_video','stage':'video','input_type':'image_to_video'}),lease_until=0,next_attempt=int(time.time())+15))
             elif kind == 'video' and heygen:
                 task=await self.providers.studio_heygen.scene_video(image_url,speech_url,key+'-video')
                 await asyncio.shield(repo.update_job(key,status='polling',provider_id=task,usage=repo.encoded({'provider':'heygen','stage':'video','input_type':'image'}),lease_until=0,next_attempt=int(time.time())+15))
@@ -184,6 +191,8 @@ class Worker:
                 pass
 
     async def validate_scene_audio(self, snap):
+        from .heygen_subjects import validate as validate_subjects
+        if snap['spec'].get('video_provider')=='heygen': validate_subjects(snap)
         rules.validate_audio_asset(snap)
         if snap['spec'].get('dialogue'):
             from .episode_two import speech_profiles
@@ -261,7 +270,7 @@ class Worker:
             attachments.append(keyboard)
         elif kind=='video':
             snap=json.loads(item['snapshot'])
-            number=snap.get('number')
+            number=snap['spec'].get('display_number',snap.get('number'))
             if number is None:
                 scene=await repo.get('scene',item['target_id'])
                 number=scene['number'] if scene else '?'

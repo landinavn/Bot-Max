@@ -14,6 +14,7 @@ from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
 from handlers import _reply
 from . import repository as repo
+from .timeline import label as scene_label
 from .seed import seed
 from .tts import VOICES, speech_settings, MASHA_PROFILE
 
@@ -143,7 +144,7 @@ def create_router(admin_id, settings, assets):
                 ('🎨 Создать / перегенерировать эталон','make:image:character:'+key),
                 ('👁 Эталон / утвердить','view:character:'+key),('⬅️ Проект','p:'+project['id'])])
         elif entity=='episode':
-            buttons=[(f"{s['number']}. {s['spec'].get('title','Сцена')}",'s:'+s['id']) for s in await repo.children('scene',key)]
+            buttons=[(f"{scene_label(s)}. {s['spec'].get('title','Сцена')}",'s:'+s['id']) for s in await repo.children('scene',key)]
             buttons += [('➕ Сцена','new:scene:'+key),('✏️ Серия / финальная заставка','edit:episode:'+key),
                         ('🎵 Загрузить фоновую музыку','music:'+key),('🎞 Собрать серию','make:assemble:episode:'+key),
                         ('📥 Получить MP4','view:episode:'+key),('⬅️ Проект','p:'+project['id'])]
@@ -169,7 +170,7 @@ def create_router(admin_id, settings, assets):
                 validation=await repo.one(db,'SELECT * FROM cartoon_scene_validation WHERE scene_id=? AND context_hash=?',(key,snap['context_hash']))
             if validation:
                 notice+='\nПроверка: '+validation['scene_validation_status']+'; речь: '+str(validation['audio_duration_seconds'])+' с. '+(validation['error'] or '')
-            await tell(event,(notice+'\n' if notice else '')+f"Сцена {row['number']} · версия {row['revision']}\nНачало речи: {editing['speech_start']:g} с\nНачало исходного видео: {editing['video_start']:g} с\n"+json.dumps(row['spec'],ensure_ascii=False,indent=2),[
+            await tell(event,(notice+'\n' if notice else '')+f"Сцена {scene_label(row)} · версия {row['revision']}\nНачало речи: {editing['speech_start']:g} с\nНачало исходного видео: {editing['video_start']:g} с\n"+json.dumps(row['spec'],ensure_ascii=False,indent=2),[
                 ('✏️ Изменить сцену','edit:scene:'+key),('⏱ Начало речи','speech_start:'+key),('✂️ Начало видео','video_start:'+key),('🎨 Изображение / перегенерировать','make:image:scene:'+key),
                 ('♻️ Восстановить картинку и видео','restore_assets:'+key),
                 ('📤 Загрузить своё изображение','scene_upload:'+key),

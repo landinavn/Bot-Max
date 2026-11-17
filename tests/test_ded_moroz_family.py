@@ -83,6 +83,7 @@ async def test_numbered_collection_review_edit_restart_and_confirm_before_audio(
     await credit_db.init_db()  # Persisted selected field; empty in-memory FSM after restart.
     context=await ready_context()
     await dispatch_callback(router,callback_event('cat_ded_moroz_family'),context)
+    await dispatch_callback(router,callback_event('dm_open:'+key),context)
     assert await context.get_state()==PosterStates.ded_moroz_input
     e=message_event('занимаешься футболом');await call_handler(router,'ded_moroz_input',e,context)
     changed=await dm.get(key);saved=json.loads(changed['details'])
@@ -115,13 +116,14 @@ async def test_no_photo_requires_confirmed_fields_and_cannot_skip_selected_edit(
     assert (await dm.get(row['id']))['status']=='input'
 
 
-async def test_single_order_cannot_be_overwritten_by_family_count_button(credit_db):
+async def test_single_order_is_preserved_when_family_count_starts_an_independent_order(credit_db):
     single=await dm.begin(456);await dm.update(single['id'],details=json.dumps({'name':'Марк'}))
     context=await ready_context();e=callback_event('dm_family_count:3')
     await dispatch_callback(create_router(admin_user_id=456),e,context)
-    assert 'Сначала завершите' in e.send.await_args.args[0]
+    assert await context.get_state()==PosterStates.ded_moroz_input
+    assert (await context.get_data())['dm_order']!=single['id']
     assert json.loads((await dm.get(single['id']))['details'])=={'name':'Марк'}
-    assert len(await dm.read('SELECT * FROM ded_moroz_orders',all_rows=True))==1
+    assert len(await dm.read('SELECT * FROM ded_moroz_orders',all_rows=True))==2
 
 
 async def test_unpaid_family_never_authorized_for_customer_even_with_paid_single_receipt(credit_db):

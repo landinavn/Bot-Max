@@ -2340,7 +2340,7 @@ def create_router(
         await context.set_state(PosterStates.waiting_for_mode)
         if isinstance(payload,str) and payload.startswith('dm_paid_'):
             from ded_moroz import enter
-            await enter(event,context,admin_user_id);return
+            await enter(event,context,admin_user_id,payment_key=payload.removeprefix('dm_paid_'));return
         if payload=='ded_moroz':
             from ded_moroz_sales import offer
             await offer(event,admin=admin_user_id);return
@@ -2349,7 +2349,7 @@ def create_router(
             active=await claim(user_id,admin_user_id)
             if active:
                 from ded_moroz import enter
-                await enter(event,context,admin_user_id);return
+                await enter(event,context,admin_user_id,key=active['id']);return
         if isinstance(payload, str) and payload.startswith("share_"):
             image_url = await get_shared_image(unquote(payload.removeprefix("share_")))
             if image_url is not None:
@@ -2435,6 +2435,20 @@ def create_router(
         from ded_moroz_sales import offer
         await offer(event,admin=admin_user_id)
 
+    @router.message_callback(F.callback.payload.startswith('dm_open:') | F.callback.payload.startswith('dm_single_new:'))
+    async def ded_moroz_order_action(event: MessageCallback,context:MemoryContext):
+        await event.ack(notification='Поздравление Деда Мороза')
+        user=event.get_ids()[1]
+        if user is None:return
+        from ded_moroz import begin,enter
+        action,key=event.callback.payload.split(':',1)
+        if not re.fullmatch(r'[a-f0-9]{32}',key):return
+        if action=='dm_single_new':
+            if admin_user_id is None or user!=admin_user_id:return
+            row=await begin(user,new=True,creation_key='single:'+key)
+            key=row['id']
+        await enter(event,context,admin_user_id,key=key)
+
     @router.message_callback(F.callback.payload.in_({'dm_start','dm_another','dm_continue','dm_launch_start'}))
     async def ded_moroz_start(event: MessageCallback,context:MemoryContext):
         await event.ack(notification='Мастерская Деда Мороза')
@@ -2445,7 +2459,7 @@ def create_router(
             if event.callback.payload=='dm_continue':
                 from ded_moroz import enter
                 await enter(event,context,admin_user_id)
-            else:await start(event,context,admin_user_id,payments)
+            else:await start(event,context,admin_user_id,payments,new=event.callback.payload=='dm_another')
         except Exception:
             logger.exception('Не удалось открыть заказ Деда Мороза')
             await _reply(event,'Сейчас не удалось открыть заказ. Если оплата уже прошла, повторно платить не нужно — нажмите «Продолжить» позже.')

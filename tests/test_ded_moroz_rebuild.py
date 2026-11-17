@@ -64,7 +64,7 @@ async def test_another_active_order_is_not_overwritten_or_skipped(credit_db,setu
     new=await dm.begin(456)
     with pytest.raises(ValueError,match='завершённый'):
         queue_rebuild(worker.config,worker.settings)
-    with pytest.raises(ValueError,match='другой незавершённый'):
-        queue_rebuild(worker.config,worker.settings,row['id'])
-    assert (await dm.get(row['id']))['status']=='done'
+    queued=queue_rebuild(worker.config,worker.settings,row['id'])
+    assert queued['paid_requests']==0
+    assert (await dm.get(row['id']))['status']=='render'
     assert (await dm.get(new['id']))['status']=='input'

@@ -180,7 +180,11 @@ async def init_tables(db):
         SELECT id,version,text,NULL,COALESCE(speech_provider_url,audio_url),audio_path,audio_url
         FROM ded_moroz_orders WHERE audio_path IS NOT NULL AND audio_url IS NOT NULL
         AND text IS NOT NULL""")
-    await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS dm_active_user ON ded_moroz_orders(user_id) WHERE status NOT IN ('done','cancelled')")
+    # A greeting has its own identity; an older attempt must not block another order.
+    await db.execute('DROP INDEX IF EXISTS dm_active_user')
+    if 'creation_key' not in columns:
+        await db.execute('ALTER TABLE ded_moroz_orders ADD COLUMN creation_key TEXT')
+    await db.execute('CREATE UNIQUE INDEX IF NOT EXISTS dm_creation_request ON ded_moroz_orders(user_id,creation_key) WHERE creation_key IS NOT NULL')
     from ded_moroz_sales import init_tables as init_sales
     await init_sales(db)
     await db.execute('''CREATE TABLE IF NOT EXISTS ded_moroz_avatar (
@@ -213,13 +217,19 @@ async def transition(key,user,status,new_status,*,version=None):
         await db.commit();return cur.rowcount==1
 
 
-async def begin(user, *, details=None):
+async def begin(user, *, details=None, new=False, creation_key=None):
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
         await db.execute('BEGIN IMMEDIATE');db.row_factory=aiosqlite.Row
-        row=await db.execute("SELECT * FROM ded_moroz_orders WHERE user_id=? AND status NOT IN ('done','cancelled')",(user,))
-        prior=await row.fetchone()
-        if prior:return dict(prior)
-        key=uuid4().hex;await db.execute('INSERT INTO ded_moroz_orders(id,user_id,details) VALUES (?,?,?)',(key,user,json.dumps(details or {},ensure_ascii=False)))
+        variant='family' if details and family.is_family(details) else 'single'
+        if creation_key:
+            row=await db.execute('SELECT * FROM ded_moroz_orders WHERE user_id=? AND creation_key=?',(user,creation_key))
+            prior=await row.fetchone()
+            if prior:return dict(prior)
+        elif not new:
+            row=await db.execute("SELECT * FROM ded_moroz_orders WHERE user_id=? AND COALESCE(json_extract(details,'$.variant'),'single')=? AND status NOT IN ('done','cancelled') ORDER BY rowid DESC LIMIT 1",(user,variant))
+            prior=await row.fetchone()
+            if prior:return dict(prior)
+        key=uuid4().hex;await db.execute('INSERT INTO ded_moroz_orders(id,user_id,details,creation_key) VALUES (?,?,?,?)',(key,user,json.dumps(details or {},ensure_ascii=False),creation_key))
         if details and family.is_family(details):
             await database.increment_counter('dm_family_started',user_id=user,connection=db)
             await database.increment_counter('dm_family_children_'+str(family.count(details)),user_id=user,connection=db)
@@ -435,10 +445,14 @@ async def tell(event,text=None,**kwargs):
     return await _reply(event,text,**kwargs)
 
 
-async def enter(event,context,admin):
+async def enter(event,context,admin,*,key=None,payment_key=None):
     from handlers import PosterStates,navigation_keyboard
     user=event.get_ids()[1]
-    row=await begin(user) if admin is not None and user==admin else await sales.claim(user,admin)
+    row=(await get(key) if key else await sales.claim(user,admin,payment_key=payment_key) if payment_key
+         else await begin(user) if admin is not None and user==admin else await sales.claim(user,admin))
+    if row and row['user_id']==user and family.is_family(row['details']) and user!=admin:
+        await family.entry(event,context,admin);return
+    if row and (row['user_id']!=user or not await sales.allowed(row,admin)):row=None
     if not row:
         await tell(event,'Сначала оплатите поздравление. Если оплата уже прошла, подождите немного и нажмите «Продолжить» снова.',attachments=[navigation_keyboard((('🎅 К поздравлению','cat_ded_moroz'),))]);return
     await context.clear();await context.update_data(dm_order=row['id'])
@@ -453,6 +467,9 @@ async def enter(event,context,admin):
         else:
             await context.set_state(PosterStates.ded_moroz_photo)
             await tell(event,PHOTO_PROMPT)
+    elif row['status']=='done':
+        from ded_moroz_customer import last_result
+        await last_result(event,admin,Config.from_env(),order_id=row['id'])
     elif row['status']=='editing':
         await show_facts(event,context,row)
     elif row['status']=='manual' and user!=admin:

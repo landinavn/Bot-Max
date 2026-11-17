@@ -227,33 +227,36 @@ async def render_ded_moroz(video, child, speech, examples, target, name, *, name
     from pathlib import Path
     from media_service import audio_duration
     from multstudio.render import process as render_process
-    video,child,speech,examples,target=map(Path,(video,child,speech,examples,target))
+    video,speech,examples,target=map(Path,(video,speech,examples,target))
+    child=Path(child) if child is not None else None
     seconds=await audio_duration(speech)
     if not 0<seconds<=1800:raise ValueError('Недопустимая длительность озвучки.')
-    for path in (video,child,speech,examples/'audio/ny_music.mp3',examples/'audio/jingle_bells.mp3'):
+    for path in (video,speech,examples/'audio/ny_music.mp3',examples/'audio/jingle_bells.mp3',*((child,) if child else ())):
         if not path.is_file():raise ValueError('Не найден файл монтажа: '+path.name)
     target.parent.mkdir(parents=True,exist_ok=True)
     from ded_moroz_frame import create_child_frame, FRAME_PAD
     frame_path=target.with_name(target.stem+'-frame.png')
-    photo_width,photo_height=await asyncio.to_thread(create_child_frame,child,frame_path)
+    if child:photo_width,photo_height=await asyncio.to_thread(create_child_frame,child,frame_path)
     from ded_moroz_intro import create_intro, INTRO_SECONDS
     intro_path=target.with_name(target.stem+'-intro.png')
     await asyncio.to_thread(create_intro,name,intro_path,name_genitive=name_genitive)
     total_seconds=seconds+INTRO_SECONDS
     temporary=target.with_name('rendering.mp4')
     child_index,speech_index,bg_index,jingle_index=1,2,3,4
+    if not child:speech_index,bg_index,jingle_index=1,2,3
+    intro_index=6 if child else 4
     filters=(
         f'[0:v]setpts=PTS-STARTPTS,scale=1920:1080:force_original_aspect_ratio=increase,'
         f'crop=1920:1080,setsar=1,fps=30,tpad=stop_mode=clone:stop_duration={seconds:.6f},trim=duration={seconds:.6f}[lit];'
-        + f'[{child_index}:v]scale={photo_width}:{photo_height}:flags=lanczos,setsar=1,format=rgba,'
+        + (f'[{child_index}:v]scale={photo_width}:{photo_height}:flags=lanczos,setsar=1,format=rgba,'
         f'pad=iw+{2*FRAME_PAD}:ih+{2*FRAME_PAD}:{FRAME_PAD}:{FRAME_PAD}:color=black@0[photo];'
         '[5:v]format=rgba[border];'
         '[photo][border]overlay=0:0:format=auto:shortest=1,'
         "drawbox=x=12:y=ih/2:w=3:h=3:color=white@0.9:t=fill:enable='lt(mod(t,1.6),0.18)',"
         "drawbox=x=iw/2:y=12:w=3:h=3:color=white@0.9:t=fill:enable='lt(mod(t+0.7,1.9),0.18)'[pip];"
         f"[lit][pip]overlay=x=W-w-48:y=H-h-48:enable='between(t,{seconds*.3:.6f},{seconds*.7:.6f})':shortest=1[framed];"
-        '[framed]format=yuv420p[body];'
-        f'[6:v]setpts=PTS-STARTPTS,setsar=1,fps=30,trim=duration={INTRO_SECONDS:.6f},format=yuv420p,'
+        '[framed]format=yuv420p[body];' if child else '[lit]format=yuv420p[body];')
+        + f'[{intro_index}:v]setpts=PTS-STARTPTS,setsar=1,fps=30,trim=duration={INTRO_SECONDS:.6f},format=yuv420p,'
         f'fade=t=in:st=0:d=0.25,fade=t=out:st={INTRO_SECONDS-.25:.6f}:d=0.25[intro];'
         '[intro][body]concat=n=2:v=1:a=0[v];'
         f'[{speech_index}:a]asetpts=PTS-STARTPTS,aresample=48000,adelay={round(INTRO_SECONDS*1000)}:all=1,apad[voice];'
@@ -261,15 +264,17 @@ async def render_ded_moroz(video, child, speech, examples, target, name, *, name
         f'[{jingle_index}:a]atrim=duration=3,asetpts=PTS-STARTPTS,aresample=48000,volume=0.4[jingle];'
         '[voice][bg][jingle]amix=inputs=3:duration=first:normalize=0,alimiter=limit=0.95[a]'
     )
-    inputs=['-i',str(video.resolve())]
-    inputs+=['-loop','1','-framerate','30','-i',str(child.resolve()),'-i',str(speech.resolve()),
-        '-stream_loop','-1','-i',str((examples/'audio/ny_music.mp3').resolve()),
-        '-i',str((examples/'audio/jingle_bells.mp3').resolve()),
-        '-loop','1','-framerate','30','-i',str(frame_path.resolve()),
-        '-loop','1','-framerate','30','-i',str(intro_path.resolve())]
+    # Bound decoder/encoder threads: several looping still images otherwise oversubscribe the host.
+    inputs=['-threads','1','-i',str(video.resolve())]
+    if child:inputs+=['-loop','1','-framerate','30','-threads','1','-i',str(child.resolve())]
+    inputs+=['-threads','1','-i',str(speech.resolve()),
+        '-stream_loop','-1','-threads','1','-i',str((examples/'audio/ny_music.mp3').resolve()),
+        '-threads','1','-i',str((examples/'audio/jingle_bells.mp3').resolve())]
+    if child:inputs+=['-loop','1','-framerate','30','-threads','1','-i',str(frame_path.resolve())]
+    inputs+=['-loop','1','-framerate','30','-threads','1','-i',str(intro_path.resolve())]
     await render_process('ffmpeg','-nostdin','-v','error','-y','-filter_complex_threads','1',
         *inputs,'-filter_complex',filters,
-        '-map','[v]','-map','[a]','-t',f'{total_seconds:.6f}','-r','30','-c:v','libx264','-preset','fast','-crf','20',
+        '-map','[v]','-map','[a]','-t',f'{total_seconds:.6f}','-r','30','-c:v','libx264','-threads','2','-preset','fast','-crf','20',
         '-pix_fmt','yuv420p','-c:a','aac','-ar','48000','-ac','2','-movflags','+faststart',str(temporary.resolve()),
         timeout=1800,cwd=str(target.parent.resolve()))
     await asyncio.to_thread(temporary.replace,target)

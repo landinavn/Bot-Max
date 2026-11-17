@@ -22,7 +22,9 @@ def queue_rebuild(config, settings, order_id=None, *, name_genitive=None):
                                       (config.admin_user_id,)).fetchone())
         if not row or row['user_id'] != config.admin_user_id or row['status'] != 'done':
             raise ValueError('Нужен завершённый заказ этого администратора.')
-        for name, path in (('видео HeyGen', row['raw_path']), ('фото', row['photo_path']),
+        from ded_moroz_family import is_family,title_options
+        family=is_family(row['details'])
+        for name, path in (('видео HeyGen', row['raw_path']), *((('фото', row['photo_path']),) if row['photo_path'] or not family else ()),
                            ('озвучка', row['approved_audio_path'] or row['audio_path']),
                            ('предыдущая сборка', row['output_path'])):
             if not path or not assets.path(path).is_file():
@@ -31,8 +33,10 @@ def queue_rebuild(config, settings, order_id=None, *, name_genitive=None):
             if not (settings.examples / 'audio' / name).is_file():
                 raise ValueError('Не найден файл монтажа: ' + name)
         details=json.loads(row['details'])
-        if not isinstance(details.get('name'), str):
+        if family:title_options(details)
+        if not family and not isinstance(details.get('name'), str):
             raise ValueError('Не найдено сохранённое имя ребёнка.')
+        if name_genitive is not None and family:raise ValueError('Для семейного поздравления исправьте имена детей; заставка склоняется по каждому имени.')
         if name_genitive is not None:
             from ded_moroz_intro import recipient_line
             recipient_line(details['name'],name_genitive)

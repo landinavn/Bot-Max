@@ -397,6 +397,7 @@ CATEGORY_BUTTONS = (
     ('🎬 Мульт-открытка', 'cat_cartoon'),
     ('✨ Оживление фотографий', 'cat_animate'),
     ('🎅 Поздравление Деда Мороза', 'cat_ded_moroz'),
+    ('🎅 Поздравление для нескольких детей', 'cat_ded_moroz_family'),
     ('👑 Ручная работа', 'custom_order'),
     ('🎵 Аудиопесни', 'cat_audio'),
     ('📸 Нейрофотосессии', 'cat_photo'),
@@ -1814,6 +1815,10 @@ def create_router(
             f"- Эксклюзив (ручная работа): {c('click_custom_order')}\n"
             f"- Оживление фотографий: {c('click_animation')}\n"
             f"- Дед Мороз: {c('click_ded_moroz')}\n"
+            "🎅 Семейное поздравление (пока тест администратора):\n"
+            f"- Нажатия пользователей: {c('click_ded_moroz_family')} | Начато: {c('dm_family_started')} | Готово: {c('dm_family_video_created')}\n"
+            f"- Администратор — нажатия: {dm_counters.get('click_ded_moroz_family',0)-c('click_ded_moroz_family')}, начато: {dm_counters.get('dm_family_started',0)-c('dm_family_started')}, готово: {dm_counters.get('dm_family_video_created',0)-c('dm_family_video_created')}\n"
+            "- Начато по числу детей (включая тесты): " + ", ".join(f"{n}: {dm_counters.get('dm_family_children_'+str(n),0)}" for n in range(2,7)) + "\n"
             f"🎅 Готовых поздравлений клиентов: {c('dm_video_created')}\n"
             f"🛠 Проверки администратора — нажатия: {dm_counters.get('click_ded_moroz',0)-c('click_ded_moroz')}, готовые видео: {dm_counters.get('dm_video_created',0)-c('dm_video_created')}\n"
             f"🎅 Поздравления Деда Мороза — оплачено: {dm_stats['paid']} / выдано: {dm_stats['ready']} / нужна помощь: {dm_stats['attention']}\n"
@@ -2398,6 +2403,26 @@ def create_router(
                 return
             await increment_counter('promo_1111_click', user_id=user_id)
         await send_welcome_message(event, context)
+
+    @router.message_callback(F.callback.payload == 'cat_ded_moroz_family')
+    async def ded_moroz_family_menu(event: MessageCallback, context: MemoryContext):
+        await event.ack(notification='Семейное поздравление')
+        user=event.get_ids()[1]
+        if user is None or event.message is None:return
+        await increment_counter('click_ded_moroz_family',user_id=user)
+        from ded_moroz_family import entry
+        await entry(event,context,admin_user_id)
+
+    @router.message_callback(F.callback.payload.startswith('dm_family_count:') | F.callback.payload.startswith('dm_family_field:') | F.callback.payload.startswith('dm_family_confirm:') | F.callback.payload.startswith('dm_family_no_photo:'))
+    async def ded_moroz_family_action(event: MessageCallback, context: MemoryContext):
+        await event.ack(notification='Семейное поздравление')
+        if event.get_ids()[1] is None or event.message is None:return
+        from ded_moroz_family import callback
+        try:await callback(event,context,admin_user_id)
+        except ValueError as exc:await _reply(event,str(exc))
+        except Exception:
+            logger.exception('Не удалось обработать семейное поздравление')
+            await _reply(event,'Не удалось завершить обработку. Данные сохранены; откройте раздел снова.')
 
     @router.message_callback(F.callback.payload == 'cat_ded_moroz')
     async def ded_moroz_menu(event: MessageCallback, context: MemoryContext):

@@ -106,6 +106,8 @@ async def set_link(key,link):
 
 async def allowed(row,admin):
     if admin is not None and row['user_id']==admin:return True
+    from ded_moroz_family import is_family
+    if is_family(row['details']):return False
     key=row.get('payment_order_id')
     pay=await payment(key) if key else None
     return bool(pay and pay['user_id']==row['user_id'] and pay['status']=='paid' and pay['claimed_id']==row['id'])

@@ -21,6 +21,7 @@ from heygen_tts import (HeyGenTTSAdapter, HeyGenSpeechError, prepare_speech_text
 from multstudio.assets import Assets, https_url
 from ded_moroz_media import child_png as png_bytes
 import ded_moroz_sales as sales
+import ded_moroz_family as family
 
 logger=logging.getLogger(__name__)
 STUB='🎅 Поздравление от Деда Мороза уже в разработке! Скоро здесь можно будет заказать персональное видео с вашим ребёнком.'
@@ -89,6 +90,7 @@ def fact_value(field,value):
 
 
 def tagged_text(details):
+    if family.is_family(details):return family.tagged_text(details)
     return TEMPLATE.format(**{key:fact_value(key,details.get(key)) for key in FACT_LABELS})
 
 
@@ -211,13 +213,17 @@ async def transition(key,user,status,new_status,*,version=None):
         await db.commit();return cur.rowcount==1
 
 
-async def begin(user):
+async def begin(user, *, details=None):
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
         await db.execute('BEGIN IMMEDIATE');db.row_factory=aiosqlite.Row
         row=await db.execute("SELECT * FROM ded_moroz_orders WHERE user_id=? AND status NOT IN ('done','cancelled')",(user,))
         prior=await row.fetchone()
         if prior:return dict(prior)
-        key=uuid4().hex;await db.execute('INSERT INTO ded_moroz_orders(id,user_id) VALUES (?,?)',(key,user));await db.commit()
+        key=uuid4().hex;await db.execute('INSERT INTO ded_moroz_orders(id,user_id,details) VALUES (?,?,?)',(key,user,json.dumps(details or {},ensure_ascii=False)))
+        if details and family.is_family(details):
+            await database.increment_counter('dm_family_started',user_id=user,connection=db)
+            await database.increment_counter('dm_family_children_'+str(family.count(details)),user_id=user,connection=db)
+        await db.commit()
     return await get(key)
 
 
@@ -242,7 +248,7 @@ def keyboard(order, *, admin=None):
     if can_regenerate(order,admin):
         if order['user_id']==admin:
             b.row(CallbackButton(text='🔄 Перегенерировать озвучку',payload='dm_audio_regenerate'))
-        b.row(CallbackButton(text='✏️ Изменить данные ребёнка',payload='dm_audio_edit'))
+        b.row(CallbackButton(text='✏️ Изменить данные детей' if family.is_family(order['details']) else '✏️ Изменить данные ребёнка',payload='dm_audio_edit'))
     return b.as_markup()
 
 
@@ -269,7 +275,7 @@ async def regenerate(key, user, version, *, admin=None):
 
 async def approve(key, user, version):
     row=await get(key)
-    if row and row.get('payment_order_id'):
+    if row and (row.get('payment_order_id') or family.is_family(row['details'])):
         take=await read('SELECT duration FROM ded_moroz_audio_versions WHERE order_id=? AND version=?',(key,version))
         if not take or take['duration'] is None or take['duration']>sales.MAX_SPEECH_SECONDS:
             raise ValueError('Эта озвучка слишком длинная. Сократите данные ребёнка или выберите другой вариант.')
@@ -324,7 +330,8 @@ async def revised(key,user,text,*,admin=None):
     row=await get(key)
     if not row or row['user_id']!=user or row['status']!='editing':return False
     if not row['edit_field']:raise ValueError('Сначала выберите, какое имя или факт изменить кнопкой ниже.')
-    value=fact_value(row['edit_field'],text)
+    details=json.loads(row['edit_details'] or row['details'])
+    value=family.value(row['edit_field'],text,details) if family.is_family(details) else fact_value(row['edit_field'],text)
     if user!=admin or row.get('payment_order_id'):sales.validate_field(row['edit_field'],value)
     draft=json.loads(row['edit_details'] or row['details']);draft[row['edit_field']]=value
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
@@ -334,7 +341,8 @@ async def revised(key,user,text,*,admin=None):
 
 
 async def select_fact(key,user,version,field):
-    if field not in FACT_LABELS:return False
+    row=await get(key)
+    if not row or field not in (family.labels(json.loads(row['details'])) if family.is_family(row['details']) else FACT_LABELS):return False
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
         cur=await db.execute("UPDATE ded_moroz_orders SET edit_field=?,edit_details=COALESCE(edit_details,details) WHERE id=? AND user_id=? AND version=? AND status='editing'",(field,key,user,version))
         await db.commit();return cur.rowcount==1
@@ -370,17 +378,19 @@ async def show_facts(event,context,row):
     await context.set_state(PosterStates.ded_moroz_edit)
     draft=json.loads(row['edit_details'] or row['details'])
     b=InlineKeyboardBuilder()
-    for field,label in FACT_LABELS.items():
-        b.row(CallbackButton(text='✏️ '+label,payload=f"dm_fact_edit:{row['id']}:{row['version']}:{field}"))
+    if family.is_family(draft):family.edit_buttons(b,draft,f"dm_fact_edit:{row['id']}:{row['version']}:")
+    else:
+        for field,label in FACT_LABELS.items():
+            b.row(CallbackButton(text='✏️ '+label,payload=f"dm_fact_edit:{row['id']}:{row['version']}:{field}"))
     label='🎙 Сохранить и озвучить (платно)' if not row.get('payment_order_id') else '🎙 Создать второй вариант озвучки'
     b.row(CallbackButton(text=label,payload=f"dm_facts_apply:{row['id']}:{row['version']}"))
     b.row(CallbackButton(text='⬅️ Отменить изменения',payload=f"dm_facts_cancel:{row['id']}:{row['version']}"))
-    text='Можно изменить только данные ребёнка. Шаблон и теги голоса бот сохранит.\n\n'
-    text+='\n'.join(label+': '+draft.get(field,'—') for field,label in FACT_LABELS.items())
+    text='Можно изменить только данные детей. Шаблон и теги голоса бот сохранит.\n\n' if family.is_family(draft) else 'Можно изменить только данные ребёнка. Шаблон и теги голоса бот сохранит.\n\n'
+    text+='\n'.join(label+': '+draft.get(field,'—') for field,label in (family.labels(draft) if family.is_family(draft) else FACT_LABELS).items())
     text+=('\n\nОдна правка данных и второй вариант озвучки уже входят в стоимость. Выберите поле, затем нажмите «Создать второй вариант озвучки».'
         if row.get('payment_order_id') else '\n\nВыберите поле. Новая платная озвучка начнётся только после «Сохранить и озвучить».')
     if row['edit_field']:
-        text+='\n\n'+edit_prompt(row['edit_field'])
+        text+='\n\n'+(family.question(row['edit_field'],draft) if family.is_family(draft) else edit_prompt(row['edit_field']))
     await tell(event,text,attachments=[b.as_markup()])
 
 
@@ -400,7 +410,7 @@ def question(field,user,admin):
 def manual_audio_retry_allowed(row):
     stage=(row['error'] or '').split(':',1)[0]
     return (row['status']=='manual' and stage in ('audio_queued','audio_submitting','audio_download','audio_publish','audio_ready')
-            and bool(row['text'] and row['photo_path']) and not any(row[x] for x in ('video_id','raw_path','output_path','output_url')))
+            and bool(row['text'] and (row['photo_path'] or family.is_family(row['details']))) and not any(row[x] for x in ('video_id','raw_path','output_path','output_url')))
 
 
 async def retry_manual_audio(key,user,version,*,admin,config=None,settings=None):
@@ -409,7 +419,7 @@ async def retry_manual_audio(key,user,version,*,admin,config=None,settings=None)
     if not row or row['user_id']!=user or row['version']!=version or not manual_audio_retry_allowed(row):return False
     config=config or Config.from_env();settings=settings or Settings.from_config(config)
     settings.ready(config,stage='audio')
-    if not Assets(settings.root,config).path(row['photo_path']).is_file():raise ValueError('Не найдено сохранённое фото ребёнка.')
+    if row['photo_path'] and not Assets(settings.root,config).path(row['photo_path']).is_file():raise ValueError('Не найдено сохранённое фото ребёнка.')
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
         cur=await db.execute("""UPDATE ded_moroz_orders SET text=?,status='audio_queued',version=version+1,
             regeneration_attempts=regeneration_attempts+1,audio_path=NULL,audio_url=NULL,speech_provider_url=NULL,
@@ -432,7 +442,9 @@ async def enter(event,context,admin):
     if not row:
         await tell(event,'Сначала оплатите поздравление. Если оплата уже прошла, подождите немного и нажмите «Продолжить» снова.',attachments=[navigation_keyboard((('🎅 К поздравлению','cat_ded_moroz'),))]);return
     await context.clear();await context.update_data(dm_order=row['id'])
-    if row['status']=='input':
+    if row['status']=='input' and family.is_family(row['details']):
+        await family.resume_input(event,context,row)
+    elif row['status']=='input':
         data=json.loads(row['details']);remaining=[question(k,user,admin) for k,q in QUESTIONS if k not in data]
         if remaining:
             await context.set_state(PosterStates.ded_moroz_input)
@@ -477,6 +489,8 @@ async def collect(event,context,admin,config=None,settings=None):
             await show_facts(event,context,await get(row['id']))
         return
     if state==PosterStates.ded_moroz_input and row['status']=='input':
+        if family.is_family(row['details']):
+            await family.collect_input(event,context,row);return
         data=json.loads(row['details']);key=next((k for k,_ in QUESTIONS if k not in data),None)
         if key is None:return
         data[key]=fact_value(key,text)
@@ -508,6 +522,10 @@ async def collect(event,context,admin,config=None,settings=None):
         tmp=alias.with_name('.child-'+uuid4().hex+'.png');await asyncio.to_thread(tmp.write_bytes,png);await asyncio.to_thread(os.replace,tmp,alias)
         url=await assets.publish(path)
         text=tagged_text(json.loads(row['details']))
+        if family.is_family(row['details']):
+            if await family.queue_audio(row,photo_path=path,photo_url=url):
+                await context.clear();await tell(event,AUDIO_GENERATING)
+            return
         await update(row['id'],photo_path=path,photo_url=url,text=text)
         if await transition(row['id'],user,'input','audio_queued'):
             await context.clear();await tell(event,AUDIO_GENERATING)
@@ -541,7 +559,7 @@ async def callback(event,context,admin,config=None,settings=None):
         if await select_fact(key,user,version,parts[3]):
             await context.clear();await context.update_data(dm_order=key)
             await context.set_state(PosterStates.ded_moroz_edit)
-            await tell(event,edit_prompt(parts[3]))
+            await tell(event,family.question(parts[3],json.loads(row['edit_details'] or row['details'])) if family.is_family(row['details']) else edit_prompt(parts[3]))
         else:await tell(event,'Эта кнопка относится к предыдущей версии. Откройте раздел заново.')
         return
     if len(parts)!=3:return
@@ -595,7 +613,7 @@ class Worker:
         self.uploads={}
 
     async def announce(self,row,stage,text):
-        if not row.get('payment_order_id'):return
+        if not row.get('payment_order_id') and not family.is_family(row['details']):return
         now=database._now_ts()
         if row.get('progress_stage')==stage and row.get('progress_next',0)>now:return
         if await self.bot.send_message(user_id=row['user_id'],text=text) is None:return
@@ -631,7 +649,7 @@ class Worker:
     async def store_audio_result(self,row,path):
         key=row['id'];text=prepare_speech_text(row['text'])
         seconds=None
-        if row.get('payment_order_id'):
+        if row.get('payment_order_id') or family.is_family(row['details']):
             from media_service import audio_duration
             seconds=await audio_duration(self.assets.path(path))
         signature=HeyGenTTSAdapter(None,self.settings.voice_id,self.assets,model=self.settings.tts_model,
@@ -651,10 +669,10 @@ class Worker:
         if state in ('video_queued','polling','download'):
             await self.announce(row,'video','🎅 Дедушка Мороз записывает для вас персональное поздравление. Нужно немного подождать — я пришлю видео сюда, как только оно будет готово.')
         elif state in ('render','publish'):
-            await self.announce(row,'render','✨ Поздравление записано! Добавляю фотографию ребёнка, новогоднюю заставку и музыку. Осталось немного подождать.')
+            await self.announce(row,'render','✨ Поздравление записано! Добавляю новогоднюю заставку, музыку'+(' и фотографию.' if row['photo_path'] else '.')+' Осталось немного подождать.')
         if state=='audio_queued':
             self.settings.ready(self.config,avatar_known=bool(await read('SELECT look_id FROM ded_moroz_avatar WHERE look_id IS NOT NULL')))
-            if not row['photo_path'] or not self.assets.path(row['photo_path']).is_file():raise ValueError('Не найдено сохранённое фото ребёнка.')
+            if (not row['photo_path'] and not family.is_family(row['details'])) or (row['photo_path'] and not self.assets.path(row['photo_path']).is_file()):raise ValueError('Не найдено сохранённое фото ребёнка.')
             text=prepare_speech_text(row['text'])
             if not text or len(text)>10000:raise ValueError('После очистки тегов текст озвучки должен содержать от 1 до 10000 символов.')
             if not await transition(key,user,'audio_queued','audio_submitting'):return
@@ -687,7 +705,15 @@ class Worker:
             for chunk in chunks:
                 if await self.bot.send_message(user_id=user,text=chunk) is None:raise ValueError('MAX не подтвердил текст.')
             buttons=keyboard(row,admin=self.admin)
+            if family.is_family(row['details']):
+                take=await read('SELECT duration FROM ded_moroz_audio_versions WHERE order_id=? AND version=?',(key,row['version']))
+                if not take or take['duration'] is None or take['duration']>sales.MAX_SPEECH_SECONDS:
+                    b=InlineKeyboardBuilder().row(CallbackButton(text='✏️ Сократить данные детей',payload='dm_audio_edit'))
+                    b.row(CallbackButton(text='🔄 Перегенерировать озвучку',payload='dm_audio_regenerate'))
+                    buttons=b.as_markup()
             caption='🎧 Прослушайте озвучку Деда Мороза. Всё нравится?'
+            if family.is_family(row['details']) and (not take or take['duration'] is None or take['duration']>sales.MAX_SPEECH_SECONDS):
+                caption+='\nОзвучка не укладывается в 70 секунд с заставкой. Сократите факты или пожелания; видео пока не запущено.'
             if row.get('payment_order_id'):
                 takes=await read('SELECT * FROM ded_moroz_audio_versions WHERE order_id=? AND public_url IS NOT NULL ORDER BY version LIMIT 2',(key,),all_rows=True)
                 b=InlineKeyboardBuilder()
@@ -716,13 +742,13 @@ class Worker:
             if needs_help:await update(key,status='manual',error='audio_ready:duration_limit')
         elif state=='video_queued':
             self.settings.ready(self.config,avatar_known=bool(await read('SELECT look_id FROM ded_moroz_avatar WHERE look_id IS NOT NULL')),stage='video')
-            sources={'photo_path':row['photo_path'],
-                     'audio_path':row['approved_audio_path'] or row['audio_path']}
+            sources={'audio_path':row['approved_audio_path'] or row['audio_path']}
+            if row['photo_path'] or not family.is_family(row['details']):sources['photo_path']=row['photo_path']
             for field_name,path in sources.items():
                 if not path or not self.assets.path(path).is_file():raise ValueError('Не найден сохранённый исходник: '+field_name)
             approved_url=row['approved_audio_url'] or row['audio_url']  # Already-approved legacy orders.
             https_url(approved_url)
-            if row.get('payment_order_id'):
+            if row.get('payment_order_id') or family.is_family(row['details']):
                 from media_service import audio_duration
                 if await audio_duration(self.assets.path(row['approved_audio_path'] or row['audio_path']))>sales.MAX_SPEECH_SECONDS:
                     raise ValueError('Утверждённая озвучка не укладывается в 70 секунд с заставкой.')
@@ -751,10 +777,12 @@ class Worker:
             if target.exists():target=self.assets.path(key+'/greeting-'+uuid4().hex+'.mp4')
             details=json.loads(row['details'])
             title_options=({'name_genitive':details['title_name_genitive']}
-                if details.get('title_name_source')==details['name'] and details.get('title_name_genitive') else {})
-            await render_ded_moroz(self.assets.path(row['raw_path']),self.assets.path(row['photo_path']),
-                self.assets.path(row['approved_audio_path'] or row['audio_path']),self.settings.examples,target,details['name'],**title_options)
-            if row.get('payment_order_id'):
+                if details.get('title_name_source')==details.get('name') and details.get('title_name_genitive') else {})
+            name=details.get('name')
+            if family.is_family(details):name,title_options=family.title_options(details)
+            await render_ded_moroz(self.assets.path(row['raw_path']),self.assets.path(row['photo_path']) if row['photo_path'] else None,
+                self.assets.path(row['approved_audio_path'] or row['audio_path']),self.settings.examples,target,name,**title_options)
+            if row.get('payment_order_id') or family.is_family(row['details']):
                 from media_service import audio_duration
                 if await audio_duration(target)>70:raise ValueError('Итоговое поздравление длиннее 70 секунд.')
             await update(key,output_path=target.relative_to(self.assets.root).as_posix(),status='publish')
@@ -784,7 +812,7 @@ class Worker:
                 prior=await cursor.fetchone()
                 if prior and prior[1]=='deliver':
                     await db.execute("UPDATE ded_moroz_orders SET status='done',notified=1,error=NULL WHERE id=?",(key,))
-                    if not prior[0]:await database.increment_counter('dm_video_created',user_id=user,connection=db)
+                    if not prior[0]:await database.increment_counter('dm_family_video_created' if family.is_family(row['details']) else 'dm_video_created',user_id=user,connection=db)
                 await db.commit()
             self.uploads={k:v for k,v in self.uploads.items() if k[1]!=key}
 

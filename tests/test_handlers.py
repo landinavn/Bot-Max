@@ -4705,6 +4705,7 @@ async def test_cartoon_main_menu_order_and_names_are_exact():
         ('🔮 Карты желаний','cat_vision'), ('🎁 Открытки','cat_cards'),
         ('🎵 Музыкальная открытка','cat_video'), ('🎬 Мульт-открытка','cat_cartoon'),
         ('✨ Оживление фотографий','cat_animate'), ('🎅 Поздравление Деда Мороза','cat_ded_moroz'),
+        ('🎅 Поздравление для нескольких детей','cat_ded_moroz_family'),
         ('👑 Ручная работа','custom_order'), ('🎵 Аудиопесни','cat_audio'),
         ('📸 Нейрофотосессии','cat_photo')]
 

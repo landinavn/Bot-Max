@@ -17,7 +17,8 @@ logger=logging.getLogger(__name__)
 
 def result_keyboard(row,bot_link):
     b=InlineKeyboardBuilder()
-    b.row(CallbackButton(text='🎅 Сделать ещё',payload='dm_another'))
+    from ded_moroz_family import is_family
+    b.row(CallbackButton(text='🎅 Сделать ещё',payload='cat_ded_moroz_family' if is_family(row['details']) else 'dm_another'))
     b.row(CallbackButton(text='📱 Версия для телефона',payload='dm_mobile:'+row['id']))
     if row.get('output_url'):b.row(LinkButton(text='⬇️ Скачать видео',url=row['output_url']))
     b.row(CallbackButton(text='🔗 Поделиться',payload='dm_share:'+row['id']))

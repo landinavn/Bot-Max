@@ -2,15 +2,22 @@
 
 
 def ordered(scenes, spec):
+    ids={s['id'] for s in scenes}
+    excluded=spec.get('excluded_scene_ids',[])
+    if (not isinstance(excluded,list) or any(not isinstance(k,str) for k in excluded)
+            or len(set(excluded))!=len(excluded) or not set(excluded)<=ids):
+        raise ValueError('Исключённые сцены должны содержать уникальные ID сцен этой серии.')
+    scenes=[s for s in scenes if s['id'] not in excluded]
     timeline=spec.get('scene_order')
     if timeline is None:
         return sorted(scenes,key=lambda s:s['number'])
     if (not isinstance(timeline,list) or any(not isinstance(k,str) for k in timeline)
             or len(set(timeline))!=len(timeline)):
         raise ValueError('Порядок сцен должен содержать уникальные ID.')
-    ids={s['id'] for s in scenes}
     if not set(timeline)<=ids:
         raise ValueError('В монтажном порядке есть отсутствующая сцена. Проверьте scene_order серии.')
+    if set(timeline)&set(excluded):
+        raise ValueError('Исключённая сцена не должна входить в монтажный порядок.')
     positions={key:i for i,key in enumerate(timeline)}
     return sorted(scenes,key=lambda s:(positions.get(s['id'],len(timeline)),s['number']))
 

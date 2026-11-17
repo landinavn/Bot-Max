@@ -30,6 +30,8 @@ async def configure(bot, dispatcher, config):
         await revise_three(project,config.admin_user_id)
         from .episode_three_trim import apply as trim_three
         await trim_three(project,config.admin_user_id)
+        from .episode_three_delivery import apply as delivery_three
+        await delivery_three(project,config.admin_user_id,config.bot_link)
         await prepare_jobs(episode_three,settings)
     except ValueError:
         import logging

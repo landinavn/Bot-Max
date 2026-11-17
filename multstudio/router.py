@@ -154,6 +154,8 @@ def create_router(admin_id, settings, assets):
                 timing = f"\nЕстественная речь без ускорения; целевая длительность {row['spec']['target_seconds']} секунд; сцены продлеваются под речь.\n"
             if row['spec'].get('production',{}).get('strict_five_seconds'):
                 timing=f"\n{len(await repo.children('scene',key))} сцен × 5 секунд. Один кадр — один голос. Аудио до 4,5 с; без растяжения и ускорения.\n"
+            if row['spec'].get('heygen_end_trim_seconds'):
+                timing='\nПри сборке у HeyGen-клипов убирается до 2 секунд в конце, без обрезки реплик. Итоговая длина зависит от озвучки. Финал — 5 секунд, русская заставка и QR-код бота.\n'
             await tell(event,row['title']+timing+
                        'Звуковые эффекты и отдельная музыка сцен в MVP сохраняются как режиссёрские указания; можно загрузить общий музыкальный трек.',buttons)
         else:

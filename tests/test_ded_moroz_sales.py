@@ -140,3 +140,30 @@ async def test_statistics_excludes_administrator_orders(credit_db):
         order=await sales.claim(user,456);await dm.update(order['id'],status='done')
     stats=await sales.statistics(456)
     assert stats=={'paid':1,'revenue':99000,'ready':1,'attention':0}
+
+
+def test_customer_copy_never_advertises_expired_990_offer():
+    from ded_moroz_broadcast import TEXT
+    for text in (sales.PRICE_TEXT,sales.DESCRIPTION,TEXT):
+        import re
+        assert not re.search(r'(?<!\d)990(?!\d)',text)
+        assert '1490 ₽' in text and '1990 ₽' in text
+        assert '18 ноября' not in text
+
+
+@pytest.mark.parametrize('when,expected',[(stamp(11,19),149000),(stamp(12,1),199000)])
+async def test_current_checkout_price_after_campaign_has_ended(credit_db,monkeypatch,when,expected):
+    monkeypatch.setattr(database,'_now_ts',lambda:when)
+    row=await sales.checkout(789)
+    assert row['amount_kopecks']==expected
+
+
+async def test_expired_offer_copy_does_not_reprice_existing_invoice(credit_db,monkeypatch):
+    monkeypatch.setattr(database,'_now_ts',lambda:stamp(11,18))
+    old=await sales.checkout(789)
+    monkeypatch.setattr(database,'_now_ts',lambda:stamp(11,19))
+    current=await sales.checkout(789)
+    assert old['order_id']!=current['order_id']
+    assert (await sales.payment(old['order_id']))['amount_kopecks']==99000
+    assert current['amount_kopecks']==149000
+    assert await sales.mark_paid(old['order_id'],'old-valid-invoice')

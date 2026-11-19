@@ -479,6 +479,20 @@ async def _snapshot(db, target, key):
                 location = previous_snap['assets'].get('image')
                 if location and location['approved']:
                     snap['location_reference'] = location
+    if target=='scene' and row['spec'].get('prop_reference_scene_ids'):
+        required=row['spec']['prop_reference_scene_ids']
+        if (not isinstance(required,list) or len(required)>4 or any(not isinstance(k,str) for k in required)
+                or len(set(required))!=len(required)):
+            raise ValueError('Укажите до четырёх уникальных ID готовых изображений для предметов сцены.')
+        snap['prop_references']=[]
+        for ref_id in required:
+            reference=await one(db,'''SELECT s.id FROM cartoon_scenes s JOIN cartoon_episodes e ON e.id=s.episode_id
+                WHERE s.id=? AND e.project_id=? AND (e.number<? OR (e.id=? AND s.number<?))''',
+                (ref_id,project_id,episode['number'],row['episode_id'],row['number']))
+            if not reference:raise ValueError('Изображение для предмета должно быть из более ранней сцены этого проекта.')
+            ref=await _snapshot(db,'scene',ref_id);image=ref['assets'].get('image')
+            if image and image.get('approved'):
+                snap['prop_references'].append(dict(scene_id=ref_id,title=ref['spec'].get('title',''),image=image))
     if target == 'episode':
         snap['music'] = await one(db, "SELECT * FROM cartoon_assets WHERE target='episode' AND target_id=? AND kind='music' ORDER BY rowid DESC LIMIT 1", (key,))
     snap['context_hash'] = digest(snap)
@@ -625,6 +639,9 @@ async def quote(target, key, kind, settings):
             raise ValueError('Сначала создайте и утвердите эталоны всех персонажей сцены.')
         if snap.get('location_reference_required') and not snap.get('location_reference'):
             raise ValueError('Сначала создайте и утвердите изображение предыдущей сцены как эталон комнаты.')
+    if kind=='image' and target=='scene' and snap['spec'].get('prop_reference_scene_ids'):
+        from .prompts import validate_scene_image_references
+        validate_scene_image_references(snap)
     if kind in ('video','speech') and (not snap['assets'].get('image') or not snap['assets']['image']['approved']):
         raise ValueError('Сначала утвердите изображение этой версии сцены.')
     if kind == 'video' and snap['spec'].get('speech_speeds') and not snap['assets'].get('speech'):

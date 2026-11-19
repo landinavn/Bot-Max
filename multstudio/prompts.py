@@ -48,6 +48,9 @@ def validate_scene_image_references(snap):
         not c.get('assets', {}).get('image', {}).get('approved') for c in snap['cast']
     ):
         raise ValueError('Сначала создайте и утвердите эталоны всех персонажей сцены.')
+    required=snap.get('spec',{}).get('prop_reference_scene_ids',[])
+    if required and (len(snap.get('prop_references',[]))!=len(required) or any(not r['image'].get('approved') for r in snap.get('prop_references',[]))):
+        raise ValueError('Сначала создайте и утвердите готовые изображения мечтаний, указанные для телефона или карты этой сцены.')
     if (snap['number'] > 1 or snap['spec'].get('location_reference_scene_id')) and snap.get('location_reference_required', True) and not (snap.get('location_reference') or {}).get('approved'):
         raise ValueError('Сначала создайте и утвердите изображение предыдущей сцены как эталон комнаты.')
 
@@ -73,8 +76,15 @@ def scene_image_prompt(snap, location_reference_url=None):
                 'for vertical 9:16 export. One still moment, one camera.')
     if strict(spec) and spec.get('framing')=='wide':
         camera='ONE WIDE ESTABLISHING SHOT of the whole apartment, table, sofa and snowy window. No close-up.'
+    if spec.get('camera_direction'):
+        camera=('ONE continuous '+str(spec.get('framing','medium'))+' shot. '+spec['camera_direction']+
+                ' Do not substitute a facial close-up. Keep the scripted environment and objects visible, '
+                'with safe margins for vertical 9:16 export. '+
+                ('Only the adult speaker is present. Their face and closed lips remain clearly visible, '
+                 'unobscured and large enough for later lip-sync; a three-quarter angle is allowed, never a hidden face.'
+                 if spec.get('speaker_id') else 'Show only the listed cast; no extra people.'))
     for original, keyframe in zip(SCENES, KEYFRAMES):
-        if spec.get('title') == original[0] and moment == original[3]:
+        if not spec.get('camera_direction') and spec.get('title') == original[0] and moment == original[3]:
             moment, camera = keyframe
             break
     # Never send the full spec (camera transitions, dialogue, sound, duration) to
@@ -112,6 +122,12 @@ def scene_image_prompt(snap, location_reference_url=None):
         '\nSTILL MOMENT:\n' + moment + '\nFIXED CAMERA:\n' + camera
         + '\nWORLD:\n' + encoded(snap['world'])
         + '\nCAST IN IMAGE ORDER:\n' + encoded(cast)
+        + ('\nPROP IMAGE REFERENCES: Images between character references and the LAST location reference '
+           'are approved dream artworks for the phone screen or printed pictures on the table. '
+           'Use those actual artworks in the scripted props; do not invent app interfaces or replace '
+           'the apartment with their scenery. These are not extra characters, panels or split-screen shots. '
+           +encoded([dict(scene_id=r['scene_id'],title=r['title']) for r in snap.get('prop_references',[])])
+           if snap.get('prop_references') else '')
         + location_direction
         + CLOSED_MOUTH_KEYFRAME
     )

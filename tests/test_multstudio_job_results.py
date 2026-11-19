@@ -81,7 +81,9 @@ async def test_show_picture_sends_one_image_attachment_from_yandex_url(studio,re
     url=(await repo.job(job['id']))['result_url']
     upload.assert_awaited_once_with(pressed.bot,url)
     assert url.startswith(PREFIX)
-    assert pressed.bot.send_message.await_args.kwargs['attachments']==[attachment]
+    assert pressed.bot.send_message.await_args.kwargs['attachments'][0]==attachment
+    keyboard=pressed.bot.send_message.await_args.kwargs['attachments'][1]
+    assert keyboard.payload.buttons[-1][0].payload=='back_to_main'
     assert pressed.bot.send_message.await_args.kwargs['user_id']==456
 
 
@@ -228,7 +230,7 @@ async def test_new_image_path_put_object_url_and_immediate_max_delivery_agree(st
     assert len([a for a in message['attachments'] if a.type=='inline_keyboard'])==1
     buttons=[b for row in message['attachments'][1].payload.buttons for b in row]
     assert [b.payload for b in buttons]==['studio:approve_reference:'+item['id'],
-                                        'studio:make:image:character:'+char['id']]
+                                        'studio:make:image:character:'+char['id'],'back_to_main']
     assert (await repo.job(item['id']))['notified']==1
     await worker.notices()
     assert bot.send_message.await_count==(2 if max_fails else 1)

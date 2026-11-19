@@ -29,6 +29,7 @@ from maxapi.types import (
     AttachmentUpload,
 )
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
+from result_navigation import result_keyboard as completed_keyboard, home_button
 
 from config import Config, DEFAULT_BOT_LINK, validate_bot_link
 import promo1111
@@ -958,10 +959,10 @@ def is_bot_message(event: MessageCreated) -> bool:
 
 
 def result_keyboard(url: str):
-    return InlineKeyboardBuilder().row(
+    return completed_keyboard(InlineKeyboardBuilder().row(
         LinkButton(text="Скачать", url=url),
         CallbackButton(text="Ещё", payload="more"),
-    ).as_markup()
+    ))
 
 
 async def generate_video(avatar_url: str, song_url: str, *, mode: str = '') -> str:
@@ -1417,7 +1418,7 @@ def create_router(
                     elif index >= sent_count:
                         image = await upload_image_for_max(event.bot, urls[index])
                         sent = await event.bot.send_message(
-                            **_recipient(event), text=f"Фотография {index + 1} из {total}", attachments=[image],
+                            **_recipient(event), text=f"Фотография {index + 1} из {total}", attachments=[image,completed_keyboard()],
                         )
                         if sent is None:
                             raise RuntimeError("MAX не подтвердил отправку фотографии.")
@@ -3466,7 +3467,7 @@ def create_router(
                 return
             sent = await _reply(event, '🎬 Ваша мульт-открытка готова! ' + data['video_merged_url'], attachments=[video,
                 InlineKeyboardBuilder().row(LinkButton(text='⬇️ Скачать MP4', url=data['video_merged_url'])).row(
-                    CallbackButton(text='⬅️ Главное меню', payload='back_to_main')).as_markup()])
+                    home_button()).as_markup()])
             if sent is None:
                 raise RuntimeError('MAX не подтвердил отправку мульт-открытки.')
             if (await context.get_data()).get('cartoon_session_id') == session:
@@ -4003,7 +4004,7 @@ def create_router(
                     return
                 sent = await _reply(event, '🎵 Ваша музыкальная открытка готова: ' + result, attachments=[
                     InlineKeyboardBuilder().row(LinkButton(text='⬇️ Скачать видео', url=result)).row(
-                        CallbackButton(text='⬅️ Главное меню', payload='back_to_main')).as_markup(), video_attachment])
+                        home_button()).as_markup(), video_attachment])
                 if sent is None:
                     raise RuntimeError('MAX не подтвердил отправку музыкальной открытки.')
                 await context.update_data(video_complete=True, video_result_url=result)
@@ -4231,6 +4232,7 @@ def create_router(
             buttons.append(('🔄 Не то, ещё раз (бесплатно)', 'audio_regenerate'))
         buttons.append(('🆘 Написать в поддержку', 'help_support'))
         buttons.append(("⬅️ Назад", "cat_audio"))
+        buttons.append(("🏠 Главный экран", "back_to_main"))
         keyboard = InlineKeyboardBuilder()
         for label, payload in buttons:
             keyboard.row(LinkButton(text=label, url=SUPPORT_URL) if payload == 'help_support' else CallbackButton(text=label, payload=payload))
@@ -4666,7 +4668,7 @@ def create_router(
             if not data.get('audio_regeneration_used'):
                 keyboard.row(CallbackButton(text='🔄 Не то, ещё раз (бесплатно)', payload='audio_regenerate'))
             keyboard.row(LinkButton(text='🆘 Написать в поддержку', url=SUPPORT_URL))
-            await _reply(event, url, attachments=[keyboard.as_markup()])
+            await _reply(event, url, attachments=[completed_keyboard(keyboard)])
             return
         await event.ack(notification="Аудио скоро появится")
         await _reply(event, "Аудио скоро появится")
@@ -4675,7 +4677,7 @@ def create_router(
         buttons = [("Скачать вариант 1", "audio_download_fun_1"), ("Скачать вариант 2", "audio_download_fun_2")]
         if can_regenerate:
             buttons.append(("Не то, ещё раз (бесплатно)", "audio_regenerate"))
-        return navigation_keyboard(buttons)
+        return navigation_keyboard((*buttons,("🏠 Главный экран","back_to_main")))
 
     @router.message_created(Command("test_audio_fun_success"))
     async def test_audio_fun_success(event: MessageCreated, context: MemoryContext) -> None:
@@ -4697,7 +4699,7 @@ def create_router(
         await _reply(event, AUDIO_GIFT_SUCCESS_TEXT + "\n\n🧪 Тестовый экран: файлы ещё не созданы.",
                      attachments=[navigation_keyboard((("Скачать MP3", "audio_download_gift_mp3"),
                                                        ("Скачать минусовку", "audio_download_gift_instrumental"),
-                                                       ("Написать в поддержку", "help_support")))])
+                                                       ("Написать в поддержку", "help_support"),("🏠 Главный экран","back_to_main")))])
 
     @router.message_callback((F.callback.payload == "audio_regenerate") | F.callback.payload.startswith('audio_regenerate:'))
     async def audio_regenerate(event: MessageCallback, context: MemoryContext) -> None:

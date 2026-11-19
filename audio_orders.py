@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from maxapi.types import CallbackButton, LinkButton
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
+from result_navigation import home_button
 
 from audio_service import generate_song, wait_for_song_result, wait_for_song_with_progress, song_tracks, write_song_lyrics, make_protected_preview, validate_song_arguments, InvalidSongArguments, AudioNotConfigured, SongFailed
 from database import (get_audio_order, update_audio_order, pending_audio_orders,
@@ -45,7 +46,7 @@ class PaidAudioWorker:
             label = f"Оплатить {order['amount_kopecks'] // 100} ₽ и получить полный трек"
             keyboard.row(LinkButton(text=label, url=link) if link else
                          CallbackButton(text=label, payload='audio_gift_checkout:' + order['order_id']))
-        keyboard.row(CallbackButton(text='Главное меню', payload='back_to_main'))
+        keyboard.row(home_button())
         text = ('🎧 Полная песня уже доступна. Ниже — фрагмент и кнопка скачивания MP3.' if unlocked else
                 '🎧 Ваша песня готова! Послушайте фрагмент. Если всё нравится, оплатите доступ к полному MP3 без защиты, минусовке и тексту.')
         await self.notify(order['user_id'],
@@ -60,6 +61,7 @@ class PaidAudioWorker:
         if not order['regeneration_used']:
             keyboard.row(CallbackButton(text='🔄 Не то, ещё раз (бесплатно)', payload='audio_regenerate:' + order['order_id']))
         keyboard.row(LinkButton(text='🆘 Написать в поддержку', url=SUPPORT_URL))
+        keyboard.row(home_button())
         return keyboard
 
     async def run(self):
@@ -136,7 +138,6 @@ class PaidAudioWorker:
                 text += f"\n\nВариант {index + 1}: {track['title']}\n{track['audioUrl']}"
                 keyboard.row(CallbackButton(text=f'Скачать вариант {index + 1}', payload=f'audio_paid_download:{order_id}:{index}'))
             self.result_actions(keyboard, order)
-            keyboard.row(CallbackButton(text='Главное меню', payload='back_to_main'))
             await self.notify(order['user_id'], text, attachments=[keyboard.as_markup()])
             await update_audio_order(order_id, delivered=1, error=None)
         except asyncio.CancelledError:

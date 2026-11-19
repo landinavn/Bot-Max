@@ -7,6 +7,7 @@ import aiosqlite
 from maxapi.types import CallbackButton,LinkButton,InputMedia
 from maxapi.enums import UploadType
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
+from result_navigation import result_keyboard as completed_keyboard
 
 import database
 import ded_moroz_sales as sales
@@ -23,7 +24,7 @@ def result_keyboard(row,bot_link):
     if row.get('output_url'):b.row(LinkButton(text='⬇️ Скачать видео',url=row['output_url']))
     b.row(CallbackButton(text='🔗 Поделиться',payload='dm_share:'+row['id']))
     b.row(CallbackButton(text='✍️ Написать отзыв',payload='dm_review:'+row['id']))
-    return b.as_markup()
+    return completed_keyboard(b)
 
 
 async def compact_video(source,target,*,preview_seconds=None):
@@ -140,7 +141,7 @@ async def process_auxiliary(worker):
                 if getattr(video,'type',None)!='video':raise RuntimeError('MAX вернул другой тип вложения.')
                 worker.uploads[token_key]=video
             b=InlineKeyboardBuilder().row(LinkButton(text='⬇️ Скачать компактное видео',url=item['url']))
-            sent=await worker.bot.send_message(user_id=row['user_id'],text='📱 Компактная версия готова! На iPhone откройте видео → «Поделиться» → «Сохранить видео». Если сначала сохранили в «Файлы», откройте MP4 там и повторите эти действия.',attachments=[video,b.as_markup()])
+            sent=await worker.bot.send_message(user_id=row['user_id'],text='📱 Компактная версия готова! На iPhone откройте видео → «Поделиться» → «Сохранить видео». Если сначала сохранили в «Файлы», откройте MP4 там и повторите эти действия.',attachments=[video,completed_keyboard(b)])
             if sent is None:raise RuntimeError('MAX не подтвердил компактное видео.')
             async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
                 await db.execute('UPDATE ded_moroz_mobile_jobs SET notified=1 WHERE order_id=?',(row['id'],));await db.commit()

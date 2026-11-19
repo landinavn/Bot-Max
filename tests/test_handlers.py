@@ -2815,7 +2815,7 @@ async def test_family_three_sequential_frames_use_same_reference_and_no_card_gen
     assert frames.await_args_list == [call("https://photos.example.com/source.png", p) for p in handlers.NY_FAMILY_THREE_PROMPTS]
     assert len(set(handlers.NY_FAMILY_THREE_PROMPTS)) == 3
     assert [c.kwargs["text"] for c in event.bot.send_message.await_args_list] == ["Фотография 1 из 3", "Фотография 2 из 3", "Фотография 3 из 3"]
-    assert all(len(c.kwargs["attachments"]) == 1 for c in event.bot.send_message.await_args_list)
+    assert all(len(c.kwargs["attachments"]) == 2 and c.kwargs["attachments"][1].payload.buttons[-1][0].payload == "back_to_main" for c in event.bot.send_message.await_args_list)
     assert [c.args[0] for c in event.send.await_args_list[:3]] == [f"Генерирую кадр {i} из 3... ⏳ Это может занять 3-5 минут. Пожалуйста, не закрывайте чат!" for i in range(1, 4)]
     data = await context.get_data()
     assert data["photosession_urls"] == outputs and data["photosession_sent_count"] == 3
@@ -3055,7 +3055,8 @@ async def test_toddlers_three_frames_use_same_reference_and_correct_prompts(cred
         index = sum(e.startswith("send") for e in events)
         events.append(f"send-{index}")
         assert kwargs["text"] == f"Фотография {index + 1} из 3"
-        assert len(kwargs["attachments"]) == 1
+        assert len(kwargs["attachments"]) == 2
+        assert kwargs["attachments"][1].payload.buttons[-1][0].payload == "back_to_main"
         return object()
     photo.bot.send_message.side_effect = send
     await call_handler(router, "collect_photosession_photo", photo, context)
@@ -3610,7 +3611,7 @@ async def test_audio_success_commands_show_test_screens_without_payments(credit_
     buttons = event.message.answer.await_args.kwargs['attachments'][0].payload.buttons
     expected = (['audio_download_fun_1', 'audio_download_fun_2', 'audio_regenerate'] if format_name == 'fun'
                 else ['audio_download_gift_mp3', 'audio_download_gift_instrumental', 'help_support'])
-    assert [row[0].payload for row in buttons] == expected
+    assert [row[0].payload for row in buttons] == expected + ["back_to_main"]
     assert await credit_db.get_all_counters() == {}
     assert dict(await credit_db.get_user(456)) == before
     assert payments.mock_calls == []
@@ -3640,7 +3641,7 @@ async def test_fun_regeneration_is_once_per_test_session(credit_db):
     assert (await context.get_data())['audio_regeneration_used'] is True
     assert 'Бесплатная перегенерация использована.' in first.send.await_args.args[0]
     assert [row[0].payload for row in first.send.await_args.kwargs['attachments'][0].payload.buttons] == [
-        'audio_download_fun_1', 'audio_download_fun_2',
+        'audio_download_fun_1', 'audio_download_fun_2', 'back_to_main',
     ]
     duplicate = callback_event('audio_regenerate')
     await dispatch_callback(router, duplicate, context)

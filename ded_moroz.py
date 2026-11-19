@@ -342,7 +342,7 @@ async def revised(key,user,text,*,admin=None):
     if not row['edit_field']:raise ValueError('Сначала выберите, какое имя или факт изменить кнопкой ниже.')
     details=json.loads(row['edit_details'] or row['details'])
     value=family.value(row['edit_field'],text,details) if family.is_family(details) else fact_value(row['edit_field'],text)
-    if user!=admin or row.get('payment_order_id'):sales.validate_field(row['edit_field'],value)
+    if not family.is_family(details) and (user!=admin or row.get('payment_order_id')):sales.validate_field(row['edit_field'],value)
     draft=json.loads(row['edit_details'] or row['details']);draft[row['edit_field']]=value
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
         cur=await db.execute("UPDATE ded_moroz_orders SET edit_details=?,edit_field=NULL WHERE id=? AND user_id=? AND version=? AND status='editing' AND edit_field=? AND edit_details IS ?",
@@ -450,7 +450,7 @@ async def enter(event,context,admin,*,key=None,payment_key=None):
     user=event.get_ids()[1]
     row=(await get(key) if key else await sales.claim(user,admin,payment_key=payment_key) if payment_key
          else await begin(user) if admin is not None and user==admin else await sales.claim(user,admin))
-    if row and row['user_id']==user and family.is_family(row['details']) and user!=admin:
+    if row and row['user_id']==user and family.is_family(row['details']) and user!=admin and not await sales.allowed(row,admin):
         await family.entry(event,context,admin);return
     if row and (row['user_id']!=user or not await sales.allowed(row,admin)):row=None
     if not row:
@@ -737,12 +737,12 @@ class Worker:
                 for number,take in enumerate(takes,1):
                     if take['duration'] is not None and take['duration']<=sales.MAX_SPEECH_SECONDS:
                         b.row(CallbackButton(text=f'✅ Оставить озвучку {number}',payload=f"dm_audio_choose:{key}:{row['version']}:{take['version']}"))
-                if can_regenerate(row,self.admin):b.row(CallbackButton(text='✏️ Изменить данные ребёнка',payload='dm_audio_edit'))
+                if can_regenerate(row,self.admin):b.row(CallbackButton(text='✏️ Изменить данные детей' if family.is_family(row['details']) else '✏️ Изменить данные ребёнка',payload='dm_audio_edit'))
                 b.row(CallbackButton(text='🆘 Поддержка',payload='help_support'))
                 buttons=b.as_markup()
                 if len(takes)>1:
                     previous=await self.bot.upload_media(InputMedia(path=str(self.assets.path(takes[0]['path'])),type=UploadType.AUDIO))
-                    if await self.bot.send_message(user_id=user,text='🎧 Вариант 1 — с первоначальными данными ребёнка.',attachments=[previous]) is None:raise RuntimeError('MAX не подтвердил вариант 1.')
+                    if await self.bot.send_message(user_id=user,text='🎧 Вариант 1 — с первоначальными данными детей.' if family.is_family(row['details']) else '🎧 Вариант 1 — с первоначальными данными ребёнка.',attachments=[previous]) is None:raise RuntimeError('MAX не подтвердил вариант 1.')
                     caption='🎧 Вариант 2 — с изменёнными данными. Какую озвучку оставить для видео: 1 или 2?'
                 current=next((take for take in takes if take['version']==row['version']),None)
                 if current and current['duration'] is not None and current['duration']>sales.MAX_SPEECH_SECONDS:

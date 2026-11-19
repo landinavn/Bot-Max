@@ -44,17 +44,20 @@ def test_tagged_script_keeps_order_every_child_and_individual_wishes(n):
     for i in range(1,n+1):
         assert plain.count(data[f'child_{i}_name'])==3
         assert data[f'child_{i}_fact'] in text and data[f'child_{i}_wish'] in text
-    assert 'Умница!' in text and 'Молодец!' in text
+    assert 'Умница!' in text and 'Здорово!' in text
+    assert plain.startswith('Охо-хо-хо! Здравствуйте, мои дорогие '+family.joined([data[f'child_{i}_name'] for i in range(1,n+1)])+'! Это я, Дедушка Мороз!')
     assert 'ты ты' not in dm.prepare_speech_text(text)
     assert family.tagged_text(data)==dm.tagged_text(data)
 
 
 @pytest.mark.parametrize('admin',[None,999])
 @pytest.mark.parametrize('payload',['cat_ded_moroz_family','dm_family_count:2','dm_family_count:more','dm_family_no_photo:fake','dm_family_confirm:fake','dm_family_field:fake:child_1_name'])
-async def test_public_menu_and_forged_callbacks_only_show_stub(credit_db,admin,payload):
+async def test_public_menu_and_forged_callbacks_never_create_free_orders(credit_db,admin,payload):
     e=callback_event(payload);context=await ready_context()
     await dispatch_callback(create_router(admin_user_id=admin),e,context)
-    assert e.send.await_args.args[0]==family.STUB
+    text=str(e.send.await_args_list)
+    assert family.STUB not in text
+    if payload=='cat_ded_moroz_family':assert 'Одно поздравление для всей семьи!' in text
     e.ack.assert_awaited_once()
     assert not await dm.read('SELECT * FROM ded_moroz_orders')
     assert not await dm.read('SELECT * FROM ded_moroz_payments')

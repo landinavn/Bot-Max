@@ -11,6 +11,7 @@ from maxapi.context.state_machine import State, StatesGroup
 from maxapi.filters.command import Command
 from maxapi.types import CallbackButton, LinkButton
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
+from result_navigation import result_keyboard as completed_keyboard
 
 from handlers import _reply
 from . import repository as repo
@@ -391,7 +392,7 @@ def create_router(admin_id, settings, assets):
                 if entity=='episode' and snap['assets'].get('assemble'):
                     from media_service import upload_video_for_max
                     video=await upload_video_for_max(event.bot,await assets.asset_url(snap['assets']['assemble']))
-                    await _reply(event,'Готовая серия MP4',attachments=[video])
+                    await _reply(event,'Готовая серия MP4',attachments=[video,completed_keyboard()])
                 await tell(event,'Результаты текущей версии.' if links else 'У этой версии пока нет результатов.',buttons+[('Проект','p:'+snap['project_id'])],links)
             elif action=='jobs':
                 await owner('project',parts[1])
@@ -449,7 +450,7 @@ def create_router(admin_id, settings, assets):
                 except Exception as exc:
                     logger.warning('MAX не принял изображение задания %s (%s).',item['id'],type(exc).__name__)
                     raise ValueError('Изображение сохранено в S3, но MAX временно не принял файл. Повторите показ; новая генерация не запускается.') from None
-                await _reply(event,'🖼️ Изображение задания '+item['id'],attachments=[image])
+                await _reply(event,'🖼️ Изображение задания '+item['id'],attachments=[image,completed_keyboard()])
             elif action=='approve_reference':
                 asset_id=await repo.approve_character_result(parts[1],admin_id)
                 await tell(event,'✅ Эталон утверждён и выбран для персонажа. ID: '+asset_id,

@@ -260,14 +260,15 @@ class Worker:
             if getattr(media.type,'value',media.type)!=expected:
                 raise ValueError('MAX вернул вложение неверного типа.')
             self._media_uploads[job_id]=media
+        from result_navigation import result_keyboard
         attachments=[media]
+        keyboard=InlineKeyboardBuilder()
         if image:
             character=item['target']=='character'
             text='✅ Эталон сгенерирован!' if character else '✅ Изображение сцены сгенерировано!'
             approve='studio:approve_reference:'+job_id if character else 'studio:approve:'+asset['id']
             keyboard=InlineKeyboardBuilder().row(CallbackButton(text='✅ Утвердить',payload=approve)).row(
-                CallbackButton(text='🔄 Перегенерировать',payload=f"studio:make:image:{item['target']}:{item['target_id']}")).as_markup()
-            attachments.append(keyboard)
+                CallbackButton(text='🔄 Перегенерировать',payload=f"studio:make:image:{item['target']}:{item['target_id']}"))
         elif kind=='video':
             snap=json.loads(item['snapshot'])
             number=snap['spec'].get('display_number',snap.get('number'))
@@ -277,14 +278,13 @@ class Worker:
             text=f'🎬 Сцена {number} оживлена! Посмотрите результат.'
             keyboard=InlineKeyboardBuilder().row(CallbackButton(
                 text='✅ Утвердить',payload='studio:approve_video:'+asset['id'])).row(CallbackButton(
-                text='🔄 Перегенерировать',payload='studio:make:video:scene:'+item['target_id'])).as_markup()
-            attachments.append(keyboard)
+                text='🔄 Перегенерировать',payload='studio:make:video:scene:'+item['target_id']))
         elif kind=='speech':
             text='🎧 Озвучка готова'
         else:
             text='🎉 Мультфильм собран! Скачайте или отправьте в соцсети.'
-            attachments.append(InlineKeyboardBuilder().row(LinkButton(
-                text='📥 Скачать MP4',url=public_url)).as_markup())
+            keyboard.row(LinkButton(text='📥 Скачать MP4',url=public_url))
+        attachments.append(result_keyboard(keyboard))
         return await self.bot.send_message(user_id=self.admin_id,text=text,attachments=attachments)
 
     async def lane(self):

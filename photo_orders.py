@@ -5,6 +5,7 @@ import time
 
 from maxapi.types import LinkButton, CallbackButton
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
+from result_navigation import result_keyboard as completed_keyboard
 
 from audio_orders import SUPPORT_URL
 from database import (get_pending_photo_jobs,update_photo_order,get_photo_order,get_photo_results,
@@ -78,7 +79,7 @@ async def deliver_photo_result(bot,order_id,slot,image_url,*,admin_user_id=None,
     if not result['delivered']:
         attachment=await (uploader or upload_image_for_max)(bot,image_url)
         sent=await bot.send_message(user_id=order['user_id'],
-            text=f"Фотография {slot} из {PHOTO_PACKAGE_SIZES[order['tariff']]}",attachments=[attachment])
+            text=f"Фотография {slot} из {PHOTO_PACKAGE_SIZES[order['tariff']]}",attachments=[attachment,completed_keyboard()])
         if sent is None:
             raise RuntimeError('MAX не подтвердил отправку фотографии.')
     complete=await mark_photo_result_delivered(order_id,slot)

@@ -55,7 +55,8 @@ async def test_done_video_is_sent_inline_once_with_one_keyboard(studio,result_as
     buttons=[b for row in keyboard.payload.buttons for b in row]
     assert [(b.text,b.payload) for b in buttons]==[
         ('✅ Утвердить','studio:approve_video:'+asset['id']),
-        ('🔄 Перегенерировать','studio:make:video:scene:'+scene['id'])]
+        ('🔄 Перегенерировать','studio:make:video:scene:'+scene['id']),
+        ('🏠 Главный экран','back_to_main')]
     assert item['notified']==1 and item['status']=='done' and item['actual']==27000
     await worker.notices()
     admin.send_message.assert_awaited_once()
@@ -216,7 +217,8 @@ async def test_audio_and_final_episode_are_sent_with_correct_types_and_text(stud
     sent=admin.send_message.await_args.kwargs
     assert sent['user_id']==456 and sent['attachments'][0].type==expected
     if kind=='speech':
-        assert sent['text']=='🎧 Озвучка готова' and len(sent['attachments'])==1
+        assert sent['text']=='🎧 Озвучка готова' and len(sent['attachments'])==2
+        assert sent['attachments'][1].payload.buttons[-1][0].payload=='back_to_main'
     else:
         assert sent['text']=='🎉 Мультфильм собран! Скачайте или отправьте в соцсети.'
         assert len(sent['attachments'])==2 and sent['attachments'][1].type=='inline_keyboard'

@@ -5,6 +5,7 @@ import time
 
 from maxapi.types import CallbackButton, LinkButton
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
+from result_navigation import result_keyboard as completed_keyboard
 
 from audio_orders import SUPPORT_URL
 from database import (animation_work_items, get_animation_order, update_animation_order,
@@ -57,8 +58,8 @@ class PaidAnimationWorker:
                     raise ValueError('Kling не вернул HTTPS-ссылку на видео.')
                 await asyncio.shield(update_animation_job(job_id,video_url=result,status='ready'))
             video=await self.uploader(self.bot,result)
-            keyboard=InlineKeyboardBuilder().row(LinkButton(text='⬇️ Скачать видео',url=result)).row(
-                CallbackButton(text='📷 Ещё фотография',payload='animation_resume:'+job['order_id'])).as_markup()
+            keyboard=completed_keyboard(InlineKeyboardBuilder().row(LinkButton(text='⬇️ Скачать видео',url=result)).row(
+                CallbackButton(text='📷 Ещё фотография',payload='animation_resume:'+job['order_id'])))
             sent=await self.bot.send_message(user_id=job['user_id'],text='✨ Ваша оживлённая фотография готова! Видео — 5 секунд.',
                                              attachments=[video,keyboard])
             if sent is None: raise RuntimeError('MAX не подтвердил отправку видео.')

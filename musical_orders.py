@@ -5,6 +5,7 @@ import time
 
 from maxapi.types import LinkButton, CallbackButton
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
+from result_navigation import result_keyboard as completed_keyboard
 
 from database import (get_musical_order, update_musical_order, claim_musical_order,
                       pending_musical_orders, reset_musical_workers)
@@ -74,7 +75,7 @@ class PaidMusicalWorker:
                     raise ValueError('Не получена HTTPS-ссылка на музыкальную открытку.')
                 await asyncio.shield(update_musical_order(order_id, result_url=result))
             video = await self.uploader(self.bot, result)
-            keyboard = InlineKeyboardBuilder().row(LinkButton(text='⬇️ Скачать MP4', url=result)).as_markup()
+            keyboard = completed_keyboard(InlineKeyboardBuilder().row(LinkButton(text='⬇️ Скачать MP4', url=result)))
             sent = await self.bot.send_message(user_id=order['user_id'],
                 text='🎵 Ваша музыкальная открытка готова!', attachments=[video, keyboard])
             if sent is None:

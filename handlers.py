@@ -1732,6 +1732,7 @@ def create_router(
         dm_counters = await get_all_counters()
         from ded_moroz_sales import statistics as dm_statistics
         dm_stats=await dm_statistics(admin_user_id)
+        dm_family_stats=await dm_statistics(admin_user_id,variant="family")
         sources = await get_source_stats(admin_id=admin_user_id)
         ad_sources = await get_ad_source_counts(admin_id=admin_user_id)
         admin = await get_user(admin_user_id)
@@ -1815,7 +1816,10 @@ def create_router(
             f"- Эксклюзив (ручная работа): {c('click_custom_order')}\n"
             f"- Оживление фотографий: {c('click_animation')}\n"
             f"- Дед Мороз: {c('click_ded_moroz')}\n"
-            "🎅 Семейное поздравление (пока тест администратора):\n"
+            "🎅 Семейное поздравление:\n"
+            f"- Оплачено: {dm_family_stats['paid']} | Выдано: {dm_family_stats['ready']} | Нужна помощь: {dm_family_stats['attention']}\n"
+            f"- Выручка: {dm_family_stats['revenue']//100} ₽ | Счета: {c('dm_family_checkout')} | Из рассылки: {c('dm_family_launch_click')}\n"
+            f"- Покупки 990 ₽: {c('buy_ded_moroz_family_990')} | 1490 ₽: {c('buy_ded_moroz_family_1490')} | 1990 ₽: {c('buy_ded_moroz_family_1990')}\n"
             f"- Нажатия пользователей: {c('click_ded_moroz_family')} | Начато: {c('dm_family_started')} | Готово: {c('dm_family_video_created')}\n"
             f"- Администратор — нажатия: {dm_counters.get('click_ded_moroz_family',0)-c('click_ded_moroz_family')}, начато: {dm_counters.get('dm_family_started',0)-c('dm_family_started')}, готово: {dm_counters.get('dm_family_video_created',0)-c('dm_family_video_created')}\n"
             "- Начато по числу детей (включая тесты): " + ", ".join(f"{n}: {dm_counters.get('dm_family_children_'+str(n),0)}" for n in range(2,7)) + "\n"
@@ -2404,21 +2408,33 @@ def create_router(
             await increment_counter('promo_1111_click', user_id=user_id)
         await send_welcome_message(event, context)
 
-    @router.message_callback(F.callback.payload == 'cat_ded_moroz_family')
+    @router.message_callback(F.callback.payload.in_({'cat_ded_moroz_family','dm_family_launch'}))
     async def ded_moroz_family_menu(event: MessageCallback, context: MemoryContext):
         await event.ack(notification='Семейное поздравление')
         user=event.get_ids()[1]
         if user is None or event.message is None:return
         await increment_counter('click_ded_moroz_family',user_id=user)
+        if event.callback.payload=='dm_family_launch':await increment_counter('dm_family_launch_click',user_id=user)
         from ded_moroz_family import entry
         await entry(event,context,admin_user_id)
 
-    @router.message_callback(F.callback.payload.startswith('dm_family_count:') | F.callback.payload.startswith('dm_family_field:') | F.callback.payload.startswith('dm_family_confirm:') | F.callback.payload.startswith('dm_family_no_photo:'))
+    @router.message_callback(F.callback.payload=='dm_family_start')
+    async def ded_moroz_family_start(event:MessageCallback,context:MemoryContext):
+        await event.ack(notification='Количество детей')
+        if event.get_ids()[1] is None or event.message is None:return
+        from ded_moroz_family import count_buttons
+        from ded_moroz_sales import enabled,family_price_at
+        if not enabled() or family_price_at() is None:
+            await _reply(event,'Новые семейные поздравления сейчас недоступны.');return
+        b=await count_buttons(context)
+        await _reply(event,'👧👦 Сколько детей поздравим? После выбора выставим счёт. Данные детей заполним после оплаты.',attachments=[b.as_markup()])
+
+    @router.message_callback(F.callback.payload.startswith('dm_family_paid:') | F.callback.payload.startswith('dm_family_count:') | F.callback.payload.startswith('dm_family_field:') | F.callback.payload.startswith('dm_family_confirm:') | F.callback.payload.startswith('dm_family_no_photo:'))
     async def ded_moroz_family_action(event: MessageCallback, context: MemoryContext):
         await event.ack(notification='Семейное поздравление')
         if event.get_ids()[1] is None or event.message is None:return
         from ded_moroz_family import callback
-        try:await callback(event,context,admin_user_id)
+        try:await callback(event,context,admin_user_id,payments=payments)
         except ValueError as exc:await _reply(event,str(exc))
         except Exception:
             logger.exception('Не удалось обработать семейное поздравление')
@@ -2500,6 +2516,26 @@ def create_router(
         if is_bot_message(event):return
         from ded_moroz_customer import review
         await review(event,context,admin_user_id)
+
+    @router.message_created(Command('broadcast_ded_moroz_kids_preview'))
+    @router.message_created(Command('broadcast_ded_moroz_kids'))
+    async def ded_moroz_family_broadcast_preview(event:MessageCreated):
+        if is_bot_message(event) or admin_user_id is None or event.get_ids()[1]!=admin_user_id:return
+        from ded_moroz_family_broadcast import preview
+        try:await preview(event,confirm=(event.message.body.text or '').split()[0]=='/broadcast_ded_moroz_kids')
+        except Exception:
+            logger.exception('Не удалось подготовить семейный анонс')
+            await _reply(event,'Рассылка не запущена. Добавьте видео-пример examples/ded_moroz_kids.mp4 и повторите предпросмотр.')
+
+    @router.message_callback(F.callback.payload=='dm_family_broadcast_confirm')
+    async def ded_moroz_family_broadcast_confirm(event:MessageCallback):
+        await event.ack(notification='Рассылка')
+        if admin_user_id is None or event.get_ids()[1]!=admin_user_id:return
+        from ded_moroz_family_broadcast import send
+        try:await send(event,broadcast_lock)
+        except Exception:
+            logger.exception('Не удалось отправить семейный анонс')
+            await _reply(event,'Рассылка остановлена. Проверьте видео-пример и журнал; прогресс сохранён.')
 
     @router.message_created(Command('broadcast_ded_moroz_preview'))
     @router.message_created(Command('broadcast_ded_moroz'))

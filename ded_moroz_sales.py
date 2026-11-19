@@ -17,6 +17,7 @@ from config import BASE_DIR
 from ded_moroz_intro import INTRO_SECONDS
 
 PRODUCT='Персональное видеопоздравление Деда Мороза'
+FAMILY_PRODUCT='Персональное видеопоздравление Деда Мороза для нескольких детей'
 EXAMPLE=BASE_DIR/'examples/ded_moroz_preview.mp4'
 PRICE_TEXT=('🎁 Стоимость поздравления:\n'
             'До 30 ноября — 1490 ₽.\nВ декабре — 1990 ₽.\nВсе даты — по московскому времени.')
@@ -42,6 +43,24 @@ def price_at(timestamp=None):
     return 99000 if value.day<=18 else 149000
 
 
+def family_price_at(timestamp=None):
+    value=datetime.fromtimestamp(database._now_ts() if timestamp is None else timestamp,ZoneInfo('Europe/Moscow'))
+    if value.year!=2026 or value.month not in (11,12):return None
+    if value.month==12:return 199000
+    if value.day<19:return None
+    return 99000 if value.day<=22 else 149000
+
+
+def family_price_text(timestamp=None):
+    price=family_price_at(timestamp)
+    if price is None:return 'Заказ семейного поздравления сейчас недоступен.'
+    if price==99000:
+        return ('🔥 До 22 ноября 23:59 МСК — 990 ₽.\n'
+                'С 23 по 30 ноября — 1490 ₽.\nВ декабре — 1990 ₽.')
+    if price==149000:return '🎁 До 30 ноября — 1490 ₽.\nВ декабре — 1990 ₽.'
+    return '🎁 В декабре — 1990 ₽.'
+
+
 def validate_field(field,value):
     chars,words=LIMITS[field]
     if len(value)>chars or len(value.split())>words:
@@ -56,6 +75,12 @@ async def init_tables(db):
         status TEXT NOT NULL DEFAULT 'pending',payment_link TEXT,provider_payment_id TEXT UNIQUE,
         claimed_id TEXT UNIQUE,notified INTEGER NOT NULL DEFAULT 0,next_attempt INTEGER NOT NULL DEFAULT 0,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,paid_at TEXT)''')
+    async with db.execute('PRAGMA table_info(ded_moroz_payments)') as cur:
+        columns={r[1] for r in await cur.fetchall()}
+    if 'variant' not in columns:
+        await db.execute("ALTER TABLE ded_moroz_payments ADD COLUMN variant TEXT NOT NULL DEFAULT 'single'")
+    if 'children_count' not in columns:
+        await db.execute('ALTER TABLE ded_moroz_payments ADD COLUMN children_count INTEGER')
     await db.execute('''CREATE TABLE IF NOT EXISTS ded_moroz_reviews (
         order_id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,text TEXT NOT NULL,
         delivered INTEGER NOT NULL DEFAULT 0,next_attempt INTEGER NOT NULL DEFAULT 0)''')
@@ -76,25 +101,38 @@ async def payment(order_id):
 
 
 def validate_order(row):
-    if (row['amount_kopecks'] not in (99000,149000,199000) or row['credits']!=0
-        or row['product_name']!=PRODUCT or row['package_id']!='ded_moroz_'+str(row['amount_kopecks']//100)):
+    row=dict(row)
+    variant=row.get('variant','single')
+    family=variant=='family'
+    expected=FAMILY_PRODUCT if family else PRODUCT
+    prefix='ded_moroz_family_' if family else 'ded_moroz_'
+    n=row.get('children_count')
+    if (variant not in ('single','family') or row['amount_kopecks'] not in (99000,149000,199000)
+        or row['credits']!=0 or row['product_name']!=expected
+        or row['package_id']!=prefix+str(row['amount_kopecks']//100)
+        or (family and (type(n) is not int or not 2<=n<=6)) or (not family and n is not None)):
         raise ValueError('Некорректный тариф поздравления Деда Мороза.')
 
 
-async def checkout(user_id):
+async def checkout(user_id,*,variant='single',children_count=None):
     if isinstance(user_id,bool) or not isinstance(user_id,int) or user_id<=0:
         raise ValueError('Некорректный пользователь.')
-    price=price_at()
+    if variant not in ('single','family') or (variant=='family' and (type(children_count) is not int or not 2<=children_count<=6)) or (variant=='single' and children_count is not None):
+        raise ValueError('Выберите корректный тип поздравления и количество детей.')
+    price=family_price_at() if variant=='family' else price_at()
     if not enabled() or price is None:raise ValueError('Покупка поздравления сейчас недоступна.')
+    family=variant=='family'
+    product=FAMILY_PRODUCT if family else PRODUCT
+    package=('ded_moroz_family_' if family else 'ded_moroz_')+str(price//100)
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
         await db.execute('BEGIN IMMEDIATE');db.row_factory=aiosqlite.Row
-        async with db.execute("SELECT * FROM ded_moroz_payments WHERE user_id=? AND status='pending' AND amount_kopecks=? ORDER BY rowid DESC LIMIT 1",(user_id,price)) as cur:
+        async with db.execute("SELECT * FROM ded_moroz_payments WHERE user_id=? AND status='pending' AND amount_kopecks=? AND variant=? AND children_count IS ? ORDER BY rowid DESC LIMIT 1",(user_id,price,variant,children_count)) as cur:
             row=await cur.fetchone()
         if row:return dict(row,order_type='ded_moroz')
         key='dm_'+uuid4().hex
-        await db.execute('INSERT INTO ded_moroz_payments(order_id,user_id,amount_kopecks,product_name,package_id) VALUES (?,?,?,?,?)',
-                         (key,user_id,price,PRODUCT,'ded_moroz_'+str(price//100)))
-        await database.increment_counter('dm_checkout',user_id=user_id,connection=db)
+        await db.execute('INSERT INTO ded_moroz_payments(order_id,user_id,amount_kopecks,product_name,package_id,variant,children_count) VALUES (?,?,?,?,?,?,?)',
+                         (key,user_id,price,product,package,variant,children_count))
+        await database.increment_counter('dm_family_checkout' if family else 'dm_checkout',user_id=user_id,connection=db)
         await db.commit()
     return await payment(key)
 
@@ -107,10 +145,13 @@ async def set_link(key,link):
 async def allowed(row,admin):
     if admin is not None and row['user_id']==admin:return True
     from ded_moroz_family import is_family
-    if is_family(row['details']):return False
     key=row.get('payment_order_id')
     pay=await payment(key) if key else None
-    return bool(pay and pay['user_id']==row['user_id'] and pay['status']=='paid' and pay['claimed_id']==row['id'])
+    if not (pay and pay['user_id']==row['user_id'] and pay['status']=='paid' and pay['claimed_id']==row['id']):return False
+    details=json.loads(row['details'])
+    if is_family(details):
+        return pay.get('variant')=='family' and pay.get('children_count')==details.get('children_count')
+    return pay.get('variant','single')=='single'
 
 
 async def _claim(db,user_id,payment_key=None):
@@ -120,14 +161,19 @@ async def _claim(db,user_id,payment_key=None):
         if not pay:return None
         if pay['claimed_id']:return pay['claimed_id']
     else:
-        async with db.execute("SELECT * FROM ded_moroz_payments WHERE user_id=? AND status='paid' AND claimed_id IS NULL ORDER BY rowid LIMIT 1",(user_id,)) as cur:
+        async with db.execute("SELECT * FROM ded_moroz_payments WHERE user_id=? AND status='paid' AND variant='single' AND claimed_id IS NULL ORDER BY rowid LIMIT 1",(user_id,)) as cur:
             pay=await cur.fetchone()
         if not pay:
             async with db.execute("SELECT * FROM ded_moroz_orders WHERE user_id=? AND COALESCE(json_extract(details,'$.variant'),'single')='single' AND status NOT IN ('done','cancelled') ORDER BY rowid DESC LIMIT 1",(user_id,)) as cur:
                 active=await cur.fetchone()
             return active['id'] if active else None
+    pay=dict(pay);validate_order(pay)
+    details=dict(variant='family',children_count=pay['children_count']) if pay.get('variant')=='family' else {}
     key=uuid4().hex
-    await db.execute('INSERT INTO ded_moroz_orders(id,user_id,payment_order_id) VALUES (?,?,?)',(key,user_id,pay['order_id']))
+    await db.execute('INSERT INTO ded_moroz_orders(id,user_id,payment_order_id,details) VALUES (?,?,?,?)',(key,user_id,pay['order_id'],json.dumps(details,ensure_ascii=False)))
+    if details:
+        await database.increment_counter('dm_family_started',user_id=user_id,connection=db)
+        await database.increment_counter('dm_family_children_'+str(pay['children_count']),user_id=user_id,connection=db)
     await db.execute('UPDATE ded_moroz_payments SET claimed_id=? WHERE order_id=?',(key,pay['order_id']))
     return key
 
@@ -146,7 +192,7 @@ async def mark_paid(key,payment_id):
         await db.execute('BEGIN IMMEDIATE');db.row_factory=aiosqlite.Row
         async with db.execute('SELECT * FROM ded_moroz_payments WHERE order_id=?',(key,)) as cur:row=await cur.fetchone()
         if not row:raise ValueError('Заказ Деда Мороза не найден.')
-        validate_order(row)
+        row=dict(row);validate_order(row)
         if row['status']=='paid':
             if row['provider_payment_id']!=payment_id:raise ValueError('Другой платёж для оплаченного заказа.')
             return False
@@ -157,8 +203,9 @@ async def mark_paid(key,payment_id):
         await db.execute("UPDATE ded_moroz_payments SET status='paid',provider_payment_id=?,paid_at=CURRENT_TIMESTAMP WHERE order_id=?",(payment_id,key))
         await db.execute('INSERT INTO users(user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING',(row['user_id'],))
         await database.increment_purchases(row['user_id'],connection=db)
-        await database.increment_counter('buy_ded_moroz',user_id=row['user_id'],connection=db)
-        await database.increment_counter('buy_ded_moroz_'+str(row['amount_kopecks']//100),user_id=row['user_id'],connection=db)
+        prefix='buy_ded_moroz_family' if row.get('variant')=='family' else 'buy_ded_moroz'
+        await database.increment_counter(prefix,user_id=row['user_id'],connection=db)
+        await database.increment_counter(prefix+'_'+str(row['amount_kopecks']//100),user_id=row['user_id'],connection=db)
         await _claim(db,row['user_id'],key)
         await db.commit();return True
 
@@ -234,7 +281,7 @@ async def paid_notifications(bot):
             claimed=await claim(row['user_id'],payment_key=row['order_id'])
             if not claimed:raise ValueError('Нет заказа для подтверждённой оплаты.')
             buttons=InlineKeyboardBuilder().row(CallbackButton(text='🎅 Продолжить поздравление',payload='dm_open:'+claimed['id']))
-            result=await bot.send_message(user_id=row['user_id'],text='✅ Оплата поздравления получена! Вернитесь к заказу — Дедушка Мороз ждёт имя и факты о ребёнке.',attachments=[buttons.as_markup()])
+            result=await bot.send_message(user_id=row['user_id'],text='✅ Оплата поздравления получена! Вернитесь к заказу — заполним имена и факты.',attachments=[buttons.as_markup()])
             if result is None:raise RuntimeError('MAX не подтвердил оплату.')
             async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
                 await db.execute('UPDATE ded_moroz_payments SET notified=1 WHERE order_id=?',(row['order_id'],));await db.commit()
@@ -243,13 +290,14 @@ async def paid_notifications(bot):
                 await db.execute('UPDATE ded_moroz_payments SET next_attempt=? WHERE order_id=?',(now+60,row['order_id']));await db.commit()
 
 
-async def statistics(admin=None):
+async def statistics(admin=None,variant='single'):
+    if variant not in ('single','family'):raise ValueError('Неизвестный вид поздравления.')
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
-        async with db.execute("SELECT COUNT(*),COALESCE(SUM(amount_kopecks),0) FROM ded_moroz_payments WHERE status='paid' AND (? IS NULL OR user_id!=?)",(admin,admin)) as cur:
+        async with db.execute("SELECT COUNT(*),COALESCE(SUM(amount_kopecks),0) FROM ded_moroz_payments WHERE status='paid' AND variant=? AND (? IS NULL OR user_id!=?)",(variant,admin,admin)) as cur:
             paid,revenue=await cur.fetchone()
-        async with db.execute("SELECT COUNT(*) FROM ded_moroz_orders WHERE payment_order_id IS NOT NULL AND status='done' AND (? IS NULL OR user_id!=?)",(admin,admin)) as cur:
+        async with db.execute("SELECT COUNT(*) FROM ded_moroz_orders o JOIN ded_moroz_payments p ON p.order_id=o.payment_order_id AND p.claimed_id=o.id WHERE o.status='done' AND p.variant=? AND (? IS NULL OR o.user_id!=?)",(variant,admin,admin)) as cur:
             ready=(await cur.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM ded_moroz_orders WHERE payment_order_id IS NOT NULL AND status='manual' AND (? IS NULL OR user_id!=?)",(admin,admin)) as cur:
+        async with db.execute("SELECT COUNT(*) FROM ded_moroz_orders o JOIN ded_moroz_payments p ON p.order_id=o.payment_order_id AND p.claimed_id=o.id WHERE o.status='manual' AND p.variant=? AND (? IS NULL OR o.user_id!=?)",(variant,admin,admin)) as cur:
             attention=(await cur.fetchone())[0]
     return {'paid':paid,'revenue':revenue,'ready':ready,'attention':attention}
 

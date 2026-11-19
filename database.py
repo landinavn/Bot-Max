@@ -1375,7 +1375,8 @@ def _base_sale_counter_keys(kind: str, order: dict) -> tuple[str, ...]:
     if kind == 'animation':
         return (f"buy_animation_{order['tariff']}",)
     if kind == 'ded_moroz':
-        return ('buy_ded_moroz','buy_ded_moroz_'+str(order['amount_kopecks']//100))
+        prefix='buy_ded_moroz_family' if order.get('variant')=='family' else 'buy_ded_moroz'
+        return (prefix,prefix+'_'+str(order['amount_kopecks']//100))
     raise ValueError('Неизвестный тип продажи.')
 
 
@@ -1398,7 +1399,7 @@ async def _backfill_sale_counters(db, *, force=False) -> None:
         ('cartoon', 'cartoon_orders', 'tariff,promo_token', "status IN ('paid','completed','manual')"),
         ('photo', 'photo_orders', 'tariff,promo_token', "status='paid'"),
         ('animation', 'animation_orders', 'tariff', "status='paid' AND is_admin=0 AND promo_bonus=0"),
-        ('ded_moroz','ded_moroz_payments','amount_kopecks',"status='paid'"),
+        ('ded_moroz','ded_moroz_payments','amount_kopecks,variant',"status='paid'"),
     ):
         async with db.execute(f'SELECT user_id,{fields},COUNT(*) FROM {table} WHERE {status} GROUP BY user_id,{fields}') as cursor:
             names = [column[0] for column in cursor.description]

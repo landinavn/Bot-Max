@@ -1,13 +1,18 @@
-"""Admin pilot for family greetings; deterministic tagged text, no extra model calls."""
+"""Paid family greetings; deterministic tagged text, no extra model calls."""
 import json
 import re
+import logging
 from uuid import uuid4
 
-from maxapi.types import CallbackButton
+from maxapi.types import CallbackButton,LinkButton,InputMedia
+from maxapi.enums import UploadType
+from config import BASE_DIR
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
 VARIANT='family'
 STUB='🎅 Поздравление Деда Мороза для нескольких детей уже в разработке! Скоро можно будет заказать одно персональное видео для всей семьи.'
+logger=logging.getLogger(__name__)
+EXAMPLE=BASE_DIR/'examples/ded_moroz_kids.mp4'
 MAX_CHILDREN=6
 MAX_WORDS=130
 PHOTO_PROMPT=('📸 Отправьте одно общее фото детей — оно появится в поздравлении в новогодней рамке. '
@@ -82,17 +87,20 @@ def question(field,details):
                 'Не перечисляйте новые имена — речь обо всех уже указанных детях.')
     else:
         _,n,part=field.split('_')
-        name=details.get(f'child_{n}_name','пока без имени')
-        heading=f'Ребёнок {n} из {count(details)} — {name}.\n\n'
+        name=details.get(f'child_{n}_name')
+        heading=f'Ребёнок {n} из {count(details)}'+(' — '+name+'.' if name and part!='name' else '')+'\n\n'
+        if part=='name':heading='Заполняем детей по очереди в том порядке, в котором их поздравит Дед Мороз.\n'+heading
         prompts={
-            'name':'Как его или её зовут дома? Напишите одно имя, например «Машенька» или «Саша». Заполняем детей по очереди в том порядке, в котором их поздравит Дед Мороз.',
+            'name':'Как его или её зовут дома? Напишите одно имя, например «Машенька» или «Саша».',
             'age':'Сколько лет этому ребёнку? Напишите только число, например «7». Возраст нужен для проверки данных, в поздравлении он не перечисляется.',
             'gender':'Это мальчик или девочка? Напишите «мальчик» или «девочка», чтобы обращение звучало правильно.',
             'fact':'Один конкретный факт только об этом ребёнке. Заполните: «Я слышал, что ты …». Напишите фразу целиком после «ты», без имени. Например: «любишь рисовать», «научилась плавать», «собираешь конструкторы». Не пишите факты обо всех детях в одном сообщении. Если конкретного факта нет, напишите «пропустить» — будет нейтральное «ты очень стараешься».',
             'wish':'Одно пожелание только этому ребёнку. Заполните: «Желаю тебе …». Напишите фразу после «тебе». Например: «побед в футболе», «интересных книг», «ярких рисунков». Не начинайте с «желаю» и не добавляйте имя. Постарайтесь выбрать другое пожелание, чем для остальных детей.',
         }
         prompt=heading+prompts[part]
-    return prompt+f'\n\nДо {chars} символов и {words} слов. Для 4–6 детей фразы короче, чтобы каждому хватило времени.'
+    if field=='common' or field.endswith(('_fact','_wish')):
+        prompt+=f'\n\nДо {chars} символов и {words} слов.'
+    return prompt
 
 
 def joined(names):
@@ -102,14 +110,15 @@ def joined(names):
 def tagged_text(details):
     fields={field:value(field,details.get(field),details) for field in labels(details)}
     n=count(details);names=[fields[f'child_{i}_name'] for i in range(1,n+1)]
-    opening=('[deep voice] Охо-хо-хо! [raspy] Здравствуйте, мои дорогие! '
-             '[warm] Это я, Дедушка Мороз! [slightly excited] [drawls] '+joined(names)+'! ')
+    opening=('[deep voice] Охо-хо-хо! [raspy] Здравствуйте, мои дорогие [drawls] '+joined(names)+'! '
+             '[warm] Это я, Дедушка Мороз! [slightly excited] ')
     if n==2:opening+='Из Великого Устюга я вижу двух замечательных ребят! '
     elif n==3:opening+='Я нашёл на карте волшебства ваши счастливые имена! '
     else:opening+='У меня в списке особенная семья! '
     blocks=[]
     for i,name in enumerate(names,1):
-        praise='Умница!' if fields[f'child_{i}_gender']=='девочка' else 'Молодец!'
+        praise=(('Умница!' if fields[f'child_{i}_gender']=='девочка' else 'Молодец!'),
+                'Здорово!','Прекрасно!','Замечательно!','Отлично!','Вот это да!')[i-1]
         blocks.append(f'[raspy] {name}, '+('я слышал, что ' if n<4 else '')+
                       f'ты {fields[f"child_{i}_fact"]}. [proud] {praise} '
                       f'[warm] Желаю тебе [drawls] {fields[f"child_{i}_wish"]}. [pause] ')
@@ -127,25 +136,91 @@ def photo_keyboard(key):
     return InlineKeyboardBuilder().row(CallbackButton(text='Продолжить без фото',payload='dm_family_no_photo:'+key)).as_markup()
 
 
-async def entry(event,context,admin):
-    from ded_moroz import read,tell,enter
-    user=event.get_ids()[1]
-    if admin is None or user!=admin:
-        from handlers import PosterStates
-        await context.clear();await context.set_state(PosterStates.waiting_for_mode)
-        b=InlineKeyboardBuilder().row(CallbackButton(text='⬅️ Главный экран',payload='back_to_main'))
-        await tell(event,STUB,attachments=[b.as_markup()]);return
+def description():
+    from ded_moroz_sales import family_price_text
+    return ('🎅 Одно поздравление для всей семьи!\n\n'
+        '👧👦 Для 2–6 детей — каждого Дед Мороз поздравит по имени.\n'
+        '📝 Заполним детей по очереди: имя, возраст, пол, один факт и личное пожелание.\n'
+        '🤝 В конце добавим общий факт о детях.\n'
+        '📸 Общее фото можно добавить или пропустить.\n'
+        '🎧 Перед видео вы прослушаете озвучку. Можно один раз исправить данные и выбрать первый или второй вариант.\n'
+        '💳 Сначала оплата, затем заполнение данных и создание поздравления.\n\n'
+        +family_price_text()+'\n\n👇 Нажмите «Начать», чтобы выбрать количество детей и получить счёт. '
+        'Сохранённые поздравления можно продолжить отдельными кнопками.')
+
+
+async def check_example():
+    from media_service import audio_duration
+    if not EXAMPLE.is_file():raise ValueError('Добавьте examples/ded_moroz_kids.mp4 — видео-пример семейного поздравления.')
+    seconds=await audio_duration(EXAMPLE)
+    if not 0<seconds<=70 or EXAMPLE.stat().st_size>100*1024*1024:
+        raise ValueError('Пример ded_moroz_kids.mp4 должен быть MP4 до 70 секунд и 100 МБ.')
+
+
+async def example_attachment(bot):
+    await check_example()
+    result=await bot.upload_media(InputMedia(path=str(EXAMPLE),type=UploadType.VIDEO))
+    if getattr(result,'type',None)!='video':raise ValueError('MAX не вернул видео-пример.')
+    return result
+
+
+async def count_buttons(context):
     from handlers import PosterStates
     await context.clear();await context.set_state(PosterStates.waiting_for_mode)
-    b=InlineKeyboardBuilder()
-    token=uuid4().hex
+    b=InlineKeyboardBuilder();token=uuid4().hex
     for label,n in (('2 ребёнка','2'),('3 ребёнка','3'),('4 и больше','more')):
         b.row(CallbackButton(text=label,payload='dm_family_count:'+n+':'+token))
+    return b
+
+
+async def entry(event,context,admin):
+    from ded_moroz import read,tell
+    from ded_moroz_sales import allowed,enabled,family_price_at
+    from handlers import PosterStates
+    user=event.get_ids()[1]
+    await context.clear();await context.set_state(PosterStates.waiting_for_mode)
+    try:
+        attachment=await example_attachment(event.bot)
+        await tell(event,'🎬 Пример поздравления для нескольких детей:',attachments=[attachment])
+    except Exception as exc:
+        logger.warning('Не удалось показать семейный пример: %s',type(exc).__name__)
+        await tell(event,'🎬 Пример семейного поздравления скоро появится.')
+    b=await count_buttons(context) if admin is not None and user==admin else InlineKeyboardBuilder()
+    if user!=admin and enabled() and family_price_at() is not None:b.row(CallbackButton(text='🎅 Начать',payload='dm_family_start'))
     active=await read("SELECT * FROM ded_moroz_orders WHERE user_id=? AND json_extract(details,'$.variant')='family' AND status NOT IN ('done','cancelled') ORDER BY rowid DESC LIMIT 5",(user,),all_rows=True)
     for row in active:
-        b.row(CallbackButton(text='Продолжить семейное · '+row['id'][:8]+' · '+row['status'],payload='dm_open:'+row['id']))
-    b.row(CallbackButton(text='⬅️ Главный экран',payload='back_to_main'))
-    await tell(event,'🎅 Одно поздравление для всей семьи!\n\nЧтобы начать новое поздравление, выберите количество детей. Сохранённые заказы можно продолжить отдельными кнопками ниже. Затем заполним каждого по очереди: имя, возраст, пол, один факт и пожелание. В конце — общий факт и необязательное общее фото. Перед озвучкой всё можно проверить и исправить. Пока доступно для 2–6 детей.',attachments=[b.as_markup()])
+        if await allowed(row,admin):b.row(CallbackButton(text='Продолжить семейное · '+row['id'][:8],payload='dm_open:'+row['id']))
+    b.row(CallbackButton(text='🎬 Готовые поздравления',payload='dm_last'))
+    b.row(CallbackButton(text='🏠 Главный экран',payload='back_to_main'))
+    text=description()
+    if admin is not None and user==admin:
+        text+='\n\n🛠 Для администратора: выбор количества открывает тестовый заказ без оплаты.'
+    if not enabled() and user!=admin:text='Семейное поздравление временно недоступно для новых покупок.'
+    await tell(event,text,attachments=[b.as_markup()])
+
+
+async def checkout(event,context,admin,number,payments):
+    from ded_moroz import tell,Settings,read
+    from ded_moroz_sales import CHECKOUT_LOCKS,checkout as make_invoice,enabled
+    import asyncio
+    if admin is None or not enabled():raise ValueError('Покупка семейного поздравления временно недоступна.')
+    if payments is None:raise ValueError('Оплата временно недоступна. Попробуйте позже.')
+    settings=Settings.from_config(payments.config)
+    avatar=await read('SELECT look_id FROM ded_moroz_avatar WHERE singleton=1')
+    try:
+        settings.ready(payments.config,stage='audio')
+        settings.ready(payments.config,stage='video',avatar_known=bool(avatar and avatar['look_id']))
+    except ValueError:
+        raise ValueError('Мастерская временно недоступна. Счёт не создан, попробуйте позже.') from None
+    user=event.get_ids()[1]
+    lock=CHECKOUT_LOCKS.setdefault(user,asyncio.Lock())
+    async with lock:
+        invoice=await make_invoice(user,variant='family',children_count=number)
+        link=await payments.create_payment_link(user,order_id=invoice['order_id'],amount=invoice['amount_kopecks']//100,description=invoice['product_name'])
+    b=InlineKeyboardBuilder().row(LinkButton(text=f"💳 Оплатить {invoice['amount_kopecks']//100} ₽",url=link))
+    b.row(CallbackButton(text='✅ Я оплатил(а), продолжить',payload='dm_family_paid:'+invoice['order_id']))
+    b.row(CallbackButton(text='🏠 Главный экран',payload='back_to_main'))
+    await tell(event,f"🎅 Семейное поздравление для {number} детей — {invoice['amount_kopecks']//100} ₽.\n\nПосле оплаты вернитесь в бот: начнём с имени первого ребёнка.",attachments=[b.as_markup()])
 
 
 async def review(event,context,row):
@@ -213,15 +288,14 @@ async def queue_audio(row,*,photo_path=None,photo_url=None):
         await db.commit();return cur.rowcount==1
 
 
-async def callback(event,context,admin):
+async def callback(event,context,admin,payments=None):
     from ded_moroz import begin,enter,get,tell,update,Settings,AUDIO_GENERATING
     from config import Config
     from handlers import PosterStates
     import aiosqlite
     import database
     user=event.get_ids()[1]
-    if admin is None or user!=admin:
-        await entry(event,context,admin);return
+    from ded_moroz_sales import allowed,enabled
     action,key,*extra=event.callback.payload.split(':')
     if action=='dm_family_count':
         if len(extra)>1 or (extra and not re.fullmatch(r'[a-f0-9]{32}',extra[0])):raise ValueError('Откройте семейное поздравление заново.')
@@ -231,12 +305,20 @@ async def callback(event,context,admin):
             for n in range(4,MAX_CHILDREN+1):b.row(CallbackButton(text=str(n)+' детей',payload='dm_family_count:'+str(n)+(':'+token if token else '')))
             await tell(event,'Сколько детей поздравим? Для каждого будет короткий факт и отдельное пожелание.',attachments=[b.as_markup()]);return
         if key not in tuple(map(str,range(2,MAX_CHILDREN+1))):raise ValueError('Выберите количество детей кнопкой.')
+        if admin is None or user!=admin:
+            await checkout(event,context,admin,int(key),payments);return
         row=await begin(user,details={'variant':VARIANT,'children_count':int(key)},new=bool(token),creation_key='family:'+token if token else None)
         if not is_family(row['details']):
             await entry(event,context,admin);return
         await enter(event,context,admin,key=row['id']);return
+    if action=='dm_family_paid':
+        from ded_moroz_sales import payment
+        invoice=await payment(key)
+        if not invoice or invoice['user_id']!=user or invoice.get('variant')!='family':
+            await tell(event,'Счёт семейного поздравления не найден.');return
+        await enter(event,context,admin,payment_key=key);return
     row=await get(key)
-    if not row or row['user_id']!=user or not is_family(row['details']) or row['status']!='input':
+    if not row or row['user_id']!=user or not is_family(row['details']) or row['status']!='input' or not await allowed(row,admin):
         await tell(event,'Эта кнопка уже использована. Откройте семейное поздравление снова.');return
     data=json.loads(row['details'])
     if action=='dm_family_field' and len(extra)==1:

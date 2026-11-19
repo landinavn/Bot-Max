@@ -28,7 +28,7 @@ def normalize(spec):
             raise ValueError('Говорящий должен присутствовать в characters.')
         result['characters'] = [speaker]
         result['video_provider'] = 'heygen'
-        result['camera'] = ('Один средний план по пояс: только говорящий персонаж, обе руки, телефон и край стола.'
+        result['camera'] = result.get('camera_direction') or ('Один средний план по пояс: только говорящий персонаж, обе руки, телефон и край стола.'
                             if result.get('framing')=='medium' else
                             'Один крупный или средний план только говорящего персонажа. Остальные за кадром.')
     else:
@@ -58,6 +58,8 @@ def validate(spec):
         raise ValueError('Новая сцена должна длиться ровно 5 секунд.')
     if spec.get('max_speakers_per_scene') != 1:
         raise ValueError('Один кадр — максимум один голос.')
+    if spec.get('camera_direction') is not None and (not isinstance(spec['camera_direction'],str) or not spec['camera_direction'].strip() or len(spec['camera_direction'])>1500):
+        raise ValueError('Укажите один понятный ракурс в camera_direction, до 1500 символов.')
     lines = spec.get('dialogue', [])
     if not isinstance(lines, list) or len(lines) > 1:
         raise ValueError('Разделите реплики на отдельные пятисекундные сцены.')

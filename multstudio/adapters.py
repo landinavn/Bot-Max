@@ -233,6 +233,7 @@ class Providers:
             refs = [snap['assets']['image']] if snap['assets'].get('image') else []
         else:
             refs = [c['assets']['image'] for c in snap['cast']]
+            refs.extend(r['image'] for r in snap.get('prop_references',[]))
             if snap.get('location_reference'):
                 refs.append(snap['location_reference'])
         urls = [await self.assets.asset_url(a) for a in refs]

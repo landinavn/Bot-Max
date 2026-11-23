@@ -15,6 +15,7 @@ import httpx
 from openai import AsyncOpenAI
 
 from config import Config
+from mothers_day import TITLE as MOTHER_TITLE, LYRICS_INSTRUCTION as MOTHER_LYRICS_INSTRUCTION
 from media_service import audio_duration
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,12 @@ def build_song_request(details: str, scenario_title: str, audio_format: str, sty
         tags += ', New Year, Russian vocals, ' + ('playful, happiness and gifts, short song, 30-40 seconds' if audio_format == 'fun' else
                                                 'heartfelt family memories and wishes, 2-3 minutes')
 
+    if scenario_title == MOTHER_TITLE:
+        prompt = (f'[Verse 1]\nВ окне сияет мягкий свет заката,\nВ твоих ладонях — нежность и тепло.\n'
+                  f'[Chorus]\n{chorus}\n[Verse 2]\nСпасибо, мама, за любовь и ласку.\n'
+                  f'[Chorus]\n{chorus}\n[Bridge]\nПусть в доме будет много добрых встреч.\n[Chorus]\n{chorus}')
+        tags = str(style or 'warm emotional acoustic pop, tender heartfelt ballad, piano, strings')
+        tags += ", Russian vocals, Mother's Day, " + ('short song, 35 seconds, vocals from the start, no long intro or outro' if audio_format == 'fun' else 'full song, 2-3 minutes')
     if scenario_title == TEACHER_SCENARIO_TITLE:
         prompt = (f'[Verse 1]\nВ каждом сердце сила, и команда рядом,\nВперед, к новым высотам, уверенным шагом!\n'
                   f'[Chorus]\n{chorus}\n[Verse 2]\n{details.strip()}\nПобеда ждёт, Ваш пример помогает нам стремиться.\n'
@@ -129,8 +136,13 @@ async def write_song_lyrics(notes: str, tags: str, title: str, *, preserve_choru
         raise AudioNotConfigured('Не настроена текстовая модель для стихов.')
     chorus = re.search(r'\[Chorus\]\s*\n(.*?)(?=\n\[|$)', notes, flags=re.S)
     source_phrase = chorus.group(1).strip() if chorus else None
-    required_phrase = source_phrase if preserve_chorus else None
+    mother = title.startswith(MOTHER_TITLE + ':')
+    required_phrase = source_phrase if preserve_chorus and not mother else None
     instruction = LYRICS_SYSTEM_PROMPT if preserve_chorus else VIDEO_GREETING_LYRICS_PROMPT
+    if mother:
+        instruction = LYRICS_STRUCTURE_PROMPT + ' ' + MOTHER_LYRICS_INSTRUCTION
+        if '35 seconds' in tags:
+            instruction += ' Очень короткая версия: 45–60 русских слов на всю песню, по одной короткой строке в каждой секции, без вступления и проигрышей; главный припев должен прозвучать в первые 20 секунд.'
     if title.startswith(TEACHER_SCENARIO_TITLE + ':'):
         instruction += (' ' + TEACHER_LYRICS_INSTRUCTION if preserve_chorus else
                         ' Напиши уважительную песню-благодарность для учителя или тренера на Вы, '
@@ -163,6 +175,13 @@ async def write_song_lyrics(notes: str, tags: str, title: str, *, preserve_choru
         raise AudioServiceError('Не соблюдена структура песни.')
     if any(not part.strip() for part in re.split(r'\[[^\]]+\]', text)[1:]):
         raise AudioServiceError('В песне есть пустые секции.')
+    if mother:
+        relatives = r'\b(?:вну[кч]\w*|бабуш\w*)\b'
+        if re.search(relatives,text,re.I) and not re.search(relatives,notes,re.I):
+            raise AudioServiceError('Внуки и бабушка могут упоминаться только по данным клиента.')
+        choruses = re.findall(r'\[Chorus\]\s*\n(.*?)(?=\n\[|$)', text, flags=re.S)
+        if re.search(r'с дн[её]м рождения', text, re.I) or not all(re.search(r'с дн[её]м матери', part, re.I) for part in choruses):
+            raise AudioServiceError('Песня должна поздравлять с Днём матери, без подмены праздника.')
     if required_phrase:
         choruses = re.findall(r'\[Chorus\]\s*\n(.*?)(?=\n\[|$)', text, flags=re.S)
         if len(choruses) != 3 or not all(required_phrase in part for part in choruses):

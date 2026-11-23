@@ -322,6 +322,7 @@ async def init_db() -> None:
         await init_promo1111(db)
         from ded_moroz import init_tables as init_ded_moroz
         await init_ded_moroz(db)
+        await db.execute("CREATE TABLE IF NOT EXISTS mother_events (user_id INTEGER NOT NULL,event_name TEXT NOT NULL,source TEXT NOT NULL,PRIMARY KEY(user_id,event_name,source))")
         await _init_repeat_promos(db)
         await _backfill_sale_counters(db, force=not counters_exist or not user_counters_exist)
         await db.commit()
@@ -1171,7 +1172,7 @@ async def save_musical_draft(order_id: str, user_id: int, data: dict, stage: str
         raise ValueError('Некорректный этап музыкальной открытки.')
     async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
         await db.execute("UPDATE musical_orders SET draft=?,input_stage=? WHERE order_id=? AND user_id=? "
-                         "AND status='paid' AND prepaid=1 AND input_ready=0",
+                         "AND status IN ('pending','paid') AND prepaid=1 AND input_ready=0",
                          (json.dumps(data,ensure_ascii=False),stage,order_id,user_id))
         await db.commit()
 
@@ -1256,6 +1257,7 @@ async def reset_musical_workers():
 
 
 CARTOON_TARIFFS = {
+    'mother': (79000, 'Мульт-открытка «День матери» (35 сек)'),
     'short': (59000, 'Мульт-открытка'),
     'long': (129000, 'Мульт-поздравление (до 30 сек)'),
 }
@@ -1268,7 +1270,8 @@ CARTOON_ORDER_THEMES = frozenset({
 async def create_cartoon_order(order_id: str, user_id: int, theme: str, tariff: str):
     if (not isinstance(order_id,str) or not order_id.startswith(('cartoon_','promo_cartoon_')) or len(order_id)>200
             or isinstance(user_id,bool) or not isinstance(user_id,int) or user_id<=0
-            or theme not in CARTOON_ORDER_THEMES or tariff not in CARTOON_TARIFFS):
+            or theme not in CARTOON_ORDER_THEMES or tariff not in CARTOON_TARIFFS
+            or ((theme=='theme_mother') != (tariff=='mother'))):
         raise ValueError('Некорректный мульт-заказ.')
     async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
         await db.execute('BEGIN IMMEDIATE')
@@ -1369,7 +1372,7 @@ def _base_sale_counter_keys(kind: str, order: dict) -> tuple[str, ...]:
         return (('buy_music_direct',) if order['tariff'] == 'direct'
                 else ('buy_music_upsell', 'buy_music_card_149'))
     if kind == 'cartoon':
-        return ('buy_cartoon_590' if order['tariff'] == 'short' else 'buy_cartoon_1290',)
+        return ({'short':'buy_cartoon_590','long':'buy_cartoon_1290','mother':'buy_cartoon_790'}[order['tariff']],)
     if kind == 'photo':
         return (f"buy_photo_{order['tariff']}",)
     if kind == 'animation':
@@ -1683,7 +1686,7 @@ def repeat_sale_counter(kind,order):
     if kind=='musical':
         return 'promo_buy_music_card'
     if kind=='cartoon':
-        return 'promo_buy_cartoon_'+('590' if order['tariff']=='short' else '1290')
+        return 'promo_buy_cartoon_'+{'short':'590','long':'1290','mother':'790'}[order['tariff']]
     if kind=='photo':
         return f"promo_buy_photo_{order['tariff']}"
     return None

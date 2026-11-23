@@ -80,6 +80,9 @@ class PaidMusicalWorker:
                 text='🎵 Ваша музыкальная открытка готова!', attachments=[video, keyboard])
             if sent is None:
                 raise RuntimeError('MAX не подтвердил отправку музыкальной открытки.')
+            if order.get('mode')=='mode_mother':
+                from mother_stats import record
+                await record(order['user_id'],'mother_music_ready',order_id)
             await update_musical_order(order_id, delivered=1, error=None,promo_due=1)
             await send_repeat_offer(self.bot,order['user_id'],'music_card','music:'+order_id,admin_user_id=self.admin_user_id)
             await send_video_share(self.bot, order['user_id'], bot_link=self.bot_link)

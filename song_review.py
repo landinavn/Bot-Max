@@ -28,7 +28,7 @@ async def show_voice(event,context):
     await _reply(event,'🎙 Каким голосом исполнить песню?\n\nСмешанный — мужской и женский вместе. После выбора покажу текст для проверки.',attachments=[b.as_markup()])
 
 
-async def prepare(event,context,*,flow,details,label,audio_format,style=None,writer=None):
+async def prepare(event,context,*,flow,details,label,audio_format,style=None,writer=None,admin=None):
     from handlers import PosterStates
     from audio_service import build_song_request
     d=await context.get_data()
@@ -36,7 +36,7 @@ async def prepare(event,context,*,flow,details,label,audio_format,style=None,wri
     if approved(d,details) and d.get('song_review_source')==source:return False
     notes,tags,title=build_song_request(details,label,audio_format,style)
     if style:tags=style+', Russian vocals, '+('short song, 35 seconds, vocals from the start' if audio_format=='fun' else 'full song, 2-3 minutes')
-    await context.update_data(song_review_source=source,song_review_flow=flow,song_review_details=details,song_review_user=event.get_ids()[1],
+    await context.update_data(song_review_source=source,song_review_flow=flow,song_review_details=details,song_review_user=event.get_ids()[1],song_review_admin=admin is not None and event.get_ids()[1]==admin,
         song_review_label=label,song_review_format=audio_format,song_review_style=style,
         song_review_notes=notes,song_review_base_tags=tags,song_review_title=title,
         song_review_lyrics=None,song_review_approved=False,song_review_voice=None,
@@ -57,6 +57,9 @@ async def show_text(event,context):
         b.row(CallbackButton(text='🎬 Сделать мульт-открытку',payload='song_review:cartoon:'+token))
         b.row(CallbackButton(text='🎵 Сделать музыкальную открытку',payload='song_review:music:'+token))
     else:b.row(CallbackButton(text='✅ Текст подходит, продолжить',payload='song_review:approve:'+token))
+    if d.get('song_review_admin'):
+        b.row(CallbackButton(text='✍️ Переписать текст песни',payload='song_review:rewrite:'+token))
+        b.row(CallbackButton(text='📝 Вставить свой текст',payload='song_review:manual:'+token))
     b.row(CallbackButton(text='✏️ Изменить мои слова',payload='song_review:edit:'+token))
     b.row(CallbackButton(text='🎙 Изменить голос',payload='song_review:voice_menu:'+token))
     b.row(CallbackButton(text='🏠 Главный экран',payload='back_to_main'))
@@ -101,6 +104,14 @@ async def action(event,context,writer):
         await context.update_data(song_review_voice=parts[2],song_setup_voice=parts[2]);await write_text(event,context,writer)
     elif action=='voice_menu' and d.get('song_review_step')=='text':
         await context.update_data(song_review_step='voice');await show_voice(event,context)
+    elif action in ('rewrite','manual') and d.get('song_review_step')=='text' and d.get('song_review_admin'):
+        if action=='manual':
+            await context.update_data(song_review_step='manual')
+            await _reply(event,'📝 Отправьте полный текст песни. Картинка и выбранный голос сохранятся. До 5000 символов. После этого покажу текст для подтверждения.')
+        else:
+            await context.update_data(song_review_lyrics=None,song_review_approved=False,song_review_rewrite_pending=True,song_review_token=uuid4().hex)
+            await _reply(event,'✍️ Перепишу только слова. Картинка, аватар и готовые сцены сохранены. Новая музыка будет создана после подтверждения текста.')
+            await write_text(event,context,writer)
     elif action=='edit' and d.get('song_review_step')=='text':
         import database
         await database.increment_counter('song_lyrics_edit',user_id=event.get_ids()[1])
@@ -120,6 +131,16 @@ async def edit(event,context,writer):
     from handlers import _reply
     from audio_service import build_song_request
     d=await context.get_data()
+    if d.get('song_review_step')=='manual' and d.get('song_review_admin'):
+        from audio_service import validate_song_arguments
+        text=(getattr(event.message.body,'text',None) or '').strip()
+        for source,target in (('Куплет 1','[Verse 1]'),('Куплет 2','[Verse 2]'),('Припев','[Chorus]'),('Переход','[Bridge]')):
+            text='\n'.join(target if line.strip()==source else line for line in text.splitlines())
+        validate_song_arguments(text,d['song_review_tags'],d['song_review_title'])
+        await context.update_data(song_review_lyrics=text,song_review_approved=False,song_review_rewrite_pending=True,
+            song_review_step='text',song_review_token=uuid4().hex)
+        await show_text(event,context)
+        return
     if d.get('song_review_step')!='input':
         await _reply(event,'Используйте кнопки под текстом песни.');return
     text=(getattr(event.message.body,'text',None) or '').strip()

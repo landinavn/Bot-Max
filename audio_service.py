@@ -15,7 +15,7 @@ import httpx
 from openai import AsyncOpenAI
 
 from config import Config
-from mothers_day import TITLE as MOTHER_TITLE, LYRICS_INSTRUCTION as MOTHER_LYRICS_INSTRUCTION
+from mothers_day import TITLE as MOTHER_TITLE, LYRICS_INSTRUCTION as MOTHER_LYRICS_INSTRUCTION, FULL_LYRICS_INSTRUCTION, SHORT_LYRICS_INSTRUCTION
 from media_service import audio_duration
 
 logger = logging.getLogger(__name__)
@@ -66,9 +66,14 @@ def build_song_request(details: str, scenario_title: str, audio_format: str, sty
                                                 'heartfelt family memories and wishes, 2-3 minutes')
 
     if scenario_title == MOTHER_TITLE:
-        prompt = (f'[Verse 1]\nВ окне сияет мягкий свет заката,\nВ твоих ладонях — нежность и тепло.\n'
-                  f'[Chorus]\n{chorus}\n[Verse 2]\nСпасибо, мама, за любовь и ласку.\n'
-                  f'[Chorus]\n{chorus}\n[Bridge]\nПусть в доме будет много добрых встреч.\n[Chorus]\n{chorus}')
+        # Personal source remains intact; these are writing notes, not a tiny song to paraphrase.
+        prompt=(f'[Verse 1]\nИсточник личных деталей клиента: {details.strip()}\n'
+                'Раскрой благодарность за заботу и то, что мама значит для близких.\n'
+                f'[Chorus]\n{details.strip()}\nС Днём матери — цельное признание, имя в ритмичной строке.\n')
+        if audio_format=='gift':
+            prompt+=('[Verse 2]\nРазвей личную мысль клиента: взросление, поддержка и ответная забота, без вымышленных фактов.\n'
+                     f'[Chorus]\n{details.strip()}\n[Bridge]\nПожелай маме радости и времени для себя.\n'
+                     f'[Chorus]\n{details.strip()}')
         tags = str(style or 'warm emotional acoustic pop, tender heartfelt ballad, piano, strings')
         tags += ", Russian vocals, Mother's Day, " + ('short song, 35 seconds, vocals from the start, no long intro or outro' if audio_format == 'fun' else 'full song, 2-3 minutes')
     if scenario_title == TEACHER_SCENARIO_TITLE:
@@ -139,10 +144,10 @@ async def write_song_lyrics(notes: str, tags: str, title: str, *, preserve_choru
     mother = title.startswith(MOTHER_TITLE + ':')
     required_phrase = source_phrase if preserve_chorus and not mother else None
     instruction = LYRICS_SYSTEM_PROMPT if preserve_chorus else VIDEO_GREETING_LYRICS_PROMPT
+    mother_short=mother and '35 seconds' in tags
     if mother:
-        instruction = LYRICS_STRUCTURE_PROMPT + ' ' + MOTHER_LYRICS_INSTRUCTION
-        if '35 seconds' in tags:
-            instruction += ' Очень короткая версия: 45–60 русских слов на всю песню, по одной короткой строке в каждой секции, без вступления и проигрышей; главный припев должен прозвучать в первые 20 секунд.'
+        instruction = ('Ты профессиональный автор персональных песен на русском языке. Верни только текст с музыкальными секциями, без пояснений и заголовка. До 5000 символов. '
+                       + MOTHER_LYRICS_INSTRUCTION + ' ' + (SHORT_LYRICS_INSTRUCTION if mother_short else FULL_LYRICS_INSTRUCTION))
     if title.startswith(TEACHER_SCENARIO_TITLE + ':'):
         instruction += (' ' + TEACHER_LYRICS_INSTRUCTION if preserve_chorus else
                         ' Напиши уважительную песню-благодарность для учителя или тренера на Вы, '
@@ -171,11 +176,17 @@ async def write_song_lyrics(notes: str, tags: str, title: str, *, preserve_choru
         raise AudioServiceError('Некорректный текст песни.')
     text = text.strip()
     sections = re.findall(r'\[([^\]]+)\]', text)
-    if not text.startswith('[Verse 1]') or sections != ['Verse 1','Chorus','Verse 2','Chorus','Bridge','Chorus']:
+    expected_sections=['Verse 1','Chorus'] if mother_short else ['Verse 1','Chorus','Verse 2','Chorus','Bridge','Chorus']
+    if not text.startswith('[Verse 1]') or sections != expected_sections:
         raise AudioServiceError('Не соблюдена структура песни.')
     if any(not part.strip() for part in re.split(r'\[[^\]]+\]', text)[1:]):
         raise AudioServiceError('В песне есть пустые секции.')
     if mother:
+        bodies=re.split(r'\[[^\]]+\]',text)[1:]
+        minimums=[3,4] if mother_short else [6,4,6,4,3,4]
+        if any(len([line for line in body.splitlines() if line.strip()])<minimum
+               for body,minimum in zip(bodies,minimums)):
+            raise AudioServiceError('Песня слишком сокращена для выбранного формата.')
         relatives = r'\b(?:вну[кч]\w*|бабуш\w*)\b'
         if re.search(relatives,text,re.I) and not re.search(relatives,notes,re.I):
             raise AudioServiceError('Внуки и бабушка могут упоминаться только по данным клиента.')

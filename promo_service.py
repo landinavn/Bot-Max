@@ -40,7 +40,12 @@ async def deliver_repeat_offer(bot,offer,*,admin_user_id=None):
             return False
         keyboard=InlineKeyboardBuilder().row(CallbackButton(text='🎁 Забрать со скидкой',
             payload=REPEAT_CALLBACKS[offer['category']])).as_markup()
-        sent=await bot.send_message(user_id=offer['user_id'],text=REPEAT_TEXTS[offer['category']],attachments=[keyboard])
+        text=REPEAT_TEXTS[offer['category']]
+        if offer['category']=='cartoon' and offer['delivery_key'].startswith('cartoon:'):
+            from database import get_cartoon_order
+            order=await get_cartoon_order(offer['delivery_key'].split(':',1)[1])
+            if order and order['tariff']=='mother':text=text.replace('472 ₽ вместо 590 ₽','632 ₽ вместо 790 ₽')
+        sent=await bot.send_message(user_id=offer['user_id'],text=text,attachments=[keyboard])
         if sent is None:
             raise RuntimeError('MAX не подтвердил отправку промо.')
         await mark_repeat_offer_sent(offer['delivery_key'])

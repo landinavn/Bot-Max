@@ -1167,7 +1167,7 @@ async def test_eight_cartoon_themes_use_exact_identity_and_background(monkeypatc
     monkeypatch.setattr(service,'_generate_and_store',generate)
     assert await service.generate_cartoon_avatar(PHOTO_URL,theme)=='https://cdn.example/clean-avatar.png'
     prompt=generate.await_args.kwargs['prompt_override']
-    assert prompt == (
+    expected = (
         'Transform the person from the reference photo into a 3D animated movie character in the style of Pixar/Disney. '
         'STYLE REQUIREMENTS (Absolute Priority): '
         '- 3D rendered cartoon style, smooth stylized skin, big expressive eyes, slightly exaggerated cute facial features. '
@@ -1178,6 +1178,9 @@ async def test_eight_cartoon_themes_use_exact_identity_and_background(monkeypatc
         + service.FACE_ORIENTATION_REQUIREMENT + ' '
         + service.CARTOON_CLOTHING_STYLE + service.CARTOON_CLOTHING[theme] + ' SCENE & BACKGROUND: - ' + background
     )
+    assert prompt.startswith(expected)
+    if theme=='theme_mother':assert 'EXACTLY ONE adult woman' in prompt
+    else:assert prompt==expected
     assert generate.await_args.kwargs['count']==1
 
 

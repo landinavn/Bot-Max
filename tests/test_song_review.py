@@ -1,0 +1,211 @@
+"""Real new interface: occasion -> genre -> voice -> details -> words -> product -> pay."""
+import json
+from unittest.mock import AsyncMock
+
+import pytest
+
+import handlers
+import database
+import song_review
+from audio_orders import PaidAudioWorker
+from test_handlers import callback_event,message_event,ready_context,dispatch_callback,call_handler,event_replies
+from test_prodamus import payments,payment_config
+
+WORDS='[Verse 1]\nДом согревает свет\n[Chorus]\nС Днём матери, Людмила, спасибо за заботу!\n[Verse 2]\nТы даришь нам тепло\n[Chorus]\nС Днём матери, Людмила, спасибо за заботу!\n[Bridge]\nПусть счастье будет рядом\n[Chorus]\nС Днём матери, Людмила, спасибо за заботу!'
+
+
+async def draft(payments,*,scenario='gift_scen_mother',voice='mixed'):
+    writer=AsyncMock(return_value=WORDS)
+    router=handlers.create_router(admin_user_id=999,payments=payments,lyric_writer=writer)
+    ctx=await ready_context()
+    await dispatch_callback(router,callback_event(scenario),ctx)
+    d=await ctx.get_data();assert await ctx.get_state()==handlers.PosterStates.waiting_for_song_setup
+    writer.assert_not_awaited()
+    token=d['song_setup_token']
+    await dispatch_callback(router,callback_event('song_setup:genre:pop:'+token),ctx)
+    await dispatch_callback(router,callback_event('song_setup:voice:'+voice+':'+token),ctx)
+    assert await ctx.get_state()==handlers.GIFT_SCENARIO_STATES[scenario]
+    writer.assert_not_awaited()
+    await call_handler(router,'collect_gift_details',message_event('Людмила; спасибо за заботу'),ctx)
+    d=await ctx.get_data()
+    writer.assert_awaited_once()
+    assert d['song_review_lyrics']==WORDS and d['song_review_voice']==voice
+    assert await ctx.get_state()==handlers.PosterStates.waiting_for_song_review
+    return router,ctx,writer
+
+
+async def test_public_catalog_and_all_three_products_before_any_music_charge(credit_db,payments):
+    router,ctx,writer=await draft(payments)
+    assert not await database.get_audio_order('not-created')
+    async with __import__('aiosqlite').connect(database.DATABASE_PATH) as db:
+        assert (await (await db.execute('SELECT COUNT(*) FROM audio_orders')).fetchone())[0]==0
+    d=await ctx.get_data();event=callback_event('song_review:voice_menu:'+d['song_review_token'])
+    await dispatch_callback(router,event,ctx)
+    event=callback_event('song_review:voice:female:'+d['song_review_token'])
+    await dispatch_callback(router,event,ctx)
+    assert writer.await_count==1  # Changing the vocal style reuses reviewed words.
+    text=str(event.send.await_args_list)
+    assert 'Сделать песню' in text and 'Сделать мульт-открытку' in text and 'Сделать музыкальную открытку' in text
+    assert (await ctx.get_data())['song_review_tags'].endswith('female solo vocals')
+
+
+async def test_change_personal_words_then_confirm_keeps_final_lyrics_for_paid_worker(credit_db,payments):
+    router,ctx,writer=await draft(payments)
+    token=(await ctx.get_data())['song_review_token']
+    await dispatch_callback(router,callback_event('song_review:edit:'+token),ctx)
+    newer=WORDS.replace('заботу','поддержку')
+    writer.return_value=newer
+    await call_handler(router,'song_review_input',message_event('Людмила; спасибо за поддержку'),ctx)
+    assert writer.await_count==2
+    token=(await ctx.get_data())['song_review_token']
+    e=callback_event('song_review:approve:'+token)
+    await dispatch_callback(router,e,ctx)
+    data=await ctx.get_data();order=await database.get_audio_order(data['audio_checkout_id'])
+    assert order['status']=='pending' and order['amount_kopecks']==49000
+    assert order['lyrics']==newer and 'male and female vocals' in order['tags']
+    assert not order['job_id'] and not order['submit_started'] and not order['preview_requested']
+    assert '490 ₽' in str(e.send.await_args_list)
+    assert not await database.pending_audio_orders()
+    await database.mark_audio_paid(order['order_id'],'song-review-paid')
+    generator=AsyncMock(return_value='known-job')
+    worker=PaidAudioWorker(e.bot,generator=generator,waiter=AsyncMock(return_value={'data':{'musics':[{'audioUrl':'https://cdn.example/song.mp3','title':'Маме'}]}}),lyric_writer=AsyncMock(side_effect=AssertionError('Do not rewrite approved text')))
+    await worker.process(order['order_id'])
+    generator.assert_awaited_once()
+    assert generator.await_args.args[0]==newer and 'male and female vocals' in generator.await_args.args[1]
+    assert (await database.get_audio_order(order['order_id']))['delivered']==1
+    await dispatch_callback(router,callback_event('song_review:approve:'+token),ctx)
+    assert generator.await_count==1
+
+
+@pytest.mark.parametrize('product,table,price',[('cartoon','cartoon_orders',79000),('music','musical_orders',29900)])
+async def test_conversion_preserves_review_and_voice_in_durable_unpaid_draft(credit_db,payments,product,table,price):
+    router,ctx,writer=await draft(payments)
+    token=(await ctx.get_data())['song_review_token'];e=callback_event('song_review:'+product+':'+token)
+    await dispatch_callback(router,e,ctx)
+    async with __import__('aiosqlite').connect(database.DATABASE_PATH) as db:
+        db.row_factory=__import__('aiosqlite').Row
+        row=dict(await (await db.execute('SELECT * FROM '+table)).fetchone())
+    assert row['status']=='pending' and row['amount_kopecks']==price
+    seed=json.loads(row['fsm_data'] if product=='cartoon' else row['draft'])
+    assert seed['song_review_lyrics']==WORDS and seed['song_review_voice']=='mixed' and seed['_song_seed']
+    if product=='cartoon':
+        assert row['tariff']=='mother' and row['theme']=='theme_mother'
+        await database.mark_cartoon_paid(row['order_id'],'cartoon-from-song')
+        await dispatch_callback(router,callback_event('cartoon_resume:'+row['order_id']),ctx)
+        assert await ctx.get_state()==handlers.PosterStates.waiting_for_avatar_photo
+    else:
+        await database.mark_musical_paid(row['order_id'],'music-from-song')
+        await dispatch_callback(router,callback_event('music_resume:'+row['order_id']),ctx)
+        assert await ctx.get_state()==handlers.PosterStates.waiting_for_photo
+    assert (await ctx.get_data())['song_review_lyrics']==WORDS
+    writer.assert_awaited_once()
+
+
+async def test_other_occasions_also_use_genre_voice_and_review(credit_db,payments):
+    router,ctx,_=await draft(payments,scenario='gift_scen_bday',voice='male')
+    d=await ctx.get_data()
+    assert 'male solo vocals' in d['song_review_tags']
+    await dispatch_callback(router,callback_event('song_review:cartoon:'+d['song_review_token']),ctx)
+    assert (await ctx.get_data())['song_product_seed']['song_review_lyrics']==WORDS
+    e=callback_event('song_product_theme:theme_ny')
+    await dispatch_callback(router,e,ctx)
+    order=await database.get_cartoon_order((await ctx.get_data())['cartoon_order_id'])
+    assert order['amount_kopecks']==59000 and order['status']=='pending'
+
+
+async def test_stale_review_or_setup_callbacks_cannot_start_music_or_create_invoices(credit_db,payments):
+    router,ctx,writer=await draft(payments)
+    e=callback_event('song_review:approve:'+'a'*32)
+    await dispatch_callback(router,e,ctx)
+    assert not (await ctx.get_data()).get('audio_checkout_id')
+    await ctx.clear()
+    await dispatch_callback(router,callback_event('song_setup:voice:male:'+'b'*32),ctx)
+    writer.assert_awaited_once()
+
+
+async def test_mother_cartoon_preview_and_heygen_story_use_approved_song_without_kling(credit_db,monkeypatch):
+    from maxapi.types import AttachmentUpload
+    from test_handlers import cartoon_photo
+    import mother_story
+    import mothers_day
+    writer=AsyncMock(return_value=WORDS)
+    generator=AsyncMock(return_value='approved-song-job')
+    router=handlers.create_router(admin_user_id=456,lyric_writer=writer,avatar_generator=AsyncMock(return_value='https://cdn.example/mom-avatar.png'),
+        song_generator=generator,song_waiter=AsyncMock(return_value={'data':{'musics':[{'audioUrl':'https://cdn.example/approved.mp3'}]}}))
+    monkeypatch.setattr(handlers,'upload_image_for_max',AsyncMock(return_value=AttachmentUpload(type='image',payload={'token':'image'})))
+    monkeypatch.setattr(handlers,'upload_audio_for_max',AsyncMock(return_value=AttachmentUpload(type='audio',payload={'token':'audio'})))
+    monkeypatch.setattr(handlers,'upload_video_for_max',AsyncMock(return_value=AttachmentUpload(type='video',payload={'token':'video'})))
+    monkeypatch.setattr(handlers,'create_audio_preview',AsyncMock(return_value='https://cdn.example/preview.mp3'))
+    animation=AsyncMock(return_value='https://cdn.example/mother-final.mp4');monkeypatch.setattr(mother_story,'generate',animation)
+    ctx=await ready_context()
+    await dispatch_callback(router,callback_event('cat_cartoon'),ctx)
+    await dispatch_callback(router,callback_event('theme_mother'),ctx)
+    await call_handler(router,'collect_cartoon_photo',cartoon_photo(),ctx)
+    await dispatch_callback(router,callback_event('avatar_ok_1'),ctx)
+    assert (await ctx.get_data())['chosen_song']=='audio_fun_mother'
+    assert await ctx.get_state()==handlers.PosterStates.waiting_for_cartoon_song_phrase
+    await call_handler(router,'collect_video_song_phrase',message_event('Людмила; спасибо за заботу'),ctx)
+    generator.assert_not_awaited()
+    d=await ctx.get_data()
+    await dispatch_callback(router,callback_event('song_review:voice:female:'+d['song_review_token']),ctx)
+    generator.assert_not_awaited()
+    await dispatch_callback(router,callback_event('song_review:approve:'+d['song_review_token']),ctx)
+    generator.assert_awaited_once()
+    assert generator.await_args.args[0]==WORDS and 'female solo vocals' in generator.await_args.args[1]
+    token=(await ctx.get_data())['cartoon_preview_token']
+    await dispatch_callback(router,callback_event('cartoon_music_ok:'+token),ctx)
+    animation.assert_awaited_once()
+    assert animation.await_args.args[1:] == ('https://cdn.example/mom-avatar.png','https://cdn.example/approved.mp3')
+    handlers.create_video_task.assert_not_awaited()
+    writer.assert_awaited_once()
+    assert await ctx.get_state()==handlers.PosterStates.waiting_for_mode
+
+
+async def test_short_song_keeps_199_price_with_approved_text_and_female_voice(credit_db,payments):
+    writer=AsyncMock(return_value=WORDS)
+    router=handlers.create_router(admin_user_id=999,payments=payments,lyric_writer=writer)
+    ctx=await ready_context()
+    await dispatch_callback(router,callback_event('audio_fun_mother'),ctx)
+    token=(await ctx.get_data())['song_setup_token']
+    await dispatch_callback(router,callback_event('song_setup:genre:jazz:'+token),ctx)
+    await dispatch_callback(router,callback_event('song_setup:voice:female:'+token),ctx)
+    await call_handler(router,'collect_song_details',message_event('Людмила; спасибо за заботу'),ctx)
+    token=(await ctx.get_data())['song_review_token']
+    await dispatch_callback(router,callback_event('song_review:approve:'+token),ctx)
+    order=await database.get_audio_order((await ctx.get_data())['audio_checkout_id'])
+    assert order['amount_kopecks']==19900 and order['lyrics']==WORDS
+    assert 'female solo vocals' in order['tags'] and 'jazz' in order['tags']
+    assert order['status']=='pending' and not order['job_id']
+    assert not await database.pending_audio_orders()
+
+
+async def test_old_payment_button_cannot_bypass_new_text_approval(credit_db,payments):
+    router,ctx,writer=await draft(payments)
+    event=callback_event('gift_payment_soon')
+    await dispatch_callback(router,event,ctx)
+    assert 'подтвердите текст' in event.ack.await_args.kwargs['notification']
+    assert not (await ctx.get_data()).get('audio_checkout_id')
+    assert not await database.pending_audio_orders()
+    writer.assert_awaited_once()
+
+
+async def test_paid_music_conversion_completes_inputs_without_rewriting_chosen_song(credit_db,payments,monkeypatch):
+    from test_handlers import photo_event
+    router,ctx,writer=await draft(payments)
+    token=(await ctx.get_data())['song_review_token']
+    await dispatch_callback(router,callback_event('song_review:music:'+token),ctx)
+    key=(await ctx.get_data())['music_prepaid_id']
+    await database.mark_musical_paid(key,'seeded-music-complete')
+    generator=AsyncMock(return_value='music-from-reviewed-text')
+    card=AsyncMock(return_value=['https://cdn.example/card.png'])
+    monkeypatch.setattr(handlers,'fix_text_with_ai',AsyncMock(side_effect=lambda text:text))
+    router=handlers.create_router(admin_user_id=999,payments=payments,lyric_writer=writer,postcard_generator=card,
+        song_generator=generator,song_waiter=AsyncMock(return_value={'data':{'musics':[{'audioUrl':'https://cdn.example/approved-song.mp3'}]}}))
+    await dispatch_callback(router,callback_event('music_resume:'+key),ctx)
+    await call_handler(router,'collect_photo',photo_event(),ctx)
+    await call_handler(router,'collect_card_text',message_event('Мама, с Днём матери!'),ctx)
+    order=await database.get_musical_order(key)
+    assert order['input_ready']==1 and order['audio_url']=='https://cdn.example/approved-song.mp3'
+    assert order['image_url']=='https://cdn.example/card.png'
+    writer.assert_awaited_once();generator.assert_awaited_once()
+    assert generator.await_args.args[0]==WORDS and 'male and female vocals' in generator.await_args.args[1]

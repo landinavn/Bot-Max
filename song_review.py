@@ -31,6 +31,9 @@ async def show_voice(event,context):
 async def prepare(event,context,*,flow,details,label,audio_format,style=None,writer=None,admin=None):
     from handlers import PosterStates
     from audio_service import build_song_request
+    from mothers_day import TITLE as MOTHER_TITLE
+    if label==MOTHER_TITLE and flow in ('cartoon','video'):
+        audio_format='gift'  # Review the full approved song; the cartoon uses an excerpt.
     d=await context.get_data()
     source=[flow,details,label,audio_format,style]
     if approved(d,details) and d.get('song_review_source')==source:return False

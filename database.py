@@ -1257,7 +1257,7 @@ async def reset_musical_workers():
 
 
 CARTOON_TARIFFS = {
-    'mother': (79000, 'Мульт-открытка «День матери» (35 сек)'),
+    'mother': (79000, 'Мульт-открытка «День матери» (60 сек)'),
     'short': (59000, 'Мульт-открытка'),
     'long': (129000, 'Мульт-поздравление (до 30 сек)'),
 }
@@ -1650,6 +1650,19 @@ async def _create_repeat_order(db,table,order_id,identity,base_amount,base_name,
     columns=','.join(values)
     await db.execute(f"INSERT INTO {table}({columns}) VALUES ({','.join('?' for _ in values)})",tuple(values.values()))
     return order_id
+
+
+def cartoon_tariff_value(order):
+    """Previously issued 35-second invoices retain their exact name and amount."""
+    base=CARTOON_TARIFFS.get(order['tariff'])
+    old_name='Мульт-открытка «День матери» (35 сек)'
+    if order['tariff']=='mother':
+        if order.get('promo_token'):
+            if (order.get('promo_base_amount_kopecks'),order.get('promo_base_product_name'))==(79000,old_name):
+                return 79000,old_name
+        elif (order.get('amount_kopecks'),order.get('product_name'))==(79000,old_name):
+            return 79000,old_name
+    return base
 
 
 def repeat_order_value(order,category,base_value,*,creation=False):

@@ -1045,6 +1045,9 @@ def create_router(
     cartoon_video_generator = cartoon_video_generator or generate_video
 
     async def retain_song_submission(data):
+        if admin_user_id is not None and data.get('song_review_user')==admin_user_id and data.get('cartoon_theme')=='theme_mother':
+            from mother_admin_sessions import save
+            await save(admin_user_id,data,PosterStates.cartoon_generating)
         if data.get('cartoon_order_id'):
             order=await get_cartoon_order(data['cartoon_order_id'])
             saved=json.loads(order['fsm_data']) if order and order.get('fsm_data') else {}
@@ -1832,6 +1835,7 @@ def create_router(
             f"- Апгрейд к открытке (доплата 149 ₽): {c('buy_music_upsell')}\n\n"
             "🎬 Мульт-открытки:\n"
             f"- Мульт-открытка (590 ₽): {c('buy_cartoon_590')}\n"
+            f"- Автоматических запусков сборки: {c('cartoon_auto_render')}\n"
             "\n"
             "✨ Оживление фотографий:\n"
             f"- Первый запуск (199 ₽): {c('buy_animation_intro')}\n"
@@ -2683,6 +2687,9 @@ def create_router(
     async def persist_cartoon_state(context):
         data = await context.get_data()
         order_id = data.get('cartoon_order_id')
+        if admin_user_id is not None and data.get('song_review_user')==admin_user_id and data.get('cartoon_theme')=='theme_mother':
+            from mother_admin_sessions import save
+            await save(admin_user_id,data,await context.get_state())
         if order_id:
             await update_cartoon_order(order_id, fsm_data=json.dumps(data, ensure_ascii=False),
                                        fsm_state=str(await context.get_state()))
@@ -2696,7 +2703,8 @@ def create_router(
             if saved.get('_song_seed') and state==str(PosterStates.waiting_for_cartoon_payment):state=str(PosterStates.waiting_for_avatar_photo)
             if state == str(PosterStates.cartoon_generating):
                 # Resume the same stage and cached task, rather than issuing another paid request.
-                state = (PosterStates.waiting_for_cartoon_music_review if saved.get('cartoon_kling_task_id') or saved.get('cartoon_kling_story')
+                state = (PosterStates.waiting_for_cartoon_song_phrase if saved.get('cartoon_auto_pipeline') else
+                         PosterStates.waiting_for_cartoon_music_review if saved.get('cartoon_kling_task_id') or saved.get('cartoon_kling_story')
                          else PosterStates.waiting_for_cartoon_song_phrase if saved.get('chosen_song_phrase')
                          else PosterStates.waiting_for_avatar_photo)
             await context.set_state(state)
@@ -2742,7 +2750,7 @@ def create_router(
                 raise RuntimeError('Не настроена интеграция Prodamus.')
             amount=order['amount_kopecks']//100
             link=await payments.create_payment_link(user_id,order_id=order['order_id'],amount=amount,description=order['product_name'])
-            text=(f"🤱 Мульт-открытка «День матери» (35 секунд) стоит {amount} ₽. Оплатите, чтобы начать создание." if product[0]=='mother' else f"🎬 Мульт-открытка стоит {amount} ₽. Оплатите, чтобы начать создание." if product[0]=='short'
+            text=(f"🤱 Мульт-открытка «День матери» (60 секунд) стоит {amount} ₽. Оплатите, чтобы начать создание." if product[0]=='mother' else f"🎬 Мульт-открытка стоит {amount} ₽. Оплатите, чтобы начать создание." if product[0]=='short'
                   else f"🎬 Мульт-поздравление (до 30 сек) стоит {amount} ₽. Оплатите, чтобы начать создание.")
             if order.get('promo_token'):
                 text+=' Скидка 20%.'
@@ -2781,6 +2789,13 @@ def create_router(
                          else 'Данные заказа восстановлены. Продолжайте по последнему сообщению.')
         else:
             await _reply(event, 'Продолжайте создание по последнему сообщению. Данные заказа сохранены.')
+        restored=await context.get_data()
+        if (restored.get('cartoon_auto_pipeline') and restored.get('chosen_avatar') and
+                song_review.approved(restored,restored.get('chosen_song_phrase')) and
+                await context.get_state()==PosterStates.waiting_for_cartoon_song_phrase):
+            lock=cartoon_locks.setdefault(event.get_ids()[1],asyncio.Lock())
+            if not lock.locked():
+                async with lock:await prepare_cartoon_music_preview(event,context)
         if (await context.get_data()).get('cartoon_video_failed'):
             await cartoon_video_support(event)
 
@@ -3395,6 +3410,10 @@ def create_router(
         if attempt not in (1,2) or data.get('cartoon_video_failed'):
             return
         await context.set_state(PosterStates.cartoon_generating)
+        if event.get_ids()[1]!=admin_user_id and song_review.approved(data,data.get('chosen_song_phrase')):
+            data['cartoon_auto_pipeline']=True
+            await context.update_data(cartoon_auto_pipeline=True)
+            await persist_cartoon_state(context)
         try:
             await _reply(event, '🎵 Создаю песню... Подождите немного.')
             audio_url = data.get(f'song_{attempt}_url')
@@ -3406,6 +3425,13 @@ def create_router(
                 data[f'song_{attempt}_phrase'] = data.get('chosen_song_phrase')
                 await context.update_data(**video_cache(data), **{key:value for key,value in data.items() if key.startswith('song_')})
                 await persist_cartoon_state(context)
+            if (event.get_ids()[1]!=admin_user_id and
+                    song_review.approved(data,data.get('chosen_song_phrase'))):
+                data.update(selected_song_variant=attempt,cartoon_auto_pipeline=True)
+                await context.update_data(selected_song_variant=attempt,cartoon_auto_pipeline=True)
+                await persist_cartoon_state(context)
+                await generate_confirmed_cartoon_video(event,context,data)
+                return
             preview = data.get(f'song_{attempt}_preview_url')
             if not preview:
                 preview = await create_audio_preview(audio_url)
@@ -3495,11 +3521,11 @@ def create_router(
         full_song = data.get(f'song_{selected}_url') or data.get('video_song_url')
         data.update(video_song_url=full_song, chosen_song_url=full_song, selected_song_variant=selected)
         await context.update_data(video_song_url=full_song, chosen_song_url=full_song, selected_song_variant=selected)
-        await increment_counter('song_ok', user_id=user_id)
+        await increment_counter('cartoon_auto_render' if data.get('cartoon_auto_pipeline') else 'song_ok', user_id=user_id)
         session = data['cartoon_session_id']
         await context.set_state(PosterStates.cartoon_generating)
         try:
-            await _reply(event, '🎬 Создаю мультфильм ко Дню матери на 35 секунд. Это займёт несколько минут; буду сообщать о готовности сцен.' if data.get('cartoon_theme')=='theme_mother' else CARTOON_VIDEO_WAIT if data.get('cartoon_theme') else VIDEO_GENERATION_MESSAGE)
+            await _reply(event, '🎬 Продолжаю сохранённую версию мультфильма.' if data.get('cartoon_theme')=='theme_mother' and (data.get('cartoon_kling_story') or {}).get('source',[None])[0]=='mother-one-character-heygen-seven-shots-v1' else '🎬 Создаю минутный мультфильм ко Дню матери. Это займёт несколько минут; буду сообщать о готовности сцен.' if data.get('cartoon_theme')=='theme_mother' else CARTOON_VIDEO_WAIT if data.get('cartoon_theme') else VIDEO_GENERATION_MESSAGE)
             original = data.get('original_image_url') or data['chosen_avatar']
             await context.update_data(original_image_url=original,
                 **{f'avatar_{index}_url': url for index,url in data.get('avatar_urls',{}).items() if index in ('1','2')})
@@ -5603,6 +5629,13 @@ def create_router(
         if not seed or data.get('song_product_kind')!=kind or not song_review.approved(seed,seed.get('song_review_details')):return
         if user!=admin_user_id and payments is None:
             await _reply(event,'Оплата временно недоступна. Слова и голос сохранены.');return
+        if kind=='cartoon' and target=='theme_mother' and seed.get('song_review_format')=='fun':
+            await context.update_data(card_song_precheckout=True,card_song_kind=kind,card_song_target=target,
+                song_setup_flow='cartoon',song_setup_voice=seed['song_review_voice'])
+            await _reply(event,'Для минутного мультфильма нужна полная песня. Покажу полный текст с вашим именем и словами для проверки — перед оплатой.')
+            await song_review.prepare(event,context,flow='cartoon',details=seed['song_review_details'],
+                label=MOTHER_TITLE,audio_format='gift',style=seed.get('song_style'),writer=lyric_writer,admin=admin_user_id)
+            return
         if kind=='cartoon':
             if target not in CARTOON_THEMES:return
             if target=='theme_mother':await increment_counter('theme_mother_click',user_id=user)
@@ -5629,7 +5662,7 @@ def create_router(
             link=await payments.create_payment_link(user,order_id=key,amount=order['amount_kopecks']//100,description=order['product_name'])
             b=InlineKeyboardBuilder().row(LinkButton(text=f"💳 Оплатить {order['amount_kopecks']//100} ₽",url=link))
             b.row(CallbackButton(text='✅ Продолжить после оплаты',payload='cartoon_resume:'+key)).row(home_button())
-            await _reply(event,('🎬 Мульт-открытка ко Дню матери — 35 секунд. Используем короткий фрагмент выбранной песни.\n' if target=='theme_mother' else '🎬 Мульт-открытка с вашей песней.\n')+'Слова и голос сохранены. После оплаты загрузите фото героя.',attachments=[b.as_markup()])
+            await _reply(event,('🎬 Мульт-открытка ко Дню матери — 60 секунд. Песня начинается сразу со слов.\n' if target=='theme_mother' else '🎬 Мульт-открытка с вашей песней.\n')+'Слова и голос сохранены. После оплаты загрузите фото героя.',attachments=[b.as_markup()])
         else:
             if target not in POSTCARD_PROMPTS:return
             if target=='mode_mother':await increment_counter('click_mother_music',user_id=user)
@@ -5827,6 +5860,52 @@ def create_router(
             await persist_cartoon_state(context)
             await _reply(event,'✅ Готовая картинка восстановлена. Слова песни сохранены. Продолжить с этой картинкой?',
                 attachments=[navigation_keyboard((('✅ Продолжить','avatar_ok_1'),('🏠 Главный экран','back_to_main')))])
+
+    @router.message_created(Command('mother_resume'))
+    async def mother_resume(event:MessageCreated,context:MemoryContext):
+        if is_bot_message(event) or admin_user_id is None or event.get_ids()[1]!=admin_user_id:return
+        lock=cartoon_locks.setdefault(admin_user_id,asyncio.Lock())
+        if lock.locked() or await context.get_state()==PosterStates.cartoon_generating:
+            await _reply(event,'Текущий запрос ещё выполняется.');return
+        from mother_admin_sessions import latest
+        snapshot=await latest(admin_user_id)
+        if not snapshot:
+            await _reply(event,'Сохранённых этапов тестового мультфильма нет. Картинку можно вернуть через /restore_cartoon_image.');return
+        async with lock:
+            data,saved_state=snapshot
+            await context.set_data(data)
+            if not data.get('chosen_avatar') or not song_review.approved(data,data.get('chosen_song_phrase') or data.get('song_review_details')):
+                await context.set_state(saved_state)
+                await _reply(event,'Данные теста восстановлены. Сначала выберите картинку и утвердите слова песни. Для правок — /rewrite_song, для готовой картинки — /restore_cartoon_image.');return
+            await context.set_state(PosterStates.waiting_for_cartoon_music_review)
+            await _reply(event,'Восстановлен последний тестовый мультфильм: '+data['cartoon_session_id']+
+                '. Картинка, песня и ID сцен сохранены. Продолжение — после подтверждения под песней.')
+            await prepare_cartoon_music_preview(event,context)
+
+    @router.message_created(Command('mother_minute'))
+    async def mother_minute(event:MessageCreated,context:MemoryContext):
+        if is_bot_message(event) or admin_user_id is None or event.get_ids()[1]!=admin_user_id:return
+        data=await context.get_data()
+        if data.get('cartoon_theme')!='theme_mother' or not data.get('chosen_avatar'):
+            await _reply(event,'Сначала откройте мульт-открытку ко Дню матери и выберите готовую картинку.');return
+        if await context.get_state()==PosterStates.cartoon_generating:
+            await _reply(event,'Дождитесь завершения текущего запроса.');return
+        if not (data.get('song_1_url') or data.get('video_song_url')):
+            await _reply(event,'Сначала подготовьте полную песню. Картинка сохранена.');return
+        old=data.get('cartoon_kling_story')
+        if old and any((shot.get('image_submitting') and not shot.get('image_url')) or
+                (shot.get('video_submitting') and not shot.get('video_url')) for shot in old.get('shots',[])):
+            await _reply(event,'Есть незавершённая старая сцена. Сначала проверьте её задачу, чтобы не оплатить повторную генерацию.');return
+        archive=list(data.get('cartoon_kling_story_archive',[]))
+        archive.append({k:v for k,v in data.items() if k in ('cartoon_kling_story','cartoon_kling_task_id',
+            'cartoon_kling_video_url','cartoon_kling_source','video_merged_url','video_merged_source') and v is not None})
+        await context.update_data(cartoon_kling_story_archive=archive,cartoon_kling_story=None,
+            cartoon_kling_task_id=None,cartoon_kling_video_url=None,cartoon_kling_source=None,
+            video_merged_url=None,video_merged_source=None,cartoon_video_failed=False)
+        await persist_cartoon_state(context)
+        await _reply(event,'Картинка и песня сохранены. Подготовлю новую минутную версию: старые файлы останутся в архиве. '
+            'Новые сцены начнут создаваться после вашего подтверждения под песней.')
+        await prepare_cartoon_music_preview(event,context)
 
     @router.message_created(Command('rewrite_song'))
     async def admin_song_rewrite_command(event:MessageCreated,context:MemoryContext):

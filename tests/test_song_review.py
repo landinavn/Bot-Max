@@ -351,3 +351,130 @@ async def test_mother_card_reviews_full_song_without_technical_sequence_message(
     await call_handler(router,'card_song_details',message_event('Ольга; спасибо за заботу'),ctx)
     assert (await ctx.get_data())['song_review_format']=='gift'
     assert '2-3 minutes' in writer.await_args.args[1] and '35 seconds' not in writer.await_args.args[1]
+
+
+@pytest.mark.parametrize('interrupted',[False,True])
+async def test_paid_customer_goes_from_approved_image_to_final_video_without_audio_preview(credit_db,payments,monkeypatch,interrupted):
+    import asyncio
+    import mother_story
+    from maxapi.types import AttachmentUpload
+    from test_handlers import cartoon_photo
+    router,ctx,writer=await draft(payments)
+    await dispatch_callback(router,callback_event('song_review:cartoon:'+(await ctx.get_data())['song_review_token']),ctx)
+    key=(await ctx.get_data())['cartoon_order_id']
+    await database.mark_cartoon_paid(key,'auto-render-paid')
+    picture=AsyncMock(return_value='https://cdn.example/mom.png')
+    song=AsyncMock(return_value='known-song-id')
+    preview=AsyncMock();audio_upload=AsyncMock()
+    monkeypatch.setattr(handlers,'create_audio_preview',preview)
+    monkeypatch.setattr(handlers,'upload_audio_for_max',audio_upload)
+    monkeypatch.setattr(handlers,'count_people_in_photo',AsyncMock(return_value=1))
+    monkeypatch.setattr(handlers,'create_cartoon_avatar_preview',AsyncMock(return_value='https://cdn.example/preview.png'))
+    monkeypatch.setattr(handlers,'upload_image_for_max',AsyncMock(return_value=AttachmentUpload(type='image',payload={'token':'image'})))
+    monkeypatch.setattr(handlers,'upload_video_for_max',AsyncMock(return_value=AttachmentUpload(type='video',payload={'token':'video'})))
+    calls=0
+    async def render(data,reference,audio,*,checkpoint,progress):
+        nonlocal calls
+        calls+=1
+        if interrupted and calls==1:
+            data['cartoon_kling_story']={'source':['minute','https://cdn.example/mom.png'],'shots':[{'task_id':'already-paid-heygen-id'}]}
+            await checkpoint()
+            raise asyncio.CancelledError()
+        if interrupted:assert data['cartoon_kling_story']['shots'][0]['task_id']=='already-paid-heygen-id'
+        return 'https://cdn.example/minute.mp4'
+    render_mock=AsyncMock(side_effect=render);monkeypatch.setattr(mother_story,'generate',render_mock)
+    router=handlers.create_router(admin_user_id=999,payments=payments,lyric_writer=writer,avatar_generator=picture,
+        song_generator=song,song_waiter=AsyncMock(return_value={'data':{'musics':[{'audioUrl':'https://cdn.example/full-song.mp3'}]}}))
+    await dispatch_callback(router,callback_event('cartoon_resume:'+key),ctx)
+    await call_handler(router,'collect_cartoon_photo',cartoon_photo(),ctx)
+    event=callback_event('avatar_ok_1')
+    if interrupted:
+        with pytest.raises(asyncio.CancelledError):await dispatch_callback(router,event,ctx)
+        assert (await database.get_cartoon_order(key))['status']=='paid'
+        await ctx.clear()
+        event=callback_event('cartoon_resume:'+key)
+        await dispatch_callback(router,event,ctx)
+    else:await dispatch_callback(router,event,ctx)
+    assert (await database.get_cartoon_order(key))['status']=='completed'
+    assert 'video' in str(event.send.await_args_list)
+    preview.assert_not_awaited();audio_upload.assert_not_awaited()
+    picture.assert_awaited_once();song.assert_awaited_once();writer.assert_awaited_once()
+
+
+async def test_short_mother_song_is_expanded_and_reviewed_before_minute_cartoon_invoice(credit_db,payments):
+    writer=AsyncMock(return_value=WORDS)
+    router=handlers.create_router(admin_user_id=999,payments=payments,lyric_writer=writer)
+    ctx=await ready_context()
+    await dispatch_callback(router,callback_event('audio_fun_mother'),ctx)
+    token=(await ctx.get_data())['song_setup_token']
+    await dispatch_callback(router,callback_event('song_setup:genre:pop:'+token),ctx)
+    await dispatch_callback(router,callback_event('song_setup:voice:female:'+token),ctx)
+    await call_handler(router,'collect_song_details',message_event('Ольга; спасибо за заботу'),ctx)
+    assert (await ctx.get_data())['song_review_format']=='fun'
+    await dispatch_callback(router,callback_event('song_review:cartoon:'+(await ctx.get_data())['song_review_token']),ctx)
+    d=await ctx.get_data()
+    assert d['song_review_format']=='gift' and not d['song_review_approved']
+    assert '2-3 minutes' in d['song_review_tags'] and d['song_review_voice']=='female'
+    assert not d.get('cartoon_order_id')
+    writer.assert_awaited();assert writer.await_count==2
+    await dispatch_callback(router,callback_event('song_review:approve:'+d['song_review_token']),ctx)
+    order=await database.get_cartoon_order((await ctx.get_data())['cartoon_order_id'])
+    assert order['status']=='pending' and order['amount_kopecks']==79000
+
+
+async def test_admin_music_and_scene_checkpoints_survive_bot_restart(credit_db,monkeypatch):
+    import asyncio
+    import mother_story
+    import mother_admin_sessions
+    from maxapi.types import AttachmentUpload
+    song=AsyncMock(return_value='retained-song-id');writer=AsyncMock()
+    monkeypatch.setattr(handlers,'create_audio_preview',AsyncMock(return_value='https://cdn.example/preview.mp3'))
+    monkeypatch.setattr(handlers,'upload_audio_for_max',AsyncMock(return_value=AttachmentUpload(type='audio',payload={'token':'audio'})))
+    async def interrupted(data,reference,audio,*,checkpoint,progress):
+        data['cartoon_kling_story']={'source':['minute',reference],'shots':[{'task_id':'retained-video-id'}]}
+        await checkpoint();raise asyncio.CancelledError()
+    monkeypatch.setattr(mother_story,'generate',AsyncMock(side_effect=interrupted))
+    router=handlers.create_router(admin_user_id=456,lyric_writer=writer,song_generator=song,
+        song_waiter=AsyncMock(return_value={'data':{'musics':[{'audioUrl':'https://cdn.example/full.mp3'}]}}))
+    ctx=await ready_context()
+    await ctx.update_data(cartoon_session_id='persistent-admin-test',cartoon_flow='mother',cartoon_theme='theme_mother',
+        chosen_avatar='https://cdn.example/mom.png',chosen_song='audio_fun_mother',
+        chosen_song_phrase='Ольга; спасибо',video_song_phrase='Ольга; спасибо',song_attempt=1,
+        song_review_user=456,song_review_approved=True,song_review_details='Ольга; спасибо',song_review_lyrics=WORDS,
+        song_review_voice='female',song_review_tags='female vocals',song_review_title='Маме',song_review_notes='notes')
+    await ctx.set_state(handlers.PosterStates.waiting_for_cartoon_song_phrase)
+    await mother_admin_sessions.save(456,await ctx.get_data(),await ctx.get_state())
+    await call_handler(router,'mother_resume',message_event('/mother_resume'),ctx)
+    token=(await ctx.get_data())['cartoon_preview_token']
+    with pytest.raises(asyncio.CancelledError):await dispatch_callback(router,callback_event('cartoon_music_ok:'+token),ctx)
+    snapshot,_=await mother_admin_sessions.latest(456)
+    assert snapshot['video_song_job_id']=='retained-song-id'
+    assert snapshot['cartoon_kling_story']['shots'][0]['task_id']=='retained-video-id'
+    assert await mother_admin_sessions.latest(999) is None
+    await ctx.clear()
+    await call_handler(router,'mother_resume',message_event('/mother_resume'),ctx)
+    assert (await ctx.get_data())['cartoon_kling_story']['shots'][0]['task_id']=='retained-video-id'
+    song.assert_awaited_once();writer.assert_not_awaited()
+
+
+async def test_admin_explicit_minute_upgrade_archives_old_clips_and_keeps_picture_and_music(credit_db,monkeypatch):
+    from maxapi.types import AttachmentUpload
+    monkeypatch.setattr(handlers,'create_audio_preview',AsyncMock(return_value='https://cdn.example/preview.mp3'))
+    monkeypatch.setattr(handlers,'upload_audio_for_max',AsyncMock(return_value=AttachmentUpload(type='audio',payload={'token':'audio'})))
+    songs=AsyncMock();pictures=AsyncMock()
+    router=handlers.create_router(admin_user_id=456,song_generator=songs,avatar_generator=pictures)
+    ctx=await ready_context();old={'source':['mother-one-character-heygen-seven-shots-v1','https://cdn.example/mom.png'],
+        'shots':[{'image_url':'https://cdn.example/old.png','video_submitting':True,'video_url':'https://cdn.example/old.mp4'}]}
+    await ctx.update_data(cartoon_theme='theme_mother',cartoon_flow='mother',cartoon_session_id='upgrade-test',
+        chosen_avatar='https://cdn.example/mom.png',chosen_song='audio_fun_mother',chosen_song_phrase='Ольга; спасибо',
+        song_1_url='https://cdn.example/full.mp3',cartoon_kling_story=old,video_merged_url='https://cdn.example/old-final.mp4',
+        song_review_user=456)
+    await ctx.set_state(handlers.PosterStates.waiting_for_mode)
+    await call_handler(router,'mother_minute',message_event('/mother_minute'),ctx)
+    data=await ctx.get_data()
+    assert data['chosen_avatar']=='https://cdn.example/mom.png' and data['song_1_url']=='https://cdn.example/full.mp3'
+    assert data['cartoon_kling_story'] is None and data['video_merged_url'] is None
+    assert data['cartoon_kling_story_archive'][0]['cartoon_kling_story']==old
+    assert data['cartoon_kling_story_archive'][0]['video_merged_url']=='https://cdn.example/old-final.mp4'
+    assert await ctx.get_state()==handlers.PosterStates.waiting_for_cartoon_music_review
+    songs.assert_not_awaited();pictures.assert_not_awaited()

@@ -86,32 +86,40 @@ def renderer(monkeypatch):
     monkeypatch.setattr(media,'_upload_video',Mock(return_value='https://cdn.example/mother.mp4'))
     async def download(http,url,path,limit):path.write_bytes(b'fixture')
     monkeypatch.setattr(media,'_download',download)
-    monkeypatch.setattr(media,'audio_duration',AsyncMock(return_value=35.))
-    async def render(clips,song,target,duration):
-        assert len(clips)==7 and duration==35.;target.write_bytes(b'mp4')
+    async def duration(path):
+        return 120. if path.suffix=='.mp3' else 10. if path.name.startswith('scene-') else 60.
+    monkeypatch.setattr(media,'audio_duration',AsyncMock(side_effect=duration))
+    monkeypatch.setattr(story,'video_duration',AsyncMock(side_effect=duration))
+    monkeypatch.setattr('song_alignment.detect_song_start',AsyncMock(return_value=2.))
+    monkeypatch.setattr(image_service,'_store_image',Mock(side_effect=lambda client,config,path:'https://cdn.example/'+path.name))
+    async def end(video,target):target.write_bytes(b'png')
+    monkeypatch.setattr(story,'extract_last_frame',AsyncMock(side_effect=end))
+    async def render(clips,song,target,duration,**kwargs):
+        assert len(clips)==6 and duration==60. and kwargs['audio_start']==2.;target.write_bytes(b'mp4')
     monkeypatch.setattr(story,'render_local',AsyncMock(side_effect=render))
-    images=AsyncMock(side_effect=['https://cdn.example/image-'+str(i)+'.png' for i in range(7)])
+    images=AsyncMock(side_effect=['https://cdn.example/image-'+str(i)+'.png' for i in range(6)])
     monkeypatch.setattr(image_service,'generate_photosession_frame',images)
-    submit=AsyncMock(side_effect=['heygen-scene-'+str(i) for i in range(7)])
+    submit=AsyncMock(side_effect=['heygen-scene-'+str(i) for i in range(6)])
     monkeypatch.setattr(story,'submit_animation',submit)
-    poll=AsyncMock(side_effect=['https://cdn.example/video-'+str(i)+'.mp4' for i in range(7)])
+    poll=AsyncMock(side_effect=['https://cdn.example/video-'+str(i)+'.mp4' for i in range(6)])
     monkeypatch.setattr(story,'poll_animation',poll)
     return images,submit,poll
 
 
-async def test_seven_different_single_mother_shots_are_retained_and_reused(renderer):
+async def test_six_different_ten_second_mother_shots_are_retained_and_reused(renderer):
     images,submit,poll=renderer;data={};snapshots=[]
     async def checkpoint():snapshots.append(json.loads(json.dumps(data)))
     result=await story.generate(data,'https://cdn.example/mom.png','https://cdn.example/song.mp3',checkpoint=checkpoint,progress=AsyncMock())
     assert result=='https://cdn.example/mother.mp4'
-    assert images.await_count==submit.await_count==poll.await_count==7
-    assert len({c.args[1] for c in images.await_args_list})==7
-    assert all('EXACTLY ONE' in c.args[1] and '16:9' in c.args[1] for c in images.await_args_list)
-    assert images.await_args_list[1].kwargs['style_reference_url']=='https://cdn.example/image-0.png'
+    assert images.await_count==submit.await_count==poll.await_count==6
+    assert len({c.args[1] for c in images.await_args_list})==6
+    assert all('Exactly ONE' in c.args[1] and '16:9' in c.args[1] for c in images.await_args_list)
+    assert images.await_args_list[1].kwargs['style_reference_urls']==('https://cdn.example/image-0.png','https://cdn.example/end-0.png')
+    assert all(c.kwargs['duration']==10 for c in submit.await_args_list)
     assert all(x['task_id'].startswith('heygen-') and x['request_key'] for x in data['cartoon_kling_story']['shots'])
     assert any(s['cartoon_kling_story']['shots'][0].get('video_submitting') and not s['cartoon_kling_story']['shots'][0].get('task_id') for s in snapshots)
     assert await story.generate(data,'https://cdn.example/mom.png','https://cdn.example/song.mp3',checkpoint=checkpoint,progress=AsyncMock())==result
-    assert submit.await_count==images.await_count==7
+    assert submit.await_count==images.await_count==6
 
 
 async def test_unknown_paid_submission_is_not_repeated(renderer):
@@ -127,9 +135,9 @@ async def test_known_heygen_id_resumes_poll_without_second_submission(renderer):
     poll.side_effect=TimeoutError('still rendering')
     with pytest.raises(TimeoutError):await story.generate(data,'https://cdn.example/mom.png','https://cdn.example/song.mp3',checkpoint=AsyncMock(),progress=AsyncMock())
     assert data['cartoon_kling_story']['shots'][0]['task_id']=='heygen-scene-0'
-    poll.side_effect=['https://cdn.example/v-'+str(i)+'.mp4' for i in range(7)]
+    poll.side_effect=['https://cdn.example/v-'+str(i)+'.mp4' for i in range(6)]
     await story.generate(data,'https://cdn.example/mom.png','https://cdn.example/song.mp3',checkpoint=AsyncMock(),progress=AsyncMock())
-    assert images.await_count==submit.await_count==7 and poll.await_count==8
+    assert images.await_count==submit.await_count==6 and poll.await_count==7
 
 
 async def test_too_short_song_stops_before_paid_visuals(renderer,monkeypatch):
@@ -146,15 +154,15 @@ async def test_heygen_uses_existing_silent_image_api_not_avatar_or_kling():
     c=adapter.request.await_args
     assert c.args==('POST','/v3/models/videos')
     assert c.kwargs['payload']['model']=='heygen-video-1' and c.kwargs['payload']['mode']=='image_to_video'
-    assert c.kwargs['payload']['duration']==5 and c.kwargs['idempotency']=='unique-key'
+    assert c.kwargs['payload']['duration']==10 and c.kwargs['idempotency']=='unique-key'
     assert 'audio_url' not in c.kwargs['payload'] and 'avatar_id' not in c.kwargs['payload']
 
 
-async def test_real_ffmpeg_35_seconds_widescreen_song_from_zero(tmp_path):
+async def test_real_ffmpeg_legacy_35_second_story_still_renders(tmp_path):
     clip=tmp_path/'clip.mp4';song=tmp_path/'song.mp3';target=tmp_path/'output.mp4'
-    subprocess.run(['ffmpeg','-v','error','-y','-f','lavfi','-i','color=c=blue:s=160x90:r=25:d=5','-c:v','libx264','-pix_fmt','yuv420p',str(clip)],check=True)
-    subprocess.run(['ffmpeg','-v','error','-y','-f','lavfi','-i','sine=frequency=440:duration=40','-c:a','libmp3lame',str(song)],check=True)
-    await story.render_local([clip]*7,song,target,35)
+    subprocess.run(['ffmpeg','-v','error','-y','-f','lavfi','-i','color=c=blue:s=160x90:r=25:d=10','-c:v','libx264','-pix_fmt','yuv420p',str(clip)],check=True)
+    subprocess.run(['ffmpeg','-v','error','-y','-f','lavfi','-i','sine=frequency=440:duration=70','-c:a','libmp3lame',str(song)],check=True)
+    await story.render_local([clip]*7,song,target,35,shot_seconds=5)
     probe=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_entries','format=duration:stream=codec_name,width,height,start_time,pix_fmt','-of','json',str(target)],text=True))
     assert abs(float(probe['format']['duration'])-35)<.15
     video,audio=probe['streams']
@@ -228,3 +236,56 @@ def test_personalization_keeps_all_other_lines_and_never_adds_grandchildren():
     updated=mother.render_approved_song('Ольги',lines)
     assert updated==base.replace('Но в каждом добром шаге, в каждом взлёте —\nТвоя любовь, что силы нам дала.','\n'.join(lines))
     assert 'внук' not in base.lower() and 'бабуш' not in base.lower()
+
+
+async def test_new_audio_reuses_all_six_paid_scenes_and_refreshes_only_alignment(renderer):
+    import song_alignment
+    images,submit,poll=renderer;data={}
+    for audio in ('https://cdn.example/first.mp3','https://cdn.example/second.mp3'):
+        await story.generate(data,'https://cdn.example/mom.png',audio,checkpoint=AsyncMock(),progress=AsyncMock())
+    assert images.await_count==submit.await_count==poll.await_count==6
+    assert song_alignment.detect_song_start.await_count==2
+
+
+async def test_completed_legacy_story_is_kept_without_submitting_new_minute(renderer):
+    import mother_story_legacy
+    images,submit,poll=renderer
+    data={'cartoon_kling_story':{'source':[mother_story_legacy.POLICY,'https://cdn.example/mom.png'],
+        'shots':[{} for _ in range(7)],'result_audio':'https://cdn.example/old.mp3','result_url':'https://cdn.example/old-35.mp4'}}
+    assert await story.generate(data,'https://cdn.example/mom.png','https://cdn.example/old.mp3',checkpoint=AsyncMock(),progress=AsyncMock())=='https://cdn.example/old-35.mp4'
+    images.assert_not_awaited();submit.assert_not_awaited();poll.assert_not_awaited()
+
+
+async def test_issued_35_second_receipt_still_valid_after_minute_tariff(credit_db,payments):
+    from urllib.parse import parse_qsl,urlsplit
+    from prodamus import parse_form_fields
+    import aiosqlite
+    key=await database.create_cartoon_order('cartoon_legacy_mother_invoice',456,'theme_mother','mother')
+    old='Мульт-открытка «День матери» (35 сек)'
+    async with aiosqlite.connect(database.DATABASE_PATH) as db:
+        await db.execute('UPDATE cartoon_orders SET product_name=? WHERE order_id=?',(old,key));await db.commit()
+    link=await payments.create_payment_link(456,order_id=key,amount=790,description=old)
+    form=parse_form_fields(parse_qsl(urlsplit(link).query,keep_blank_values=True))
+    receipt={'order_num':key,'order_id':'old-35-paid','sum':'790.00','currency':'rub','payment_status':'success',
+        'products':form['products'],'_param_user_id':'456','_param_credits':'0','_param_package_id':'cartoon_mother'}
+    order,_=await payments.validate_payment(receipt)
+    assert order['product_name']==old and order['amount_kopecks']==79000
+
+
+async def test_unknown_alignment_result_does_not_trigger_another_request_or_any_visuals(renderer):
+    import song_alignment
+    song_alignment.detect_song_start.side_effect=TimeoutError('unknown transcription response')
+    data={}
+    with pytest.raises(TimeoutError):await story.generate(data,'https://cdn.example/mom.png','https://cdn.example/song.mp3',checkpoint=AsyncMock(),progress=AsyncMock())
+    with pytest.raises(ValueError,match='ответ неизвестен'):await story.generate(data,'https://cdn.example/mom.png','https://cdn.example/song.mp3',checkpoint=AsyncMock(),progress=AsyncMock())
+    song_alignment.detect_song_start.assert_awaited_once()
+    renderer[0].assert_not_awaited();renderer[1].assert_not_awaited()
+
+
+async def test_short_video_is_not_looped_or_frozen_to_fill_ten_seconds(renderer,monkeypatch):
+    async def duration(path):return 120. if path.suffix=='.mp3' else 8.
+    monkeypatch.setattr(story,'video_duration',AsyncMock(return_value=8.))
+    data={}
+    with pytest.raises(ValueError,match='короче 10'):await story.generate(data,'https://cdn.example/mom.png','https://cdn.example/song.mp3',checkpoint=AsyncMock(),progress=AsyncMock())
+    assert data['cartoon_kling_story']['shots'][0]['task_id']=='heygen-scene-0'
+    renderer[0].assert_awaited_once();renderer[1].assert_awaited_once()

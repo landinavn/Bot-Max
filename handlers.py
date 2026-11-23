@@ -3217,6 +3217,9 @@ def create_router(
                 urls[str(attempt)] = url
                 await context.update_data(avatar_urls=urls, **{f'avatar_{attempt}_url': url},
                     **({'avatar_first_photo_url': photo_url} if attempt == 1 else {}))
+                from cartoon_avatar_archive import remember
+                try:await remember(event.get_ids()[1],await context.get_data())
+                except Exception:logger.exception('Не удалось сохранить ссылку мульт-аватара в архив')
                 await persist_cartoon_state(context)
                 await send_offline_conversion(event.get_ids()[1], goal_id='bot_generation')
             previews = dict(data.get('avatar_preview_urls', {}))
@@ -5496,6 +5499,12 @@ def create_router(
                 logger.exception('Не удалось повторно открыть счёт по утверждённой песне')
                 await _reply(event,'Не удалось открыть счёт. Слова и голос сохранены. Попробуйте ещё раз.')
             return
+        # Preserve free admin generations even when starting over or changing words.
+        from cartoon_avatar_archive import remember
+        try:await remember(user,data)
+        except Exception:
+            logger.exception('Не удалось архивировать готовую картинку перед сменой сценария')
+            await _reply(event,'Не удалось сохранить ссылку на готовую картинку. Данные не сброшены; попробуйте ещё раз.');return
         # New purchases approve words before checkout; no photo generation here.
         await context.clear()
         flow='cartoon' if kind=='cartoon' else 'video'
@@ -5614,7 +5623,8 @@ def create_router(
             await context.clear();await context.update_data(**seed)
             if user==admin_user_id:
                 await context.set_state(PosterStates.waiting_for_avatar_photo)
-                await _reply(event,'👑 Режим администратора: оплата пропущена. Слова и голос сохранены.\n\n'+CARTOON_PHOTO_PROMPT);return
+                await _reply(event,'👑 Режим администратора: оплата пропущена. Слова и голос сохранены.\n\n'+CARTOON_PHOTO_PROMPT,
+                    attachments=[navigation_keyboard((('♻️ Вернуть готовую картинку','restore_cartoon_menu'),))]);return
             await context.set_state(PosterStates.waiting_for_cartoon_payment)
             link=await payments.create_payment_link(user,order_id=key,amount=order['amount_kopecks']//100,description=order['product_name'])
             b=InlineKeyboardBuilder().row(LinkButton(text=f"💳 Оплатить {order['amount_kopecks']//100} ₽",url=link))
@@ -5705,6 +5715,118 @@ def create_router(
         lock=song_review_locks.setdefault(event.get_ids()[1],asyncio.Lock())
         if lock.locked():return
         async with lock:await reopen_admin_song_text(event,context)
+
+    async def show_restore_avatar(event,context,asset):
+        image=await upload_image_for_max(event.bot,asset['image_url'])
+        await context.update_data(cartoon_restore_preview_id=asset['id'])
+        b=InlineKeyboardBuilder().row(CallbackButton(text='✅ Использовать эту картинку',payload='restore_cartoon_use:'+str(asset['id'])))
+        b.row(home_button())
+        await _reply(event,'Готовая картинка из хранилища. Убедитесь, что на ней нет надписи PREVIEW. '
+            'При выборе картинка не генерируется заново; текущие слова песни сохранятся.',attachments=[image,b.as_markup()])
+
+    @router.message_created(Command('restore_cartoon_image'))
+    async def restore_cartoon_image(event:MessageCreated,context:MemoryContext):
+        user=event.get_ids()[1]
+        if (not hasattr(event,'callback') and is_bot_message(event)) or admin_user_id is None or user!=admin_user_id:return
+        if await context.get_state() in (PosterStates.cartoon_generating,PosterStates.generating):
+            await _reply(event,'Дождитесь завершения текущей генерации.');return
+        from cartoon_avatar_archive import remember,recent,import_saved_orders,legacy_objects,save,storage_key,display_date
+        data=await context.get_data()
+        await remember(user,data)
+        parts=(event.message.body.text or '').split(maxsplit=1) if not hasattr(event,'callback') else []
+        arg=parts[1].strip() if len(parts)>1 else ''
+        try:
+            if arg=='storage':
+                config=Config.from_env()
+                await _reply(event,'Ищу до 60 последних картинок за 7 дней. Новая генерация не запускается.')
+                items,complete=await legacy_objects(config)
+                if not items:
+                    await _reply(event,'В проверенной части хранилища подходящих картинок не найдено.');return
+                await context.update_data(cartoon_restore_storage_items=items,cartoon_restore_storage_page=0)
+                await show_storage_avatars(event,context,complete=complete)
+                return
+            if arg:
+                storage_key(Config.from_env(),arg)
+                asset_id=await save(user,arg,data.get('cartoon_theme') or 'theme_mother')
+                from cartoon_avatar_archive import get
+                await show_restore_avatar(event,context,await get(user,asset_id));return
+            await import_saved_orders(user)
+            assets=await recent(user)
+            if not assets:
+                await _reply(event,'Ссылки не сохранились в заказах. Для старой картинки используйте '
+                    '/restore_cartoon_image storage — покажу файлы из хранилища, включая оригиналы.');return
+            b=InlineKeyboardBuilder()
+            for asset in assets:
+                label=CARTOON_THEMES.get(asset['theme'],asset['theme'])
+                b.row(CallbackButton(text=f"{display_date(asset['created_at'])} · {label}",payload='restore_cartoon_show:'+str(asset['id'])))
+            b.row(home_button())
+            await _reply(event,'Выберите сохранённую картинку. Если нужной нет: /restore_cartoon_image storage',attachments=[b.as_markup()])
+        except Exception:
+            logger.exception('Не удалось открыть архив мульт-аватаров')
+            await _reply(event,'Не удалось открыть сохранённую картинку. Проверьте ссылку или доступ к хранилищу. Генерация не запускалась.')
+
+    async def show_storage_avatars(event,context,*,complete=True):
+        data=await context.get_data();items=data.get('cartoon_restore_storage_items',[])
+        page=data.get('cartoon_restore_storage_page',0)
+        from cartoon_avatar_archive import save,display_date
+        for item in items[page:page+3]:
+            asset_id=await save(event.get_ids()[1],item['url'],data.get('cartoon_theme') or 'theme_mother')
+            image=await upload_image_for_max(event.bot,item['url'])
+            b=InlineKeyboardBuilder().row(CallbackButton(text='Выбрать эту картинку',payload='restore_cartoon_show:'+str(asset_id)))
+            await _reply(event,'Сохранённый файл · '+display_date(item['date'])+'\nВыбирайте оригинал без PREVIEW.',attachments=[image,b.as_markup()])
+        await context.update_data(cartoon_restore_storage_page=page+3)
+        if page+3<len(items):
+            await _reply(event,'Показать следующие сохранённые файлы?',attachments=[navigation_keyboard((('Ещё картинки','restore_cartoon_more'),))])
+        if not complete:await _reply(event,'Проверена часть хранилища (до 20 000 файлов). При необходимости можно указать точную ссылку после команды.')
+
+    @router.message_callback(F.callback.payload.startswith('restore_cartoon_show:') | F.callback.payload.startswith('restore_cartoon_use:') | F.callback.payload.in_({'restore_cartoon_more','restore_cartoon_menu'}))
+    async def restore_cartoon_pick(event:MessageCallback,context:MemoryContext):
+        await event.ack(notification='Сохранённая картинка')
+        user=event.get_ids()[1]
+        if admin_user_id is None or user!=admin_user_id or event.message is None:return
+        lock=cartoon_locks.setdefault(user,asyncio.Lock())
+        if lock.locked():return
+        async with lock:
+            if await context.get_state() in (PosterStates.cartoon_generating,PosterStates.generating):return
+            payload=event.callback.payload
+            if payload=='restore_cartoon_menu':
+                await restore_cartoon_image(event,context);return
+            if payload=='restore_cartoon_more':
+                await show_storage_avatars(event,context);return
+            from cartoon_avatar_archive import get
+            try:asset_id=int(payload.split(':',1)[1])
+            except ValueError:return
+            asset=await get(user,asset_id)
+            if not asset:return
+            if payload.startswith('restore_cartoon_show:'):
+                await show_restore_avatar(event,context,asset);return
+            data=await context.get_data()
+            if data.get('cartoon_restore_preview_id')!=asset_id:return
+            if data.get('cartoon_order_id'):
+                order=await get_cartoon_order(data['cartoon_order_id'])
+                if not order or order['user_id']!=user:
+                    await _reply(event,'Это заказ другого пользователя. Его материалы не изменены.');return
+                if order['status']=='completed':
+                    await context.update_data(cartoon_order_id=None)
+            if data.get('cartoon_theme') and data['cartoon_theme']!=asset['theme']:
+                await _reply(event,'Картинка относится к другой теме. Откройте нужную мульт-открытку.');return
+            theme=asset['theme']
+            if theme not in CARTOON_THEMES:return
+            details=data.get('song_review_details') or data.get('chosen_song_phrase')
+            approved=song_review.approved(data,details)
+            await context.update_data(cartoon_theme=theme,cartoon_mode=theme,
+                cartoon_flow='mother' if theme=='theme_mother' else 'short',
+                cartoon_amount_kopecks=79000 if theme=='theme_mother' else 59000,
+                cartoon_session_id=data.get('cartoon_session_id') or uuid4().hex,
+                chosen_avatar=asset['image_url'],original_image_url=asset['image_url'],avatar_attempt=1,
+                avatar_urls={'1':asset['image_url']},avatar_1_url=asset['image_url'],avatar_preview_urls={},
+                cartoon_restore_preview_id=None,chosen_song='audio_fun_mother' if theme=='theme_mother' else 'audio_fun_universal',
+                chosen_song_phrase=details,video_song_phrase=details,_song_seed=approved,
+                card_song_precheckout=False)
+            await context.set_state(PosterStates.waiting_for_avatar_review)
+            await persist_cartoon_state(context)
+            await _reply(event,'✅ Готовая картинка восстановлена. Слова песни сохранены. Продолжить с этой картинкой?',
+                attachments=[navigation_keyboard((('✅ Продолжить','avatar_ok_1'),('🏠 Главный экран','back_to_main')))])
 
     @router.message_created(Command('rewrite_song'))
     async def admin_song_rewrite_command(event:MessageCreated,context:MemoryContext):

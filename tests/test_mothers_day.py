@@ -21,8 +21,13 @@ from test_prodamus import payments,payment_config
 from test_handlers import callback_event,ready_context,dispatch_callback,event_replies,call_handler,message_event
 
 
-def lyrics(chorus='С Днём матери, Людмила! Спасибо за заботу.'):
-    return '[Verse 1]\nВ окне сияет свет\n[Chorus]\n'+chorus+'\n[Verse 2]\nТы даришь нам тепло\n[Chorus]\n'+chorus+'\n[Bridge]\nПусть счастье будет рядом\n[Chorus]\n'+chorus
+def lyrics(chorus='С Днём матери! Спасибо за заботу.', *, full=False):
+    verse='В окне родного дома свет не гаснет\nС тобой любой обычный вечер праздник\nДля Ольги эта песня благодарность\nЗа то что можно быть собой'
+    chorus+='\nПусть радость возвращается к тебе\nСпасибо за поддержку и принятие\nТеперь мы будем беречь тебя'
+    if not full:return '[Verse 1]\n'+verse+'\n[Chorus]\n'+chorus
+    verse+='\nКогда тревоги рядом ты согреешь\nИ силы снова обретаю я'
+    bridge='Пусть дни заботой согревают\nИ всё сбывается что хочешь ты\nПусть сердце радости не забывает'
+    return '[Verse 1]\n'+verse+'\n[Chorus]\n'+chorus+'\n[Verse 2]\n'+verse+'\n[Chorus]\n'+chorus+'\n[Bridge]\n'+bridge+'\n[Chorus]\n'+chorus
 
 
 @pytest.mark.parametrize('fmt',['fun','gift'])
@@ -47,8 +52,8 @@ async def test_lyrics_allow_inflection_and_only_requested_grandchildren(monkeypa
     assert await audio.write_song_lyrics(notes,tags,title)==text
     body=json.loads(route.calls[0].request.content)
     instruction=body['messages'][0]['content']
-    assert 'Разрешено грамматически' in instruction and 'НЕ ко дню рождения' in instruction
-    assert '35' in tags and '45–60' in instruction
+    assert 'естественным ритмом и падежом' in instruction and 'НЕ ко дню рождения' in instruction
+    assert '35' in tags and '55–85' in instruction
     assert json.loads(body['messages'][1]['content'])['required_chorus_phrase'] is None
 
 
@@ -202,3 +207,21 @@ async def test_cannot_buy_new_mother_story_at_old_short_price(credit_db):
     with pytest.raises(ValueError):await database.create_cartoon_order('cartoon_wrong_theme',456,'theme_ny','mother')
     key=await database.create_cartoon_order('cartoon_other_theme',456,'theme_ny','short')
     assert (await database.get_cartoon_order(key))['amount_kopecks']==59000
+
+
+@respx.mock
+async def test_full_mother_song_keeps_developed_verses_and_name_outside_chorus(monkeypatch):
+    monkeypatch.setattr(audio.Config,'from_env',lambda:Config(token='test',photo_path=Path('unused'),image_api_key='test-key'))
+    notes,tags,title=audio.build_song_request('Ольга; спасибо за принятие и поддержку',mother.TITLE,'gift')
+    text=lyrics(full=True)
+    route=respx.post('https://api.openai.com/v1/chat/completions').mock(return_value=httpx.Response(200,json={
+        'choices':[{'finish_reason':'stop','message':{'content':text}}]}))
+    assert await audio.write_song_lyrics(notes,tags,title)==text
+    instruction=json.loads(route.calls[0].request.content)['messages'][0]['content']
+    assert '180–260' in instruction and '8 строк' in instruction
+    assert 'НЕ обязано повторяться' in instruction
+    assert 'иначе 2–4 строки' not in instruction
+    # A collapsed six-section full version is rejected before the music request.
+    route.mock(return_value=httpx.Response(200,json={'choices':[{'finish_reason':'stop','message':{
+        'content':'[Verse 1]\nПривет\n[Chorus]\nС Днём матери\n[Verse 2]\nСпасибо\n[Chorus]\nС Днём матери\n[Bridge]\nУра\n[Chorus]\nС Днём матери'}}]}))
+    with pytest.raises(audio.AudioServiceError,match='сокращена'):await audio.write_song_lyrics(notes,tags,title)

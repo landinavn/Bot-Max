@@ -13,6 +13,9 @@ from maxapi.exceptions import MaxApiError
 from maxapi.types import AttachmentUpload, PhotoAttachmentPayload
 
 import handlers
+import song_review
+_REAL_PREPARE_SONG = song_review.prepare
+_LEGACY_CARD_ENTRY = False
 from handlers import EXAMPLE_TEXT, NO_CREDITS_TEXT, PACKAGES_TEXT, PosterStates, create_router
 
 
@@ -40,6 +43,9 @@ def accepted_song_draft_for_legacy_regressions(monkeypatch):
     import song_review
     monkeypatch.setattr(song_review,'prepare',AsyncMock(return_value=False))
     monkeypatch.setattr(song_review,'start_questions',AsyncMock(return_value=False))
+    # This module checks old saved/paid scenarios. Actual new checkout UI is covered
+    # without this adapter in test_song_review (including restart and payment gates).
+    monkeypatch.setattr(__import__(__name__),'_LEGACY_CARD_ENTRY',True)
 
 
 @pytest.fixture(autouse=True)
@@ -109,6 +115,7 @@ def callback_event(payload, *, deleted=False):
 
 
 async def dispatch_callback(router, event, context):
+    before=await context.get_data()
     matches = [
         handler for handler in router.event_handlers
         if handler.update_type == UpdateType.MESSAGE_CALLBACK
@@ -118,6 +125,48 @@ async def dispatch_callback(router, event, context):
     func = matches[0].func_event
     kwargs = {"context": context} if "context" in signature(func).parameters else {}
     await func(event, **kwargs)
+    if (_LEGACY_CARD_ENTRY and (await context.get_data()).get('card_song_precheckout')
+            and await context.get_state()==PosterStates.waiting_for_song_setup):
+        await accepted_card_entry(router,event,context,before)
+
+
+async def accepted_card_entry(router,event,context,before):
+    """Supply an approved text then use real checkout; continue as a legacy saved draft.
+
+    Existing regression tests start with photo/song stages. Their full new public
+    voice/review UI is tested separately, rather than repeated hundreds of times.
+    """
+    import json
+    import database
+    d=await context.get_data();flow=d['song_setup_flow'];kind=d['card_song_kind']
+    # Keep the real voice selection and explicit approval; only the text model is a fixture.
+    token=d['song_setup_token']
+    await dispatch_callback(router,callback_event('song_setup:voice:female:'+token),context)
+    details='Мама, спасибо за всё!'
+    await _REAL_PREPARE_SONG(event,context,flow=flow,details=details,label=d['card_song_label'],
+        audio_format='fun',writer=AsyncMock(return_value='[Verse 1]\nСпасибо за заботу\n[Chorus]\nС Днём матери, мама!'))
+    # A retried legacy checkout retains its original pending order if its tariff is current.
+    key=before.get('cartoon_order_id' if kind=='cartoon' else 'music_prepaid_id')
+    if key:
+        order=await (database.get_cartoon_order(key) if kind=='cartoon' else database.get_musical_order(key))
+        expected=(79000 if d['card_song_target']=='theme_mother' else 59000) if kind=='cartoon' else 29900
+        if order and order['status']=='pending' and order['amount_kopecks']==expected:
+            await context.update_data(**{('cartoon_order_id' if kind=='cartoon' else 'music_prepaid_id'):key})
+    confirm=callback_event('song_review:approve:'+(await context.get_data())['song_review_token'])
+    confirm.send,confirm.bot,confirm.get_ids=event.send,event.bot,event.get_ids
+    await dispatch_callback(router,confirm,context)
+    # Preserve the old order snapshot format for the legacy resume regressions.
+    saved=await context.get_data()
+    if await context.get_state() in (PosterStates.waiting_for_cartoon_payment,PosterStates.waiting_for_avatar_photo,
+            PosterStates.waiting_for_video_payment,PosterStates.waiting_for_photo):
+        saved={k:v for k,v in saved.items() if not k.startswith(('song_review_','song_setup_'))
+            and k not in ('_song_seed','chosen_song_phrase','video_song_phrase','song_custom_text','chosen_song')}
+        await context.set_data(saved)
+        if saved.get('cartoon_order_id'):
+            await database.update_cartoon_order(saved['cartoon_order_id'],fsm_data=json.dumps(saved),
+                fsm_state=str(PosterStates.waiting_for_avatar_photo))
+        if saved.get('music_prepaid_id'):
+            await database.save_musical_draft(saved['music_prepaid_id'],event.get_ids()[1],saved,'photo')
 
 
 async def dispatch_callback_and_phrase(router, event, context, phrase=None):
@@ -6057,7 +6106,7 @@ async def start_themed_cartoon(router,context,theme='theme_ny',entry='cat_cartoo
     await dispatch_callback(router,callback_event(entry),context)
     selected=callback_event(theme)
     await dispatch_callback(router,selected,context)
-    assert selected.send.await_args.args[0]==handlers.CARTOON_PHOTO_PROMPT
+    assert selected.send.await_args.args[0].endswith(handlers.CARTOON_PHOTO_PROMPT)
     await call_handler(router,'collect_cartoon_photo',cartoon_photo(),context)
     await dispatch_callback(router,callback_event('avatar_ok_1'),context)
     await dispatch_callback(router,callback_event('cartoon_song:audio_fun_ny' if theme=='theme_ny' else 'cartoon_song:audio_fun_universal'),context)
@@ -6167,8 +6216,8 @@ async def test_cartoon_customer_cannot_bypass_payment_with_old_or_forged_buttons
     elif payload in handlers.CARTOON_PRODUCTS:
         assert await context.get_state() == PosterStates.waiting_for_cartoon_style
     elif payload in handlers.CARTOON_THEMES:
-        assert await context.get_state() == PosterStates.waiting_for_cartoon_payment
-        assert 'Не удалось создать платёжную ссылку' in event.send.await_args.args[0]
+        assert await context.get_state() == PosterStates.waiting_for_song_review
+        assert 'Оплата временно недоступна' in event.send.await_args.args[0]
     elif payload.startswith('cartoon_style:'):
         assert 'Выберите одну из новых тем' in event.ack.await_args.kwargs['notification']
     else:
@@ -6245,6 +6294,8 @@ async def test_themed_cartoon_real_dispatcher_routes_photo_phrase_review_and_fin
     try:
         await click('cat_cartoon');await click('theme_mar8')
         context=dp.fsm.get_context(chat_id=123,user_id=456)
+        legacy=callback_event('theme_mar8');legacy.bot=bot
+        await accepted_card_entry(router,legacy,context,{})
         await dp.handle(MessageCreated(timestamp=2,bot=bot,message=message(attachments=[{'type':'image','payload':{'photo_id':1,'token':'source','url':'https://photos.example.com/photo.png'}}])))
         assert await context.get_state()==PosterStates.waiting_for_avatar_review
         await click('avatar_ok_1')
@@ -6413,9 +6464,7 @@ async def test_cartoon_checkout_before_photo_and_paid_resume(credit_db, entry, a
     assert order['amount_kopecks']==amount*100 and order['status']=='pending'
     assert order['product_name'] == (handlers.CARTOON_TARIFFS['mother'][1] if theme=='theme_mother' else 'Мульт-открытка')
     payments.create_payment_link.assert_awaited_once_with(456,order_id=order['order_id'],amount=amount,description=order['product_name'])
-    expected=('🤱 Мульт-открытка «День матери» (35 секунд) стоит 790 ₽. Оплатите, чтобы начать создание.' if theme=='theme_mother' else '🎬 Мульт-открытка стоит 590 ₽. Оплатите, чтобы начать создание.' if amount==590 else
-              '🎬 Мульт-поздравление (до 30 сек) стоит 1290 ₽. Оплатите, чтобы начать создание.')
-    assert event.send.await_args.args[0]==expected
+    assert 'Слова и голос сохранены. После оплаты загрузите фото героя.' in event.send.await_args.args[0]
     assert event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0].url=='https://shop.payform.ru/cartoon-personal'
     assert await context.get_state()==PosterStates.waiting_for_cartoon_payment
     await call_handler(router,'echo',cartoon_photo(),context)
@@ -6564,6 +6613,9 @@ async def test_cartoon_real_dispatcher_requires_webhook_before_photo_then_restor
     try:
         await click('cat_cartoon')
         await click('theme_feb23')
+        context=dp.fsm.get_context(chat_id=123,user_id=456)
+        legacy=callback_event('theme_feb23');legacy.bot=bot
+        await accepted_card_entry(router,legacy,context,{})
         order_id=payments.create_payment_link.await_args.kwargs['order_id']
         await photo()
         avatar.assert_not_awaited()
@@ -6802,7 +6854,10 @@ async def test_second_song_keyboard_uses_exact_confirm_video_2_payload(credit_db
     await dispatch_callback(router,callback_event('cartoon_music_bad:'+(await context.get_data())['cartoon_preview_token']),context)
     event=await submit_themed_song(router,context,'Аня, будь счастлива!')
     buttons=event.message.answer.await_args.kwargs['attachments'][1].payload.buttons
-    assert buttons[-1][0].text=='🎬 Создать видео' and buttons[-1][0].payload=='confirm_video_2'
+    create=next(row[0] for row in buttons if row[0].payload=='confirm_video_2')
+    assert create.text=='🎬 Создать видео'
+    assert buttons[-1][0].text=='✍️ Переписать текст песни'
+    assert buttons[-1][0].payload.startswith('admin_song_rewrite:')
 
 
 async def test_confirm_video_2_failure_has_traceback_and_support_without_silent_hang(credit_db,monkeypatch,caplog):

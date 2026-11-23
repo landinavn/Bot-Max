@@ -27,7 +27,7 @@ async def test_submit_exact_custom_music_request_and_fetch():
         result = await service.fetch_song('job-1')
     calls = list(http.requests.values())
     assert calls[0][0].kwargs['json'] == {'custom': True, 'instrumental': False, 'mv': 'chirp-v6',
-        'prompt': 'Текст песни', 'title': 'Для Ани', 'tags': 'pop, start immediately with vocals, no long intro', 'audio_format': 'mp3'}
+        'prompt': 'Текст песни', 'title': 'Для Ани', 'tags': 'pop, vocals at 0.0 seconds, first lyric immediately, zero instrumental intro, no wordless humming', 'audio_format': 'mp3'}
     assert calls[0][0].kwargs['headers']['TT-API-KEY'] == 'secret-test-ttapi'
     assert result['status'] == 'SUCCESS'
 

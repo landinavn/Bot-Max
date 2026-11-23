@@ -1,4 +1,4 @@
-"""Seven retained five-second shots; only explicit, checkpointed paid submissions."""
+"""Six genuine 10-second shots, vocal start alignment, retained paid IDs and legacy resume."""
 import asyncio
 import shutil
 import os
@@ -9,35 +9,18 @@ from pathlib import Path
 
 import httpx
 
-POLICY = 'mother-one-character-heygen-seven-shots-v1'
-SHOTS = (
-    ('Средний план: мама ставит цветы в вазу', 'Medium shot. Mother gently places a bouquet into a vase on the dining table.'),
-    ('Цветы и улыбка мамы', 'Medium side shot including her face and hands. Mother arranges the flowers, then smiles at them.'),
-    ('Общий план: мама накрывает стол', 'Wide shot. Mother sets plates on the dining table, moving naturally around it.'),
-    ('Мама завершает сервировку', 'Medium shot. Mother folds a napkin and carefully sets the last cup on the table.'),
-    ('Мама приглашает к столу', 'Medium shot. Mother turns toward the doorway and makes a warm inviting hand gesture toward the table. Guests remain off-screen.'),
-    ('Мама открывает фотоальбом', 'Medium seated shot. Mother opens a family photo album at the same dining table.'),
-    ('Тёплые воспоминания', 'Over-the-shoulder medium shot. Mother slowly turns an album page, then looks up with a tender smile. Album images are indistinct decorative shapes, no legible faces.'),
-)
-BASE = (
-    'Single continuous high-quality stylized 3D animated family movie, horizontal 16:9 frame. Keep her entire head comfortably inside the central widescreen safe area. '
-    'EXACTLY ONE visible character: the same adult mother as in the identity reference. '
-    'Preserve her age, recognizable face, hair, outfit and proportions. '
-    'Keep the exact same cozy apartment, dining table, vase, furniture, sunset lighting and color palette '
-    'as in the location reference. No children, other adults, crowds, reflections of people or extra faces. '
-    'One undivided frame, no collage, split screen, inset or montage. No text, subtitles, logos or watermark. '
-    'Mother does not talk or sing; closed relaxed mouth, no lip sync. Background song will be added later. '
-)
+from mother_storyboard import POLICY,SHOTS,BASE,SHOT_SECONDS,DURATION,image_prompt,video_prompt
+import mother_story_legacy as legacy
 
 
-async def submit_animation(adapter,image_url,prompt,key):
+async def submit_animation(adapter,image_url,prompt,key,*,duration=SHOT_SECONDS):
     from heygen import https_url
     https_url(image_url)
     # Same image-to-video API contract used by the existing silent studio scenes.
     data=await adapter.request('POST','/v3/models/videos',payload={
         'model':'heygen-video-1','mode':'image_to_video',
         'image':{'type':'url','url':image_url},'prompt':prompt,
-        'duration':5,'resolution':'1080p','prompt_enhancement':'disabled'},idempotency=key)
+        'duration':duration,'resolution':'1080p','aspect_ratio':'16:9','prompt_enhancement':'disabled'},idempotency=key)
     return adapter.identifier(data.get('video_id') or data.get('id'))
 
 
@@ -59,21 +42,45 @@ async def poll_animation(adapter,provider_id,*,timeout=1200):
     raise TimeoutError('Ожидание сцены HeyGen истекло. ID сохранён, новый платный запрос не отправляется.')
 
 
-async def render_local(clips, audio, target, duration):
+async def video_duration(path):
     from media_service import run_media_process,MediaServiceError
-    if len(clips)!=len(SHOTS) or not 30<=duration<=35:
-        raise ValueError('Нужны семь сцен и песня продолжительностью не менее 30 секунд.')
+    import json,math
+    raw=await run_media_process(shutil.which('ffprobe'),'-v','error','-select_streams','v:0',
+        '-show_entries','stream=duration','-of','json',str(path),timeout=30)
+    try:
+        duration=float(json.loads(raw)['streams'][0]['duration'])
+        if not math.isfinite(duration) or duration<=0:raise ValueError
+        return duration
+    except (ValueError,KeyError,IndexError,TypeError):
+        raise MediaServiceError('Не удалось проверить длительность видеоряда.') from None
+
+
+async def extract_last_frame(video,target):
+    from media_service import run_media_process
+    await run_media_process(shutil.which('ffmpeg'),'-nostdin','-v','error','-y','-sseof','-0.08',
+        '-i',str(video),'-frames:v','1',str(target),timeout=60)
+    if not target.is_file():raise ValueError('Не удалось сохранить кадр для продолжения сцены.')
+
+
+async def render_local(clips,audio,target,duration,*,shot_seconds=SHOT_SECONDS,audio_start=0.):
+    from media_service import run_media_process,MediaServiceError
+    old=len(clips)==len(legacy.SHOTS) and shot_seconds==5 and 30<=duration<=35
+    new=len(clips)==len(SHOTS) and shot_seconds==10 and duration==60
+    if not (old or new) or audio_start<0:raise ValueError('Неверная длительность сцен мультфильма.')
     binary=shutil.which('ffmpeg')
     if not binary:raise MediaServiceError('Для мультфильма установите ffmpeg.')
     inputs=[];filters=[]
     for i,path in enumerate(clips):
         inputs+=['-i',str(path)]
-        filters.append(f'[{i}:v]setpts=PTS-STARTPTS,fps=25,scale=1280:720:force_original_aspect_ratio=increase,'
-                       f'crop=1280:720,setsar=1,'
-                       f'tpad=stop_mode=clone:stop_duration=5,trim=duration=5,setpts=PTS-STARTPTS[v{i}]')
+        # The foreground is never zoomed/cropped. Fill any aspect-ratio margins with a soft backdrop.
+        filters.append(f'[{i}:v]setpts=PTS-STARTPTS,fps=25,split=2[bg{i}][fg{i}]')
+        filters.append(f'[bg{i}]scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,boxblur=20:1[b{i}]')
+        filters.append(f'[fg{i}]scale=1280:720:force_original_aspect_ratio=decrease[f{i}]')
+        filters.append(f'[b{i}][f{i}]overlay=(W-w)/2:(H-h)/2,setsar=1,'
+            f'tpad=stop_mode=clone:stop_duration=0.25,trim=duration={shot_seconds},setpts=PTS-STARTPTS[v{i}]')
     filters.append(''.join(f'[v{i}]' for i in range(len(clips)))+f'concat=n={len(clips)}:v=1:a=0,trim=duration={duration}[v]')
-    filters.append(f'[{len(clips)}:a]asetpts=PTS-STARTPTS,aresample=48000,apad,atrim=duration={duration},'
-                   f'afade=t=out:st={duration-1}:d=1[a]')
+    filters.append(f'[{len(clips)}:a]atrim=start={audio_start},asetpts=PTS-STARTPTS,aresample=48000,'
+        f'apad,atrim=duration={duration},afade=t=out:st={duration-1}:d=1[a]')
     await run_media_process(binary,'-nostdin','-v','error','-y','-filter_complex_threads','1',
         '-protocol_whitelist','file,pipe',*inputs,'-i',str(audio),'-filter_complex',';'.join(filters),
         '-map','[v]','-map','[a]','-c:v','libx264','-threads','1','-preset','fast','-crf','22',
@@ -85,17 +92,23 @@ async def render_local(clips, audio, target, duration):
 async def generate(data, reference_url, audio_url, *, checkpoint, progress):
     """checkpoint persists the entire storyboard in the existing paid-order FSM."""
     from config import Config
-    from image_service import generate_photosession_frame
+    from image_service import generate_photosession_frame,_store_image
     from heygen import HeyGenAdapter
     from media_service import _download,audio_duration,_storage_client,_upload_video,MediaServiceError
+    from song_alignment import detect_song_start
+    import hashlib
     if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
         raise MediaServiceError('Для мультфильма установите ffmpeg и ffprobe.')
-    source=[POLICY,reference_url]
     story=data.get('cartoon_kling_story')
+    old=bool(story and story.get('source',[None])[0]==legacy.POLICY)
+    policy=legacy.POLICY if old else POLICY
+    shots=legacy.SHOTS if old else SHOTS
+    shot_seconds=5 if old else SHOT_SECONDS
+    source=[policy,reference_url]
     if story is not None and story.get('source')!=source:
         raise ValueError('В этом заказе уже сохранён другой аватар. Обратитесь в поддержку; сцены сохранены.')
     if story is None:
-        story={'source':source,'shots':[{} for _ in SHOTS]}
+        story={'source':source,'shot_seconds':shot_seconds,'shots':[{} for _ in shots]}
         data['cartoon_kling_story']=story
         await checkpoint()
     if story.get('result_audio')==audio_url and story.get('result_url'):return story['result_url']
@@ -111,18 +124,44 @@ async def generate(data, reference_url, audio_url, *, checkpoint, progress):
             async with httpx.AsyncClient(timeout=120,trust_env=False,follow_redirects=False) as http:
                 await _download(http,audio_url,audio,32*1024*1024)
                 seconds=await audio_duration(audio)
-                if seconds<30:raise ValueError('Песня короче 30 секунд. Выберите другой вариант до создания мультфильма.')
-                duration=min(35.,seconds)
-                for index,(label,action) in enumerate(SHOTS):
+                minimum=30 if old else DURATION
+                if seconds<minimum:raise ValueError(f'Песня короче {minimum} секунд. Нужна полная песня до создания сцен.')
+                audio_start=0.
+                if not old:
+                    lyrics=data.get('song_review_lyrics') or data.get('video_song_lyrics') or ''
+                    alignment_source=[audio_url,hashlib.sha256(lyrics.encode()).hexdigest()]
+                    if story.get('alignment_source')!=alignment_source:
+                        if story.get('alignment_submitting')==alignment_source:
+                            raise ValueError('Начало песни уже проверялось, но ответ неизвестен. Нужна проверка поддержки; повторный запрос не отправлялся.')
+                        story['alignment_submitting']=alignment_source;await checkpoint()
+                        audio_start=await detect_song_start(audio,lyrics,root)
+                        story.update(alignment_source=alignment_source,audio_start=audio_start)
+                        await checkpoint()
+                    else:audio_start=story['audio_start']
+                    if seconds-audio_start<DURATION:
+                        raise ValueError('После музыкального вступления осталось меньше минуты песни. Сцены ещё не создавались.')
+                duration=min(35.,seconds) if old else float(DURATION)
+                clips=[]
+                for index,item in enumerate(shots):
+                    label=item[0] if old else item['label']
+                    frame_prompt=legacy.BASE+item[1] if old else image_prompt(index)
+                    motion_prompt=(legacy.BASE+item[1]+' Natural continuous motion for five seconds.') if old else video_prompt(index)
                     shot=story['shots'][index]
-                    await progress(f'🎬 Создаю сцену {index+1} из {len(SHOTS)}: {label.lower()}. Пожалуйста, подождите.')
+                    shot.setdefault('image_prompt',frame_prompt);shot.setdefault('video_prompt',motion_prompt)
+                    await progress(f'🎬 Создаю сцену {index+1} из {len(shots)}: {label.lower()}. Пожалуйста, подождите.')
                     if not shot.get('image_url'):
                         if shot.get('image_submitting'):
                             raise ValueError('Результат запроса картинки неизвестен. Нужна проверка поддержки; повторная генерация не запускалась.')
                         shot['image_submitting']=True;await checkpoint()
-                        previous=story['shots'][0].get('image_url') or reference_url
-                        shot['image_url']=await generate_photosession_frame(reference_url,BASE+action,
-                            style_reference_url=previous,image_size='1536x1024')
+                        location=story['shots'][0].get('image_url') or reference_url
+                        if old:
+                            shot['image_url']=await generate_photosession_frame(reference_url,shot['image_prompt'],
+                                style_reference_url=location,image_size='1536x1024')
+                        else:
+                            continuity=story['shots'][index-1].get('end_frame_url') if index else None
+                            refs=tuple(dict.fromkeys(x for x in (location,continuity) if x))
+                            shot['image_url']=await generate_photosession_frame(reference_url,shot['image_prompt'],
+                                style_reference_urls=refs,image_size='1536x1024')
                         await asyncio.shield(checkpoint())
                     if not shot.get('task_id'):
                         if shot.get('video_submitting'):
@@ -130,19 +169,27 @@ async def generate(data, reference_url, audio_url, *, checkpoint, progress):
                         shot['video_submitting']=True
                         shot.setdefault('request_key','mother-scene-'+uuid4().hex)
                         await checkpoint()
-                        shot['task_id']=await submit_animation(animation,shot['image_url'],BASE+action+' Natural continuous motion for five seconds.',shot['request_key'])
+                        shot['task_id']=await submit_animation(animation,shot['image_url'],shot['video_prompt'],shot['request_key'],duration=shot_seconds)
                         await asyncio.shield(checkpoint())
                     if not shot.get('video_url'):
                         shot['video_url']=await poll_animation(animation,shot['task_id'],timeout=1200)
                         await checkpoint()
-                clips=[]
-                for i,shot in enumerate(story['shots']):
-                    path=root/f'scene-{i}.mp4'
-                    await _download(http,shot['video_url'],path,100*1024*1024);clips.append(path)
+                    path=root/f'scene-{index}.mp4'
+                    await _download(http,shot['video_url'],path,100*1024*1024)
+                    if not old:
+                        if await video_duration(path)<9.75:
+                            raise ValueError('Получена сцена короче 10 секунд. ID сохранён; повторная генерация не запускалась.')
+                        if index<len(shots)-1 and not shot.get('end_frame_url'):
+                            last=root/f'end-{index}.png'
+                            await extract_last_frame(path,last)
+                            shot['end_frame_url']=await asyncio.to_thread(_store_image,client,settings,last)
+                            await checkpoint()
+                    clips.append(path)
             await progress('🎵 Все сцены готовы! Добавляю вашу песню и собираю мультфильм.')
-            target=root/'mother.mp4';await render_local(clips,audio,target,duration)
-            actual=await audio_duration(target)
-            if not 30<=actual<=40:raise MediaServiceError('Не удалось выдержать длительность мультфильма 30–40 секунд.')
+            target=root/'mother.mp4';await render_local(clips,audio,target,duration,shot_seconds=shot_seconds,audio_start=audio_start)
+            actual=await video_duration(target)
+            if not ((30<=actual<=40) if old else abs(actual-DURATION)<0.2):
+                raise MediaServiceError('Итоговая длительность мультфильма не соответствует сценарию.')
             story['result_url']=await asyncio.to_thread(_upload_video,client,settings,target)
             story['result_audio']=audio_url
             await checkpoint()

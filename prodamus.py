@@ -18,7 +18,7 @@ import aiohttp
 from yarl import URL
 
 from config import Config
-from database import repeat_order_value, validate_repeat_invoice, get_photo_order, set_photo_payment_link, PHOTO_TARIFFS, get_cartoon_order, update_cartoon_order, CARTOON_TARIFFS, get_musical_order, update_musical_order, MUSICAL_TARIFFS, create_payment_order, get_payment_order, create_audio_order, get_audio_order, update_audio_order, SONG_PROMO_PRODUCT
+from database import repeat_order_value, validate_repeat_invoice, get_photo_order, set_photo_payment_link, PHOTO_TARIFFS, get_cartoon_order, update_cartoon_order, CARTOON_TARIFFS, cartoon_tariff_value, get_musical_order, update_musical_order, MUSICAL_TARIFFS, create_payment_order, get_payment_order, create_audio_order, get_audio_order, update_audio_order, SONG_PROMO_PRODUCT
 from database import get_animation_order, update_animation_order, ANIMATION_TARIFFS
 
 PACKAGES = {
@@ -365,7 +365,7 @@ class ProdamusPayments:
             raise ValueError('Параметры оплаты не совпадают с мульт-заказом.')
         if order['payment_link']:
             return order['payment_link']
-        if repeat_order_value(order,'cartoon',CARTOON_TARIFFS.get(order['tariff']),creation=True) != (order['amount_kopecks'],order['product_name']):
+        if repeat_order_value(order,'cartoon',cartoon_tariff_value(order),creation=True) != (order['amount_kopecks'],order['product_name']):
             raise ValueError('Для новой ссылки выберите действующий тариф.')
         await validate_repeat_invoice(order,'cartoon')
         data = {
@@ -487,7 +487,7 @@ class ProdamusPayments:
         elif order.get('order_type') == 'cartoon':
             # Сумма уже сверена с сохранённым заказом: ранее выданные счета
             # остаются действительными после изменения прайса.
-            tariff = CARTOON_TARIFFS.get(order['tariff'])
+            tariff = cartoon_tariff_value(order)
             # Сохраняем совместимость с уже выданными счетами короткого формата.
             names = {tariff[1]} if tariff else set()
             if order['tariff'] == 'short':

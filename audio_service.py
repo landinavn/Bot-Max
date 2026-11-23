@@ -315,7 +315,7 @@ async def _request(method: str, path: str, **kwargs) -> dict:
 
 async def generate_song(prompt: str, tags: str, title: str) -> str:
     validate_song_arguments(prompt, tags, title)
-    suffix = ', start immediately with vocals, no long intro'
+    suffix = ', vocals at 0.0 seconds, first lyric immediately, zero instrumental intro, no wordless humming'
     tags = tags if tags.endswith(suffix) else tags + suffix
     validate_song_arguments(prompt, tags, title)
     result = await _request('POST', '/suno/v1/music', json={

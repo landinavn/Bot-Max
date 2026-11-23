@@ -5508,7 +5508,6 @@ def create_router(
             song_setup_token=uuid4().hex,song_setup_voice=None)
         await context.set_state(PosterStates.waiting_for_song_setup)
         if kind=='cartoon' and mother:await _reply(event,MOTHER_CARTOON_DESCRIPTION)
-        await _reply(event,'🎵 Сначала выберем голос и проверим слова песни. Затем — оплата, фото и создание картинки.')
         await song_review.setup_voice(event,context)
 
     @router.message_created(PosterStates.waiting_for_card_song_details)

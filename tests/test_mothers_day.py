@@ -21,15 +21,6 @@ from test_prodamus import payments,payment_config
 from test_handlers import callback_event,ready_context,dispatch_callback,event_replies,call_handler,message_event
 
 
-def lyrics(chorus='С Днём матери! Спасибо за заботу.', *, full=False):
-    verse='В окне родного дома свет не гаснет\nС тобой любой обычный вечер праздник\nДля Ольги эта песня благодарность\nЗа то что можно быть собой'
-    chorus+='\nПусть радость возвращается к тебе\nСпасибо за поддержку и принятие\nТеперь мы будем беречь тебя'
-    if not full:return '[Verse 1]\n'+verse+'\n[Chorus]\n'+chorus
-    verse+='\nКогда тревоги рядом ты согреешь\nИ силы снова обретаю я'
-    bridge='Пусть дни заботой согревают\nИ всё сбывается что хочешь ты\nПусть сердце радости не забывает'
-    return '[Verse 1]\n'+verse+'\n[Chorus]\n'+chorus+'\n[Verse 2]\n'+verse+'\n[Chorus]\n'+chorus+'\n[Bridge]\n'+bridge+'\n[Chorus]\n'+chorus
-
-
 @pytest.mark.parametrize('fmt',['fun','gift'])
 def test_song_shared_request_preserves_personal_source_and_day(fmt):
     notes,tags,title=audio.build_song_request('Людмила; спасибо за заботу',mother.TITLE,fmt)
@@ -40,21 +31,21 @@ def test_song_shared_request_preserves_personal_source_and_day(fmt):
 
 @respx.mock
 @pytest.mark.parametrize('grandchildren',[False,True])
-async def test_lyrics_allow_inflection_and_only_requested_grandchildren(monkeypatch,grandchildren):
-    config=Config(token='test',photo_path=Path('unused'),image_api_key='test-text-key')
-    monkeypatch.setattr(audio.Config,'from_env',lambda:config)
-    details='Людмила; благодарность за заботу'+('; от внуков' if grandchildren else '')
+async def test_personalizes_only_name_and_two_lines_of_approved_song(monkeypatch,grandchildren):
+    monkeypatch.setattr(audio.Config,'from_env',lambda:Config(token='test',photo_path=Path('unused'),image_api_key='test-key'))
+    details='Людмила; спасибо за заботу'+('; от внуков' if grandchildren else '')
     notes,tags,title=audio.build_song_request(details,mother.TITLE,'fun')
-    text=lyrics('С Днём матери! Для Людмилы наши тёплые слова.'+(' Любимая бабушка, от внуков!' if grandchildren else ''))
+    lines=['От внуков эта песня благодарность,','Любимой бабушке за каждый добрый час.'] if grandchildren else []
     route=respx.post('https://api.openai.com/v1/chat/completions').mock(return_value=httpx.Response(200,json={
-        'id':'lyrics','object':'chat.completion','created':1,'model':'gpt-4o-mini',
-        'choices':[{'index':0,'finish_reason':'stop','message':{'role':'assistant','content':text}}]}))
-    assert await audio.write_song_lyrics(notes,tags,title)==text
+        'choices':[{'finish_reason':'stop','message':{'content':json.dumps({'name_genitive':'Людмилы','personal_lines':lines})}}]}))
+    text=await audio.write_song_lyrics(notes,tags,title)
+    assert text==mother.render_approved_song('Людмилы',lines,short=True)
+    assert mother.APPROVED_CHORUS in text
     body=json.loads(route.calls[0].request.content)
-    instruction=body['messages'][0]['content']
-    assert 'естественным ритмом и падежом' in instruction and 'НЕ ко дню рождения' in instruction
-    assert '35' in tags and '55–85' in instruction
-    assert json.loads(body['messages'][1]['content'])['required_chorus_phrase'] is None
+    assert body['response_format']=={'type':'json_object'}
+    assert 'НЕ пиши новую песню' in body['messages'][0]['content']
+    payload=json.loads(body['messages'][1]['content'])
+    assert payload['required_chorus_phrase'] is None and payload['details']==details
 
 
 @respx.mock
@@ -63,7 +54,7 @@ async def test_rejects_birthday_or_invented_grandchildren_before_paid_music(monk
     monkeypatch.setattr(audio.Config,'from_env',lambda:Config(token='test',photo_path=Path('unused'),image_api_key='test-key'))
     notes,tags,title=audio.build_song_request('Людмила; спасибо за заботу',mother.TITLE,'fun')
     respx.post('https://api.openai.com/v1/chat/completions').mock(return_value=httpx.Response(200,json={
-        'choices':[{'finish_reason':'stop','message':{'content':lyrics(wrong)}}]}))
+        'choices':[{'finish_reason':'stop','message':{'content':json.dumps({'name_genitive':'Людмилы','personal_lines':[wrong,'Спасибо за твою заботу.']})}}]}))
     with pytest.raises(audio.AudioServiceError):await audio.write_song_lyrics(notes,tags,title)
 
 
@@ -210,18 +201,30 @@ async def test_cannot_buy_new_mother_story_at_old_short_price(credit_db):
 
 
 @respx.mock
-async def test_full_mother_song_keeps_developed_verses_and_name_outside_chorus(monkeypatch):
+async def test_full_song_is_the_exact_approved_text_not_free_model_output(monkeypatch):
     monkeypatch.setattr(audio.Config,'from_env',lambda:Config(token='test',photo_path=Path('unused'),image_api_key='test-key'))
-    notes,tags,title=audio.build_song_request('Ольга; спасибо за принятие и поддержку',mother.TITLE,'gift')
-    text=lyrics(full=True)
+    notes,tags,title=audio.build_song_request('Ольга; спасибо за заботу',mother.TITLE,'gift')
     route=respx.post('https://api.openai.com/v1/chat/completions').mock(return_value=httpx.Response(200,json={
-        'choices':[{'finish_reason':'stop','message':{'content':text}}]}))
-    assert await audio.write_song_lyrics(notes,tags,title)==text
-    instruction=json.loads(route.calls[0].request.content)['messages'][0]['content']
-    assert '180–260' in instruction and '8 строк' in instruction
-    assert 'НЕ обязано повторяться' in instruction
-    assert 'иначе 2–4 строки' not in instruction
-    # A collapsed six-section full version is rejected before the music request.
-    route.mock(return_value=httpx.Response(200,json={'choices':[{'finish_reason':'stop','message':{
-        'content':'[Verse 1]\nПривет\n[Chorus]\nС Днём матери\n[Verse 2]\nСпасибо\n[Chorus]\nС Днём матери\n[Bridge]\nУра\n[Chorus]\nС Днём матери'}}]}))
-    with pytest.raises(audio.AudioServiceError,match='сокращена'):await audio.write_song_lyrics(notes,tags,title)
+        'choices':[{'finish_reason':'stop','message':{'content':'{"name_genitive":"Ольги","personal_lines":[]}'}}]}))
+    text=await audio.write_song_lyrics(notes,tags,title)
+    assert text==mother.render_approved_song('Ольги',[])
+    assert text.count(mother.APPROVED_CHORUS)==3
+    assert mother.APPROVED_VERSE_2 in text and mother.APPROVED_BRIDGE in text
+    assert 'Для Ольги эта песня — благодарность' in text
+    # Free-form lyrics and unexpected fields cannot silently replace the agreed song.
+    for bad in ['[Verse 1]\nДругая песня','{"name_genitive":"Ольги","personal_lines":[],"lyrics":"Другая песня"}']:
+        route.mock(return_value=httpx.Response(200,json={'choices':[{'finish_reason':'stop','message':{'content':bad}}]}))
+        with pytest.raises(audio.AudioServiceError,match='персонализировать'):await audio.write_song_lyrics(notes,tags,title)
+
+
+@pytest.mark.parametrize('lines',[['Одна строка'],['Новая\nстрока','Вторая'],['[Chorus]','Подмена'],['x'*141,'Текст']])
+def test_personal_lines_cannot_replace_stanzas_or_insert_tags(lines):
+    with pytest.raises(ValueError):mother.render_approved_song('Ольги',lines)
+
+
+def test_personalization_keeps_all_other_lines_and_never_adds_grandchildren():
+    base=mother.render_approved_song('Ольги',[])
+    lines=['За то, что ты любила наши встречи,','За тёплый чай и добрые слова.']
+    updated=mother.render_approved_song('Ольги',lines)
+    assert updated==base.replace('Но в каждом добром шаге, в каждом взлёте —\nТвоя любовь, что силы нам дала.','\n'.join(lines))
+    assert 'внук' not in base.lower() and 'бабуш' not in base.lower()

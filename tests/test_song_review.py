@@ -335,3 +335,19 @@ async def test_public_review_does_not_expose_admin_rewrite_button(credit_db,paym
     assert 'Переписать текст песни' not in str(show.send.await_args_list)
     assert 'Вставить свой текст' not in str(show.send.await_args_list)
     assert 'Изменить мои слова' in str(show.send.await_args_list)
+
+
+@pytest.mark.parametrize('kind,target',[('cartoon','theme_mother'),('music','mode_mother')])
+async def test_mother_card_reviews_full_song_without_technical_sequence_message(credit_db,payments,kind,target):
+    writer=AsyncMock(return_value=WORDS)
+    router=handlers.create_router(admin_user_id=999,payments=payments,lyric_writer=writer)
+    ctx=await ready_context()
+    await ctx.update_data(cartoon_flow='short') if kind=='cartoon' else await ctx.update_data(video_flow=True,video_product='direct')
+    event=callback_event(target if kind=='cartoon' else 'video_style:'+target)
+    await dispatch_callback(router,event,ctx)
+    assert 'Сначала выберем голос' not in str(event.send.await_args_list)
+    token=(await ctx.get_data())['song_setup_token']
+    await dispatch_callback(router,callback_event('song_setup:voice:female:'+token),ctx)
+    await call_handler(router,'card_song_details',message_event('Ольга; спасибо за заботу'),ctx)
+    assert (await ctx.get_data())['song_review_format']=='gift'
+    assert '2-3 minutes' in writer.await_args.args[1] and '35 seconds' not in writer.await_args.args[1]

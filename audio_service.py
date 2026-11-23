@@ -15,7 +15,7 @@ import httpx
 from openai import AsyncOpenAI
 
 from config import Config
-from mothers_day import TITLE as MOTHER_TITLE, LYRICS_INSTRUCTION as MOTHER_LYRICS_INSTRUCTION, FULL_LYRICS_INSTRUCTION, SHORT_LYRICS_INSTRUCTION
+from mothers_day import TITLE as MOTHER_TITLE, PERSONALIZATION_INSTRUCTION, render_approved_song
 from media_service import audio_duration
 
 logger = logging.getLogger(__name__)
@@ -146,8 +146,7 @@ async def write_song_lyrics(notes: str, tags: str, title: str, *, preserve_choru
     instruction = LYRICS_SYSTEM_PROMPT if preserve_chorus else VIDEO_GREETING_LYRICS_PROMPT
     mother_short=mother and '35 seconds' in tags
     if mother:
-        instruction = ('Ты профессиональный автор персональных песен на русском языке. Верни только текст с музыкальными секциями, без пояснений и заголовка. До 5000 символов. '
-                       + MOTHER_LYRICS_INSTRUCTION + ' ' + (SHORT_LYRICS_INSTRUCTION if mother_short else FULL_LYRICS_INSTRUCTION))
+        instruction = PERSONALIZATION_INSTRUCTION
     if title.startswith(TEACHER_SCENARIO_TITLE + ':'):
         instruction += (' ' + TEACHER_LYRICS_INSTRUCTION if preserve_chorus else
                         ' Напиши уважительную песню-благодарность для учителя или тренера на Вы, '
@@ -162,11 +161,15 @@ async def write_song_lyrics(notes: str, tags: str, title: str, *, preserve_choru
                                    http_client=http_client, max_retries=0) as client:
                 user_data = {'details': notes, 'style': tags, 'title_for_context_only': title,
                              'required_chorus_phrase': required_phrase}
+                if mother:
+                    source=re.search(r'Источник личных деталей клиента: (.*?)\nРаскрой благодарность',notes,re.S)
+                    user_data['details']=source.group(1) if source else source_phrase or notes
                 if not preserve_chorus:
                     user_data['greeting_source'] = source_phrase
-                result = await client.chat.completions.create(model='gpt-4o-mini', temperature=0.7,
+                extra={'response_format':{'type':'json_object'}} if mother else {}
+                result = await client.chat.completions.create(model='gpt-4o-mini', temperature=0.2 if mother else 0.7,
                     messages=[{'role': 'system', 'content': instruction},
-                              {'role': 'user', 'content': json.dumps(user_data, ensure_ascii=False)}])
+                              {'role': 'user', 'content': json.dumps(user_data, ensure_ascii=False)}],**extra)
     except Exception as exc:
         raise AudioServiceError('Не удалось написать стихи.') from exc
     if not result.choices or result.choices[0].finish_reason != 'stop':
@@ -175,6 +178,14 @@ async def write_song_lyrics(notes: str, tags: str, title: str, *, preserve_choru
     if not isinstance(text, str) or len(text) > 5000:
         raise AudioServiceError('Некорректный текст песни.')
     text = text.strip()
+    if mother:
+        try:
+            personal=json.loads(text)
+            if not isinstance(personal,dict) or set(personal)!={'name_genitive','personal_lines'}:
+                raise ValueError('Unexpected personalization fields')
+            text=render_approved_song(personal['name_genitive'],personal['personal_lines'],short=mother_short)
+        except (ValueError,TypeError,KeyError) as exc:
+            raise AudioServiceError('Не удалось персонализировать утверждённую песню. Исходный текст сохранён.') from exc
     sections = re.findall(r'\[([^\]]+)\]', text)
     expected_sections=['Verse 1','Chorus'] if mother_short else ['Verse 1','Chorus','Verse 2','Chorus','Bridge','Chorus']
     if not text.startswith('[Verse 1]') or sections != expected_sections:

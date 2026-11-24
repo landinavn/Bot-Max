@@ -1,4 +1,4 @@
-"""Pay for the selected card before photo/music generation; deliver only the finished video."""
+"""Legacy prepaid-order recovery; new text/checkout UI is in test_personal_song."""
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -8,7 +8,7 @@ import handlers
 from handlers import create_router, PosterStates
 from musical_orders import PaidMusicalWorker
 from test_handlers import (callback_event, ready_context, dispatch_callback, call_handler,
-    message_event, photo_event, event_replies, max_image_upload, isolated_example_directory, text_correction)
+    message_event, photo_event, event_replies, max_image_upload, isolated_example_directory, text_correction, accepted_song_draft_for_legacy_regressions)
 from test_sales_stats import sales_payments, deliver_webhook
 
 

@@ -174,7 +174,7 @@ async def dispatch_callback_and_phrase(router, event, context, phrase=None):
     await dispatch_callback(router, event, context)
     if await context.get_state() not in (PosterStates.waiting_for_video_song_phrase, PosterStates.waiting_for_cartoon_song_phrase):
         return
-    assert 'фразу для припева' in event.send.await_args.args[0]
+    assert any(prompt in event.send.await_args.args[0] for prompt in (handlers.PERSONAL_SONG_DETAILS_PROMPT,handlers.MOTHER_DETAILS_PROMPT,handlers.TEACHER_DETAILS_PROMPT))
     event.send.reset_mock()
     details = message_event(phrase or (await context.get_data()).get('chosen_song_phrase') or 'С Новым годом, друзья!')
     details.get_ids = event.get_ids
@@ -3392,7 +3392,7 @@ async def test_song_empty_details_keep_waiting(text):
     await context.update_data(song_scenario='cat')
     event = message_event(text)
     await call_handler(create_router(), 'collect_song_details', event, context)
-    assert ('фразу для припева' in event.message.answer.await_args.args[0] or (payload in {'gift_scen_mother','gift_scen_mother_bday'} and 'Как зовут маму' in event.message.answer.await_args.args[0]))
+    assert event.message.answer.await_args.args[0]==handlers.AUDIO_FUN_SCENARIOS['audio_fun_cat'][1]
     assert await context.get_state() == PosterStates.waiting_for_song_details
 
 
@@ -3540,7 +3540,7 @@ async def test_gift_empty_details_do_not_advance(payload, text):
     await context.update_data(gift_scenario=handlers.gift_scenario_name(payload))
     event = message_event(text)
     await call_handler(create_router(), 'collect_gift_details', event, context)
-    assert ('фразу для припева' in event.message.answer.await_args.args[0] or (payload in {'gift_scen_mother','gift_scen_mother_bday'} and 'Как зовут маму' in event.message.answer.await_args.args[0]))
+    assert event.message.answer.await_args.args[0]==handlers.AUDIO_GIFT_SCENARIOS[payload][1]
     assert await context.get_state() == handlers.GIFT_SCENARIO_STATES[payload]
     assert 'gift_details' not in await context.get_data()
 
@@ -5075,7 +5075,7 @@ async def test_video_teacher_collects_details_creates_formal_text_and_keeps_card
         assert await context.get_state() == PosterStates.waiting_for_mode
         return
 
-    assert chosen.send.await_args.args[0] == 'Напишите имя тренера/учителя и фразу для припева (например: «Иван, лучший тренер по футболу»).'
+    assert chosen.send.await_args.args[0] == handlers.TEACHER_DETAILS_PROMPT
     assert await context.get_state() == PosterStates.waiting_for_video_teacher_details
     assert 'payform' not in str(chosen.send.await_args_list)
     event = message_event('Ирина Петровна, математика, строгая но справедливая')
@@ -5977,7 +5977,7 @@ async def test_pending_video_processor_uses_persisted_style(credit_db, piapi_ani
     assert await credit_db.get_all_pending_videos() == []
 
 
-@pytest.mark.parametrize('invalid', ['', '   ', 'я' * 501])
+@pytest.mark.parametrize('invalid', ['', '   ', 'я' * 1001])
 async def test_cat_video_rejects_missing_or_oversized_song_phrase(credit_db, invalid):
     router, context = create_router(admin_user_id=999), await ready_context()
     await prepare_teacher_video(router, context, 'cat_video')

@@ -67,6 +67,10 @@ async def show_text(event,context):
     b.row(CallbackButton(text='🎙 Изменить голос',payload='song_review:voice_menu:'+token))
     b.row(CallbackButton(text='🏠 Главный экран',payload='back_to_main'))
     text=d['song_review_lyrics']
+    from mothers_day import TITLE, minute_excerpt
+    if (not d.get('song_review_admin') and d.get('song_review_label')==TITLE
+            and (d.get('song_review_flow')=='cartoon' or d.get('song_review_flow')=='product:cartoon')):
+        text=minute_excerpt(text)
     for a,z in (('[Verse 1]','Куплет 1'),('[Verse 2]','Куплет 2'),('[Chorus]','Припев'),('[Bridge]','Переход')):text=text.replace(a,z)
     # Complete text may exceed a single MAX message. Only the final part carries actions.
     parts=[text[i:i+3000] for i in range(0,len(text),3000)]

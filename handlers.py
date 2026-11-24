@@ -665,17 +665,18 @@ VIDEO_UPSELL_TEXT = (
 
 # Long-product metadata is retained only to fulfil previously paid orders.
 CARTOON_PRODUCTS = {
-    "cat_cartoon_mother": ("mother", 79000, MOTHER_CARTOON_DESCRIPTION, "5-10"),
-    'cat_cartoon': ('short', 59000, '🎬 Создаем короткий мультфильм с вашим лицом, длительность около 40 секунд. Выберите стиль:', '5-10'),
+    "cat_cartoon_mother": ("mother", 59000, MOTHER_CARTOON_DESCRIPTION, "5-10"),
+    'cat_cartoon': ('short', 39000, '🎬 Создаем короткий мультфильм с вашим лицом, длительность около 40 секунд. Выберите стиль:', '5-10'),
     'cat_cartoon_long': ('long', 129000, '🎬 Создаем полноценное мульт-поздравление с сюжетом! Выберите стиль:', '15-20'),
 }
 CARTOON_AVATAR_EVENTS = {'avatar_ok_1': 'avatar_ok_first', 'avatar_bad_1': 'avatar_bad_first',
                        'avatar_ok_2': 'avatar_ok_second', 'avatar_bad_2': 'avatar_bad_second'}
 CARTOON_THEMES = {
+    'theme_mother': '🤱 День матери',
     'theme_ny': '🎄 Новый год', 'theme_bday': '🎂 День рождения',
     'theme_bday_kid': '👶 День рождения малыша', 'theme_valentine': '💖 14 февраля',
     'theme_feb23': '🛡️ 23 февраля', 'theme_mar8': '🌷 8 марта',
-    'theme_mother': '🤱 День матери', 'theme_father': '👨‍👧 День отца',
+    'theme_father': '👨‍👧 День отца',
 }
 CARTOON_PHOTO_PROMPT = '📸 Отправьте четкое фото (анфас, хорошее освещение). Мы нарисуем вашего персонажа!'
 CARTOON_SONG_PHRASE_PROMPT = 'Теперь напишите имя и фразу для припева (например: «Маша, с днём рождения!»).'
@@ -1834,7 +1835,8 @@ def create_router(
             f"- Прямая покупка (299 ₽): {c('buy_music_direct')}\n"
             f"- Апгрейд к открытке (доплата 149 ₽): {c('buy_music_upsell')}\n\n"
             "🎬 Мульт-открытки:\n"
-            f"- Мульт-открытка (590 ₽): {c('buy_cartoon_590')}\n"
+            f"- Мульт-открытка (390 ₽): {c('buy_cartoon_390')}\n"
+            f"- Ранее купленные мульт-открытки (590 ₽): {c('buy_cartoon_590')}\n"
             f"- Автоматических запусков сборки: {c('cartoon_auto_render')}\n"
             "\n"
             "✨ Оживление фотографий:\n"
@@ -1846,8 +1848,10 @@ def create_router(
             f"💰 Всего покупок: {data['total_purchases']}\n\n"
             "🔁 Повторные покупки со скидкой 20%:\n"
             f"- Музыкальные открытки: {c('promo_buy_music_card')}\n"
-            f"- Мульт-открытки (590): {c('promo_buy_cartoon_590')}\n"
-            f"- День матери — мультфильм (790): {c('promo_buy_cartoon_790')}\n"
+            f"- Мульт-открытки (390): {c('promo_buy_cartoon_390')}\n"
+            f"- Ранее мульт-открытки (590): {c('promo_buy_cartoon_590')}\n"
+            f"- День матери — мультфильм (590): {c('promo_buy_cartoon_mother_590')}\n"
+            f"- Ранее День матери (790): {c('promo_buy_cartoon_790')}\n"
             f"- Фотосессии (590): {c('promo_buy_photo_590')}\n"
             f"- Фотосессии (990): {c('promo_buy_photo_990')}\n"
             f"- Фотосессии (1490): {c('promo_buy_photo_1490')}\n\n"
@@ -2575,6 +2579,40 @@ def create_router(
         from ded_moroz_customer import review
         await review(event,context,admin_user_id)
 
+    @router.message_created(Command('broadcast_mother_preview'))
+    @router.message_created(Command('broadcast_mother'))
+    async def broadcast_mother_preview(event: MessageCreated):
+        if is_bot_message(event) or admin_user_id is None or event.get_ids()[1]!=admin_user_id:return
+        from mother_broadcast import preview
+        try:
+            await preview(event,confirm=(event.message.body.text or '').split()[0]=='/broadcast_mother')
+        except Exception:
+            logger.exception('Не удалось подготовить рассылку ко Дню матери:')
+            await _reply(event,'Рассылка не запущена. Не удалось загрузить пример; проверьте examples/den_mama.mp4.')
+
+    @router.message_callback(F.callback.payload=='mother_broadcast_confirm')
+    async def mother_broadcast_confirm(event: MessageCallback):
+        if admin_user_id is None or event.get_ids()[1]!=admin_user_id:
+            await event.ack(notification='Недоступно.');return
+        await event.ack(notification='Отправляю рассылку…')
+        from mother_broadcast import send
+        try:await send(event,broadcast_lock)
+        except Exception:
+            logger.exception('Рассылка ко Дню матери остановлена:')
+            await _reply(event,'Рассылка остановлена. Прогресс сохранён, можно продолжить той же командой.')
+
+    @router.message_callback(F.callback.payload=='mother_card_start')
+    async def mother_card_start(event: MessageCallback,context: MemoryContext):
+        if event.message is None or event.get_ids()[1] is None:
+            await event.ack(notification='Откройте меню через /start.');return
+        if await context.get_state() in (PosterStates.generating,PosterStates.cartoon_generating,
+                PosterStates.generating_video_teacher,PosterStates.waiting_for_audio_generation):
+            await event.ack(notification='Текущая генерация ещё не завершена. Пожалуйста, подождите.');return
+        await event.ack(notification='Создаём подарок маме…')
+        await increment_counter('mother_broadcast_start',user_id=event.get_ids()[1])
+        await increment_counter('theme_mother_click',user_id=event.get_ids()[1])
+        await start_card_song_review(event,context,'cartoon','theme_mother')
+
     @router.message_created(Command('broadcast_ded_moroz_kids_preview'))
     @router.message_created(Command('broadcast_ded_moroz_kids'))
     async def ded_moroz_family_broadcast_preview(event:MessageCreated):
@@ -2645,7 +2683,7 @@ def create_router(
             await _reply(event,str(exc))
 
     def cartoon_style_keyboard(screen='cat_cards'):
-        return navigation_keyboard((*((label+(' — 790 ₽' if key=='theme_mother' else ''), key) for key, label in CARTOON_THEMES.items()), ('⬅️ Назад', 'back_to_main')))
+        return navigation_keyboard((*((label+(' — 590 ₽' if key=='theme_mother' else ' — 390 ₽'), key) for key, label in CARTOON_THEMES.items()), ('⬅️ Назад', 'back_to_main')))
 
     async def ensure_cartoon_access(event, context, *, acknowledged=False):
         user_id = event.get_ids()[1]
@@ -2898,7 +2936,7 @@ def create_router(
         if category=='music_card':
             await open_music_menu(event,context)
         elif category=='cartoon':
-            await context.update_data(cartoon_flow='short',cartoon_amount_kopecks=59000,
+            await context.update_data(cartoon_flow='short',cartoon_amount_kopecks=CARTOON_TARIFFS['short'][0],
                                       cartoon_session_id=uuid4().hex,cartoon_promo_choose_tariff=True)
             await context.set_state(PosterStates.waiting_for_cartoon_style)
             await _reply(event,'🎬 Выберите тему следующей мульт-открытки:',attachments=[cartoon_style_keyboard()])
@@ -5676,7 +5714,15 @@ def create_router(
             song_setup_state=str(PosterStates.waiting_for_card_song_details),song_setup_step='voice',
             song_setup_token=uuid4().hex,song_setup_voice=None)
         await context.set_state(PosterStates.waiting_for_song_setup)
-        if kind=='cartoon' and mother:await _reply(event,MOTHER_CARTOON_DESCRIPTION)
+        if kind=='cartoon' and mother:
+            from mother_broadcast import example_attachment
+            try:
+                example=await example_attachment(event.bot)
+                await _reply(event,'🎬 Пример мульт-открытки ко Дню матери:',attachments=[example])
+            except Exception:
+                logger.warning('Не удалось показать пример мульт-открытки ко Дню матери.')
+                await _reply(event,'Пример временно недоступен.')
+            await _reply(event,MOTHER_CARTOON_DESCRIPTION)
         await song_review.setup_voice(event,context)
 
     @router.message_created(PosterStates.waiting_for_card_song_details)
@@ -5983,7 +6029,7 @@ def create_router(
             approved=song_review.approved(data,details)
             await context.update_data(cartoon_theme=theme,cartoon_mode=theme,
                 cartoon_flow='mother' if theme=='theme_mother' else 'short',
-                cartoon_amount_kopecks=79000 if theme=='theme_mother' else 59000,
+                cartoon_amount_kopecks=CARTOON_TARIFFS['mother' if theme=='theme_mother' else 'short'][0],
                 cartoon_session_id=data.get('cartoon_session_id') or uuid4().hex,
                 chosen_avatar=asset['image_url'],original_image_url=asset['image_url'],avatar_attempt=1,
                 avatar_urls={'1':asset['image_url']},avatar_1_url=asset['image_url'],avatar_preview_urls={},

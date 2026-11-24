@@ -19,7 +19,7 @@ CARD_PROMPT = (
 CARTOON_DESCRIPTION = (
     '🤱 Ко Дню матери создадим маленький мультфильм на 60 секунд с героиней — вашей мамой! 💐\n\n'
     '🎵 За кадром прозвучит персональная песня с её именем.\n\n'
-    '📸 Подготовьте одно фото мамы, где она одна и хорошо видно лицо.'
+    '📸 Подготовьте одно фото мамы, где она одна и хорошо видно лицо.\n\nСтоимость — 590 ₽.'
 )
 
 # This is the approved song, not an example for free-form rewriting.
@@ -85,3 +85,13 @@ def render_approved_song(name_genitive, personal_lines, *, short=False):
     return ('[Verse 1]\n'+verse1+'\n[Chorus]\n'+APPROVED_CHORUS+
             '\n[Verse 2]\n'+'\n'.join(verse2)+'\n[Chorus]\n'+APPROVED_CHORUS+
             '\n[Bridge]\n'+APPROVED_BRIDGE+'\n[Chorus]\n'+APPROVED_CHORUS)
+
+
+def minute_excerpt(text):
+    """Only the first approved verse and chorus are shown for the one-minute cartoon."""
+    import re
+    verse=re.search(r'\[Verse 1\]\s*\n(.*?)(?=\n\[|$)',text,re.S)
+    chorus=re.search(r'\[Chorus\]\s*\n(.*?)(?=\n\[|$)',text,re.S)
+    if not verse or not chorus:
+        raise ValueError('Не найден куплет и припев минутной песни.')
+    return '[Verse 1]\n'+verse.group(1).strip()+'\n[Chorus]\n'+chorus.group(1).strip()

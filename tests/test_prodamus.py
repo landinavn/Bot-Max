@@ -732,7 +732,7 @@ async def test_music_webhook_worker_renders_after_payment_and_reuses_result_for_
     assert (await credit_db.get_musical_order('music_test'))['delivered']==1
 
 
-@pytest.mark.parametrize('tariff,amount', [('short',590),('long',1290)])
+@pytest.mark.parametrize('tariff,amount', [('short',390),('long',1290)])
 async def test_cartoon_personal_link_validated_webhook_and_duplicate_are_idempotent(payments, client, credit_db, tariff, amount):
     db=credit_db
     order_id='cartoon_456_theme_feb23_123'
@@ -762,8 +762,8 @@ async def test_cartoon_personal_link_validated_webhook_and_duplicate_are_idempot
 async def test_cartoon_invalid_or_unsuccessful_webhook_never_unlocks_photo(payments, client, credit_db, change):
     await credit_db.create_cartoon_order('cartoon_456_theme_ny_1',456,'theme_ny','short')
     order=await credit_db.get_cartoon_order('cartoon_456_theme_ny_1')
-    data={'order_num':order['order_id'],'order_id':'provider-1','payment_status':'success','sum':'590',
-          'products':[{'name':order['product_name'],'price':'590.00','quantity':'1'}]}
+    data={'order_num':order['order_id'],'order_id':'provider-1','payment_status':'success','sum':'390',
+          'products':[{'name':order['product_name'],'price':'390.00','quantity':'1'}]}
     if change=='sum': data['sum']='1'
     if change=='product': data['products'][0]['name']='Другой товар'
     if change=='user': data['_param_user_id']='999'

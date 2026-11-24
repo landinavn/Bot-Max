@@ -9,7 +9,7 @@ from database import (grant_repeat_offer,pending_repeat_offers,mark_repeat_offer
 logger=logging.getLogger(__name__)
 REPEAT_TEXTS={
     'music_card':'🎵 Понравилась музыкальная открытка? Сделайте ещё одну для другого праздника со скидкой 20%! Цена 239 ₽ вместо 299 ₽. Скидка действует 24 часа.',
-    'cartoon':'🎬 Понравилась мульт-открытка? Создайте ещё одну со скидкой 20%! Скидка действует 24 часа. Цена 472 ₽ вместо 590 ₽.',
+    'cartoon':'🎬 Понравилась мульт-открытка? Создайте ещё одну со скидкой 20%! Скидка действует 24 часа. Цена 312 ₽ вместо 390 ₽.',
     'photo':'📸 Вы использовали все фото из вашего пакета! Хотите сделать ещё одну фотосессию? Дарим скидку 20% на любой тариф! Скидка действует 24 часа.',
 }
 REPEAT_CALLBACKS={'music_card':'promo_music_card','cartoon':'promo_cartoon','photo':'promo_photo'}
@@ -42,9 +42,11 @@ async def deliver_repeat_offer(bot,offer,*,admin_user_id=None):
             payload=REPEAT_CALLBACKS[offer['category']])).as_markup()
         text=REPEAT_TEXTS[offer['category']]
         if offer['category']=='cartoon' and offer['delivery_key'].startswith('cartoon:'):
-            from database import get_cartoon_order
+            from database import get_cartoon_order,CARTOON_TARIFFS,repeat_discount
             order=await get_cartoon_order(offer['delivery_key'].split(':',1)[1])
-            if order and order['tariff']=='mother':text=text.replace('472 ₽ вместо 590 ₽','632 ₽ вместо 790 ₽')
+            if order:
+                amount=CARTOON_TARIFFS[order['tariff']][0]
+                text=text.replace('312 ₽ вместо 390 ₽',f'{repeat_discount(amount)//100} ₽ вместо {amount//100} ₽')
         sent=await bot.send_message(user_id=offer['user_id'],text=text,attachments=[keyboard])
         if sent is None:
             raise RuntimeError('MAX не подтвердил отправку промо.')

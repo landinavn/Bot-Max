@@ -176,28 +176,28 @@ async def test_new_mother_price_receipt_and_statistics_survive_restart(credit_db
     from urllib.parse import parse_qsl,urlsplit
     key=await database.create_cartoon_order('cartoon_mother_price',456,'theme_mother','mother')
     order=await database.get_cartoon_order(key)
-    assert order['amount_kopecks']==79000
-    link=await payments.create_payment_link(456,order_id=key,amount=790,description=order['product_name'])
+    assert order['amount_kopecks']==59000
+    link=await payments.create_payment_link(456,order_id=key,amount=590,description=order['product_name'])
     form=parse_form_fields(parse_qsl(urlsplit(link).query,keep_blank_values=True))
-    receipt={'order_num':key,'order_id':'paid-mother-790','sum':'790.00','currency':'rub','payment_status':'success',
+    receipt={'order_num':key,'order_id':'paid-mother-590','sum':'590.00','currency':'rub','payment_status':'success',
         'products':form['products'],'_param_user_id':'456','_param_credits':'0','_param_package_id':order['package_id']}
     validated,_=await payments.validate_payment(receipt)
     assert validated['tariff']=='mother'
-    assert await database.mark_cartoon_paid(key,'paid-mother-790')
-    assert not await database.mark_cartoon_paid(key,'paid-mother-790')
+    assert await database.mark_cartoon_paid(key,'paid-mother-590')
+    assert not await database.mark_cartoon_paid(key,'paid-mother-590')
     assert await record(456,'mother_cartoon_ready',key)
     assert not await record(456,'mother_cartoon_ready',key)
     await record(999,'mother_cartoon_ready','admin-test')
     await database.init_db()
     counters=await database.get_all_counters(admin_id=999)
-    assert counters['buy_cartoon_790']==1 and counters['mother_cartoon_ready']==1
+    assert counters['buy_cartoon_mother_590']==1 and counters['mother_cartoon_ready']==1
     paid=await sales(999)
-    assert paid['cartoon_paid']==1 and paid['cartoon_revenue']==79000
+    assert paid['cartoon_paid']==1 and paid['cartoon_revenue']==59000
     e=message_event('/stats')
     e.get_ids=lambda:(123,999)
     await call_handler(handlers.create_router(admin_user_id=999),'stats',e)
     assert 'День матери' in str(e.message.answer.await_args_list)
-    assert '790' in str(e.message.answer.await_args_list)
+    assert '590' in str(e.message.answer.await_args_list)
     assert all(len(c.args[0])<4000 for c in e.message.answer.await_args_list)
 
 
@@ -205,7 +205,7 @@ async def test_cannot_buy_new_mother_story_at_old_short_price(credit_db):
     with pytest.raises(ValueError):await database.create_cartoon_order('cartoon_wrong_price',456,'theme_mother','short')
     with pytest.raises(ValueError):await database.create_cartoon_order('cartoon_wrong_theme',456,'theme_ny','mother')
     key=await database.create_cartoon_order('cartoon_other_theme',456,'theme_ny','short')
-    assert (await database.get_cartoon_order(key))['amount_kopecks']==59000
+    assert (await database.get_cartoon_order(key))['amount_kopecks']==39000
 
 
 @respx.mock
@@ -263,7 +263,7 @@ async def test_issued_35_second_receipt_still_valid_after_minute_tariff(credit_d
     key=await database.create_cartoon_order('cartoon_legacy_mother_invoice',456,'theme_mother','mother')
     old='Мульт-открытка «День матери» (35 сек)'
     async with aiosqlite.connect(database.DATABASE_PATH) as db:
-        await db.execute('UPDATE cartoon_orders SET product_name=? WHERE order_id=?',(old,key));await db.commit()
+        await db.execute('UPDATE cartoon_orders SET product_name=?,amount_kopecks=79000 WHERE order_id=?',(old,key));await db.commit()
     link=await payments.create_payment_link(456,order_id=key,amount=790,description=old)
     form=parse_form_fields(parse_qsl(urlsplit(link).query,keep_blank_values=True))
     receipt={'order_num':key,'order_id':'old-35-paid','sum':'790.00','currency':'rub','payment_status':'success',

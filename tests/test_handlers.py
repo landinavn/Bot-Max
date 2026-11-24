@@ -2308,7 +2308,7 @@ async def test_category_screens_ordered_album_and_buttons(credit_db, example_pho
         assert replies[0].kwargs["text"] == "Примеры работ:"
     assert replies[-1].kwargs["text"] == handlers.CATEGORY_MENUS[screen][1]
     buttons = replies[-1].kwargs["attachments"][0].payload.buttons
-    assert [row[0].payload for row in buttons] == payloads
+    assert [button.payload for row in buttons for button in row] == payloads
     assert await context.get_state() == PosterStates.waiting_for_mode
     assert await context.get_data() == {}
     assert await credit_db.get_user(456) is None  # Навигация не начисляет и не списывает кредиты.
@@ -3283,14 +3283,14 @@ async def test_audio_tariffs_show_fun_or_gift_screen_and_return_to_workshop(cred
     if tariff == 'audio_tariff_fun':
         assert event.send.await_args.args[0] == handlers.AUDIO_FUN_MENU_TEXT
         buttons = event.send.await_args.kwargs['attachments'][0].payload.buttons
-        assert [row[0].payload for row in buttons] == [
+        assert [button.payload for row in buttons for button in row] == [
             'audio_fun_boss', 'audio_fun_friend', 'audio_fun_cat', 'audio_fun_student',
             'audio_fun_universal', 'audio_fun_meme', 'audio_fun_ny', 'audio_fun_mother', 'audio_fun_mother_bday', 'cat_audio',
         ]
     else:
         assert event.send.await_args.args[0] == handlers.AUDIO_GIFT_TEXT
         buttons = event.send.await_args.kwargs['attachments'][0].payload.buttons
-        assert [(row[0].text, row[0].payload) for row in buttons] == [
+        assert [(button.text, button.payload) for row in buttons for button in row] == [
             ('Выбрать сценарий', 'gift_choose_scenario'), ('⬅️ Назад', 'cat_audio'),
         ]
     back = event.send.await_args.kwargs['attachments'][0].payload.buttons[-1][0]
@@ -3306,7 +3306,7 @@ async def test_audio_tariffs_show_fun_or_gift_screen_and_return_to_workshop(cred
     workshop.ack.assert_awaited_once()
     assert workshop.send.await_args.kwargs['text'] == handlers.CATEGORY_MENUS['cat_audio'][1]
     buttons = workshop.send.await_args.kwargs['attachments'][0].payload.buttons
-    assert [(row[0].text,row[0].payload) for row in buttons] == list(handlers.CATEGORY_MENUS['cat_audio'][2])
+    assert [(button.text,button.payload) for row in buttons for button in row] == list(handlers.CATEGORY_MENUS['cat_audio'][2])
     assert await credit_db.get_all_counters() == {counter: 1, 'click_audio': 1}
 
 
@@ -3473,7 +3473,7 @@ async def test_gift_scenario_menu_keeps_order_and_clears_old_data(credit_db):
     event.ack.assert_awaited_once()
     assert event.send.await_args.args[0].startswith('Для кого песня?')
     buttons = event.send.await_args.kwargs['attachments'][0].payload.buttons
-    assert [row[0].payload for row in buttons] == [
+    assert [button.payload for row in buttons for button in row] == [
         'gift_scen_bday', 'gift_scen_anniv', 'gift_scen_parents', 'gift_scen_child',
         'gift_scen_friend', 'gift_scen_custom', 'audio_gift_ny', 'audio_gift_teacher', 'gift_scen_mother', 'gift_scen_mother_bday', 'audio_tariff_gift',
     ]
@@ -4479,8 +4479,8 @@ async def test_video_menu_first_and_matches_existing_style_labels(credit_db, exa
         rows = event.send.await_args.kwargs['attachments'][0].payload.buttons
         expected_labels=[label for label, _ in handlers.CATEGORY_MENUS[screen][2]]
         if screen=='cat_cards':expected_labels.insert(1,handlers.BIRTHDAY_TITLE)
-        assert [row[0].text for row in rows] == expected_labels
-        assert all(row[0].payload.startswith('video_style:') or row[0].payload == 'back_to_main' for row in rows)
+        assert [button.text for row in rows for button in row] == expected_labels
+        assert all(button.payload.startswith('video_style:') or button.payload == 'back_to_main' for row in rows for button in row)
     await dispatch_callback(router, callback_event('video_style:cat_cards'), context)
     assert (await context.get_data())['video_amount_kopecks'] == 29900
     await dispatch_callback(router, callback_event('back_to_main'), context)
@@ -4499,10 +4499,10 @@ async def test_static_card_video_upsells_keep_source_and_do_not_generate(credit_
     first_reply = event.send.await_args_list[0]
     assert first_reply.args[0] == '🎵 Выберите сценарий песни для видео-поздравления:'
     rows = first_reply.kwargs['attachments'][0].payload.buttons
-    assert [row[0].payload for row in rows[:-1]] == [
+    assert [button.payload for row in rows[:-1] for button in row] == [
         'video_song:audio_fun_boss', 'video_song:audio_fun_friend', 'video_song:audio_fun_cat',
         'video_song:audio_fun_student', 'video_song:audio_fun_universal', 'video_song:audio_fun_meme', 'video_song:audio_fun_ny', 'video_song:audio_fun_mother', 'video_song:audio_fun_mother_bday', 'audio_video_teacher']
-    assert all(row[0].type == 'callback' for row in rows)
+    assert all(button.type == 'callback' for row in rows for button in row)
     data = await context.get_data()
     assert data['video_source_image'] == 'https://cdn.example/card.png'
     assert data['video_amount_kopecks'] == price * 100
@@ -4802,7 +4802,7 @@ async def test_cartoon_avatars_approval_short_songs_and_admin_generation(credit_
     assert data['cartoon_mode'] == 'mode_modern_card'
     assert accepted.send.await_args.args[0] == 'Теперь выберите песню для вашего мультфильма:'
     song_buttons = accepted.send.await_args.kwargs['attachments'][0].payload.buttons
-    assert [row[0].payload for row in song_buttons[:-1]] == ['cartoon_song:' + key for key in handlers.AUDIO_FUN_SCENARIOS]
+    assert [button.payload for row in song_buttons[:-1] for button in row] == ['cartoon_song:' + key for key in handlers.AUDIO_FUN_SCENARIOS]
     pay = callback_event('cartoon_song:audio_fun_ny')
     await dispatch_callback_and_phrase(router, pay, context)
     assert 'https://video.example/cartoon.mp4' in pay.send.await_args.args[0]
@@ -5140,7 +5140,7 @@ async def test_video_menus_include_all_eight_required_scenarios(credit_db, entry
         event = callback_event(entry)
         await dispatch_callback(router, event, context)
         markup = event.send.await_args.kwargs['attachments'][0]
-    buttons = [row[0] for row in markup.payload.buttons]
+    buttons = [button for row in markup.payload.buttons for button in row]
     expected = ['🎤 Начальник года', '💖 Лучшая подруга', '🐱 Гимн кота', '🎓 Вечный студент',
                 '⏰ Поздравление на бегу', '🌀 Абсурдный мем', '🎄 Новогодняя', '👨‍🏫 Для тренера / учителя']
     assert all(label in [button.text for button in buttons] for label in expected)
@@ -6134,7 +6134,7 @@ async def test_themed_cartoon_requires_music_confirmation_before_kling(credit_db
     router,context=create_router(admin_user_id=456,avatar_generator=avatar),await ready_context()
     menu=callback_event(entry);await dispatch_callback(router,menu,context)
     buttons=menu.send.await_args.kwargs['attachments'][0].payload.buttons
-    assert [row[0].payload for row in buttons[:-1]]==list(handlers.CARTOON_THEMES)
+    assert [button.payload for row in buttons[:-1] for button in row]==list(handlers.CARTOON_THEMES)
     await dispatch_callback(router,callback_event(theme),context)
     photo=cartoon_photo();await call_handler(router,'collect_cartoon_photo',photo,context)
     avatar.assert_awaited_once_with('https://photos.example.com/first.png',theme)

@@ -21,11 +21,11 @@ def arguments(data,details,fallback):
 
 
 async def show_voice(event,context):
-    from handlers import _reply
-    d=await context.get_data();b=InlineKeyboardBuilder()
-    for key,(label,_) in VOICES.items():b.row(CallbackButton(text=label,payload=f"song_review:voice:{key}:{d['song_review_token']}"))
-    b.row(CallbackButton(text='🏠 Главный экран',payload='back_to_main'))
-    await _reply(event,'🎙 Каким голосом исполнить песню?\n\nСмешанный — мужской и женский вместе. После выбора покажу текст для проверки.',attachments=[b.as_markup()])
+    from handlers import _reply, navigation_keyboard
+    d=await context.get_data()
+    buttons=[(label,f"song_review:voice:{key}:{d['song_review_token']}") for key,(label,_) in VOICES.items()]
+    keyboard=navigation_keyboard((*buttons,('🏠 Главный экран','back_to_main')),columns=2)
+    await _reply(event,'🎙 Каким голосом исполнить песню?\n\nСмешанный — мужской и женский вместе. После выбора покажу текст для проверки.',attachments=[keyboard])
 
 
 async def prepare(event,context,*,flow,details,label,audio_format,style=None,writer=None,admin=None):
@@ -190,11 +190,11 @@ async def start_questions(event,context,*,flow,prompt,state):
 
 
 async def setup_voice(event,context):
-    from handlers import _reply
-    d=await context.get_data();b=InlineKeyboardBuilder()
-    for key,(label,_) in VOICES.items():b.row(CallbackButton(text=label,payload=f"song_setup:voice:{key}:{d['song_setup_token']}"))
-    b.row(CallbackButton(text='🏠 Главный экран',payload='back_to_main'))
-    await _reply(event,'🎙 Кто исполнит вашу песню? Смешанный вариант — мужской и женский вместе.',attachments=[b.as_markup()])
+    from handlers import _reply, navigation_keyboard
+    d=await context.get_data()
+    buttons=[(label,f"song_setup:voice:{key}:{d['song_setup_token']}") for key,(label,_) in VOICES.items()]
+    keyboard=navigation_keyboard((*buttons,('🏠 Главный экран','back_to_main')),columns=2)
+    await _reply(event,'🎙 Кто исполнит вашу песню? Смешанный вариант — мужской и женский вместе.',attachments=[keyboard])
 
 
 async def setup_action(event,context):

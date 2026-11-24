@@ -6001,11 +6001,12 @@ def create_router(
             return
         parts = (event.message.body.text or '').split()
         try:
-            if len(parts) != 2:
+            if len(parts) not in (2,3):
                 raise ValueError
             start = float(parts[1].replace(',', '.'))
+            variant = int(parts[2]) if len(parts)==3 else None
         except ValueError:
-            await _reply(event, 'После прослушивания песни укажите секунду начала слов: /mother_song_start 3.5'); return
+            await _reply(event, 'После прослушивания укажите секунду и вариант: /mother_song_start 13 2 — 13 секунд для варианта 2.'); return
         lock = cartoon_locks.setdefault(admin_user_id, asyncio.Lock())
         if lock.locked() or await context.get_state() == PosterStates.cartoon_generating:
             await _reply(event, 'Дождитесь завершения текущего запроса.'); return
@@ -6023,21 +6024,21 @@ def create_router(
                     if not order or order['user_id'] != admin_user_id or order['status'] not in ('paid', 'manual'):
                         raise ValueError('Доступно только для собственного оплаченного незавершённого заказа.')
                     if order['status'] == 'manual':
-                        if not await recover_order(order, PosterStates.waiting_for_cartoon_music_review, start=start):
+                        if not await recover_order(order, PosterStates.waiting_for_cartoon_music_review, start=start, variant=variant):
                             raise ValueError('Не удалось восстановить этап проверки песни.')
                         order = await get_cartoon_order(order['order_id'])
                         data = json.loads(order['fsm_data'])
                     else:
-                        manual_start(data, start)
+                        manual_start(data, start, variant=variant)
                 else:
-                    manual_start(data, start)
+                    manual_start(data, start, variant=variant)
             except ValueError as exc:
                 await _reply(event, str(exc)); return
             await context.set_data(data)
             await context.set_state(PosterStates.waiting_for_cartoon_music_review)
             await persist_cartoon_state(context)
             await save(admin_user_id, data, PosterStates.waiting_for_cartoon_music_review)
-            await _reply(event, f'✅ Начало слов сохранено: {start:g} с. Песня и картинка сохранены. '
+            await _reply(event, f'✅ Вариант {data.get("selected_song_variant") or 1}. Начало слов сохранено: {start:g} с. Песня и картинка сохранены. '
                          'Для продолжения отправьте /mother_resume и подтвердите песню. Новые генерации сейчас не запускаются.')
 
     @router.message_created(Command('mother_assets'))

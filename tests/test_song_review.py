@@ -145,6 +145,7 @@ async def test_mother_cartoon_preview_and_heygen_story_use_approved_song_without
     await dispatch_callback(router,callback_event('song_setup:voice:female:'+token),ctx)
     await call_handler(router,'card_song_details',message_event('Людмила; спасибо за заботу'),ctx)
     generator.assert_not_awaited()
+    await ctx.update_data(song_review_no_preview=False)  # Existing preview order.
     token=(await ctx.get_data())['song_review_token']
     await dispatch_callback(router,callback_event('song_review:approve:'+token),ctx)
     assert await ctx.get_state()==handlers.PosterStates.waiting_for_avatar_photo
@@ -363,6 +364,7 @@ async def test_paid_customer_selects_performance_before_video_and_resumes_withou
     from maxapi.types import AttachmentUpload
     from test_handlers import cartoon_photo
     router,ctx,writer=await draft(payments,scenario='gift_scen_'+occasion)
+    await ctx.update_data(song_review_no_preview=False)  # Existing two-performance order.
     await dispatch_callback(router,callback_event('song_review:cartoon:'+(await ctx.get_data())['song_review_token']),ctx)
     key=(await ctx.get_data())['cartoon_order_id']
     await database.mark_cartoon_paid(key,'auto-render-paid')

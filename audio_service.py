@@ -142,16 +142,22 @@ async def write_song_lyrics(notes: str, tags: str, title: str, *, preserve_choru
     settings = Config.from_env()
     if not settings.image_api_key:
         raise AudioNotConfigured('Не настроена текстовая модель для стихов.')
+    from personal_song import parse_request, SYSTEM_PROMPT, FULL_FORMAT, SHORT_FORMAT, validate_lyrics
+    brief = parse_request(notes)
     chorus = re.search(r'\[Chorus\]\s*\n(.*?)(?=\n\[|$)', notes, flags=re.S)
     source_phrase = chorus.group(1).strip() if chorus else None
     mother = any(title.startswith(label + ':') for label in MOTHER_LABELS)
     birthday = title.startswith(BIRTHDAY_TITLE + ':')
-    required_phrase = source_phrase if preserve_chorus and not mother else None
+    required_phrase = source_phrase if preserve_chorus and not mother and not brief else None
     instruction = LYRICS_SYSTEM_PROMPT if preserve_chorus else VIDEO_GREETING_LYRICS_PROMPT
     mother_short=mother and '35 seconds' in tags
     if mother:
         instruction = PERSONALIZATION_INSTRUCTION.replace('ко Дню матери', 'ко дню рождения мамы') if birthday else PERSONALIZATION_INSTRUCTION
-    if title.startswith(TEACHER_SCENARIO_TITLE + ':'):
+    if brief:
+        instruction = SYSTEM_PROMPT + '\n' + (SHORT_FORMAT if brief['format']=='fun' else FULL_FORMAT)
+    if brief and title.startswith(TEACHER_SCENARIO_TITLE + ':'):
+        instruction += ' Обращайся к учителю или тренеру на Вы. Сохрани предмет или вид спорта, если они указаны, и благодарность за вклад. '
+    elif title.startswith(TEACHER_SCENARIO_TITLE + ':'):
         instruction += (' ' + TEACHER_LYRICS_INSTRUCTION if preserve_chorus else
                         ' Напиши уважительную песню-благодарность для учителя или тренера на Вы, '
                         'сохраняя имя и смысл исходного поздравления. ' + TEACHER_MUSIC_INSTRUCTION)
@@ -165,6 +171,8 @@ async def write_song_lyrics(notes: str, tags: str, title: str, *, preserve_choru
                                    http_client=http_client, max_retries=0) as client:
                 user_data = {'details': notes, 'style': tags, 'title_for_context_only': title,
                              'required_chorus_phrase': required_phrase}
+                if brief:
+                    user_data.update(brief)
                 if mother:
                     source=re.search(r'Источник личных деталей клиента: (.*?)\nРаскрой благодарность',notes,re.S)
                     user_data['details']=source.group(1) if source else source_phrase or notes
@@ -190,6 +198,11 @@ async def write_song_lyrics(notes: str, tags: str, title: str, *, preserve_choru
             text=render_approved_song(personal['name_genitive'],personal['personal_lines'],short=mother_short,birthday=birthday)
         except (ValueError,TypeError,KeyError) as exc:
             raise AudioServiceError('Не удалось персонализировать утверждённую песню. Исходный текст сохранён.') from exc
+    if brief:
+        try:
+            return validate_lyrics(text, brief['format'])
+        except ValueError as exc:
+            raise AudioServiceError(str(exc)) from exc
     sections = re.findall(r'\[([^\]]+)\]', text)
     expected_sections=['Verse 1','Chorus'] if mother_short else ['Verse 1','Chorus','Verse 2','Chorus','Bridge','Chorus']
     if not text.startswith('[Verse 1]') or sections != expected_sections:

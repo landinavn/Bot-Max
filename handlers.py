@@ -36,6 +36,7 @@ from mothers_day import (TITLE as MOTHER_TITLE, DETAILS_PROMPT as MOTHER_DETAILS
     CARTOON_DESCRIPTION as MOTHER_CARTOON_DESCRIPTION, BIRTHDAY_TITLE, BIRTHDAY_CARTOON_DESCRIPTION,
     MOTHER_LABELS, MOTHER_THEMES, MOTHER_MODES, MOTHER_SCENARIOS, mother_suffix, mother_title,
     mother_description, mother_event)
+from personal_song import DETAILS_PROMPT as PERSONAL_SONG_DETAILS_PROMPT
 import promo1111
 import song_review
 from video_service import build_video_prompt, generate_video_from_avatar, CARTOON_VIDEO_PROMPTS, create_video_task_with_retry as create_video_task, poll_video_task
@@ -321,11 +322,7 @@ def photo_request(text: str) -> str:
     return text + "\n\n" + PHOTO_GUIDANCE
 
 
-VIDEO_SONG_CUSTOM_TEXT_PROMPT = (
-    'Отличный выбор! Теперь напишите имя и фразу для припева '
-    '(например: «Иван, лучший тренер по футболу!» или «Маша, с днём рождения!»). '
-    'Эта фраза обязательно прозвучит в песне.'
-)
+VIDEO_SONG_CUSTOM_TEXT_PROMPT = PERSONAL_SONG_DETAILS_PROMPT
 
 
 CARD_TEXT_PROMPT = (
@@ -561,20 +558,20 @@ AUDIO_CLICK_EVENTS = {
 }
 
 AUDIO_FUN_SCENARIOS = {
-    'audio_fun_boss': ('🎤 Начальник года', 'Напишите имя начальника и фразу для припева (например: «Сергей, лучший босс!»).'),
-    'audio_fun_friend': ('💖 Лучшая подруга', 'Напишите имя подруги и фразу для припева (например: «Аня, ты моя сестра!»).'),
-    'audio_fun_cat': ('🐱 Гимн кота', 'Напишите кличку кота и фразу для припева (например: «Барсик, самый крутой кот!»).'),
-    'audio_fun_student': ('🎓 Вечный студент', 'Напишите имя друга и фразу для припева (например: «Иван, сдай сессию!»).'),
-    'audio_fun_universal': ('⏰ Поздравление на бегу', 'Напишите имя и фразу для припева (например: «Маша, с днём рождения!»).'),
-    'audio_fun_meme': ('🌀 Абсурдный мем', 'Напишите тему мема и фразу для припева (например: «Холодильник, ты мой герой!»).'),
-    'audio_fun_ny': ('🎄 Новогодняя', 'Напишите имя и фразу для припева (например: «С Новым годом, друзья!»).'),
+    'audio_fun_boss': ('🎤 Начальник года', PERSONAL_SONG_DETAILS_PROMPT),
+    'audio_fun_friend': ('💖 Лучшая подруга', PERSONAL_SONG_DETAILS_PROMPT),
+    'audio_fun_cat': ('🐱 Гимн кота', PERSONAL_SONG_DETAILS_PROMPT),
+    'audio_fun_student': ('🎓 Вечный студент', PERSONAL_SONG_DETAILS_PROMPT),
+    'audio_fun_universal': ('⏰ Поздравление на бегу', PERSONAL_SONG_DETAILS_PROMPT),
+    'audio_fun_meme': ('🌀 Абсурдный мем', PERSONAL_SONG_DETAILS_PROMPT),
+    'audio_fun_ny': ('🎄 Новогодняя', PERSONAL_SONG_DETAILS_PROMPT),
     'audio_fun_mother': (MOTHER_TITLE, MOTHER_DETAILS_PROMPT),
     'audio_fun_mother_bday': (BIRTHDAY_TITLE, MOTHER_DETAILS_PROMPT),
 }
 
 AUDIO_FUN_MENU_TEXT = (
     "🔥 Выбери сценарий для песни (30-40 секунд, 2 варианта на выбор). "
-    "После выбора я попрошу имя и фразу для припева, и мы создадим хит!"
+    "Выберите жанр и голос, расскажите о герое и проверьте текст перед оплатой."
 )
 
 AUDIO_FUN_PAYMENT_TEXT = (
@@ -611,16 +608,16 @@ AUDIO_GIFT_TEXT = (
     "Если что-то пойдёт не так — бесплатно перегенерируем."
 )
 
-TEACHER_DETAILS_PROMPT = 'Напишите имя тренера/учителя и фразу для припева (например: «Иван, лучший тренер по футболу»).'
+TEACHER_DETAILS_PROMPT = PERSONAL_SONG_DETAILS_PROMPT + '\nДля учителя или тренера можно добавить предмет или вид спорта.'
 
 AUDIO_GIFT_SCENARIOS = {
-    'gift_scen_bday': ('🎂 День рождения', 'Напишите имя и фразу для припева (например: «Маша, будь счастлива!»).'),
-    'gift_scen_anniv': ('💍 Годовщина / Свадьба', 'Напишите имена и фразу для припева (например: «Аня и Ваня, навсегда!»).'),
-    'gift_scen_parents': ('👵 Для родителей', 'Напишите имя и фразу для припева (например: «Мама, спасибо за всё!»).'),
-    'gift_scen_child': ('🧸 Для ребёнка', 'Напишите имя и фразу для припева (например: «Саша, расти большой!»).'),
-    'gift_scen_friend': ('🤝 Для друга / подруги', 'Напишите имя и фразу для припева (например: «Игорь, ты лучший друг!»).'),
-    'gift_scen_custom': ('🎯 Свой вариант', 'Напишите имя, повод и фразу для припева.'),
-    'audio_gift_ny': ('🎄 Новогодняя', 'Напишите имя и фразу для припева (например: «С Новым годом, друзья!»).'),
+    'gift_scen_bday': ('🎂 День рождения', PERSONAL_SONG_DETAILS_PROMPT),
+    'gift_scen_anniv': ('💍 Годовщина / Свадьба', PERSONAL_SONG_DETAILS_PROMPT),
+    'gift_scen_parents': ('👵 Для родителей', PERSONAL_SONG_DETAILS_PROMPT),
+    'gift_scen_child': ('🧸 Для ребёнка', PERSONAL_SONG_DETAILS_PROMPT),
+    'gift_scen_friend': ('🤝 Для друга / подруги', PERSONAL_SONG_DETAILS_PROMPT),
+    'gift_scen_custom': ('🎯 Свой вариант', PERSONAL_SONG_DETAILS_PROMPT),
+    'audio_gift_ny': ('🎄 Новогодняя', PERSONAL_SONG_DETAILS_PROMPT),
     "audio_gift_teacher": (TEACHER_SCENARIO_TITLE, TEACHER_DETAILS_PROMPT),
     "gift_scen_mother": (MOTHER_TITLE, MOTHER_DETAILS_PROMPT),
     "gift_scen_mother_bday": (BIRTHDAY_TITLE, MOTHER_DETAILS_PROMPT),
@@ -686,7 +683,7 @@ CARTOON_THEMES = {
     'theme_father': '👨‍👧 День отца',
 }
 CARTOON_PHOTO_PROMPT = '📸 Отправьте четкое фото (анфас, хорошее освещение). Мы нарисуем вашего персонажа!'
-CARTOON_SONG_PHRASE_PROMPT = 'Теперь напишите имя и фразу для припева (например: «Маша, с днём рождения!»).'
+CARTOON_SONG_PHRASE_PROMPT = PERSONAL_SONG_DETAILS_PROMPT
 CARTOON_EXAMPLE_FILES = ('cartoon_example.mp4', 'cartoon_example1.mp4')
 
 CARTOON_COMING_SOON = '🎬 Раздел «Мульт-открытка» уже совсем скоро заработает! Мы заканчиваем настройку оплаты, и в ближайшее время вы сможете создавать настоящие мультфильмы с вашим лицом. Следите за обновлениями! 🚀'
@@ -3571,6 +3568,7 @@ def create_router(
         if (data.get('cartoon_theme') in MOTHER_THEMES
                 and song_review.approved(data, data.get('chosen_song_phrase'))
                 and data.get('song_review_tags') and data.get('song_review_title')
+                and not data.get('song_review_no_preview')
                 and (data.get('mother_song_variants') or not started_visuals)):
             await prepare_mother_song_variants(event, context)
             return
@@ -3579,7 +3577,7 @@ def create_router(
         if attempt not in (1,2) or data.get('cartoon_video_failed'):
             return
         await context.set_state(PosterStates.cartoon_generating)
-        if event.get_ids()[1]!=admin_user_id and song_review.approved(data,data.get('chosen_song_phrase')):
+        if (event.get_ids()[1]!=admin_user_id or data.get('song_review_no_preview')) and song_review.approved(data,data.get('chosen_song_phrase')):
             data['cartoon_auto_pipeline']=True
             await context.update_data(cartoon_auto_pipeline=True)
             await persist_cartoon_state(context)
@@ -3594,7 +3592,7 @@ def create_router(
                 data[f'song_{attempt}_phrase'] = data.get('chosen_song_phrase')
                 await context.update_data(**video_cache(data), **{key:value for key,value in data.items() if key.startswith('song_')})
                 await persist_cartoon_state(context)
-            if (event.get_ids()[1]!=admin_user_id and
+            if ((event.get_ids()[1]!=admin_user_id or data.get('song_review_no_preview')) and
                     song_review.approved(data,data.get('chosen_song_phrase'))):
                 data.update(selected_song_variant=attempt,cartoon_auto_pipeline=True)
                 await context.update_data(selected_song_variant=attempt,cartoon_auto_pipeline=True)
@@ -3626,7 +3624,7 @@ def create_router(
             logger.exception('Ошибка подготовки песни для мульт-открытки:')
             if (await context.get_data()).get('cartoon_session_id') == session:
                 await context.set_state(PosterStates.waiting_for_cartoon_song_phrase)
-                await _reply(event, 'Не удалось подготовить аудио-превью. Отправьте фразу ещё раз или /cancel; готовая песня сохранена.')
+                await _reply(event, 'Не удалось завершить подготовку песни. Данные и готовая песня сохранены. Обратитесь в поддержку, повторно оплачивать не нужно.')
         finally:
             if (await context.get_data()).get('cartoon_session_id') == session:
                 await context.update_data(**video_cache(data), **{key:value for key,value in data.items() if key.startswith('song_')})
@@ -4132,7 +4130,7 @@ def create_router(
             return
         user_id = event.get_ids()[1]
         if data.get('video_product') == 'direct':
-            await event.ack(notification='Жду фразу для припева…')
+            await event.ack(notification='Расскажите о герое песни…')
             if scenario == 'audio_video_teacher' and user_id is not None:
                 await increment_counter('audio_scen_teacher_video', user_id=user_id)
             elif scenario in {'audio_fun_ny', 'audio_gift_ny'} and user_id is not None:
@@ -4154,7 +4152,7 @@ def create_router(
             await context.set_state(PosterStates.waiting_for_video_teacher_details)
             await _reply(event, TEACHER_DETAILS_PROMPT)
             return
-        await event.ack(notification='Жду фразу для припева…')
+        await event.ack(notification='Расскажите о герое песни…')
         if scenario in {'audio_fun_ny', 'audio_gift_ny'} and user_id is not None:
             await increment_counter('audio_scen_ny_video', user_id=user_id)
         await context.update_data(video_song_scenario=scenario, video_song_lyrics=None, video_song_tags=None,
@@ -4189,10 +4187,10 @@ def create_router(
                 return
             body = event.message.body
             phrase = (body.text or '').strip() if body else ''
-            if not phrase or len(phrase) > 500:
+            if not phrase or len(phrase) > (500 if scenario in MOTHER_SCENARIOS else 1000):
                 await _reply(event, (MOTHER_DETAILS_PROMPT if scenario in MOTHER_SCENARIOS else CARTOON_SONG_PHRASE_PROMPT if cartoon and data.get('cartoon_theme') else
                                      VIDEO_SONG_CUSTOM_TEXT_PROMPT if not cartoon and data.get('video_product') == 'direct'
-                                     else scenarios[scenario][1]) + ' До 500 символов. /cancel — отмена.')
+                                     else scenarios[scenario][1]) + ' /cancel — отмена.')
                 return
             if cartoon and data.get('song_2_url') and data.get('song_attempt') == 2:
                 await prepare_cartoon_music_preview(event, context)
@@ -4234,7 +4232,7 @@ def create_router(
                 return
             body = event.message.body
             details = (body.text or '').strip() if body else ''
-            if not details:
+            if not details or len(details)>1000:
                 await _reply(event, TEACHER_DETAILS_PROMPT)
                 return
             await context.update_data(video_teacher_details=details,video_song_phrase=details)
@@ -5767,12 +5765,12 @@ def create_router(
             data=await context.get_data()
             if not data.get('card_song_precheckout'):return
             text=(getattr(event.message.body,'text',None) or '').strip()
-            if not text or len(text)>500:
-                await _reply(event,data['song_setup_prompt']+' До 500 символов.');return
+            if not text or len(text)>(500 if data.get('card_song_label') in MOTHER_LABELS else 1000):
+                await _reply(event,data['song_setup_prompt']);return
             await context.update_data(chosen_song_phrase=text,video_song_phrase=text,song_custom_text=text)
             try:
                 await song_review.prepare(event,context,flow=data['song_setup_flow'],details=text,
-                    label=data['card_song_label'],audio_format='fun',writer=lyric_writer,admin=admin_user_id)
+                    label=data['card_song_label'],audio_format='fun',style=data.get('song_style'),writer=lyric_writer,admin=admin_user_id)
             except Exception:
                 logger.exception('Не удалось подготовить текст открытки перед оплатой')
                 await _reply(event,'Не удалось подготовить слова. Музыка и картинка ещё не создавались. Попробуйте выбрать голос ещё раз.')
@@ -5789,22 +5787,38 @@ def create_router(
                 selected_song_variant=None,cartoon_preview_token=None,song_review_rewrite_pending=False)
             data=await context.get_data()
         await context.update_data(audio_lyrics=data['song_review_lyrics'])
+        if flow=='product:audio':
+            audio_format=data.get('song_review_format','gift')
+            scenarios=AUDIO_GIFT_SCENARIOS if audio_format=='gift' else AUDIO_FUN_SCENARIOS
+            chosen=next((key for key,(label,_) in scenarios.items() if label==data['song_review_label']),
+                        'gift_scen_custom' if audio_format=='gift' else 'audio_fun_universal')
+            scenario=gift_scenario_name(chosen) if audio_format=='gift' else chosen.removeprefix('audio_fun_')
+            await context.update_data(card_song_precheckout=False,
+                **({'gift_scenario':scenario,'gift_details':data['song_review_details']} if audio_format=='gift'
+                   else {'song_scenario':scenario,'song_details':data['song_review_details']}))
+            flow=audio_format
+            data=await context.get_data()
+        elif flow.startswith('product:'):
+            await context.update_data(card_song_precheckout=False)
+            await launch_song_product(event,context,flow.split(':')[1]);return
         if data.get('card_song_precheckout'):
             seed=reviewed_song_seed(data)
             await context.update_data(song_product_seed=seed,song_product_kind=data['card_song_kind'])
             await checkout_song_product(event,context,data['card_song_kind'],data['card_song_target'])
             return
-        if flow.startswith('product:'):
-            await launch_song_product(event,context,flow.split(':')[1]);return
         if flow=='fun' and data.get('song_review_label') in MOTHER_LABELS and data.get('song_review_format')=='gift':
             await context.update_data(gift_scenario=data.get('song_scenario'),gift_details=data['song_review_details'],
                 gift_chorus_phrase=data['song_review_details'])
             flow='gift'
-        if flow=='fun':await finish_fun_details(event,context)
+        if flow=='fun':
+            if event.get_ids()[1]==admin_user_id and data.get('song_review_no_preview'):
+                await deliver_admin_reviewed_song(event,context,'fun')
+            else:await finish_fun_details(event,context)
         elif flow=='gift':
             await context.set_state(PosterStates.waiting_for_gift_preview)
             if event.get_ids()[1]==admin_user_id:
-                await generate_gift_preview(event,context)
+                if data.get('song_review_no_preview'):await deliver_admin_reviewed_song(event,context,'gift')
+                else:await generate_gift_preview(event,context)
             elif payments is None:await _reply(event,'Оплата временно недоступна. Текст сохранён.')
             else:
                 order_id,link=await prepare_audio_checkout(context,event.get_ids()[1],'gift',await context.get_data())
@@ -5821,6 +5835,22 @@ def create_router(
                 await context.update_data(video_teacher_lyrics_source=data['song_review_details'],
                     video_song_lyrics=data['song_review_lyrics'],video_song_tags=data['song_review_tags'],video_song_title=data['song_review_title'])
             await finish_video_selection(event,context)
+
+    async def deliver_admin_reviewed_song(event,context,audio_format):
+        data=await context.get_data();user=event.get_ids()[1]
+        if user!=admin_user_id or not song_review.approved(data,data.get('song_review_details')):return
+        key=data.get('audio_checkout_id')
+        order=await get_audio_order(key) if key else None
+        if not order or order['lyrics']!=data['song_review_lyrics']:
+            key=f'audio-{user}-{uuid4().hex}'
+            scenario=data.get('gift_scenario') if audio_format=='gift' else data.get('song_scenario')
+            await create_audio_order(key,user,audio_format,scenario,data['song_review_details'],
+                data['song_review_tags'],data['song_review_notes'],data['song_review_tags'],data['song_review_title'])
+            await update_audio_order(key,lyrics=data['song_review_lyrics'])
+            await context.update_data(audio_checkout_id=key)
+        await grant_audio_admin_access(key,user)
+        await PaidAudioWorker(event.bot,generator=song_generator,waiter=song_waiter,
+            lyric_writer=lyric_writer,admin_user_id=admin_user_id).process(key)
 
     def reviewed_song_seed(data):
         seed={k:v for k,v in data.items() if k.startswith('song_review_') or k.startswith('song_setup_') or k=='song_style'}
@@ -5846,12 +5876,12 @@ def create_router(
         if not seed or data.get('song_product_kind')!=kind or not song_review.approved(seed,seed.get('song_review_details')):return
         if user!=admin_user_id and payments is None:
             await _reply(event,'Оплата временно недоступна. Слова и голос сохранены.');return
-        if kind=='cartoon' and target in MOTHER_THEMES and seed.get('song_review_format')=='fun':
+        if seed.get('song_review_format')=='fun' and (kind=='music' or (kind=='cartoon' and target in MOTHER_THEMES)):
             await context.update_data(card_song_precheckout=True,card_song_kind=kind,card_song_target=target,
-                song_setup_flow='cartoon',song_setup_voice=seed['song_review_voice'])
-            await _reply(event,'Для минутного мультфильма нужна полная песня. Покажу полный текст с вашим именем и словами для проверки — перед оплатой.')
-            await song_review.prepare(event,context,flow='cartoon',details=seed['song_review_details'],
-                label=mother_title(target),audio_format='gift',style=seed.get('song_style'),writer=lyric_writer,admin=admin_user_id)
+                song_setup_flow='video' if kind=='music' else 'cartoon',song_setup_voice=seed['song_review_voice'])
+            await _reply(event,'Для этого формата нужна полная песня. Покажу полный текст с вашими деталями для проверки — перед оплатой.')
+            await song_review.prepare(event,context,flow='video' if kind=='music' else 'cartoon',details=seed['song_review_details'],
+                label=seed['song_review_label'] if kind=='music' else mother_title(target),audio_format='gift',style=seed.get('song_style'),writer=lyric_writer,admin=admin_user_id)
             return
         if kind=='cartoon':
             if target not in CARTOON_THEMES:return
@@ -6292,7 +6322,8 @@ def create_router(
         if is_bot_message(event):return
         user=event.get_ids()[1]
         if user is None:return
-        if (await context.get_data()).get('song_review_step')=='manual' and user!=admin_user_id:return
+        if ((await context.get_data()).get('song_review_step')=='manual' and user!=admin_user_id
+                and not (await context.get_data()).get('song_review_no_preview')):return
         lock=song_review_locks.setdefault(user,asyncio.Lock())
         if lock.locked():return
         async with lock:
@@ -6325,7 +6356,7 @@ def create_router(
             return
         body = event.message.body
         details = (body.text or "").strip() if body else ""
-        if not details:
+        if not details or len(details)>(500 if AUDIO_GIFT_SCENARIOS[payload][0] in MOTHER_LABELS else 1000):
             await _reply(event, AUDIO_GIFT_SCENARIOS[payload][1])
             return
         await context.update_data(gift_details=details, gift_chorus_phrase=details)
@@ -6338,6 +6369,9 @@ def create_router(
         if not is_bot_message(event):
             data = await context.get_data()
             order = await get_audio_order(data.get('audio_checkout_id',''))
+            if data.get('song_review_no_preview'):
+                await _reply(event,'Готовая песня уже отправлена в чат.' if order and order.get('delivered') else 'Текст согласован. После оплаты создадим и пришлём готовую песню без предварительного прослушивания.')
+                return
             if order and order['preview_url']:
                 await PaidAudioWorker(event.bot, payments=payments, admin_user_id=admin_user_id).deliver_preview(order)
                 return
@@ -6357,7 +6391,7 @@ def create_router(
             return
         body = event.message.body
         details = (body.text or "").strip() if body else ""
-        if not details:
+        if not details or len(details)>(500 if AUDIO_FUN_SCENARIOS['audio_fun_'+data['song_scenario']][0] in MOTHER_LABELS else 1000):
             await _reply(event, AUDIO_FUN_SCENARIOS['audio_fun_' + data['song_scenario']][1])
             return
         await context.update_data(song_details=details, song_chorus_phrase=details)

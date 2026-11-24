@@ -30,9 +30,9 @@ async def show_voice(event,context):
 
 async def prepare(event,context,*,flow,details,label,audio_format,style=None,writer=None,admin=None):
     from handlers import PosterStates
-    from audio_service import build_song_request
+    from personal_song import build_request as build_song_request
     from mothers_day import MOTHER_LABELS
-    if label in MOTHER_LABELS:
+    if label in MOTHER_LABELS or flow in ('video','teacher'):
         audio_format='gift'  # Review the full approved song; the cartoon uses an excerpt.
     d=await context.get_data()
     source=[flow,details,label,audio_format,style]
@@ -43,7 +43,7 @@ async def prepare(event,context,*,flow,details,label,audio_format,style=None,wri
         song_review_label=label,song_review_format=audio_format,song_review_style=style,
         song_review_notes=notes,song_review_base_tags=tags,song_review_title=title,
         song_review_lyrics=None,song_review_approved=False,song_review_voice=None,
-        song_review_step='voice',song_review_token=uuid4().hex)
+        song_review_step='voice',song_review_token=uuid4().hex,song_review_no_preview=True)
     await context.set_state(PosterStates.waiting_for_song_review)
     if d.get('song_setup_voice') in VOICES and d.get('song_setup_flow')==flow:
         await context.update_data(song_review_voice=d['song_setup_voice'])
@@ -59,10 +59,17 @@ async def show_text(event,context):
         b.row(CallbackButton(text='🎵 Сделать песню',payload='song_review:approve:'+token))
         b.row(CallbackButton(text='🎬 Сделать мульт-открытку',payload='song_review:cartoon:'+token))
         b.row(CallbackButton(text='🎵 Сделать музыкальную открытку',payload='song_review:music:'+token))
-    else:b.row(CallbackButton(text='✅ Текст подходит, продолжить',payload='song_review:approve:'+token))
+    else:
+        b.row(CallbackButton(text='✅ Текст подходит, продолжить',payload='song_review:approve:'+token))
+        if d.get('card_song_precheckout'):
+            b.row(CallbackButton(text='🎵 Сделать только песню',payload='song_review:audio:'+token))
+            if d.get('card_song_kind')!='cartoon':
+                b.row(CallbackButton(text='🎬 Песня с мульт-открыткой',payload='song_review:cartoon:'+token))
     if d.get('song_review_admin'):
         b.row(CallbackButton(text='✍️ Переписать текст песни',payload='song_review:rewrite:'+token))
         b.row(CallbackButton(text='📝 Вставить свой текст',payload='song_review:manual:'+token))
+    if d.get('song_review_no_preview') and not d.get('song_review_admin'):
+        b.row(CallbackButton(text='📝 Изменить текст песни',payload='song_review:text_edit:'+token))
     b.row(CallbackButton(text='✏️ Изменить мои слова',payload='song_review:edit:'+token))
     b.row(CallbackButton(text='🎙 Изменить голос',payload='song_review:voice_menu:'+token))
     b.row(CallbackButton(text='🏠 Главный экран',payload='back_to_main'))
@@ -119,16 +126,24 @@ async def action(event,context,writer):
             await context.update_data(song_review_lyrics=None,song_review_approved=False,song_review_rewrite_pending=True,song_review_token=uuid4().hex)
             await _reply(event,'✍️ Перепишу только слова. Картинка, аватар и готовые сцены сохранены. Новая музыка будет создана после подтверждения текста.')
             await write_text(event,context,writer)
+    elif action=='text_edit' and d.get('song_review_step')=='text' and d.get('song_review_no_preview'):
+        import database
+        await database.increment_counter('song_lyrics_edit',user_id=event.get_ids()[1])
+        await context.update_data(song_review_step='manual')
+        await _reply(event,'📝 Скопируйте показанный текст песни, внесите правки и пришлите его одним сообщением. Сохраните заголовки куплетов и припева. До 5000 символов. Затем снова покажу текст для подтверждения; музыка ещё не создавалась.')
     elif action=='edit' and d.get('song_review_step')=='text':
         import database
         await database.increment_counter('song_lyrics_edit',user_id=event.get_ids()[1])
         await context.update_data(song_review_step='input')
-        await _reply(event,'✏️ Напишите заново имя и ваши слова: благодарность, пожелание или фразу для припева.\n\nСейчас: '+d['song_review_details']+'\n\nМы обновим текст и покажем его перед созданием музыки.')
-    elif action in ('approve','cartoon','music') and d.get('song_review_step')=='text' and d.get('song_review_lyrics'):
-        if action!='approve' and d['song_review_flow'] not in ('fun','gift'):return None
+        from personal_song import DETAILS_PROMPT
+        await _reply(event,DETAILS_PROMPT+'\n\nСейчас: '+d['song_review_details']+'\n\nОбновлённый текст снова покажем для подтверждения.')
+    elif action in ('approve','cartoon','music','audio') and d.get('song_review_step')=='text' and d.get('song_review_lyrics'):
+        if action!='approve' and d['song_review_flow'] not in ('fun','gift') and not d.get('card_song_precheckout'):return None
+        if action=='audio' and not d.get('card_song_precheckout'):return None
         import database
         await database.increment_counter('song_lyrics_approved',user_id=event.get_ids()[1])
-        await database.increment_counter('song_product_'+('audio' if action=='approve' else action),user_id=event.get_ids()[1])
+        product=(d.get('card_song_kind') or 'audio') if action=='approve' else action
+        await database.increment_counter('song_product_'+product,user_id=event.get_ids()[1])
         await context.update_data(song_review_approved=True,song_review_step='used')
         return 'product:'+action if action!='approve' else d['song_review_flow']
     return None
@@ -136,13 +151,25 @@ async def action(event,context,writer):
 
 async def edit(event,context,writer):
     from handlers import _reply
-    from audio_service import build_song_request
+    from personal_song import build_request as build_song_request
     d=await context.get_data()
-    if d.get('song_review_step')=='manual' and d.get('song_review_admin'):
+    if d.get('song_review_step')=='manual' and (d.get('song_review_admin') or d.get('song_review_no_preview')):
         from audio_service import validate_song_arguments
         text=(getattr(event.message.body,'text',None) or '').strip()
         for source,target in (('Куплет 1','[Verse 1]'),('Куплет 2','[Verse 2]'),('Припев','[Chorus]'),('Переход','[Bridge]')):
             text='\n'.join(target if line.strip()==source else line for line in text.splitlines())
+        validate_song_arguments(text,d['song_review_tags'],d['song_review_title'])
+        import re
+        from mothers_day import MOTHER_LABELS
+        if d.get('song_review_label') in MOTHER_LABELS and d.get('song_review_flow')=='cartoon' and not d.get('song_review_admin'):
+            parts=re.findall(r'\[([^\]]+)\]\s*\n(.*?)(?=\n\[|$)',text,re.S)
+            if [tag for tag,_ in parts]!=['Verse 1','Chorus']:
+                raise ValueError('Пришлите показанный куплет и припев с заголовками.')
+            verse,chorus=(body.strip() for _,body in parts)
+            full=d['song_review_lyrics']
+            text=re.sub(r'\[Verse 1\]\s*\n.*?(?=\n\[|$)',lambda _: '[Verse 1]\n'+verse,full,flags=re.S)
+            text=re.sub(r'\[Chorus\]\s*\n.*?(?=\n\[|$)',lambda _: '[Chorus]\n'+chorus,text,flags=re.S)
+        if not re.findall(r'\[Chorus\]',text):raise ValueError('Сохраните заголовки куплетов и припева.')
         validate_song_arguments(text,d['song_review_tags'],d['song_review_title'])
         await context.update_data(song_review_lyrics=text,song_review_approved=False,song_review_rewrite_pending=True,
             song_review_step='text',song_review_token=uuid4().hex)

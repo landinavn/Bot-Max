@@ -1277,8 +1277,8 @@ async def reset_musical_workers():
 
 
 CARTOON_TARIFFS = {
-    'mother': (79000, 'Мульт-открытка «День матери» (60 сек)'),
-    'short': (59000, 'Мульт-открытка'),
+    'mother': (59000, 'Мульт-открытка «День матери» (60 сек)'),
+    'short': (39000, 'Мульт-открытка'),
     'long': (129000, 'Мульт-поздравление (до 30 сек)'),
 }
 CARTOON_ORDER_THEMES = frozenset({
@@ -1392,7 +1392,7 @@ def _base_sale_counter_keys(kind: str, order: dict) -> tuple[str, ...]:
         return (('buy_music_direct',) if order['tariff'] == 'direct'
                 else ('buy_music_upsell', 'buy_music_card_149'))
     if kind == 'cartoon':
-        return ({'short':'buy_cartoon_590','long':'buy_cartoon_1290','mother':'buy_cartoon_790'}[order['tariff']],)
+        return (cartoon_sale_counter(order),)
     if kind == 'photo':
         return (f"buy_photo_{order['tariff']}",)
     if kind == 'animation':
@@ -1419,7 +1419,7 @@ async def _backfill_sale_counters(db, *, force=False) -> None:
         ('credit', 'payment_orders', 'credits,package_id', "status='paid'"),
         ('audio', 'audio_orders', 'audio_format', "status='paid'"),
         ('musical', 'musical_orders', 'tariff,promo_token', "status='paid'"),
-        ('cartoon', 'cartoon_orders', 'tariff,promo_token', "status IN ('paid','completed','manual')"),
+        ('cartoon', 'cartoon_orders', 'tariff,promo_token,amount_kopecks,promo_base_amount_kopecks', "status IN ('paid','completed','manual')"),
         ('photo', 'photo_orders', 'tariff,promo_token', "status='paid'"),
         ('animation', 'animation_orders', 'tariff', "status='paid' AND is_admin=0 AND promo_bonus=0"),
         ('ded_moroz','ded_moroz_payments','amount_kopecks,variant',"status='paid'"),
@@ -1673,16 +1673,23 @@ async def _create_repeat_order(db,table,order_id,identity,base_amount,base_name,
 
 
 def cartoon_tariff_value(order):
-    """Previously issued 35-second invoices retain their exact name and amount."""
+    """Validate historical receipt snapshots without repricing already issued orders."""
     base=CARTOON_TARIFFS.get(order['tariff'])
-    old_name='Мульт-открытка «День матери» (35 сек)'
-    if order['tariff']=='mother':
-        if order.get('promo_token'):
-            if (order.get('promo_base_amount_kopecks'),order.get('promo_base_product_name'))==(79000,old_name):
-                return 79000,old_name
-        elif (order.get('amount_kopecks'),order.get('product_name'))==(79000,old_name):
-            return 79000,old_name
-    return base
+    value=((order.get('promo_base_amount_kopecks'),order.get('promo_base_product_name'))
+           if order.get('promo_token') else (order.get('amount_kopecks'),order.get('product_name')))
+    historical={
+        'mother': {(79000,'Мульт-открытка «День матери» (35 сек)'),
+                   (79000,'Мульт-открытка «День матери» (60 сек)')},
+        'short': {(59000,'Мульт-открытка')},
+    }
+    return value if value in historical.get(order['tariff'],set()) else base
+
+
+def cartoon_sale_counter(order, *, promo=False):
+    amount=order.get('promo_base_amount_kopecks') if order.get('promo_token') else order['amount_kopecks']
+    price=amount//100
+    suffix=('mother_590' if order['tariff']=='mother' and price==590 else str(price))
+    return ('promo_buy_cartoon_' if promo else 'buy_cartoon_')+suffix
 
 
 def repeat_order_value(order,category,base_value,*,creation=False):
@@ -1719,7 +1726,7 @@ def repeat_sale_counter(kind,order):
     if kind=='musical':
         return 'promo_buy_music_card'
     if kind=='cartoon':
-        return 'promo_buy_cartoon_'+{'short':'590','long':'1290','mother':'790'}[order['tariff']]
+        return cartoon_sale_counter(order,promo=True)
     if kind=='photo':
         return f"promo_buy_photo_{order['tariff']}"
     return None

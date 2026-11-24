@@ -77,7 +77,7 @@ async def test_change_personal_words_then_confirm_keeps_final_lyrics_for_paid_wo
     assert generator.await_count==1
 
 
-@pytest.mark.parametrize('product,table,price',[('cartoon','cartoon_orders',79000),('music','musical_orders',29900)])
+@pytest.mark.parametrize('product,table,price',[('cartoon','cartoon_orders',59000),('music','musical_orders',29900)])
 async def test_conversion_preserves_review_and_voice_in_durable_unpaid_draft(credit_db,payments,product,table,price):
     router,ctx,writer=await draft(payments)
     token=(await ctx.get_data())['song_review_token'];e=callback_event('song_review:'+product+':'+token)
@@ -110,7 +110,7 @@ async def test_other_occasions_also_use_genre_voice_and_review(credit_db,payment
     e=callback_event('song_product_theme:theme_ny')
     await dispatch_callback(router,e,ctx)
     order=await database.get_cartoon_order((await ctx.get_data())['cartoon_order_id'])
-    assert order['amount_kopecks']==59000 and order['status']=='pending'
+    assert order['amount_kopecks']==39000 and order['status']=='pending'
 
 
 async def test_stale_review_or_setup_callbacks_cannot_start_music_or_create_invoices(credit_db,payments):
@@ -212,9 +212,9 @@ async def test_paid_music_conversion_completes_inputs_without_rewriting_chosen_s
 
 
 @pytest.mark.parametrize('kind,target,table,price',[
-    ('cartoon','theme_mother','cartoon_orders',79000),
+    ('cartoon','theme_mother','cartoon_orders',59000),
     ('music','mode_mother','musical_orders',29900),
-    ('cartoon','theme_ny','cartoon_orders',59000),
+    ('cartoon','theme_ny','cartoon_orders',39000),
     ('music','mode_ny','musical_orders',29900),
 ])
 async def test_direct_card_voice_text_checkout_then_photo(credit_db,payments,kind,target,table,price):
@@ -426,7 +426,7 @@ async def test_short_mother_song_is_expanded_and_reviewed_before_minute_cartoon_
     writer.assert_awaited();assert writer.await_count==2
     await dispatch_callback(router,callback_event('song_review:approve:'+d['song_review_token']),ctx)
     order=await database.get_cartoon_order((await ctx.get_data())['cartoon_order_id'])
-    assert order['status']=='pending' and order['amount_kopecks']==79000
+    assert order['status']=='pending' and order['amount_kopecks']==59000
 
 
 async def test_admin_music_and_scene_checkpoints_survive_bot_restart(credit_db,monkeypatch):

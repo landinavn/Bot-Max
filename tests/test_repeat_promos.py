@@ -21,7 +21,7 @@ from test_handlers import (callback_event,ready_context,dispatch_callback,call_h
 
 RATES=[
     ('music_card','direct',29900,23900,'buy_music_direct','promo_buy_music_card'),
-    ('cartoon','short',59000,47200,'buy_cartoon_590','promo_buy_cartoon_590'),
+    ('cartoon','short',39000,31200,'buy_cartoon_390','promo_buy_cartoon_390'),
     ('cartoon','long',129000,103200,'buy_cartoon_1290','promo_buy_cartoon_1290'),
     ('photo',590,59000,47200,'buy_photo_590','promo_buy_photo_590'),
     ('photo',990,99000,79200,'buy_photo_990','promo_buy_photo_990'),
@@ -275,18 +275,24 @@ async def test_promo_buttons_open_correct_category_and_expired_fallback(credit_d
             assert any('Срок действия скидки истёк' in str(c) for c in event.send.await_args_list)
 
 
-@pytest.mark.parametrize('tariff,amount',[('short',472)])
+@pytest.mark.parametrize('tariff,amount',[('short',312)])
 async def test_promo_cartoon_theme_then_tariff_checkout(credit_db,sales_payments,tariff,amount):
     await credit_db.set_promo(456,'cartoon')
     router,context=create_router(admin_user_id=999,payments=sales_payments),await ready_context()
     await dispatch_callback(router,callback_event('promo_cartoon'),context)
     theme=callback_event('theme_ny');await dispatch_callback(router,theme,context)
-    assert '472' in str(theme.send.await_args) and 'promo_cartoon_tariff:long' not in str(theme.send.await_args)
+    assert '312' in str(theme.send.await_args) and 'promo_cartoon_tariff:long' not in str(theme.send.await_args)
     pay=callback_event('promo_cartoon_tariff:'+tariff)
+    await dispatch_callback(router,pay,context)
+    token=(await context.get_data())['song_setup_token']
+    await dispatch_callback(router,callback_event('song_setup:voice:female:'+token),context)
+    await call_handler(router,'card_song_details',message_event('Маме; спасибо'),context)
+    token=(await context.get_data())['song_review_token']
+    pay=callback_event('song_review:approve:'+token)
     await dispatch_callback(router,pay,context)
     order=await credit_db.get_cartoon_order((await context.get_data())['cartoon_order_id'])
     assert order['amount_kopecks']==amount*100 and order['tariff']==tariff
-    assert pay.send.await_args.kwargs['attachments'][0].payload.buttons[0][0].text==f'Оплатить {amount} ₽'
+    assert pay.send.await_args.kwargs['attachments'][0].payload.buttons[0][0].text.endswith(f'Оплатить {amount} ₽')
 
 
 @pytest.mark.parametrize('tariff,amount',[(590,472),(990,792),(1490,1192)])
@@ -311,10 +317,10 @@ async def test_repeat_stats_block_after_sales_excludes_admin(credit_db):
         await credit_db.increment_counter(key,user_id=999)
     event=message_event('/stats');event.get_ids=lambda:(123,999)
     await call_handler(create_router(admin_user_id=999),'stats',event)
-    text=event.message.answer.await_args.args[0]
+    text='\n'.join(c.args[0] for c in event.message.answer.await_args_list)
     assert text.index('Всего покупок:')<text.index('🔁 Повторные покупки')<text.index('📍 ИСТОЧНИКИ')
     assert 'Мульт-открытки (1290)' not in text
-    for label in ('Музыкальные открытки','Мульт-открытки (590)',
+    for label in ('Музыкальные открытки','Мульт-открытки (390)',
                   'Фотосессии (590)','Фотосессии (990)','Фотосессии (1490)'):
         assert f'- {label}: 1' in text
 
@@ -396,6 +402,12 @@ async def test_music_flow_prices_direct_card_at_239_with_active_promo(credit_db,
     context=await ready_context()
     await dispatch_callback(router,callback_event('cat_video'),context)
     event=callback_event('video_style:mode_ny')
+    await dispatch_callback(router,event,context)
+    token=(await context.get_data())['song_setup_token']
+    await dispatch_callback(router,callback_event('song_setup:voice:female:'+token),context)
+    await call_handler(router,'card_song_details',message_event('Маме; спасибо'),context)
+    token=(await context.get_data())['song_review_token']
+    event=callback_event('song_review:approve:'+token)
     await dispatch_callback(router,event,context)
     order=await credit_db.get_musical_order((await context.get_data())['music_prepaid_id'])
     assert order['amount_kopecks']==23900 and order['order_id'].startswith('promo_music_card_')

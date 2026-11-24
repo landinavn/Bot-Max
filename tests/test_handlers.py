@@ -149,7 +149,7 @@ async def accepted_card_entry(router,event,context,before):
     key=before.get('cartoon_order_id' if kind=='cartoon' else 'music_prepaid_id')
     if key:
         order=await (database.get_cartoon_order(key) if kind=='cartoon' else database.get_musical_order(key))
-        expected=(79000 if d['card_song_target']=='theme_mother' else 59000) if kind=='cartoon' else 29900
+        expected=(59000 if d['card_song_target']=='theme_mother' else 39000) if kind=='cartoon' else 29900
         if order and order['status']=='pending' and order['amount_kopecks']==expected:
             await context.update_data(**{('cartoon_order_id' if kind=='cartoon' else 'music_prepaid_id'):key})
     confirm=callback_event('song_review:approve:'+(await context.get_data())['song_review_token'])
@@ -6069,7 +6069,7 @@ async def test_cartoon_customer_can_choose_theme_before_payment(credit_db,entry)
     event=callback_event(entry)
     await dispatch_callback(router,event,context)
     assert event.send.await_args.args[0] == handlers.CARTOON_PRODUCTS[entry][2]
-    assert event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0].payload=='theme_ny'
+    assert event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0].payload=='theme_mother'
     assert (await context.get_data())['cartoon_flow']==handlers.CARTOON_PRODUCTS[entry][0]
     avatar.assert_not_awaited(); handlers.generate_song.assert_not_awaited()
 
@@ -6450,10 +6450,10 @@ async def test_cartoon_reselection_replaces_old_pending_price_without_changing_o
     assert payments.create_payment_link.await_args.kwargs['amount']==current[tariff][0]//100
 
 
-@pytest.mark.parametrize('entry,amount', [('cat_cartoon',590)])
+@pytest.mark.parametrize('entry,amount', [('cat_cartoon',390)])
 @pytest.mark.parametrize('theme', list(handlers.CARTOON_THEMES))
 async def test_cartoon_checkout_before_photo_and_paid_resume(credit_db, entry, amount, theme):
-    if theme=='theme_mother':amount=790
+    if theme=='theme_mother':amount=590
     payments=SimpleNamespace(create_payment_link=AsyncMock(return_value='https://shop.payform.ru/cartoon-personal'))
     avatar=AsyncMock(return_value='https://cdn.example/clean.png')
     router,context=create_router(admin_user_id=999,payments=payments,avatar_generator=avatar),await ready_context()

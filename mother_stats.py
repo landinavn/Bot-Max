@@ -39,7 +39,8 @@ def text(c,all_c,paid):
         f"- Песен для видео (заданий): {c('mother_video_song_ready')}\n"
         f"- Выбрали исполнение: спокойное {c('mother_song_pick_1')}, чуть веселее {c('mother_song_pick_2')}\n"
         f"- Оплаты: мульт {paid['cartoon_paid']} / {paid['cartoon_revenue']//100} ₽, музыкальная {paid['music_paid']} / {paid['music_revenue']//100} ₽, песни {paid['audio_paid']} / {paid['audio_revenue']//100} ₽\n"
-        f"- Покупки мультфильма по новому тарифу 790 ₽: {c('buy_cartoon_790')}\n"
+        f"- Покупки мультфильма: 590 ₽ — {c('buy_cartoon_mother_590')}, прежние 790 ₽ — {c('buy_cartoon_790')}\n"
+        f"- Рассылка: доставлено {c('mother_broadcast_delivered')}, ошибок {c('mother_broadcast_errors')}, нажали Старт {c('mother_broadcast_start')}\n"
         '- Администратор — '+', '.join(f'{label}: {all_c.get(key,0)-c(key)}' for key,label in zip(keys,('выбор открытки','выбор музыкальной','выбор мультфильма','выбор короткой песни','выбор полной песни','готовые открытки','готовые музыкальные','готовые мультфильмы','готовые аудиозаказы','песни для видео','спокойное исполнение','весёлое исполнение')))+'\n\n')
 
 

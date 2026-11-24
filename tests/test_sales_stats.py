@@ -52,7 +52,7 @@ SALE_CASES = [
     ('gift_discount', 'gift', ('buy_song_490',)),
     ('musical', 'direct', ('buy_music_direct',)),
     ('musical', 'upsell', ('buy_music_upsell','buy_music_card_149')),
-    ('cartoon', 'short', ('buy_cartoon_590',)), ('cartoon', 'long', ('buy_cartoon_1290',)),
+    ('cartoon', 'short', ('buy_cartoon_390',)), ('cartoon', 'long', ('buy_cartoon_1290',)),
     ('photo', 590, ('buy_photo_590',)), ('photo', 990, ('buy_photo_990',)),
     ('photo', 1490, ('buy_photo_1490',)),
 ]

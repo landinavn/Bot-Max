@@ -5895,6 +5895,51 @@ def create_router(
             await _reply(event,'✅ Готовая картинка восстановлена. Слова песни сохранены. Продолжить с этой картинкой?',
                 attachments=[navigation_keyboard((('✅ Продолжить','avatar_ok_1'),('🏠 Главный экран','back_to_main')))])
 
+    @router.message_created(Command('mother_song_start'))
+    async def mother_song_start(event: MessageCreated, context: MemoryContext):
+        if is_bot_message(event) or admin_user_id is None or event.get_ids()[1] != admin_user_id:
+            return
+        parts = (event.message.body.text or '').split()
+        try:
+            if len(parts) != 2:
+                raise ValueError
+            start = float(parts[1].replace(',', '.'))
+        except ValueError:
+            await _reply(event, 'После прослушивания песни укажите секунду начала слов: /mother_song_start 3.5'); return
+        lock = cartoon_locks.setdefault(admin_user_id, asyncio.Lock())
+        if lock.locked() or await context.get_state() == PosterStates.cartoon_generating:
+            await _reply(event, 'Дождитесь завершения текущего запроса.'); return
+        async with lock:
+            import copy
+            from mother_admin_sessions import latest, save
+            from mother_recovery import manual_start, recover_order
+            data = copy.deepcopy(await context.get_data())
+            if data.get('cartoon_theme') != 'theme_mother':
+                snapshot = await latest(admin_user_id)
+                data = snapshot[0] if snapshot else {}
+            try:
+                if data.get('cartoon_order_id'):
+                    order = await get_cartoon_order(data['cartoon_order_id'])
+                    if not order or order['user_id'] != admin_user_id or order['status'] not in ('paid', 'manual'):
+                        raise ValueError('Доступно только для собственного оплаченного незавершённого заказа.')
+                    if order['status'] == 'manual':
+                        if not await recover_order(order, PosterStates.waiting_for_cartoon_music_review, start=start):
+                            raise ValueError('Не удалось восстановить этап проверки песни.')
+                        order = await get_cartoon_order(order['order_id'])
+                        data = json.loads(order['fsm_data'])
+                    else:
+                        manual_start(data, start)
+                else:
+                    manual_start(data, start)
+            except ValueError as exc:
+                await _reply(event, str(exc)); return
+            await context.set_data(data)
+            await context.set_state(PosterStates.waiting_for_cartoon_music_review)
+            await persist_cartoon_state(context)
+            await save(admin_user_id, data, PosterStates.waiting_for_cartoon_music_review)
+            await _reply(event, f'✅ Начало слов сохранено: {start:g} с. Песня и картинка сохранены. '
+                         'Для продолжения отправьте /mother_resume и подтвердите песню. Новые генерации сейчас не запускаются.')
+
     @router.message_created(Command('mother_assets'))
     async def mother_assets(event: MessageCreated, context: MemoryContext):
         if is_bot_message(event) or admin_user_id is None or event.get_ids()[1] != admin_user_id:

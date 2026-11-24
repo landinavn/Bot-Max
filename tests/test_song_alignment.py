@@ -56,3 +56,51 @@ async def test_render_removes_real_non_silent_music_intro_and_discards_native_cl
     assert max(power,key=power.get)==660  # neither intro's 220 Hz nor native video's 900 Hz
     p=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_entries','format=duration','-of','json',str(out)]))
     assert abs(float(p['format']['duration'])-60)<.15
+
+
+@pytest.mark.parametrize('header',['Куплет 1','ПРИПЕВ:','Verse 1','[Verse 1]','**Куплет 2:**'])
+def test_section_heading_is_not_treated_as_sung_words(header):
+    line,expected=align.first_lyric(header+'\nВ окне родного дома свет не гаснет')
+    assert line=='В окне родного дома свет не гаснет'
+    assert expected[:4]==['в','окне','родного','дома']
+
+
+@pytest.mark.parametrize('recognized',[
+    ['Вокне','родного','дома','свет','не','гаснет'],
+    ['В','окне','родного','домика','свет','не','гаснет'],
+    ['В','окне','нашего','дома','свет','не','гаснет'],
+    ['В','окне','родного','а','дома','свет','не','гаснет'],
+    ['В','окне','дома','свет','не','гаснет'],
+])
+def test_matches_stable_phrase_with_word_boundary_or_one_internal_recognition_error(recognized):
+    expected=align.first_lyric('[Verse]\nВ окне родного дома свет не гаснет')[1]
+    transcript=[{'word':w,'start':3.06+i*.4} for i,w in enumerate(recognized)]
+    assert align.matched_start(transcript,expected)==pytest.approx(3.)
+
+
+@pytest.mark.parametrize('recognized',[
+    ['Во','дворе','стоит','красивая','ёлка'],
+    ['Окне','родного','дома','свет','не','гаснет'],  # missing the FIRST word: do not trim it away
+    ['В','родном','краю','поют','колокола'],
+    ['В','окне','родного'],  # insufficient evidence; no zero-offset fallback
+])
+def test_unrelated_or_missing_beginning_is_not_guessed(recognized):
+    expected=align.first_lyric('[Verse]\nВ окне родного дома свет не гаснет')[1]
+    with pytest.raises(ValueError):
+        align.matched_start([{'word':w,'start':3.+i*.4} for i,w in enumerate(recognized)],expected)
+
+
+@respx.mock
+async def test_successful_transcript_is_checkpointed_before_matching_failure(tmp_path,monkeypatch):
+    audio=tmp_path/'song.mp3';audio.write_bytes(b'mp3')
+    async def sample(*a,**kw):(tmp_path/'vocal-start-sample.mp3').write_bytes(b'sample')
+    monkeypatch.setattr(media,'run_media_process',sample)
+    monkeypatch.setattr(align.Config,'from_env',lambda:SimpleNamespace(image_api_key='test',openai_proxy_url=None))
+    route=respx.post('https://api.openai.com/v1/audio/transcriptions').mock(return_value=httpx.Response(200,json={
+        'text':'Другие слова песни','words':[{'word':w,'start':2.+i,'end':2.8+i} for i,w in enumerate(['Другие','слова','песни'])]}))
+    retain=AsyncMock()
+    with pytest.raises(ValueError):
+        await align.detect_song_start(audio,'В окне родного дома свет не гаснет',tmp_path,on_transcribed=retain)
+    retain.assert_awaited_once()
+    assert retain.await_args.args[0][0]=={'word':'Другие','start':2.}
+    assert route.call_count==1

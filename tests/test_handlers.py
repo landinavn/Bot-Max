@@ -6025,7 +6025,7 @@ async def test_cat_video_cancel_while_waiting_for_song_phrase_skips_music(credit
 
 
 @pytest.mark.parametrize('entry,amount',[('upsell_music',149),('upsell_video',149),('upsell_animate',149)])
-async def test_musical_checkout_persists_personal_order_and_uses_full_song(credit_db, entry, amount):
+async def test_musical_upgrade_invoices_before_song_generation(credit_db, entry, amount):
     payments=SimpleNamespace(create_musical_payment_link=AsyncMock(return_value='https://shop.payform.ru/personal-order'))
     cards=AsyncMock(return_value=['https://cdn.example/clean-card.jpg'])
     router,context=create_router(admin_user_id=999,payments=payments,postcard_generator=cards),await ready_context()
@@ -6036,7 +6036,9 @@ async def test_musical_checkout_persists_personal_order_and_uses_full_song(credi
     order=await credit_db.get_musical_order(data['music_checkout_id'])
     assert order['order_id'].startswith('music_456_')
     assert order['user_id']==456 and order['amount_kopecks']==amount*100 and order['status']=='pending'
-    assert order['audio_url']=='https://audio.example/1.mp3'
+    assert order['audio_url']=='' and order['prepaid']==1 and order['input_ready']==0
+    assert __import__('json').loads(order['draft'])['lyrics']
+    cards.assert_not_awaited(); handlers.generate_song.assert_not_awaited()
     assert order['image_url']==('https://cdn.example/clean-card.jpg' if entry=='cat_video' else 'https://cdn.example/card.png')
     assert order['tariff']==('direct' if entry=='cat_video' else 'upsell')
     payments.create_musical_payment_link.assert_awaited_once_with(order_id=order['order_id'],amount=amount,description=order['product_name'])

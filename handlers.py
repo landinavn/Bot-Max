@@ -47,7 +47,7 @@ from database import (
     get_active_promo,quote_repeat_price,get_promo_reservation,PromoReservedError,
     PHOTO_TARIFFS,PHOTO_PACKAGE_SIZES,get_photo_results,get_photo_package_balance,save_photo_result,
     create_photo_order, get_photo_order, update_photo_order, CARTOON_TARIFFS, create_cartoon_order, get_cartoon_order, latest_paid_cartoon, finish_cartoon_order, update_cartoon_order,
-    create_musical_order, get_musical_order, create_prepaid_musical_order,
+    get_musical_order, create_prepaid_musical_order, create_prepaid_musical_upsell,
     save_musical_draft, set_musical_inputs,
     deduct_credit, get_user, grant_free_trial, get_global_stats, increment_generations,
     record_first_start, save_yclid, get_source_stats, get_stats_by_source, get_ad_source_counts, AD_SOURCE_LABELS, register_shared_image, get_shared_image,
@@ -3873,11 +3873,18 @@ def create_router(
     async def music_resume(event: MessageCallback,context: MemoryContext):
         await event.ack(notification='Проверяю оплату…')
         order=await get_musical_order(event.callback.payload.removeprefix('music_resume:'))
-        if not order or order['user_id']!=event.get_ids()[1] or not order['prepaid']:
+        if not order or order['user_id']!=event.get_ids()[1] or (not order['prepaid'] and order['tariff']!='upsell'):
             await _reply(event,'Музыкальный заказ недоступен.')
             return
         if order['status']!='paid':
             await _reply(event,'Оплата ещё не подтверждена. После оплаты нажмите «Продолжить после оплаты».')
+            return
+        if order['tariff']=='upsell':
+            text = ('Оплата подтверждена. Песня и музыкальная открытка создаются автоматически. Готовое видео пришлём сюда.'
+                    if not order['failed'] else 'Оплата сохранена. Не удалось завершить заказ, напишите в поддержку: '+order['order_id'])
+            if order['delivered'] and order['result_url']:
+                text = 'Ваша музыкальная открытка готова: '+order['result_url']
+            await _reply(event,text,attachments=[main_keyboard()])
             return
         if await context.get_state() in (PosterStates.generating,PosterStates.generating_video_teacher):
             await _reply(event,'Создание уже выполняется. Пожалуйста, подождите.')
@@ -4204,17 +4211,38 @@ def create_router(
         await context.set_state(PosterStates.generating)
         checkout = dict(await context.get_data())
         try:
-            image_url = await prepare_card_video_image(checkout)
-            if (await context.get_data()).get('music_checkout_session') != token:
-                return
-            audio_url = await prepare_video_song(checkout, checkout['video_song_scenario'])
-            tariff = 'direct' if checkout['video_product'] == 'direct' else 'upsell'
-            key = [image_url, audio_url, tariff,price]
-            previous=checkout.get('music_checkout_source')
-            order_id=checkout.get('music_checkout_id') if isinstance(previous,list) and previous[:3]==key[:3] else None
-            order=await get_musical_order(order_id) if order_id else None
-            if order and order['status']!='paid' and order['amount_kopecks']!=price*100:
-                order=None
+            # The finished postcard already exists. No image/music generation before payment.
+            image_url = checkout.get('video_source_image')
+            details = (checkout.get('video_song_phrase') or checkout.get('video_teacher_details')
+                       or checkout.get('song_details') or checkout.get('card_text')
+                       or checkout.get('teacher_info') or checkout.get('coach_info')
+                       or 'Пожелания счастья, радости и исполнения мечты')
+            label = VIDEO_SONG_SCENARIOS[scenario][0]
+            notes, tags, title = build_song_request(details, label, 'fun',
+                TEACHER_MUSIC_TAGS if checkout.get('mode') == 'mode_coach' else None)
+            notes, tags, title = song_review.arguments(checkout, details, (notes, tags, title))
+            lyrics = (checkout.get('song_review_lyrics') if song_review.approved(checkout, details)
+                      else checkout.get('video_song_lyrics'))
+            if not lyrics:
+                lyrics = await lyric_writer(notes, tags, title)
+            validate_song_arguments(lyrics, tags, title)
+            cached_lyrics = checkout.get('video_song_lyrics')
+            checkout['video_song_lyrics'] = lyrics
+            draft = {'lyrics': lyrics, 'tags': tags, 'title': title}
+            key = [image_url, lyrics, tags, title]
+            previous = checkout.get('music_checkout_source')
+            order = await get_musical_order(checkout['music_checkout_id']) if checkout.get('music_checkout_id') else None
+            # Preserve invoices/materials prepared by the previous release too.
+            legacy_match = (order and not order['prepaid'] and isinstance(previous, list)
+                            and cached_lyrics == lyrics
+                            and checkout.get('video_song_source') == [scenario, details]
+                            and previous[:3] == [image_url, checkout.get('video_song_url'), 'upsell']
+                            and (order['image_url'], order['audio_url']) == (image_url, previous[1]))
+            if (not order or order['user_id'] != event.get_ids()[1] or order['tariff'] != 'upsell'
+                    or (previous != key and not legacy_match)
+                    or order['amount_kopecks'] != 14900):
+                order = None
+            order_id = order['order_id'] if order else None
             if (await context.get_data()).get('music_checkout_session') != token:
                 return
             if order and order['status'] == 'paid':
@@ -4225,7 +4253,7 @@ def create_router(
                 return
             if not order:
                 order_id = f'music_{event.get_ids()[1]}_{uuid4().hex}'
-                order_id=await create_musical_order(order_id,event.get_ids()[1],image_url,audio_url,tariff)
+                order_id=await create_prepaid_musical_upsell(order_id,event.get_ids()[1],image_url,draft)
                 order = await get_musical_order(order_id)
             if (await context.get_data()).get('music_checkout_session') != token:
                 return
@@ -4239,6 +4267,7 @@ def create_router(
                 return
             sent = await _reply(event, text, attachments=[InlineKeyboardBuilder().row(
                 LinkButton(text=f'Оплатить {price} ₽', url=link)).row(
+                CallbackButton(text='Продолжить после оплаты', payload='music_resume:'+order_id)).row(
                 CallbackButton(text='⬅️ Назад', payload='back_to_main')).as_markup()])
             if sent is None:
                 raise RuntimeError('MAX не подтвердил отправку платёжной ссылки.')

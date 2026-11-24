@@ -149,10 +149,11 @@ async def test_mother_cartoon_preview_and_heygen_story_use_approved_song_without
     assert await ctx.get_state()==handlers.PosterStates.waiting_for_avatar_photo
     await call_handler(router,'collect_cartoon_photo',cartoon_photo(),ctx)
     await dispatch_callback(router,callback_event('avatar_ok_1'),ctx)
-    generator.assert_awaited_once()
+    assert generator.await_count==2
     assert generator.await_args.args[0]==WORDS and 'female solo vocals' in generator.await_args.args[1]
     token=(await ctx.get_data())['cartoon_preview_token']
-    await dispatch_callback(router,callback_event('cartoon_music_ok:'+token),ctx)
+    await dispatch_callback(router,callback_event('cartoon_song_pick:2:'+token),ctx)
+    await dispatch_callback(router,callback_event('confirm_video_2'),ctx)
     animation.assert_awaited_once()
     assert animation.await_args.args[1:] == ('https://cdn.example/mom-avatar.png','https://cdn.example/approved.mp3')
     handlers.create_video_task.assert_not_awaited()
@@ -354,7 +355,7 @@ async def test_mother_card_reviews_full_song_without_technical_sequence_message(
 
 
 @pytest.mark.parametrize('interrupted',[False,True])
-async def test_paid_customer_goes_from_approved_image_to_final_video_without_audio_preview(credit_db,payments,monkeypatch,interrupted):
+async def test_paid_customer_selects_performance_before_video_and_resumes_without_new_music(credit_db,payments,monkeypatch,interrupted):
     import asyncio
     import mother_story
     from maxapi.types import AttachmentUpload
@@ -365,7 +366,7 @@ async def test_paid_customer_goes_from_approved_image_to_final_video_without_aud
     await database.mark_cartoon_paid(key,'auto-render-paid')
     picture=AsyncMock(return_value='https://cdn.example/mom.png')
     song=AsyncMock(return_value='known-song-id')
-    preview=AsyncMock();audio_upload=AsyncMock()
+    preview=AsyncMock(return_value='https://cdn.example/song-preview.mp3');audio_upload=AsyncMock(return_value=AttachmentUpload(type='audio',payload={'token':'audio'}))
     monkeypatch.setattr(handlers,'create_audio_preview',preview)
     monkeypatch.setattr(handlers,'upload_audio_for_max',audio_upload)
     monkeypatch.setattr(handlers,'count_people_in_photo',AsyncMock(return_value=1))
@@ -387,18 +388,24 @@ async def test_paid_customer_goes_from_approved_image_to_final_video_without_aud
         song_generator=song,song_waiter=AsyncMock(return_value={'data':{'musics':[{'audioUrl':'https://cdn.example/full-song.mp3'}]}}))
     await dispatch_callback(router,callback_event('cartoon_resume:'+key),ctx)
     await call_handler(router,'collect_cartoon_photo',cartoon_photo(),ctx)
-    event=callback_event('avatar_ok_1')
+    await dispatch_callback(router,callback_event('avatar_ok_1'),ctx)
+    render_mock.assert_not_awaited()
+    async def choose():
+        token=(await ctx.get_data())['cartoon_preview_token']
+        await dispatch_callback(router,callback_event('cartoon_song_pick:2:'+token),ctx)
+        event=callback_event('confirm_video_2')
+        await dispatch_callback(router,event,ctx)
+        return event
     if interrupted:
-        with pytest.raises(asyncio.CancelledError):await dispatch_callback(router,event,ctx)
+        with pytest.raises(asyncio.CancelledError):await choose()
         assert (await database.get_cartoon_order(key))['status']=='paid'
         await ctx.clear()
-        event=callback_event('cartoon_resume:'+key)
-        await dispatch_callback(router,event,ctx)
-    else:await dispatch_callback(router,event,ctx)
+        await dispatch_callback(router,callback_event('cartoon_resume:'+key),ctx)
+    event=await choose()
     assert (await database.get_cartoon_order(key))['status']=='completed'
     assert 'video' in str(event.send.await_args_list)
-    preview.assert_not_awaited();audio_upload.assert_not_awaited()
-    picture.assert_awaited_once();song.assert_awaited_once();writer.assert_awaited_once()
+    assert preview.await_count==2 and audio_upload.await_count>=2
+    picture.assert_awaited_once();assert song.await_count==2;writer.assert_awaited_once()
 
 
 async def test_short_mother_song_is_expanded_and_reviewed_before_minute_cartoon_invoice(credit_db,payments):
@@ -446,15 +453,16 @@ async def test_admin_music_and_scene_checkpoints_survive_bot_restart(credit_db,m
     await mother_admin_sessions.save(456,await ctx.get_data(),await ctx.get_state())
     await call_handler(router,'mother_resume',message_event('/mother_resume'),ctx)
     token=(await ctx.get_data())['cartoon_preview_token']
-    with pytest.raises(asyncio.CancelledError):await dispatch_callback(router,callback_event('cartoon_music_ok:'+token),ctx)
+    await dispatch_callback(router,callback_event('cartoon_song_pick:1:'+token),ctx)
+    with pytest.raises(asyncio.CancelledError):await dispatch_callback(router,callback_event('confirm_video_2'),ctx)
     snapshot,_=await mother_admin_sessions.latest(456)
-    assert snapshot['video_song_job_id']=='retained-song-id'
+    assert snapshot['mother_song_variants']['items']['1']['job_id']=='retained-song-id'
     assert snapshot['cartoon_kling_story']['shots'][0]['task_id']=='retained-video-id'
     assert await mother_admin_sessions.latest(999) is None
     await ctx.clear()
     await call_handler(router,'mother_resume',message_event('/mother_resume'),ctx)
     assert (await ctx.get_data())['cartoon_kling_story']['shots'][0]['task_id']=='retained-video-id'
-    song.assert_awaited_once();writer.assert_not_awaited()
+    assert song.await_count==2;writer.assert_not_awaited()
 
 
 async def test_admin_explicit_minute_upgrade_archives_old_clips_and_keeps_picture_and_music(credit_db,monkeypatch):

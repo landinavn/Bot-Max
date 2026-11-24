@@ -3408,8 +3408,104 @@ def create_router(
         return navigation_keyboard(rows)
 
 
+    async def prepare_mother_song_variants(event, context):
+        if not await ensure_cartoon_access(event, context):
+            return
+        import mother_song_variants
+        data = dict(await context.get_data())
+        session = data['cartoon_session_id']
+        await context.set_state(PosterStates.cartoon_generating)
+        if event.get_ids()[1] != admin_user_id:
+            data['cartoon_auto_pipeline'] = True
+            await context.update_data(cartoon_auto_pipeline=True)
+        async def checkpoint():
+            if (await context.get_data()).get('cartoon_session_id') != session:
+                raise asyncio.CancelledError
+            fields = {k:v for k,v in data.items() if k.startswith(('mother_song_variants', 'song_1_', 'song_2_'))
+                      or k in ('selected_song_variant', 'video_song_url', 'chosen_song_url', 'audio_url')}
+            await context.update_data(**fields)
+            await persist_cartoon_state(context)
+        error = None
+        unknown = False
+        try:
+            await _reply(event, '🎵 Подготовлю два исполнения одного текста: тёплое и спокойное, второе — чуть веселее. Затем вы выберете песню для мультфильма.')
+            await mother_song_variants.prepare(data, generator=song_generator, waiter=song_waiter, checkpoint=checkpoint)
+        except asyncio.CancelledError:
+            await asyncio.shield(checkpoint())
+            raise
+        except mother_song_variants.UnknownSongSubmission as exc:
+            error = str(exc)
+            unknown = True
+        except Exception:
+            logger.exception('Не удалось подготовить исполнения песни ко Дню матери:')
+            error = 'Не удалось подготовить оба исполнения. Готовая песня и картинка сохранены. Можно выбрать доступный вариант или продолжить ожидание.'
+        if (await context.get_data()).get('cartoon_session_id') != session:
+            return
+        variants = data.get('mother_song_variants') or {'items': {}}
+        token = uuid4().hex
+        keyboard = InlineKeyboardBuilder()
+        for index in ('1', '2'):
+            item = variants['items'].get(index, {})
+            url = item.get('audio_url')
+            if not url:
+                continue
+            try:
+                if not item.get('preview_url'):
+                    preview = await create_audio_preview(url)
+                    if not isinstance(preview, str) or not preview.startswith('https://'):
+                        raise ValueError('Не получен фрагмент песни.')
+                    item['preview_url'] = preview
+                    await checkpoint()
+                audio = await upload_audio_for_max(event.bot, item['preview_url'])
+                await _reply(event, f'🎧 Вариант {index}: '+item['label'], attachments=[audio])
+            except Exception:
+                logger.warning('Не удалось отправить фрагмент исполнения; полная песня сохранена.')
+                await _reply(event, f'🎧 Вариант {index}: '+item['label']+'\n'+url)
+            keyboard.row(CallbackButton(text=f'🎵 Выбрать вариант {index}', payload=f'cartoon_song_pick:{index}:{token}'))
+        if error and not unknown:
+            keyboard.row(CallbackButton(text='🔄 Продолжить подготовку песен', payload='mother_songs_retry:'+token))
+        if error:
+            keyboard.row(LinkButton(text='🆘 Поддержка', url=SUPPORT_URL))
+        if any(item.get('audio_url') for item in variants['items'].values()):
+            keyboard.row(CallbackButton(text='🎬 Создать видео', payload='confirm_video_2'))
+        keyboard.row(home_button())
+        if event.get_ids()[1] == admin_user_id:
+            keyboard.row(CallbackButton(text='✍️ Переписать текст песни', payload='admin_song_rewrite:'+token))
+        sent = await _reply(event, error or 'Слова одинаковые, музыкальное исполнение разное. Выберите вариант 1 или 2, затем нажмите «Создать видео».', attachments=[keyboard.as_markup()])
+        message_id = getattr(getattr(sent, 'body', None), 'mid', None)
+        avatar = data.get('chosen_avatar')
+        await context.update_data(song_attempt=2, cartoon_preview_token=token,
+            cartoon_confirm_message_id=message_id if isinstance(message_id,str) else None,
+            selected_song_variant=None, chosen_avatar_variant=data.get('chosen_avatar_variant') or 1,
+            avatar_1_url=data.get('avatar_1_url') or avatar)
+        await context.set_state(PosterStates.waiting_for_cartoon_music_review)
+        await checkpoint()
+
+    @router.message_callback(F.callback.payload.startswith('mother_songs_retry:'))
+    async def mother_songs_retry(event: MessageCallback, context: MemoryContext):
+        data = await context.get_data()
+        if (event.message is None or event.callback.payload.split(':')[-1] != data.get('cartoon_preview_token')
+                or data.get('cartoon_theme') != 'theme_mother'
+                or await context.get_state() != PosterStates.waiting_for_cartoon_music_review):
+            await event.ack(notification='Используйте текущие кнопки песни.'); return
+        lock = cartoon_locks.setdefault(event.get_ids()[1], asyncio.Lock())
+        if lock.locked():
+            await event.ack(notification='Подготовка уже выполняется.'); return
+        await event.ack(notification='Продолжаю сохранённые задания…')
+        async with lock:
+            await prepare_mother_song_variants(event, context)
+
     async def prepare_cartoon_music_preview(event, context):
         data = dict(await context.get_data())
+        story = data.get('cartoon_kling_story') or {}
+        started_visuals = any(shot.get('image_url') or shot.get('task_id') or shot.get('video_submitting')
+                              for shot in story.get('shots', []))
+        if (data.get('cartoon_theme') == 'theme_mother'
+                and song_review.approved(data, data.get('chosen_song_phrase'))
+                and data.get('song_review_tags') and data.get('song_review_title')
+                and (data.get('mother_song_variants') or not started_visuals)):
+            await prepare_mother_song_variants(event, context)
+            return
         session = data.get('cartoon_session_id')
         attempt = data.get('song_attempt', 1)
         if attempt not in (1,2) or data.get('cartoon_video_failed'):
@@ -3502,6 +3598,10 @@ def create_router(
                 await event.ack(notification=f'Выбран вариант {selected}. Нажмите «Создать видео».')
                 await context.update_data(selected_song_variant=selected, chosen_song_url=url, video_song_url=url,
                     chosen_song_phrase=data.get(f'song_{selected}_phrase'), video_song_phrase=data.get(f'song_{selected}_phrase'))
+                if data.get('mother_song_variants'):
+                    from mother_stats import record
+                    await record(user_id, 'mother_song_pick_'+str(selected),
+                                 str(data.get('cartoon_order_id') or data['cartoon_session_id'])+':'+data['mother_song_variants']['source'])
                 await persist_cartoon_state(context)
                 return
             if action == 'cartoon_music_bad' and (data.get('song_attempt',1) >= 2 or data.get('song_2_url')):

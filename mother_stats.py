@@ -3,7 +3,7 @@ import hashlib
 import aiosqlite
 import database
 
-EVENTS={'mother_music_ready','mother_cartoon_ready','mother_audio_ready','mother_video_song_ready'}
+EVENTS={'mother_music_ready','mother_cartoon_ready','mother_audio_ready','mother_video_song_ready','mother_song_pick_1','mother_song_pick_2'}
 
 
 async def record(user,event,source):
@@ -32,14 +32,15 @@ async def sales(admin=None):
 
 def text(c,all_c,paid):
     keys=('click_mother_card','click_mother_music','theme_mother_click','audio_scen_mother','audio_gift_mother',
-          'gen_mother','mother_music_ready','mother_cartoon_ready','mother_audio_ready','mother_video_song_ready')
+          'gen_mother','mother_music_ready','mother_cartoon_ready','mother_audio_ready','mother_video_song_ready','mother_song_pick_1','mother_song_pick_2')
     return ('🤱 День матери (клиенты):\n'
         f"- Выбрали: открытка {c('click_mother_card')}, музыкальная {c('click_mother_music')}, мульт {c('theme_mother_click')}, короткая песня {c('audio_scen_mother')}, полная {c('audio_gift_mother')}\n"
         f"- Готово: открыток {c('gen_mother')}, музыкальных видео {c('mother_music_ready')}, мультфильмов {c('mother_cartoon_ready')}, аудиозаказов {c('mother_audio_ready')}\n"
         f"- Песен для видео (заданий): {c('mother_video_song_ready')}\n"
+        f"- Выбрали исполнение: спокойное {c('mother_song_pick_1')}, чуть веселее {c('mother_song_pick_2')}\n"
         f"- Оплаты: мульт {paid['cartoon_paid']} / {paid['cartoon_revenue']//100} ₽, музыкальная {paid['music_paid']} / {paid['music_revenue']//100} ₽, песни {paid['audio_paid']} / {paid['audio_revenue']//100} ₽\n"
         f"- Покупки мультфильма по новому тарифу 790 ₽: {c('buy_cartoon_790')}\n"
-        '- Администратор — '+', '.join(f'{label}: {all_c.get(key,0)-c(key)}' for key,label in zip(keys,('выбор открытки','выбор музыкальной','выбор мультфильма','выбор короткой песни','выбор полной песни','готовые открытки','готовые музыкальные','готовые мультфильмы','готовые аудиозаказы','песни для видео')))+'\n\n')
+        '- Администратор — '+', '.join(f'{label}: {all_c.get(key,0)-c(key)}' for key,label in zip(keys,('выбор открытки','выбор музыкальной','выбор мультфильма','выбор короткой песни','выбор полной песни','готовые открытки','готовые музыкальные','готовые мультфильмы','готовые аудиозаказы','песни для видео','спокойное исполнение','весёлое исполнение')))+'\n\n')
 
 
 async def send_report(event,text):

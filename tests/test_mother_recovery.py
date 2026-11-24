@@ -167,3 +167,104 @@ async def test_admin_resume_clears_only_alignment_failure_and_keeps_song(credit_
     assert recovery.urls(restored)==(IMAGE,AUDIO)
     assert await ctx.get_state()==handlers.PosterStates.waiting_for_cartoon_music_review
     handlers.generate_song.assert_not_awaited()
+
+
+async def test_cached_mismatch_can_be_rechecked_after_text_fix_without_another_request(monkeypatch):
+    detector=AsyncMock(side_effect=AssertionError('No second paid transcription'))
+    monkeypatch.setattr(align,'detect_song_start',detector)
+    story={'alignment_attempt_source':align.alignment_source(AUDIO,LYRICS),'alignment_attempts':2,
+        'alignment_transcript':{'audio_url':AUDIO,'words':[
+            {'word':w,'start':2.06+i*.4} for i,w in enumerate(['Свет','родного','дома','не','гаснет'])]}}
+    with pytest.raises(align.SongAlignmentError):await resolve(story)
+    assert await resolve(story,lyrics='[Verse]\nСвет родного дома не гаснет')==pytest.approx(2.)
+    detector.assert_not_awaited()
+
+
+async def test_fresh_transcript_is_retained_even_if_match_failed(monkeypatch):
+    async def detect(audio,lyrics,workdir,*,on_transcribed):
+        await on_transcribed([{'word':'Другая','start':2.}])
+        raise ValueError('No matching lyrics')
+    detector=AsyncMock(side_effect=detect);monkeypatch.setattr(align,'detect_song_start',detector)
+    story={}
+    with pytest.raises(align.SongAlignmentError):await resolve(story)
+    assert story['alignment_transcript']['words']==[{'word':'Другая','start':2.}]
+    with pytest.raises(align.SongAlignmentError):await resolve(json.loads(json.dumps(story)))
+    detector.assert_awaited_once()
+
+
+async def test_manual_start_restores_own_test_without_api_calls(credit_db):
+    data=saved();source=align.alignment_source(AUDIO,LYRICS)
+    data['cartoon_kling_story'].update(alignment_attempt_source=source,alignment_attempts=2)
+    await save(456,data,handlers.PosterStates.cartoon_manual_review)
+    ctx=await ready_context();router=handlers.create_router(admin_user_id=456)
+    e=message_event('/mother_song_start 3,5')
+    await call_handler(router,'mother_song_start',e,ctx)
+    restored=await ctx.get_data();story=restored['cartoon_kling_story']
+    assert story['audio_start']==3.5 and story['alignment_method']=='admin'
+    assert not restored['cartoon_video_failed'] and recovery.urls(restored)==(IMAGE,AUDIO)
+    assert (await latest(456))[0]==restored
+    assert await resolve(story)==3.5
+    handlers.generate_song.assert_not_awaited()
+
+
+@pytest.mark.parametrize('number',['nan','inf','-1','30','text'])
+async def test_invalid_manual_offset_cannot_change_saved_assets(credit_db,number):
+    data=saved();await save(456,data,handlers.PosterStates.cartoon_manual_review)
+    ctx=await ready_context();router=handlers.create_router(admin_user_id=456)
+    await call_handler(router,'mother_song_start',message_event('/mother_song_start '+number),ctx)
+    assert (await latest(456))[0]==data
+    assert not (await ctx.get_data()).get('cartoon_kling_story')
+
+
+async def test_manual_offset_is_not_available_to_clients_and_does_not_unlock_unknown_scene(credit_db):
+    data=saved();data['cartoon_kling_story']['shots'][0]={'video_submitting':True}
+    await save(456,data,handlers.PosterStates.cartoon_manual_review)
+    ctx=await ready_context();router=handlers.create_router(admin_user_id=456)
+    e=message_event('/mother_song_start 3.5');e.get_ids=lambda:(123,789)
+    await call_handler(router,'mother_song_start',e,ctx)
+    e.message.answer.assert_not_awaited()
+    await call_handler(router,'mother_song_start',message_event('/mother_song_start 3.5'),ctx)
+    assert (await latest(456))[0]==data
+
+
+async def test_manual_offset_can_restore_own_paid_manual_order_without_new_payment(credit_db):
+    key=await database.create_cartoon_order('cartoon_offset',456,'theme_mother','mother')
+    await database.mark_cartoon_paid(key,'offset-payment')
+    data=saved();data['cartoon_order_id']=key
+    data['cartoon_kling_story'].update(alignment_attempt_source=align.alignment_source(AUDIO,LYRICS),alignment_attempts=2)
+    await database.update_cartoon_order(key,fsm_data=json.dumps(data),fsm_state=str(handlers.PosterStates.cartoon_manual_review))
+    await database.finish_cartoon_order(key,456,manual=True)
+    ctx=await ready_context();await ctx.set_data(data)
+    await call_handler(handlers.create_router(admin_user_id=456),'mother_song_start',message_event('/mother_song_start 4'),ctx)
+    order=await database.get_cartoon_order(key)
+    assert order['status']=='paid' and order['provider_payment_id']=='offset-payment'
+    assert json.loads(order['fsm_data'])['cartoon_kling_story']['audio_start']==4.
+
+
+def test_cached_transcript_can_recover_exhausted_budget_only_when_it_now_matches():
+    data=saved();story=data['cartoon_kling_story']
+    story.update(alignment_attempt_source=align.alignment_source(AUDIO,LYRICS),alignment_attempts=2,
+        alignment_transcript={'audio_url':AUDIO,'words':[
+            {'word':w,'start':2.+i*.4} for i,w in enumerate(['Вокне','родного','дома','свет','не','гаснет'])]})
+    assert recovery.alignment_only(data)
+    story['alignment_attempts']=1
+    story['alignment_transcript']['words']=[{'word':'Другая песня','start':1.}]
+    assert not recovery.alignment_only(data)
+
+
+async def test_manual_offset_cannot_modify_another_users_paid_order(credit_db):
+    key=await database.create_cartoon_order('cartoon_foreign_offset',789,'theme_mother','mother')
+    await database.mark_cartoon_paid(key,'foreign-offset-payment')
+    data=saved();data['cartoon_order_id']=key
+    await database.update_cartoon_order(key,fsm_data=json.dumps(data))
+    before=await database.get_cartoon_order(key)
+    ctx=await ready_context();await ctx.set_data(data)
+    await call_handler(handlers.create_router(admin_user_id=456),'mother_song_start',message_event('/mother_song_start 3.5'),ctx)
+    assert await database.get_cartoon_order(key)==before
+    assert await ctx.get_data()==data
+
+
+def test_admin_manual_offset_can_be_corrected_before_assembly():
+    data=saved();recovery.manual_start(data,3.5);recovery.manual_start(data,4.25)
+    assert data['cartoon_kling_story']['audio_start']==4.25
+    assert recovery.urls(data)==(IMAGE,AUDIO)

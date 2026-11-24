@@ -2771,6 +2771,11 @@ def create_router(
         if event.message is None or not order or order['user_id'] != event.get_ids()[1]:
             await event.ack(notification='Заказ недоступен.')
             return
+        recovered_alignment = False
+        if order['status'] == 'manual':
+            from mother_recovery import recover_order
+            recovered_alignment = await recover_order(order, PosterStates.waiting_for_cartoon_song_phrase)
+            order = await get_cartoon_order(order_id)
         if order['status'] == 'manual':
             await activate_cartoon_order(context, order)
             await context.update_data(cartoon_video_failed=True)
@@ -2783,7 +2788,7 @@ def create_router(
             return
         data = await context.get_data()
         await event.ack(notification='Оплата подтверждена.')
-        if data.get('cartoon_order_id') != order_id or await context.get_state() == PosterStates.waiting_for_cartoon_payment:
+        if recovered_alignment or data.get('cartoon_order_id') != order_id or await context.get_state() == PosterStates.waiting_for_cartoon_payment:
             await activate_cartoon_order(context, order)
             await _reply(event, CARTOON_PHOTO_PROMPT if await context.get_state() == PosterStates.waiting_for_avatar_photo
                          else 'Данные заказа восстановлены. Продолжайте по последнему сообщению.')
@@ -5890,6 +5895,43 @@ def create_router(
             await _reply(event,'✅ Готовая картинка восстановлена. Слова песни сохранены. Продолжить с этой картинкой?',
                 attachments=[navigation_keyboard((('✅ Продолжить','avatar_ok_1'),('🏠 Главный экран','back_to_main')))])
 
+    @router.message_created(Command('mother_assets'))
+    async def mother_assets(event: MessageCreated, context: MemoryContext):
+        if is_bot_message(event) or admin_user_id is None or event.get_ids()[1] != admin_user_id:
+            return
+        from mother_recovery import assets, urls
+        parts = (event.message.body.text or '').split()
+        if len(parts) > 2:
+            await _reply(event, 'Используйте /mother_assets или /mother_assets ID_заказа.'); return
+        try:
+            label, saved = await assets(admin_user_id, parts[1] if len(parts) == 2 else None,
+                                         await context.get_data())
+            image, audio = urls(saved)
+        except ValueError as exc:
+            await _reply(event, str(exc)); return
+        buttons = InlineKeyboardBuilder()
+        text = 'Сохранённые материалы: '+str(label)
+        if image:
+            text += '\n🖼 Оригинал картинки: '+image
+            buttons.row(LinkButton(text='⬇️ Картинка', url=image))
+        else:
+            text += '\nКартинка пока не сохранена.'
+        if audio:
+            text += '\n🎵 Полная песня: '+audio
+            buttons.row(LinkButton(text='⬇️ Песня', url=audio))
+        else:
+            text += '\nПесня пока не сохранена.'
+        await _reply(event, text, attachments=[buttons.as_markup()] if image or audio else [])
+        # Links remain available if MAX cannot upload one of the original files.
+        for url, uploader, caption in ((image, upload_image_for_max, '🖼 Сохранённая картинка'),
+                                       (audio, upload_audio_for_max, '🎵 Сохранённая песня')):
+            if url:
+                try:
+                    attachment = await uploader(event.bot, url)
+                    await _reply(event, caption, attachments=[attachment])
+                except Exception:
+                    logger.warning('Не удалось приложить сохранённый файл мульт-открытки; ссылка отправлена.')
+
     @router.message_created(Command('mother_resume'))
     async def mother_resume(event:MessageCreated,context:MemoryContext):
         if is_bot_message(event) or admin_user_id is None or event.get_ids()[1]!=admin_user_id:return
@@ -5902,6 +5944,13 @@ def create_router(
             await _reply(event,'Сохранённых этапов тестового мультфильма нет. Картинку можно вернуть через /restore_cartoon_image.');return
         async with lock:
             data,saved_state=snapshot
+            from mother_recovery import alignment_only, recover_order
+            if alignment_only(data):
+                if data.get('cartoon_order_id'):
+                    order = await get_cartoon_order(data['cartoon_order_id'])
+                    if order and order['user_id'] == admin_user_id:
+                        await recover_order(order, PosterStates.waiting_for_cartoon_song_phrase)
+                data['cartoon_video_failed'] = False
             await context.set_data(data)
             if not data.get('chosen_avatar') or not song_review.approved(data,data.get('chosen_song_phrase') or data.get('song_review_details')):
                 await context.set_state(saved_state)

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import httpx
 
-from mother_storyboard import POLICY,SHOTS,BASE,SHOT_SECONDS,DURATION,image_prompt,video_prompt
+from mother_storyboard import POLICY,SHOTS,BASE,SHOT_SECONDS,DURATION,image_prompt,video_prompt,storyboard
 import mother_story_legacy as legacy
 
 
@@ -100,8 +100,10 @@ async def generate(data, reference_url, audio_url, *, checkpoint, progress):
         raise MediaServiceError('Для мультфильма установите ffmpeg и ffprobe.')
     story=data.get('cartoon_kling_story')
     old=bool(story and story.get('source',[None])[0]==legacy.POLICY)
-    policy=legacy.POLICY if old else POLICY
-    shots=legacy.SHOTS if old else SHOTS
+    birthday=data.get('cartoon_theme')=='theme_mother_bday'
+    current_policy,current_shots,_=storyboard(birthday)
+    policy=legacy.POLICY if old else current_policy
+    shots=legacy.SHOTS if old else current_shots
     shot_seconds=5 if old else SHOT_SECONDS
     source=[policy,reference_url]
     if story is not None and story.get('source')!=source:
@@ -136,8 +138,8 @@ async def generate(data, reference_url, audio_url, *, checkpoint, progress):
                 clips=[]
                 for index,item in enumerate(shots):
                     label=item[0] if old else item['label']
-                    frame_prompt=legacy.BASE+item[1] if old else image_prompt(index)
-                    motion_prompt=(legacy.BASE+item[1]+' Natural continuous motion for five seconds.') if old else video_prompt(index)
+                    frame_prompt=legacy.BASE+item[1] if old else image_prompt(index,birthday=birthday)
+                    motion_prompt=(legacy.BASE+item[1]+' Natural continuous motion for five seconds.') if old else video_prompt(index,birthday=birthday)
                     shot=story['shots'][index]
                     shot.setdefault('image_prompt',frame_prompt);shot.setdefault('video_prompt',motion_prompt)
                     await progress(f'🎬 Создаю сцену {index+1} из {len(shots)}: {label.lower()}. Пожалуйста, подождите.')

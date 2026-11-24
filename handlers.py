@@ -32,7 +32,10 @@ from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 from result_navigation import result_keyboard as completed_keyboard, home_button
 
 from config import Config, DEFAULT_BOT_LINK, validate_bot_link
-from mothers_day import TITLE as MOTHER_TITLE, DETAILS_PROMPT as MOTHER_DETAILS_PROMPT, CARTOON_DESCRIPTION as MOTHER_CARTOON_DESCRIPTION
+from mothers_day import (TITLE as MOTHER_TITLE, DETAILS_PROMPT as MOTHER_DETAILS_PROMPT,
+    CARTOON_DESCRIPTION as MOTHER_CARTOON_DESCRIPTION, BIRTHDAY_TITLE, BIRTHDAY_CARTOON_DESCRIPTION,
+    MOTHER_LABELS, MOTHER_THEMES, MOTHER_MODES, MOTHER_SCENARIOS, mother_suffix, mother_title,
+    mother_description, mother_event)
 import promo1111
 import song_review
 from video_service import build_video_prompt, generate_video_from_avatar, CARTOON_VIDEO_PROMPTS, create_video_task_with_retry as create_video_task, poll_video_task
@@ -170,6 +173,7 @@ GENERATION_EVENTS = {
     "mode_goodmorning": "gen_goodmorning",
     "mode_modern_card": "gen_scrapbook",
     "mode_mother": "gen_mother",
+    "mode_mother_bday": "gen_mother_bday",
     "mode_ny_cozy": "gen_ny_cozy",
     "mode_ny_fairytale": "gen_ny_fairytale",
     "mode_ny_elegant": "gen_ny_elegant",
@@ -565,6 +569,7 @@ AUDIO_FUN_SCENARIOS = {
     'audio_fun_meme': ('🌀 Абсурдный мем', 'Напишите тему мема и фразу для припева (например: «Холодильник, ты мой герой!»).'),
     'audio_fun_ny': ('🎄 Новогодняя', 'Напишите имя и фразу для припева (например: «С Новым годом, друзья!»).'),
     'audio_fun_mother': (MOTHER_TITLE, MOTHER_DETAILS_PROMPT),
+    'audio_fun_mother_bday': (BIRTHDAY_TITLE, MOTHER_DETAILS_PROMPT),
 }
 
 AUDIO_FUN_MENU_TEXT = (
@@ -618,6 +623,7 @@ AUDIO_GIFT_SCENARIOS = {
     'audio_gift_ny': ('🎄 Новогодняя', 'Напишите имя и фразу для припева (например: «С Новым годом, друзья!»).'),
     "audio_gift_teacher": (TEACHER_SCENARIO_TITLE, TEACHER_DETAILS_PROMPT),
     "gift_scen_mother": (MOTHER_TITLE, MOTHER_DETAILS_PROMPT),
+    "gift_scen_mother_bday": (BIRTHDAY_TITLE, MOTHER_DETAILS_PROMPT),
 }
 
 CATEGORY_MENUS['cat_audio']=((), '🎵 Создадим вашу личную песню!\n\nВыберите повод, затем жанр и голос. Расскажите, кому посвящена песня и что хотите передать. Мы покажем слова до оплаты.\n\nПосле проверки можно выбрать песню, музыкальную или мульт-открытку.', tuple((label,key) for key,(label,_) in AUDIO_GIFT_SCENARIOS.items())+(('🔥 Короткая песня — 199 ₽','audio_tariff_fun'),('🏠 Главный экран','back_to_main')))
@@ -666,6 +672,7 @@ VIDEO_UPSELL_TEXT = (
 # Long-product metadata is retained only to fulfil previously paid orders.
 CARTOON_PRODUCTS = {
     "cat_cartoon_mother": ("mother", 59000, MOTHER_CARTOON_DESCRIPTION, "5-10"),
+    "cat_cartoon_mother_bday": ("mother_bday", 59000, BIRTHDAY_CARTOON_DESCRIPTION, "5-10"),
     'cat_cartoon': ('short', 39000, '🎬 Создаем короткий мультфильм с вашим лицом, длительность около 40 секунд. Выберите стиль:', '5-10'),
     'cat_cartoon_long': ('long', 129000, '🎬 Создаем полноценное мульт-поздравление с сюжетом! Выберите стиль:', '15-20'),
 }
@@ -673,7 +680,7 @@ CARTOON_AVATAR_EVENTS = {'avatar_ok_1': 'avatar_ok_first', 'avatar_bad_1': 'avat
                        'avatar_ok_2': 'avatar_ok_second', 'avatar_bad_2': 'avatar_bad_second'}
 CARTOON_THEMES = {
     'theme_mother': '🤱 День матери',
-    'theme_ny': '🎄 Новый год', 'theme_bday': '🎂 День рождения',
+    'theme_ny': '🎄 Новый год', 'theme_mother_bday': BIRTHDAY_TITLE, 'theme_bday': '🎂 День рождения',
     'theme_bday_kid': '👶 День рождения малыша', 'theme_valentine': '💖 14 февраля',
     'theme_feb23': '🛡️ 23 февраля', 'theme_mar8': '🌷 8 марта',
     'theme_father': '👨‍👧 День отца',
@@ -890,6 +897,7 @@ class PosterStates(StatesGroup):
     waiting_for_audio_generation = State()
     waiting_for_audio_result = State()
     waiting_for_gift_mother = State()
+    waiting_for_gift_mother_bday = State()
     waiting_for_gift_bday = State()
     waiting_for_gift_anniv = State()
     waiting_for_gift_parents = State()
@@ -931,6 +939,7 @@ CUSTOM_DEADLINES = {'custom_deadline_1': '1-3 дня', 'custom_deadline_3': '3-5
 
 GIFT_SCENARIO_STATES = {
     "gift_scen_mother": PosterStates.waiting_for_gift_mother,
+    "gift_scen_mother_bday": PosterStates.waiting_for_gift_mother_bday,
     "gift_scen_bday": PosterStates.waiting_for_gift_bday,
     "gift_scen_anniv": PosterStates.waiting_for_gift_anniv,
     "gift_scen_parents": PosterStates.waiting_for_gift_parents,
@@ -1046,7 +1055,7 @@ def create_router(
     cartoon_video_generator = cartoon_video_generator or generate_video
 
     async def retain_song_submission(data):
-        if admin_user_id is not None and data.get('song_review_user')==admin_user_id and data.get('cartoon_theme')=='theme_mother':
+        if admin_user_id is not None and data.get('song_review_user')==admin_user_id and data.get('cartoon_theme') in MOTHER_THEMES:
             from mother_admin_sessions import save
             await save(admin_user_id,data,PosterStates.cartoon_generating)
         if data.get('cartoon_order_id'):
@@ -1100,12 +1109,12 @@ def create_router(
         if is_video_placeholder(audio_url):
             raise ValueError('TTAPI вернул тестовую ссылку вместо песни.')
         data.update(video_song_source=source, video_song_url=audio_url, audio_url=audio_url)
-        if data.get("cartoon_theme")=="theme_mother" or scenario in {"audio_fun_mother","gift_scen_mother"}:
+        if data.get("cartoon_theme") in MOTHER_THEMES or scenario in MOTHER_SCENARIOS:
             from mother_stats import record
             if data.get('cartoon_order_id'):
                 order=await get_cartoon_order(data['cartoon_order_id']);owner=order['user_id'] if order else data.get('song_review_user')
             else:owner=data.get('song_review_user')
-            if owner is not None:await record(owner,'mother_video_song_ready',data['video_song_job_id'])
+            if owner is not None:await record(owner,mother_event(data,'mother_video_song_ready'),data['video_song_job_id'])
         return audio_url
 
     async def render_video_with_song(data, image_url, scenario):
@@ -2683,7 +2692,7 @@ def create_router(
             await _reply(event,str(exc))
 
     def cartoon_style_keyboard(screen='cat_cards'):
-        return navigation_keyboard((*((label+(' — 590 ₽' if key=='theme_mother' else ' — 390 ₽'), key) for key, label in CARTOON_THEMES.items()), ('⬅️ Назад', 'back_to_main')))
+        return navigation_keyboard((*((label+(' — 590 ₽' if key in MOTHER_THEMES else ' — 390 ₽'), key) for key, label in CARTOON_THEMES.items()), ('⬅️ Назад', 'back_to_main')))
 
     async def ensure_cartoon_access(event, context, *, acknowledged=False):
         user_id = event.get_ids()[1]
@@ -2725,7 +2734,7 @@ def create_router(
     async def persist_cartoon_state(context):
         data = await context.get_data()
         order_id = data.get('cartoon_order_id')
-        if admin_user_id is not None and data.get('song_review_user')==admin_user_id and data.get('cartoon_theme')=='theme_mother':
+        if admin_user_id is not None and data.get('song_review_user')==admin_user_id and data.get('cartoon_theme') in MOTHER_THEMES:
             from mother_admin_sessions import save
             await save(admin_user_id,data,await context.get_state())
         if order_id:
@@ -2759,9 +2768,9 @@ def create_router(
             await show_custom_order(event, context)
             return
         user_id=event.get_ids()[1]
-        if theme=='theme_mother':
-            product=CARTOON_PRODUCTS['cat_cartoon_mother']
-            await _reply(event,MOTHER_CARTOON_DESCRIPTION)
+        if theme in MOTHER_THEMES:
+            product=CARTOON_PRODUCTS['cat_cartoon_'+mother_suffix(theme)]
+            await _reply(event,mother_description(theme))
         try:
             data=await context.get_data()
             quoted,name=await quote_repeat_price(user_id,'cartoon',product[1],CARTOON_TARIFFS[product[0]][1])
@@ -2788,7 +2797,7 @@ def create_router(
                 raise RuntimeError('Не настроена интеграция Prodamus.')
             amount=order['amount_kopecks']//100
             link=await payments.create_payment_link(user_id,order_id=order['order_id'],amount=amount,description=order['product_name'])
-            text=(f"🤱 Мульт-открытка «День матери» (60 секунд) стоит {amount} ₽. Оплатите, чтобы начать создание." if product[0]=='mother' else f"🎬 Мульт-открытка стоит {amount} ₽. Оплатите, чтобы начать создание." if product[0]=='short'
+            text=(f"{mother_title(theme)} — мульт-открытка (60 секунд) стоит {amount} ₽. Оплатите, чтобы начать создание." if product[0] in ('mother','mother_bday') else f"🎬 Мульт-открытка стоит {amount} ₽. Оплатите, чтобы начать создание." if product[0]=='short'
                   else f"🎬 Мульт-поздравление (до 30 сек) стоит {amount} ₽. Оплатите, чтобы начать создание.")
             if order.get('promo_token'):
                 text+=' Скидка 20%.'
@@ -2878,8 +2887,8 @@ def create_router(
             await context.set_state(PosterStates.waiting_for_cartoon_song_phrase)
             await prepare_cartoon_music_preview(event,context)
             return
-        if data.get('cartoon_theme')=='theme_mother':
-            await context.update_data(chosen_song='audio_fun_mother',video_song_phrase=None)
+        if data.get('cartoon_theme') in MOTHER_THEMES:
+            await context.update_data(chosen_song='audio_fun_'+mother_suffix(data.get('cartoon_theme')),video_song_phrase=None)
             await context.set_state(PosterStates.waiting_for_cartoon_song_phrase)
             await persist_cartoon_state(context)
             await _reply(event,MOTHER_DETAILS_PROMPT)
@@ -3179,8 +3188,8 @@ def create_router(
             return
         product = cartoon_product(data)
         if product and target in CARTOON_THEMES:
-            if target=='theme_mother':product=CARTOON_PRODUCTS['cat_cartoon_mother']
-            elif product[0]=='mother':product=CARTOON_PRODUCTS['cat_cartoon']
+            if target in MOTHER_THEMES:product=CARTOON_PRODUCTS['cat_cartoon_'+mother_suffix(target)]
+            elif product[0] in ('mother','mother_bday'):product=CARTOON_PRODUCTS['cat_cartoon']
         if event.message is None or product is None or target not in VIDEO_CARD_SCREENS | set(CARTOON_THEMES) | (set(POSTCARD_PROMPTS) - set(ROLE_CARD_FIELDS)):
             await event.ack(notification='Откройте раздел мульт-открыток заново.')
             return
@@ -3216,7 +3225,7 @@ def create_router(
             await increment_counter(target + '_click', user_id=event.get_ids()[1])
             await context.update_data(cartoon_theme=target, cartoon_mode=target, avatar_attempt=1, avatar_urls={}, avatar_preview_urls={})
             await context.set_state(PosterStates.waiting_for_avatar_photo)
-            await _reply(event, (MOTHER_CARTOON_DESCRIPTION+'\n\n'+CARTOON_PHOTO_PROMPT) if target=='theme_mother' else CARTOON_PHOTO_PROMPT)
+            await _reply(event, (mother_description(target)+'\n\n'+CARTOON_PHOTO_PROMPT) if target in MOTHER_THEMES else CARTOON_PHOTO_PROMPT)
         elif target in POSTCARD_PROMPTS:
             await context.update_data(cartoon_mode=target, avatar_attempt=1, avatar_urls={})
             await context.set_state(PosterStates.waiting_for_avatar_photo)
@@ -3252,7 +3261,7 @@ def create_router(
                 await _reply(event, photo_request('Нужно одно фото, отправленное как изображение.'))
                 return
             photo_url = photos[0].payload.url
-            if data.get('cartoon_theme')=='theme_mother' and await count_people_in_photo(photo_url)!=1:
+            if data.get('cartoon_theme') in MOTHER_THEMES and await count_people_in_photo(photo_url)!=1:
                 await _reply(event,'Для этого мультфильма нужно фото только одной мамы. Пришлите её отдельный портрет.');return
             await context.update_data(avatar_reference_url=photo_url)
             await generate_cartoon_avatar_choice(event, context, photo_url)
@@ -3427,7 +3436,7 @@ def create_router(
         product = cartoon_product(data)
         song = event.callback.payload.removeprefix('cartoon_song:')
         if (event.message is None or not product or song not in AUDIO_FUN_SCENARIOS or not data.get('chosen_avatar')
-                or (data.get('cartoon_theme')=='theme_mother' and song!='audio_fun_mother')
+                or (data.get('cartoon_theme') in MOTHER_THEMES and song!='audio_fun_'+mother_suffix(data.get('cartoon_theme')))
                 or await context.get_state() not in (PosterStates.waiting_for_cartoon_song, PosterStates.waiting_for_cartoon_payment)):
             await event.ack(notification='Сначала выберите и одобрите аватар.')
             return
@@ -3523,7 +3532,7 @@ def create_router(
     async def mother_songs_retry(event: MessageCallback, context: MemoryContext):
         data = await context.get_data()
         if (event.message is None or event.callback.payload.split(':')[-1] != data.get('cartoon_preview_token')
-                or data.get('cartoon_theme') != 'theme_mother'
+                or data.get('cartoon_theme') not in MOTHER_THEMES
                 or await context.get_state() != PosterStates.waiting_for_cartoon_music_review):
             await event.ack(notification='Используйте текущие кнопки песни.'); return
         lock = cartoon_locks.setdefault(event.get_ids()[1], asyncio.Lock())
@@ -3538,7 +3547,7 @@ def create_router(
         story = data.get('cartoon_kling_story') or {}
         started_visuals = any(shot.get('image_url') or shot.get('task_id') or shot.get('video_submitting')
                               for shot in story.get('shots', []))
-        if (data.get('cartoon_theme') == 'theme_mother'
+        if (data.get('cartoon_theme') in MOTHER_THEMES
                 and song_review.approved(data, data.get('chosen_song_phrase'))
                 and data.get('song_review_tags') and data.get('song_review_title')
                 and (data.get('mother_song_variants') or not started_visuals)):
@@ -3638,7 +3647,7 @@ def create_router(
                     chosen_song_phrase=data.get(f'song_{selected}_phrase'), video_song_phrase=data.get(f'song_{selected}_phrase'))
                 if data.get('mother_song_variants'):
                     from mother_stats import record
-                    await record(user_id, 'mother_song_pick_'+str(selected),
+                    await record(user_id, mother_event(data,'mother_song_pick_'+str(selected)),
                                  str(data.get('cartoon_order_id') or data['cartoon_session_id'])+':'+data['mother_song_variants']['source'])
                 await persist_cartoon_state(context)
                 return
@@ -3653,7 +3662,7 @@ def create_router(
                 await increment_counter('song_bad', user_id=user_id)
                 await context.update_data(cartoon_preview_token=None, chosen_song_url=None, song_attempt=2, selected_song_variant=None)
                 await context.set_state(PosterStates.waiting_for_cartoon_song_phrase)
-                await _reply(event, MOTHER_DETAILS_PROMPT if data.get('cartoon_theme')=='theme_mother' else CARTOON_SONG_PHRASE_PROMPT)
+                await _reply(event, MOTHER_DETAILS_PROMPT if data.get('cartoon_theme') in MOTHER_THEMES else CARTOON_SONG_PHRASE_PROMPT)
                 await persist_cartoon_state(context)
                 return
             await generate_confirmed_cartoon_video(event, context, data)
@@ -3668,7 +3677,7 @@ def create_router(
         session = data['cartoon_session_id']
         await context.set_state(PosterStates.cartoon_generating)
         try:
-            await _reply(event, '🎬 Продолжаю сохранённую версию мультфильма.' if data.get('cartoon_theme')=='theme_mother' and (data.get('cartoon_kling_story') or {}).get('source',[None])[0]=='mother-one-character-heygen-seven-shots-v1' else '🎬 Создаю минутный мультфильм ко Дню матери. Это займёт несколько минут; буду сообщать о готовности сцен.' if data.get('cartoon_theme')=='theme_mother' else CARTOON_VIDEO_WAIT if data.get('cartoon_theme') else VIDEO_GENERATION_MESSAGE)
+            await _reply(event, '🎬 Продолжаю сохранённую версию мультфильма.' if data.get('cartoon_theme') in MOTHER_THEMES and (data.get('cartoon_kling_story') or {}).get('source',[None])[0]=='mother-one-character-heygen-seven-shots-v1' else '🎬 Создаю минутный мультфильм для мамы. Это займёт несколько минут; буду сообщать о готовности сцен.' if data.get('cartoon_theme') in MOTHER_THEMES else CARTOON_VIDEO_WAIT if data.get('cartoon_theme') else VIDEO_GENERATION_MESSAGE)
             original = data.get('original_image_url') or data['chosen_avatar']
             await context.update_data(original_image_url=original,
                 **{f'avatar_{index}_url': url for index,url in data.get('avatar_urls',{}).items() if index in ('1','2')})
@@ -3677,7 +3686,7 @@ def create_router(
             if not default_cartoon_video:
                 if not data.get('video_merged_url'):
                     data['video_merged_url'] = await cartoon_video_generator(original, full_song)
-            elif data.get('cartoon_theme')=='theme_mother' and (data.get('cartoon_kling_story') or not (data.get('cartoon_kling_task_id') or data.get('cartoon_kling_video_url'))):
+            elif data.get('cartoon_theme') in MOTHER_THEMES and (data.get('cartoon_kling_story') or not (data.get('cartoon_kling_task_id') or data.get('cartoon_kling_video_url'))):
                 if not data.get('video_merged_url'):
                     from mother_story import generate as generate_mother_story
                     async def checkpoint_story():
@@ -3733,9 +3742,9 @@ def create_router(
                 if data.get('cartoon_order_id'):
                     await finish_cartoon_order(data['cartoon_order_id'], user_id)
                 await increment_counter('video_success', user_id=user_id)
-                if data.get('cartoon_theme')=='theme_mother':
+                if data.get('cartoon_theme') in MOTHER_THEMES:
                     from mother_stats import record
-                    await record(user_id,'mother_cartoon_ready',str(data.get('cartoon_order_id') or session))
+                    await record(user_id,mother_event(data,'mother_cartoon_ready'),str(data.get('cartoon_order_id') or session))
                 await context.set_state(PosterStates.waiting_for_mode)
                 await send_repeat_offer(event.bot,user_id,'cartoon','cartoon:'+str(data.get('cartoon_order_id') or session),admin_user_id=admin_user_id)
                 await send_video_share(event.bot, user_id, bot_link=bot_link)
@@ -3881,6 +3890,7 @@ def create_router(
             target = ('back_to_main' if payload == 'back_to_main' else
                       'video_style:cat_cards' if payload == 'back_to_cards' else 'video_style:' + payload)
             buttons.append((label, target))
+        if screen=='cat_cards':buttons.insert(1,(BIRTHDAY_TITLE,'video_style:mode_mother_bday'))
         return navigation_keyboard(buttons)
 
     async def show_video_songs(event, context):
@@ -3889,11 +3899,11 @@ def create_router(
         await persist_music_draft(event,context,'song')
         data = await context.get_data()
         if data.get('_song_seed') and song_review.approved(data,data.get('song_custom_text')):
-            await context.update_data(video_song_scenario='audio_fun_mother' if data.get('mode')=='mode_mother' else 'audio_fun_universal')
+            await context.update_data(video_song_scenario='audio_fun_'+mother_suffix(data.get('mode')) if data.get('mode') in MOTHER_MODES else 'audio_fun_universal')
             await finish_video_selection(event,context)
             return
         scenarios = VIDEO_SHORT_SCENARIOS if data.get('video_product') in {'animate', 'upsell'} else VIDEO_SONG_SCENARIOS
-        if data.get('mode')=='mode_mother':scenarios={'audio_fun_mother':AUDIO_FUN_SCENARIOS['audio_fun_mother']}
+        if data.get('mode') in MOTHER_MODES:scenarios={key:AUDIO_FUN_SCENARIOS[key] for key in ('audio_fun_'+mother_suffix(data.get('mode')),)}
         buttons = [(label, key if key == 'audio_video_teacher' else 'video_song:' + key) for key, (label, _) in scenarios.items()]
         await _reply(event, '🎵 Выберите сценарий песни для видео-поздравления:',
                      attachments=[navigation_keyboard((*buttons, ('⬅️ Назад', 'cat_video')))])
@@ -3932,7 +3942,7 @@ def create_router(
 
     async def music_upfront_checkout(event,context,mode):
         user_id=event.get_ids()[1]
-        if mode=='mode_mother' and user_id is not None:await increment_counter('click_mother_music',user_id=user_id)
+        if mode in MOTHER_MODES and user_id is not None:await increment_counter('click_'+mother_suffix(mode)+'_music',user_id=user_id)
         if user_id is None or mode not in POSTCARD_PROMPTS:
             await _reply(event,'Выберите сюжет музыкальной открытки заново.',attachments=[main_keyboard()])
             return
@@ -4008,7 +4018,7 @@ def create_router(
             await _reply(event,CARD_TEXT_PROMPT)
         elif order['input_stage']=='phrase' and draft.get('video_song_scenario') in VIDEO_SONG_SCENARIOS:
             await context.set_state(PosterStates.waiting_for_video_song_phrase)
-            await _reply(event,MOTHER_DETAILS_PROMPT if draft.get('video_song_scenario') in {'audio_fun_mother','gift_scen_mother'} else VIDEO_SONG_CUSTOM_TEXT_PROMPT)
+            await _reply(event,MOTHER_DETAILS_PROMPT if draft.get('video_song_scenario') in MOTHER_SCENARIOS else VIDEO_SONG_CUSTOM_TEXT_PROMPT)
         else:
             await show_video_songs(event,context)
 
@@ -4111,7 +4121,7 @@ def create_router(
                                       video_teacher_lyrics_source=None, video_song_tags=None, video_song_title=None)
             await context.set_state(PosterStates.waiting_for_video_song_phrase)
             await persist_music_draft(event,context,'phrase')
-            await _reply(event, MOTHER_DETAILS_PROMPT if scenario in {'audio_fun_mother','gift_scen_mother'} else VIDEO_SONG_CUSTOM_TEXT_PROMPT)
+            await _reply(event, MOTHER_DETAILS_PROMPT if scenario in MOTHER_SCENARIOS else VIDEO_SONG_CUSTOM_TEXT_PROMPT)
             return
         if scenario == 'audio_video_teacher':
             await event.ack(notification='Жду данные учителя или тренера…')
@@ -4159,7 +4169,7 @@ def create_router(
             body = event.message.body
             phrase = (body.text or '').strip() if body else ''
             if not phrase or len(phrase) > 500:
-                await _reply(event, (MOTHER_DETAILS_PROMPT if scenario in {'audio_fun_mother','gift_scen_mother'} else CARTOON_SONG_PHRASE_PROMPT if cartoon and data.get('cartoon_theme') else
+                await _reply(event, (MOTHER_DETAILS_PROMPT if scenario in MOTHER_SCENARIOS else CARTOON_SONG_PHRASE_PROMPT if cartoon and data.get('cartoon_theme') else
                                      VIDEO_SONG_CUSTOM_TEXT_PROMPT if not cartoon and data.get('video_product') == 'direct'
                                      else scenarios[scenario][1]) + ' До 500 символов. /cancel — отмена.')
                 return
@@ -4290,9 +4300,9 @@ def create_router(
                 if sent is None:
                     raise RuntimeError('MAX не подтвердил отправку музыкальной открытки.')
                 await context.update_data(video_complete=True, video_result_url=result)
-                if data.get('mode')=='mode_mother':
+                if data.get('mode') in MOTHER_MODES:
                     from mother_stats import record
-                    await record(user_id,'mother_music_ready',str(data.get('music_prepaid_id') or data.get('video_generation_id') or result))
+                    await record(user_id,mother_event(data,'mother_music_ready'),str(data.get('music_prepaid_id') or data.get('video_generation_id') or result))
                 await context.set_state(PosterStates.waiting_for_mode)
                 await send_video_share(event.bot, event.get_ids()[1], bot_link=bot_link)
             except Exception:
@@ -4494,6 +4504,8 @@ def create_router(
         if user_id is not None:
             await increment_counter(AUDIO_FUN_COUNTERS[event.callback.payload], user_id=user_id)
         await context.clear()
+        if 'audio_fun_'+scenario in MOTHER_SCENARIOS:
+            await _reply(event,'🎵 Для мамы подготовим полную песню. Стоимость — 490 ₽.')
         await context.update_data(song_scenario=scenario)
         if await song_review.start_questions(event,context,flow='fun',prompt=AUDIO_FUN_SCENARIOS[event.callback.payload][1],state=PosterStates.waiting_for_song_details):return
         await context.set_state(PosterStates.waiting_for_song_details)
@@ -5514,7 +5526,7 @@ def create_router(
             return
         await event.ack(notification="Загружаю…")
         mode = "mode_vision" if event.callback.payload == "create_poster" else event.callback.payload
-        if mode=='mode_mother':await increment_counter('click_mother_card',user_id=event.get_ids()[1])
+        if mode in MOTHER_MODES:await increment_counter('click_'+mother_suffix(mode)+'_card',user_id=event.get_ids()[1])
         if mode == "mode_bday":
             mode = "mode_bday_young"
         await start_mode_photo(event, context, mode)
@@ -5706,10 +5718,10 @@ def create_router(
         # New purchases approve words before checkout; no photo generation here.
         await context.clear()
         flow='cartoon' if kind=='cartoon' else 'video'
-        mother=target in ('theme_mother','mode_mother')
+        mother=target in MOTHER_THEMES | MOTHER_MODES
         label=CARTOON_THEMES[target] if kind=='cartoon' else next((name for name,key in MODE_BUTTONS if key==target),'Поздравление')
         await context.update_data(card_song_precheckout=True,card_song_kind=kind,card_song_target=target,
-            card_song_label=MOTHER_TITLE if mother else label,
+            card_song_label=mother_title(target) if mother else label,
             song_setup_flow=flow,song_setup_prompt=MOTHER_DETAILS_PROMPT if mother else VIDEO_SONG_CUSTOM_TEXT_PROMPT,
             song_setup_state=str(PosterStates.waiting_for_card_song_details),song_setup_step='voice',
             song_setup_token=uuid4().hex,song_setup_voice=None)
@@ -5718,11 +5730,11 @@ def create_router(
             from mother_broadcast import example_attachment
             try:
                 example=await example_attachment(event.bot)
-                await _reply(event,'🎬 Пример мульт-открытки ко Дню матери:',attachments=[example])
+                await _reply(event,('🎬 Пример стиля и сюжета ко Дню матери. В вашем видео будет песня ко дню рождения и торт со свечами.' if target=='theme_mother_bday' else '🎬 Пример мульт-открытки ко Дню матери:'),attachments=[example])
             except Exception:
                 logger.warning('Не удалось показать пример мульт-открытки ко Дню матери.')
                 await _reply(event,'Пример временно недоступен.')
-            await _reply(event,MOTHER_CARTOON_DESCRIPTION)
+            await _reply(event,mother_description(target))
         await song_review.setup_voice(event,context)
 
     @router.message_created(PosterStates.waiting_for_card_song_details)
@@ -5763,6 +5775,10 @@ def create_router(
             return
         if flow.startswith('product:'):
             await launch_song_product(event,context,flow.split(':')[1]);return
+        if flow=='fun' and data.get('song_review_label') in MOTHER_LABELS and data.get('song_review_format')=='gift':
+            await context.update_data(gift_scenario=data.get('song_scenario'),gift_details=data['song_review_details'],
+                gift_chorus_phrase=data['song_review_details'])
+            flow='gift'
         if flow=='fun':await finish_fun_details(event,context)
         elif flow=='gift':
             await context.set_state(PosterStates.waiting_for_gift_preview)
@@ -5788,7 +5804,7 @@ def create_router(
     def reviewed_song_seed(data):
         seed={k:v for k,v in data.items() if k.startswith('song_review_') or k.startswith('song_setup_') or k=='song_style'}
         seed.update(_song_seed=True,song_custom_text=data['song_review_details'],video_song_phrase=data['song_review_details'],
-                    chosen_song_phrase=data['song_review_details'],chosen_song='audio_fun_mother' if data['song_review_label']==MOTHER_TITLE else 'audio_fun_universal')
+                    chosen_song_phrase=data['song_review_details'],chosen_song='audio_fun_'+mother_suffix(data['song_review_label']) if data['song_review_label'] in MOTHER_LABELS else 'audio_fun_universal')
         return seed
 
     async def launch_song_product(event,context,kind):
@@ -5796,8 +5812,8 @@ def create_router(
         if not song_review.approved(data,data.get('song_review_details')):return
         seed=reviewed_song_seed(data)
         await context.update_data(song_product_seed=seed,song_product_kind=kind)
-        if data['song_review_label']==MOTHER_TITLE:
-            await checkout_song_product(event,context,kind,'theme_mother' if kind=='cartoon' else 'mode_mother')
+        if data['song_review_label'] in MOTHER_LABELS:
+            await checkout_song_product(event,context,kind,('theme_' if kind=='cartoon' else 'mode_')+mother_suffix(data['song_review_label']))
             return
         choices=(tuple((v,'song_product_theme:'+k) for k,v in CARTOON_THEMES.items()) if kind=='cartoon'
                  else tuple((label,'song_product_mode:'+mode) for label,mode in MODE_BUTTONS if mode in POSTCARD_PROMPTS and mode!='mode_vision'))
@@ -5809,17 +5825,17 @@ def create_router(
         if not seed or data.get('song_product_kind')!=kind or not song_review.approved(seed,seed.get('song_review_details')):return
         if user!=admin_user_id and payments is None:
             await _reply(event,'Оплата временно недоступна. Слова и голос сохранены.');return
-        if kind=='cartoon' and target=='theme_mother' and seed.get('song_review_format')=='fun':
+        if kind=='cartoon' and target in MOTHER_THEMES and seed.get('song_review_format')=='fun':
             await context.update_data(card_song_precheckout=True,card_song_kind=kind,card_song_target=target,
                 song_setup_flow='cartoon',song_setup_voice=seed['song_review_voice'])
             await _reply(event,'Для минутного мультфильма нужна полная песня. Покажу полный текст с вашим именем и словами для проверки — перед оплатой.')
             await song_review.prepare(event,context,flow='cartoon',details=seed['song_review_details'],
-                label=MOTHER_TITLE,audio_format='gift',style=seed.get('song_style'),writer=lyric_writer,admin=admin_user_id)
+                label=mother_title(target),audio_format='gift',style=seed.get('song_style'),writer=lyric_writer,admin=admin_user_id)
             return
         if kind=='cartoon':
             if target not in CARTOON_THEMES:return
-            if target=='theme_mother':await increment_counter('theme_mother_click',user_id=user)
-            product=CARTOON_PRODUCTS['cat_cartoon_mother' if target=='theme_mother' else 'cat_cartoon']
+            if target in MOTHER_THEMES:await increment_counter(target+'_click',user_id=user)
+            product=CARTOON_PRODUCTS['cat_cartoon_'+mother_suffix(target) if target in MOTHER_THEMES else 'cat_cartoon']
             key=None;order=None
             if user!=admin_user_id:
                 old=await get_cartoon_order(data.get('cartoon_order_id',''))
@@ -5842,10 +5858,10 @@ def create_router(
             link=await payments.create_payment_link(user,order_id=key,amount=order['amount_kopecks']//100,description=order['product_name'])
             b=InlineKeyboardBuilder().row(LinkButton(text=f"💳 Оплатить {order['amount_kopecks']//100} ₽",url=link))
             b.row(CallbackButton(text='✅ Продолжить после оплаты',payload='cartoon_resume:'+key)).row(home_button())
-            await _reply(event,('🎬 Мульт-открытка ко Дню матери — 60 секунд. Песня начинается сразу со слов.\n' if target=='theme_mother' else '🎬 Мульт-открытка с вашей песней.\n')+'Слова и голос сохранены. После оплаты загрузите фото героя.',attachments=[b.as_markup()])
+            await _reply(event,('🎬 Мульт-открытка для мамы — 60 секунд. Песня начинается сразу со слов.\n' if target in MOTHER_THEMES else '🎬 Мульт-открытка с вашей песней.\n')+'Слова и голос сохранены. После оплаты загрузите фото героя.',attachments=[b.as_markup()])
         else:
             if target not in POSTCARD_PROMPTS:return
-            if target=='mode_mother':await increment_counter('click_mother_music',user_id=user)
+            if target in MOTHER_MODES:await increment_counter('click_'+mother_suffix(target)+'_music',user_id=user)
             key=None;order=None
             if user!=admin_user_id:
                 old=await get_musical_order(data.get('music_prepaid_id',''))
@@ -5855,7 +5871,7 @@ def create_router(
                     key=await create_prepaid_musical_order(f'music_{user}_{uuid4().hex}',user,target)
                     order=await get_musical_order(key)
             seed.update(video_flow=True,video_product='direct',mode=target,video_amount_kopecks=order['amount_kopecks'] if order else 29900,
-                video_song_scenario='audio_fun_mother' if target=='mode_mother' else 'audio_fun_universal')
+                video_song_scenario='audio_fun_'+mother_suffix(target) if target in MOTHER_MODES else 'audio_fun_universal')
             if key:
                 seed['music_prepaid_id']=key
                 await save_musical_draft(key,user,seed,'photo')
@@ -6028,12 +6044,12 @@ def create_router(
             details=data.get('song_review_details') or data.get('chosen_song_phrase')
             approved=song_review.approved(data,details)
             await context.update_data(cartoon_theme=theme,cartoon_mode=theme,
-                cartoon_flow='mother' if theme=='theme_mother' else 'short',
-                cartoon_amount_kopecks=CARTOON_TARIFFS['mother' if theme=='theme_mother' else 'short'][0],
+                cartoon_flow=mother_suffix(theme) if theme in MOTHER_THEMES else 'short',
+                cartoon_amount_kopecks=CARTOON_TARIFFS[mother_suffix(theme) if theme in MOTHER_THEMES else 'short'][0],
                 cartoon_session_id=data.get('cartoon_session_id') or uuid4().hex,
                 chosen_avatar=asset['image_url'],original_image_url=asset['image_url'],avatar_attempt=1,
                 avatar_urls={'1':asset['image_url']},avatar_1_url=asset['image_url'],avatar_preview_urls={},
-                cartoon_restore_preview_id=None,chosen_song='audio_fun_mother' if theme=='theme_mother' else 'audio_fun_universal',
+                cartoon_restore_preview_id=None,chosen_song='audio_fun_'+mother_suffix(theme) if theme in MOTHER_THEMES else 'audio_fun_universal',
                 chosen_song_phrase=details,video_song_phrase=details,_song_seed=approved,
                 card_song_precheckout=False)
             await context.set_state(PosterStates.waiting_for_avatar_review)
@@ -6061,7 +6077,7 @@ def create_router(
             from mother_admin_sessions import latest, save
             from mother_recovery import manual_start, recover_order
             data = copy.deepcopy(await context.get_data())
-            if data.get('cartoon_theme') != 'theme_mother':
+            if data.get('cartoon_theme') not in MOTHER_THEMES:
                 snapshot = await latest(admin_user_id)
                 data = snapshot[0] if snapshot else {}
             try:
@@ -6203,7 +6219,7 @@ def create_router(
     async def mother_minute(event:MessageCreated,context:MemoryContext):
         if is_bot_message(event) or admin_user_id is None or event.get_ids()[1]!=admin_user_id:return
         data=await context.get_data()
-        if data.get('cartoon_theme')!='theme_mother' or not data.get('chosen_avatar'):
+        if data.get('cartoon_theme') not in MOTHER_THEMES or not data.get('chosen_avatar'):
             await _reply(event,'Сначала откройте мульт-открытку ко Дню матери и выберите готовую картинку.');return
         if await context.get_state()==PosterStates.cartoon_generating:
             await _reply(event,'Дождитесь завершения текущего запроса.');return
@@ -6265,6 +6281,7 @@ def create_router(
                 logger.exception('Не удалось обновить слова песни')
                 await _reply(event,'Не удалось обновить текст. Музыка не запускалась. Попробуйте выбрать голос ещё раз.')
 
+    @router.message_created(PosterStates.waiting_for_gift_mother_bday)
     @router.message_created(PosterStates.waiting_for_gift_mother)
     @router.message_created(PosterStates.waiting_for_gift_bday)
     @router.message_created(PosterStates.waiting_for_gift_anniv)

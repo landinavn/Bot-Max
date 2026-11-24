@@ -41,6 +41,7 @@ CARTOON_VIDEO_PROMPTS = {
     'theme_feb23': CARTOON_ANIMATION_PROMPT + ' The St. George ribbon is waving, snow is falling.',
     'theme_mar8': CARTOON_ANIMATION_PROMPT + ' Flowers are swaying, sunlight is shimmering.',
     'theme_mother': CARTOON_ANIMATION_PROMPT + ' Soft particles are floating.',
+    'theme_mother_bday': CARTOON_ANIMATION_PROMPT + ' Warm festive birthday lights.',
     'theme_father': CARTOON_ANIMATION_PROMPT + ' Warm light is flickering, dust motes are floating.',
 }
 

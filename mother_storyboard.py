@@ -87,11 +87,37 @@ SHOTS=(
 )
 
 
-def image_prompt(index):
-    shot=SHOTS[index]
-    return BASE+'\nFIRST FRAME ONLY: '+shot['start']+'\nShow the moment BEFORE the action starts. Do not depict a later result or a collage.'
+def image_prompt(index, *, birthday=False):
+    _,shots,base=storyboard(birthday)
+    shot=shots[index]
+    return base+'\nFIRST FRAME ONLY: '+shot['start']+'\nShow the moment BEFORE the action starts. Do not depict a later result or a collage.'
 
 
-def video_prompt(index):
-    shot=SHOTS[index]
-    return BASE+'\nSTARTING STATE: '+shot['start']+'\nACTION AND END STATE: '+shot['action']+'\n'+MOTION_RULE
+def video_prompt(index, *, birthday=False):
+    _,shots,base=storyboard(birthday)
+    shot=shots[index]
+    return base+'\nSTARTING STATE: '+shot['start']+'\nACTION AND END STATE: '+shot['action']+'\n'+MOTION_RULE
+
+
+BIRTHDAY_POLICY='mother-birthday-six-ten-second-shots-v1'
+BIRTHDAY_BASE=BASE.replace('birthday decorations or Christmas ornaments', 'Christmas ornaments').replace(
+    'Warm natural light stays constant.',
+    'Warm natural light stays constant. Festive birthday room: restrained cream-and-gold balloons '
+    'by the window, fresh flowers and warm fairy-light garlands along the sideboard. Decorations '
+    'stay fixed across all shots, never obstruct mother or appear suddenly. No readable slogans '
+    'or age numbers. No other characters.')
+BIRTHDAY_SHOTS=[]
+for shot in SHOTS:
+    item={key:value.replace('apple pie', 'birthday cake with exactly three lit candles').replace(
+        'homemade ', '').replace('pie', 'cake').replace(
+        'The cake is whole, with no candles, lettering or birthday decorations.',
+        'The cake is whole, topped with exactly three small lit candles, no lettering or age numbers. '
+        'Candle count and placement remain unchanged in later shots. Mother does not blow out the candles.')
+        for key,value in shot.items()}
+    if item['label']=='Домашний пирог к чаю':item['label']='Праздничный торт со свечами'
+    BIRTHDAY_SHOTS.append(item)
+BIRTHDAY_SHOTS=tuple(BIRTHDAY_SHOTS)
+
+
+def storyboard(birthday=False):
+    return (BIRTHDAY_POLICY,BIRTHDAY_SHOTS,BIRTHDAY_BASE) if birthday else (POLICY,SHOTS,BASE)

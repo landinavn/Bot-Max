@@ -1278,12 +1278,13 @@ async def reset_musical_workers():
 
 CARTOON_TARIFFS = {
     'mother': (59000, 'Мульт-открытка «День матери» (60 сек)'),
+    'mother_bday': (59000, 'Мульт-открытка «День рождения мамы» (60 сек)'),
     'short': (39000, 'Мульт-открытка'),
     'long': (129000, 'Мульт-поздравление (до 30 сек)'),
 }
 CARTOON_ORDER_THEMES = frozenset({
     'theme_ny', 'theme_bday', 'theme_bday_kid', 'theme_valentine',
-    'theme_feb23', 'theme_mar8', 'theme_mother', 'theme_father',
+    'theme_feb23', 'theme_mar8', 'theme_mother', 'theme_mother_bday', 'theme_father',
 })
 
 
@@ -1291,7 +1292,7 @@ async def create_cartoon_order(order_id: str, user_id: int, theme: str, tariff: 
     if (not isinstance(order_id,str) or not order_id.startswith(('cartoon_','promo_cartoon_')) or len(order_id)>200
             or isinstance(user_id,bool) or not isinstance(user_id,int) or user_id<=0
             or theme not in CARTOON_ORDER_THEMES or tariff not in CARTOON_TARIFFS
-            or ((theme=='theme_mother') != (tariff=='mother'))):
+            or tariff != ({'theme_mother':'mother','theme_mother_bday':'mother_bday'}.get(theme, 'long' if tariff=='long' else 'short'))):
         raise ValueError('Некорректный мульт-заказ.')
     async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
         await db.execute('BEGIN IMMEDIATE')
@@ -1688,7 +1689,7 @@ def cartoon_tariff_value(order):
 def cartoon_sale_counter(order, *, promo=False):
     amount=order.get('promo_base_amount_kopecks') if order.get('promo_token') else order['amount_kopecks']
     price=amount//100
-    suffix=('mother_590' if order['tariff']=='mother' and price==590 else str(price))
+    suffix=(order['tariff']+'_590' if order['tariff'] in ('mother','mother_bday') and price==590 else str(price))
     return ('promo_buy_cartoon_' if promo else 'buy_cartoon_')+suffix
 
 

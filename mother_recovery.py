@@ -1,4 +1,5 @@
 """Read retained Mother’s Day media and recover only failed pre-scene alignment."""
+from mothers_day import MOTHER_THEMES
 import json
 from urllib.parse import urlsplit
 
@@ -25,7 +26,7 @@ def alignment_only(data, *, allow_exhausted=False):
     _, audio = urls(data)
     lyrics = data.get('song_review_lyrics') or data.get('video_song_lyrics') or ''
     source = alignment_source(audio, lyrics)
-    if (data.get('cartoon_theme') != 'theme_mother' or not audio or story.get('result_url')
+    if (data.get('cartoon_theme') not in MOTHER_THEMES or not audio or story.get('result_url')
             or story.get('alignment_source') == source):
         return False
     if not allow_exhausted:
@@ -50,7 +51,7 @@ def saved_start(data):
     _, audio = urls(data)
     lyrics = data.get('song_review_lyrics') or data.get('video_song_lyrics') or ''
     start = story.get('audio_start')
-    if (data.get('cartoon_theme') == 'theme_mother' and audio and lyrics
+    if (data.get('cartoon_theme') in MOTHER_THEMES and audio and lyrics
             and story.get('alignment_source') == alignment_source(audio, lyrics)
             and isinstance(start, (int, float)) and not isinstance(start, bool)
             and math.isfinite(start) and 0 <= start <= 29):
@@ -99,7 +100,7 @@ def manual_start(data, seconds, *, variant=None):
     if (not isinstance(seconds, (int, float)) or isinstance(seconds, bool)
             or not math.isfinite(seconds) or not 0 <= seconds <= 29):
         raise ValueError('Укажите секунду начала слов от 0 до 29, например /mother_song_start 3.5')
-    revising = (data.get('cartoon_theme') == 'theme_mother' and story.get('alignment_method') == 'admin'
+    revising = (data.get('cartoon_theme') in MOTHER_THEMES and story.get('alignment_method') == 'admin'
         and story.get('alignment_source') == alignment_source(audio, lyrics) and not story.get('result_url')
         and not any((shot.get('image_submitting') and not shot.get('image_url'))
                     or (shot.get('video_submitting') and not shot.get('task_id')) for shot in story.get('shots', [])))
@@ -110,7 +111,7 @@ def manual_start(data, seconds, *, variant=None):
         raise ValueError(f'Старая отметка относится к варианту {marked or "другому"}. '
                          f'Для текущего исполнения укажите явно: /mother_song_start {seconds:g} '
                          f'{target.get("selected_song_variant") or 1}.')
-    rebind = (variant is not None and data.get('cartoon_theme') == 'theme_mother'
+    rebind = (variant is not None and data.get('cartoon_theme') in MOTHER_THEMES
         and story.get('alignment_method') == 'admin' and len(old_source) == 2
         and old_source[1] == alignment_source(audio, lyrics)[1]
         and old_source[0] in (data.get('song_1_url'), data.get('song_2_url'))
@@ -151,17 +152,17 @@ async def recover_order(order, state, *, start=None, variant=None):
 async def assets(admin_user_id, order_id=None, live=None):
     if order_id:
         order = await database.get_cartoon_order(order_id)
-        if not order or order['theme'] != 'theme_mother':
+        if not order or order['theme'] not in MOTHER_THEMES:
             raise ValueError('Заказ ко Дню матери не найден.')
         return order_id, json.loads(order.get('fsm_data') or '{}')
-    if live and live.get('cartoon_theme') == 'theme_mother' and any(urls(live)):
+    if live and live.get('cartoon_theme') in MOTHER_THEMES and any(urls(live)):
         return live.get('cartoon_order_id') or live.get('cartoon_session_id') or 'текущий тест', live
     from mother_admin_sessions import latest
     snapshot = await latest(admin_user_id)
     if snapshot and any(urls(snapshot[0])):
         return snapshot[0].get('cartoon_session_id') or 'тест', snapshot[0]
     async with aiosqlite.connect(database.DATABASE_PATH, timeout=30) as db:
-        row = await (await db.execute("SELECT order_id FROM cartoon_orders WHERE user_id=? AND theme='theme_mother' "
+        row = await (await db.execute("SELECT order_id FROM cartoon_orders WHERE user_id=? AND theme IN ('theme_mother','theme_mother_bday') "
             "ORDER BY rowid DESC LIMIT 1", (admin_user_id,))).fetchone()
     if row:
         return await assets(admin_user_id, row[0])

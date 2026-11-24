@@ -1,4 +1,5 @@
 """Durable checkpoints for admin tests, which do not have a paid cartoon order."""
+from mothers_day import MOTHER_THEMES
 import json
 import aiosqlite
 import database
@@ -10,7 +11,7 @@ SCHEMA='''CREATE TABLE IF NOT EXISTS mother_admin_sessions (
 
 async def save(user_id,data,state):
     session=data.get('cartoon_session_id')
-    if not session or data.get('cartoon_theme')!='theme_mother':return
+    if not session or data.get('cartoon_theme') not in MOTHER_THEMES:return
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
         await db.execute(SCHEMA)
         await db.execute('''INSERT INTO mother_admin_sessions(session_id,user_id,data,state) VALUES(?,?,?,?)

@@ -1,4 +1,5 @@
 """Two arrangements of exactly the same approved lyrics; durable individual music jobs."""
+from mothers_day import mother_event
 import asyncio
 import hashlib
 import json
@@ -81,7 +82,7 @@ async def prepare(data, *, generator, waiter, checkpoint):
             await asyncio.shield(checkpoint())
         if data.get('song_review_user') and item.get('job_id'):
             from mother_stats import record
-            await record(data['song_review_user'], 'mother_video_song_ready', item['job_id'])
+            await record(data['song_review_user'], mother_event(data,'mother_video_song_ready'), item['job_id'])
         data[f'song_{index}_url'] = item['audio_url']
         data[f'song_{index}_phrase'] = data['chosen_song_phrase']
         await checkpoint()

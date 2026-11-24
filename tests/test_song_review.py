@@ -15,7 +15,8 @@ WORDS='[Verse 1]\nДом согревает свет\n[Chorus]\nС Днём ма
 
 
 async def draft(payments,*,scenario='gift_scen_mother',voice='mixed'):
-    writer=AsyncMock(return_value=WORDS)
+    words=WORDS.replace('С Днём матери,','С днём рождения,') if scenario.endswith('mother_bday') else WORDS
+    writer=AsyncMock(return_value=words)
     router=handlers.create_router(admin_user_id=999,payments=payments,lyric_writer=writer)
     ctx=await ready_context()
     await dispatch_callback(router,callback_event(scenario),ctx)
@@ -29,7 +30,7 @@ async def draft(payments,*,scenario='gift_scen_mother',voice='mixed'):
     await call_handler(router,'collect_gift_details',message_event('Людмила; спасибо за заботу'),ctx)
     d=await ctx.get_data()
     writer.assert_awaited_once()
-    assert d['song_review_lyrics']==WORDS and d['song_review_voice']==voice
+    assert d['song_review_lyrics']==words and d['song_review_voice']==voice
     assert await ctx.get_state()==handlers.PosterStates.waiting_for_song_review
     return router,ctx,writer
 
@@ -165,7 +166,7 @@ async def test_short_song_keeps_199_price_with_approved_text_and_female_voice(cr
     writer=AsyncMock(return_value=WORDS)
     router=handlers.create_router(admin_user_id=999,payments=payments,lyric_writer=writer)
     ctx=await ready_context()
-    await dispatch_callback(router,callback_event('audio_fun_mother'),ctx)
+    await dispatch_callback(router,callback_event('audio_fun_universal'),ctx)
     token=(await ctx.get_data())['song_setup_token']
     await dispatch_callback(router,callback_event('song_setup:genre:jazz:'+token),ctx)
     await dispatch_callback(router,callback_event('song_setup:voice:female:'+token),ctx)
@@ -355,12 +356,13 @@ async def test_mother_card_reviews_full_song_without_technical_sequence_message(
 
 
 @pytest.mark.parametrize('interrupted',[False,True])
-async def test_paid_customer_selects_performance_before_video_and_resumes_without_new_music(credit_db,payments,monkeypatch,interrupted):
+@pytest.mark.parametrize('occasion',['mother','mother_bday'])
+async def test_paid_customer_selects_performance_before_video_and_resumes_without_new_music(credit_db,payments,monkeypatch,interrupted,occasion):
     import asyncio
     import mother_story
     from maxapi.types import AttachmentUpload
     from test_handlers import cartoon_photo
-    router,ctx,writer=await draft(payments)
+    router,ctx,writer=await draft(payments,scenario='gift_scen_'+occasion)
     await dispatch_callback(router,callback_event('song_review:cartoon:'+(await ctx.get_data())['song_review_token']),ctx)
     key=(await ctx.get_data())['cartoon_order_id']
     await database.mark_cartoon_paid(key,'auto-render-paid')
@@ -408,7 +410,7 @@ async def test_paid_customer_selects_performance_before_video_and_resumes_withou
     picture.assert_awaited_once();assert song.await_count==2;writer.assert_awaited_once()
 
 
-async def test_short_mother_song_is_expanded_and_reviewed_before_minute_cartoon_invoice(credit_db,payments):
+async def test_mother_song_from_short_menu_is_full_before_minute_cartoon_invoice(credit_db,payments):
     writer=AsyncMock(return_value=WORDS)
     router=handlers.create_router(admin_user_id=999,payments=payments,lyric_writer=writer)
     ctx=await ready_context()
@@ -417,16 +419,13 @@ async def test_short_mother_song_is_expanded_and_reviewed_before_minute_cartoon_
     await dispatch_callback(router,callback_event('song_setup:genre:pop:'+token),ctx)
     await dispatch_callback(router,callback_event('song_setup:voice:female:'+token),ctx)
     await call_handler(router,'collect_song_details',message_event('Ольга; спасибо за заботу'),ctx)
-    assert (await ctx.get_data())['song_review_format']=='fun'
-    await dispatch_callback(router,callback_event('song_review:cartoon:'+(await ctx.get_data())['song_review_token']),ctx)
     d=await ctx.get_data()
-    assert d['song_review_format']=='gift' and not d['song_review_approved']
-    assert '2-3 minutes' in d['song_review_tags'] and d['song_review_voice']=='female'
-    assert not d.get('cartoon_order_id')
-    writer.assert_awaited();assert writer.await_count==2
-    await dispatch_callback(router,callback_event('song_review:approve:'+d['song_review_token']),ctx)
+    assert d['song_review_format']=='gift' and '2-3 minutes' in d['song_review_tags']
+    assert d['song_review_voice']=='female' and not d.get('cartoon_order_id')
+    await dispatch_callback(router,callback_event('song_review:cartoon:'+d['song_review_token']),ctx)
     order=await database.get_cartoon_order((await ctx.get_data())['cartoon_order_id'])
     assert order['status']=='pending' and order['amount_kopecks']==59000
+    writer.assert_awaited_once()
 
 
 async def test_admin_music_and_scene_checkpoints_survive_bot_restart(credit_db,monkeypatch):

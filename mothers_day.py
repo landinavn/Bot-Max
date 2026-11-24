@@ -1,4 +1,4 @@
-"""Shared Mother's Day copy and lyric direction for cards, songs and cartoons."""
+"""Approved mother greetings and occasion profiles for songs, cards and cartoons."""
 TITLE = '🤱 День матери'
 DETAILS_PROMPT = (
     '🤱 Как зовут маму и что вы хотите ей сказать?\n\n'
@@ -66,7 +66,7 @@ PERSONALIZATION_INSTRUCTION = (
 )
 
 
-def render_approved_song(name_genitive, personal_lines, *, short=False):
+def render_approved_song(name_genitive, personal_lines, *, short=False, birthday=False):
     import re
     if (not isinstance(name_genitive,str) or not name_genitive.strip() or len(name_genitive)>80
             or not re.fullmatch(r"[А-Яа-яЁёA-Za-z][А-Яа-яЁёA-Za-z '\-’]*",name_genitive)):
@@ -75,16 +75,17 @@ def render_approved_song(name_genitive, personal_lines, *, short=False):
             or any(not isinstance(line,str) or not line.strip() or len(line)>140
                    or any(ch in line for ch in '\n\r[]{}') for line in personal_lines)):
         raise ValueError('Не удалось подготовить личные строки песни.')
+    chorus=APPROVED_CHORUS.replace('С Днём матери,', 'С днём рождения,') if birthday else APPROVED_CHORUS
     verse1=APPROVED_VERSE_1.format(name_genitive=name_genitive.strip())
     if short:
         lines=verse1.splitlines()
         verse='\n'.join(lines[4:6]+personal_lines if personal_lines else lines[:2]+lines[4:6])
-        return '[Verse 1]\n'+verse+'\n[Chorus]\n'+APPROVED_CHORUS
+        return '[Verse 1]\n'+verse+'\n[Chorus]\n'+chorus
     verse2=APPROVED_VERSE_2.splitlines()
     if personal_lines:verse2[2:4]=personal_lines
-    return ('[Verse 1]\n'+verse1+'\n[Chorus]\n'+APPROVED_CHORUS+
-            '\n[Verse 2]\n'+'\n'.join(verse2)+'\n[Chorus]\n'+APPROVED_CHORUS+
-            '\n[Bridge]\n'+APPROVED_BRIDGE+'\n[Chorus]\n'+APPROVED_CHORUS)
+    return ('[Verse 1]\n'+verse1+'\n[Chorus]\n'+chorus+
+            '\n[Verse 2]\n'+'\n'.join(verse2)+'\n[Chorus]\n'+chorus+
+            '\n[Bridge]\n'+APPROVED_BRIDGE+'\n[Chorus]\n'+chorus)
 
 
 def minute_excerpt(text):
@@ -95,3 +96,37 @@ def minute_excerpt(text):
     if not verse or not chorus:
         raise ValueError('Не найден куплет и припев минутной песни.')
     return '[Verse 1]\n'+verse.group(1).strip()+'\n[Chorus]\n'+chorus.group(1).strip()
+
+
+BIRTHDAY_TITLE = '🎂 День рождения мамы'
+MOTHER_LABELS = frozenset((TITLE, BIRTHDAY_TITLE))
+MOTHER_THEMES = frozenset(('theme_mother', 'theme_mother_bday'))
+MOTHER_MODES = frozenset(('mode_mother', 'mode_mother_bday'))
+MOTHER_SCENARIOS = frozenset(('audio_fun_mother', 'gift_scen_mother', 'audio_fun_mother_bday', 'gift_scen_mother_bday'))
+BIRTHDAY_CARD_PROMPT = CARD_PROMPT.replace('Mother’s Day', "mother's birthday").replace("Mother's Day", "mother's birthday").replace(
+    'No birthday cakes, candles, numbers or New Year decor.',
+    'Elegant birthday flowers, a cake with candles and soft festive garlands. No age numbers or New Year decor.')
+BIRTHDAY_CARTOON_DESCRIPTION = (
+    '🎂 Ко дню рождения мамы создадим мультфильм на 60 секунд с героиней — вашей мамой! 💐\n\n'
+    '🎵 За кадром прозвучит персональная поздравительная песня с её именем.\n\n'
+    '🎉 Праздничная комната, торт со свечами и тёплые семейные воспоминания.\n\n'
+    '📸 Подготовьте одно фото мамы, где она одна и хорошо видно лицо.\n\nСтоимость — 590 ₽.'
+)
+
+
+def mother_suffix(value):
+    return 'mother_bday' if value in (BIRTHDAY_TITLE, 'theme_mother_bday', 'mode_mother_bday',
+        'audio_fun_mother_bday', 'gift_scen_mother_bday', 'mother_bday') else 'mother'
+
+
+def mother_title(value):
+    return BIRTHDAY_TITLE if mother_suffix(value)=='mother_bday' else TITLE
+
+
+def mother_description(value):
+    return BIRTHDAY_CARTOON_DESCRIPTION if mother_suffix(value)=='mother_bday' else CARTOON_DESCRIPTION
+
+
+def mother_event(data, event):
+    value=data.get('cartoon_theme') or data.get('mode') or data.get('song_review_label')
+    return event.replace('mother_', 'mother_bday_', 1) if mother_suffix(value)=='mother_bday' else event

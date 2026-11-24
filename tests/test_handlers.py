@@ -1393,7 +1393,8 @@ async def test_modern_card_button_uses_shared_photo_and_custom_text_flow(credit_
     assert (await credit_db.get_user(456))["balance"] == 1
 
 
-@pytest.mark.parametrize("mode", list(handlers.POSTCARD_PROMPTS))
+# Birthday mom is a musical-only entry, tested through video_style and paid review.
+@pytest.mark.parametrize("mode", [m for m in handlers.POSTCARD_PROMPTS if m != "mode_mother_bday"])
 @pytest.mark.parametrize("general_handler_first", [False, True])
 async def test_dispatcher_routes_card_text_to_generation(
     credit_db, monkeypatch, event_replies, caplog, mode, general_handler_first, text_correction,
@@ -3284,7 +3285,7 @@ async def test_audio_tariffs_show_fun_or_gift_screen_and_return_to_workshop(cred
         buttons = event.send.await_args.kwargs['attachments'][0].payload.buttons
         assert [row[0].payload for row in buttons] == [
             'audio_fun_boss', 'audio_fun_friend', 'audio_fun_cat', 'audio_fun_student',
-            'audio_fun_universal', 'audio_fun_meme', 'audio_fun_ny', 'audio_fun_mother', 'cat_audio',
+            'audio_fun_universal', 'audio_fun_meme', 'audio_fun_ny', 'audio_fun_mother', 'audio_fun_mother_bday', 'cat_audio',
         ]
     else:
         assert event.send.await_args.args[0] == handlers.AUDIO_GIFT_TEXT
@@ -3391,7 +3392,7 @@ async def test_song_empty_details_keep_waiting(text):
     await context.update_data(song_scenario='cat')
     event = message_event(text)
     await call_handler(create_router(), 'collect_song_details', event, context)
-    assert ('фразу для припева' in event.message.answer.await_args.args[0] or (payload=='gift_scen_mother' and 'Как зовут маму' in event.message.answer.await_args.args[0]))
+    assert ('фразу для припева' in event.message.answer.await_args.args[0] or (payload in {'gift_scen_mother','gift_scen_mother_bday'} and 'Как зовут маму' in event.message.answer.await_args.args[0]))
     assert await context.get_state() == PosterStates.waiting_for_song_details
 
 
@@ -3474,7 +3475,7 @@ async def test_gift_scenario_menu_keeps_order_and_clears_old_data(credit_db):
     buttons = event.send.await_args.kwargs['attachments'][0].payload.buttons
     assert [row[0].payload for row in buttons] == [
         'gift_scen_bday', 'gift_scen_anniv', 'gift_scen_parents', 'gift_scen_child',
-        'gift_scen_friend', 'gift_scen_custom', 'audio_gift_ny', 'audio_gift_teacher', 'gift_scen_mother', 'audio_tariff_gift',
+        'gift_scen_friend', 'gift_scen_custom', 'audio_gift_ny', 'audio_gift_teacher', 'gift_scen_mother', 'gift_scen_mother_bday', 'audio_tariff_gift',
     ]
     assert await context.get_state() == PosterStates.waiting_for_mode
     assert await context.get_data() == {}
@@ -3539,7 +3540,7 @@ async def test_gift_empty_details_do_not_advance(payload, text):
     await context.update_data(gift_scenario=handlers.gift_scenario_name(payload))
     event = message_event(text)
     await call_handler(create_router(), 'collect_gift_details', event, context)
-    assert ('фразу для припева' in event.message.answer.await_args.args[0] or (payload=='gift_scen_mother' and 'Как зовут маму' in event.message.answer.await_args.args[0]))
+    assert ('фразу для припева' in event.message.answer.await_args.args[0] or (payload in {'gift_scen_mother','gift_scen_mother_bday'} and 'Как зовут маму' in event.message.answer.await_args.args[0]))
     assert await context.get_state() == handlers.GIFT_SCENARIO_STATES[payload]
     assert 'gift_details' not in await context.get_data()
 
@@ -4476,7 +4477,9 @@ async def test_video_menu_first_and_matches_existing_style_labels(credit_db, exa
         event = callback_event(payload)
         await dispatch_callback(router, event, context)
         rows = event.send.await_args.kwargs['attachments'][0].payload.buttons
-        assert [row[0].text for row in rows] == [label for label, _ in handlers.CATEGORY_MENUS[screen][2]]
+        expected_labels=[label for label, _ in handlers.CATEGORY_MENUS[screen][2]]
+        if screen=='cat_cards':expected_labels.insert(1,handlers.BIRTHDAY_TITLE)
+        assert [row[0].text for row in rows] == expected_labels
         assert all(row[0].payload.startswith('video_style:') or row[0].payload == 'back_to_main' for row in rows)
     await dispatch_callback(router, callback_event('video_style:cat_cards'), context)
     assert (await context.get_data())['video_amount_kopecks'] == 29900
@@ -4498,7 +4501,7 @@ async def test_static_card_video_upsells_keep_source_and_do_not_generate(credit_
     rows = first_reply.kwargs['attachments'][0].payload.buttons
     assert [row[0].payload for row in rows[:-1]] == [
         'video_song:audio_fun_boss', 'video_song:audio_fun_friend', 'video_song:audio_fun_cat',
-        'video_song:audio_fun_student', 'video_song:audio_fun_universal', 'video_song:audio_fun_meme', 'video_song:audio_fun_ny', 'video_song:audio_fun_mother', 'audio_video_teacher']
+        'video_song:audio_fun_student', 'video_song:audio_fun_universal', 'video_song:audio_fun_meme', 'video_song:audio_fun_ny', 'video_song:audio_fun_mother', 'video_song:audio_fun_mother_bday', 'audio_video_teacher']
     assert all(row[0].type == 'callback' for row in rows)
     data = await context.get_data()
     assert data['video_source_image'] == 'https://cdn.example/card.png'
@@ -5833,7 +5836,7 @@ async def test_cat_video_scenario_waits_for_separate_song_input(credit_db, scena
     data = await context.get_data()
     assert data['photo'] == original['photo'] and data['card_text'] == original['card_text']
     assert await context.get_state() == PosterStates.waiting_for_video_song_phrase
-    assert selected.send.await_args.args[0] == (handlers.MOTHER_DETAILS_PROMPT if scenario in {'audio_fun_mother','gift_scen_mother'} else handlers.VIDEO_SONG_CUSTOM_TEXT_PROMPT)
+    assert selected.send.await_args.args[0] == (handlers.MOTHER_DETAILS_PROMPT if scenario in handlers.MOTHER_SCENARIOS else handlers.VIDEO_SONG_CUSTOM_TEXT_PROMPT)
     writer.assert_not_awaited()
     handlers.generate_song.assert_not_awaited()
     phrase = 'Иван, лучший тренер по футболу!'
@@ -6124,7 +6127,7 @@ async def submit_themed_song(router,context,phrase='Маша, с днём рож
     return event
 
 
-@pytest.mark.parametrize('theme',[t for t in handlers.CARTOON_THEMES if t!='theme_mother'])
+@pytest.mark.parametrize('theme',[t for t in handlers.CARTOON_THEMES if t not in handlers.MOTHER_THEMES])
 @pytest.mark.parametrize('entry',['cat_cartoon'])
 async def test_themed_cartoon_requires_music_confirmation_before_kling(credit_db,theme,entry,max_image_upload):
     avatar=AsyncMock(return_value='https://cdn.example/clean-avatar.png')
@@ -6453,7 +6456,7 @@ async def test_cartoon_reselection_replaces_old_pending_price_without_changing_o
 @pytest.mark.parametrize('entry,amount', [('cat_cartoon',390)])
 @pytest.mark.parametrize('theme', list(handlers.CARTOON_THEMES))
 async def test_cartoon_checkout_before_photo_and_paid_resume(credit_db, entry, amount, theme):
-    if theme=='theme_mother':amount=590
+    if theme in handlers.MOTHER_THEMES:amount=590
     payments=SimpleNamespace(create_payment_link=AsyncMock(return_value='https://shop.payform.ru/cartoon-personal'))
     avatar=AsyncMock(return_value='https://cdn.example/clean.png')
     router,context=create_router(admin_user_id=999,payments=payments,avatar_generator=avatar),await ready_context()
@@ -6464,7 +6467,7 @@ async def test_cartoon_checkout_before_photo_and_paid_resume(credit_db, entry, a
     assert order['order_id'].startswith(f'cartoon_456_{theme}_')
     assert order['user_id']==456 and order['theme']==theme
     assert order['amount_kopecks']==amount*100 and order['status']=='pending'
-    assert order['product_name'] == (handlers.CARTOON_TARIFFS['mother'][1] if theme=='theme_mother' else 'Мульт-открытка')
+    assert order['product_name'] == (handlers.CARTOON_TARIFFS[handlers.mother_suffix(theme)][1] if theme in handlers.MOTHER_THEMES else 'Мульт-открытка')
     payments.create_payment_link.assert_awaited_once_with(456,order_id=order['order_id'],amount=amount,description=order['product_name'])
     assert 'Слова и голос сохранены. После оплаты загрузите фото героя.' in event.send.await_args.args[0]
     assert event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0].url=='https://shop.payform.ru/cartoon-personal'

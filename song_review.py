@@ -31,8 +31,8 @@ async def show_voice(event,context):
 async def prepare(event,context,*,flow,details,label,audio_format,style=None,writer=None,admin=None):
     from handlers import PosterStates
     from audio_service import build_song_request
-    from mothers_day import TITLE as MOTHER_TITLE
-    if label==MOTHER_TITLE and flow in ('cartoon','video'):
+    from mothers_day import MOTHER_LABELS
+    if label in MOTHER_LABELS:
         audio_format='gift'  # Review the full approved song; the cartoon uses an excerpt.
     d=await context.get_data()
     source=[flow,details,label,audio_format,style]
@@ -67,8 +67,8 @@ async def show_text(event,context):
     b.row(CallbackButton(text='🎙 Изменить голос',payload='song_review:voice_menu:'+token))
     b.row(CallbackButton(text='🏠 Главный экран',payload='back_to_main'))
     text=d['song_review_lyrics']
-    from mothers_day import TITLE, minute_excerpt
-    if (not d.get('song_review_admin') and d.get('song_review_label')==TITLE
+    from mothers_day import MOTHER_LABELS, minute_excerpt
+    if (not d.get('song_review_admin') and d.get('song_review_label') in MOTHER_LABELS
             and (d.get('song_review_flow')=='cartoon' or d.get('song_review_flow')=='product:cartoon')):
         text=minute_excerpt(text)
     for a,z in (('[Verse 1]','Куплет 1'),('[Verse 2]','Куплет 2'),('[Chorus]','Припев'),('[Bridge]','Переход')):text=text.replace(a,z)

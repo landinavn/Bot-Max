@@ -1,4 +1,5 @@
 """Доставка оплаченных аудиозаказов из постоянной очереди SQLite."""
+from mothers_day import mother_suffix
 
 import asyncio
 import json
@@ -139,9 +140,9 @@ class PaidAudioWorker:
                 keyboard.row(CallbackButton(text=f'Скачать вариант {index + 1}', payload=f'audio_paid_download:{order_id}:{index}'))
             self.result_actions(keyboard, order)
             await self.notify(order['user_id'], text, attachments=[keyboard.as_markup()])
-            if order.get('scenario')=='mother':
+            if order.get('scenario') in ('mother','mother_bday'):
                 from mother_stats import record
-                await record(order['user_id'],'mother_audio_ready',order_id)
+                await record(order['user_id'],mother_suffix(order.get('scenario'))+'_audio_ready',order_id)
             await update_audio_order(order_id, delivered=1, error=None)
         except asyncio.CancelledError:
             raise

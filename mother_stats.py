@@ -5,6 +5,8 @@ import database
 
 EVENTS={'mother_music_ready','mother_cartoon_ready','mother_audio_ready','mother_video_song_ready','mother_song_pick_1','mother_song_pick_2'}
 
+EVENTS |= {key.replace('mother_', 'mother_bday_', 1) for key in EVENTS}
+
 
 async def record(user,event,source):
     if event not in EVENTS or not isinstance(source,str) or not source:raise ValueError('Некорректное событие Дня матери.')
@@ -23,7 +25,10 @@ async def sales(admin=None):
         for key,table,where in (
             ('cartoon','cartoon_orders',"theme='theme_mother' AND status IN ('paid','completed','manual')"),
             ('music','musical_orders',"mode='mode_mother' AND status='paid'"),
-            ('audio','audio_orders',"scenario='mother' AND status='paid'")):
+            ('audio','audio_orders',"scenario='mother' AND status='paid'"),
+            ('birthday_cartoon','cartoon_orders',"theme='theme_mother_bday' AND status IN ('paid','completed','manual')"),
+            ('birthday_music','musical_orders',"mode='mode_mother_bday' AND status='paid'"),
+            ('birthday_audio','audio_orders',"scenario='mother_bday' AND status='paid'")):
             async with db.execute('SELECT COUNT(*),COALESCE(SUM(amount_kopecks),0) FROM '+table+' WHERE '+where+' AND (? IS NULL OR user_id!=?)',(admin,admin)) as cur:
                 count,revenue=await cur.fetchone()
             result[key+'_paid']=count;result[key+'_revenue']=revenue
@@ -41,7 +46,7 @@ def text(c,all_c,paid):
         f"- Оплаты: мульт {paid['cartoon_paid']} / {paid['cartoon_revenue']//100} ₽, музыкальная {paid['music_paid']} / {paid['music_revenue']//100} ₽, песни {paid['audio_paid']} / {paid['audio_revenue']//100} ₽\n"
         f"- Покупки мультфильма: 590 ₽ — {c('buy_cartoon_mother_590')}, прежние 790 ₽ — {c('buy_cartoon_790')}\n"
         f"- Рассылка: доставлено {c('mother_broadcast_delivered')}, ошибок {c('mother_broadcast_errors')}, нажали Старт {c('mother_broadcast_start')}\n"
-        '- Администратор — '+', '.join(f'{label}: {all_c.get(key,0)-c(key)}' for key,label in zip(keys,('выбор открытки','выбор музыкальной','выбор мультфильма','выбор короткой песни','выбор полной песни','готовые открытки','готовые музыкальные','готовые мультфильмы','готовые аудиозаказы','песни для видео','спокойное исполнение','весёлое исполнение')))+'\n\n')
+        '- Администратор — '+', '.join(f'{label}: {all_c.get(key,0)-c(key)}' for key,label in zip(keys,('выбор открытки','выбор музыкальной','выбор мультфильма','выбор короткой песни','выбор полной песни','готовые открытки','готовые музыкальные','готовые мультфильмы','готовые аудиозаказы','песни для видео','спокойное исполнение','весёлое исполнение')))+'\n\n')+birthday_text(c,all_c,paid)
 
 
 async def send_report(event,text):
@@ -56,3 +61,18 @@ async def send_report(event,text):
             await _reply(event,chunk);chunk=''
         chunk+=line
     if chunk:await _reply(event,chunk)
+
+
+def birthday_text(c,all_c,paid):
+    keys=('theme_mother_bday_click','click_mother_bday_music','audio_scen_mother_bday','audio_gift_mother_bday',
+          'mother_bday_cartoon_ready','mother_bday_music_ready','mother_bday_audio_ready',
+          'mother_bday_video_song_ready','mother_bday_song_pick_1','mother_bday_song_pick_2')
+    return ('🎂 День рождения мамы (клиенты):\n'
+        f"- Выбрали: мульт {c(keys[0])}, музыкальная {c(keys[1])}, песни {c(keys[2])+c(keys[3])}\n"
+        f"- Готово: мультфильмов {c(keys[4])}, музыкальных {c(keys[5])}, песен {c(keys[6])}\n"
+        f"- Песен для видео: {c(keys[7])}; исполнение спокойное {c(keys[8])}, веселее {c(keys[9])}\n"
+        f"- Оплаты: мульт {paid.get('birthday_cartoon_paid',0)} / {paid.get('birthday_cartoon_revenue',0)//100} ₽, "
+        f"музыкальная {paid.get('birthday_music_paid',0)} / {paid.get('birthday_music_revenue',0)//100} ₽, "
+        f"песни {paid.get('birthday_audio_paid',0)} / {paid.get('birthday_audio_revenue',0)//100} ₽\n"
+        f"- Покупки мультфильма 590 ₽: {c('buy_cartoon_mother_bday_590')}\n"
+        '- Администратор (отдельно): '+', '.join(f'{key}: {all_c.get(key,0)-c(key)}' for key in keys)+'\n\n')

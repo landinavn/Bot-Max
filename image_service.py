@@ -43,10 +43,11 @@ FACE_ORIENTATION_REQUIREMENT = (
     "FACE ORIENTATION: If the person in the reference photo is looking sideways or in profile, "
     "turn their head and face to look directly at the camera. The eyes must look straight ahead."
 )
-from mothers_day import CARD_PROMPT as MOTHER_CARD_PROMPT
+from mothers_day import CARD_PROMPT as MOTHER_CARD_PROMPT, BIRTHDAY_CARD_PROMPT
 
 POSTCARD_PROMPTS = {
     "mode_mother": MOTHER_CARD_PROMPT,
+    "mode_mother_bday": BIRTHDAY_CARD_PROMPT,
     "mode_teacher": (
         "Create a beautiful, elegant greeting card for a teacher. The background and thematic elements "
         "must be directly related to the following subject: {teacher_info}. Preserve the person's face "
@@ -1349,6 +1350,13 @@ CARTOON_IMAGE_PROMPTS['theme_mother'] += (
     'One medium shot, relaxed closed mouth. Cozy apartment dining room, table, vase of flowers, '
     'soft sunset lighting. This is the first frame of a continuous family movie; no collage or text.'
 )
+CARTOON_IMAGE_PROMPTS['theme_mother_bday'] = CARTOON_IMAGE_PROMPTS['theme_mother'] + (
+    ' Birthday celebration for the adult mother. Cream-and-gold balloons, flowers and warm fairy lights. '
+    'No children, extra people, readable text or age numbers. Preserve her age and identity.')
+CARTOON_IMAGE_BACKGROUNDS['theme_mother_bday'] = CARTOON_IMAGE_BACKGROUNDS['theme_mother']
+CARTOON_CLOTHING['theme_mother_bday'] = CARTOON_CLOTHING['theme_mother']
+
+
 
 
 

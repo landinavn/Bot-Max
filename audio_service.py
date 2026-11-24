@@ -15,7 +15,7 @@ import httpx
 from openai import AsyncOpenAI
 
 from config import Config
-from mothers_day import TITLE as MOTHER_TITLE, PERSONALIZATION_INSTRUCTION, render_approved_song
+from mothers_day import TITLE as MOTHER_TITLE, BIRTHDAY_TITLE, MOTHER_LABELS, PERSONALIZATION_INSTRUCTION, render_approved_song
 from media_service import audio_duration
 
 logger = logging.getLogger(__name__)
@@ -65,7 +65,7 @@ def build_song_request(details: str, scenario_title: str, audio_format: str, sty
         tags += ', New Year, Russian vocals, ' + ('playful, happiness and gifts, short song, 30-40 seconds' if audio_format == 'fun' else
                                                 'heartfelt family memories and wishes, 2-3 minutes')
 
-    if scenario_title == MOTHER_TITLE:
+    if scenario_title in MOTHER_LABELS:
         # Personal source remains intact; these are writing notes, not a tiny song to paraphrase.
         prompt=(f'[Verse 1]\nИсточник личных деталей клиента: {details.strip()}\n'
                 'Раскрой благодарность за заботу и то, что мама значит для близких.\n'
@@ -76,6 +76,9 @@ def build_song_request(details: str, scenario_title: str, audio_format: str, sty
                      f'[Chorus]\n{details.strip()}')
         tags = str(style or 'warm emotional acoustic pop, tender heartfelt ballad, piano, strings')
         tags += ", Russian vocals, Mother's Day, " + ('short song, 35 seconds, vocals from the start, no long intro or outro' if audio_format == 'fun' else 'full song, 2-3 minutes')
+    if scenario_title == BIRTHDAY_TITLE:
+        prompt=prompt.replace('С Днём матери', 'С днём рождения мамы')
+        tags=tags.replace("Mother's Day", "mother's birthday")
     if scenario_title == TEACHER_SCENARIO_TITLE:
         prompt = (f'[Verse 1]\nВ каждом сердце сила, и команда рядом,\nВперед, к новым высотам, уверенным шагом!\n'
                   f'[Chorus]\n{chorus}\n[Verse 2]\n{details.strip()}\nПобеда ждёт, Ваш пример помогает нам стремиться.\n'
@@ -141,12 +144,13 @@ async def write_song_lyrics(notes: str, tags: str, title: str, *, preserve_choru
         raise AudioNotConfigured('Не настроена текстовая модель для стихов.')
     chorus = re.search(r'\[Chorus\]\s*\n(.*?)(?=\n\[|$)', notes, flags=re.S)
     source_phrase = chorus.group(1).strip() if chorus else None
-    mother = title.startswith(MOTHER_TITLE + ':')
+    mother = any(title.startswith(label + ':') for label in MOTHER_LABELS)
+    birthday = title.startswith(BIRTHDAY_TITLE + ':')
     required_phrase = source_phrase if preserve_chorus and not mother else None
     instruction = LYRICS_SYSTEM_PROMPT if preserve_chorus else VIDEO_GREETING_LYRICS_PROMPT
     mother_short=mother and '35 seconds' in tags
     if mother:
-        instruction = PERSONALIZATION_INSTRUCTION
+        instruction = PERSONALIZATION_INSTRUCTION.replace('ко Дню матери', 'ко дню рождения мамы') if birthday else PERSONALIZATION_INSTRUCTION
     if title.startswith(TEACHER_SCENARIO_TITLE + ':'):
         instruction += (' ' + TEACHER_LYRICS_INSTRUCTION if preserve_chorus else
                         ' Напиши уважительную песню-благодарность для учителя или тренера на Вы, '
@@ -183,7 +187,7 @@ async def write_song_lyrics(notes: str, tags: str, title: str, *, preserve_choru
             personal=json.loads(text)
             if not isinstance(personal,dict) or set(personal)!={'name_genitive','personal_lines'}:
                 raise ValueError('Unexpected personalization fields')
-            text=render_approved_song(personal['name_genitive'],personal['personal_lines'],short=mother_short)
+            text=render_approved_song(personal['name_genitive'],personal['personal_lines'],short=mother_short,birthday=birthday)
         except (ValueError,TypeError,KeyError) as exc:
             raise AudioServiceError('Не удалось персонализировать утверждённую песню. Исходный текст сохранён.') from exc
     sections = re.findall(r'\[([^\]]+)\]', text)
@@ -202,8 +206,9 @@ async def write_song_lyrics(notes: str, tags: str, title: str, *, preserve_choru
         if re.search(relatives,text,re.I) and not re.search(relatives,notes,re.I):
             raise AudioServiceError('Внуки и бабушка могут упоминаться только по данным клиента.')
         choruses = re.findall(r'\[Chorus\]\s*\n(.*?)(?=\n\[|$)', text, flags=re.S)
-        if re.search(r'с дн[её]м рождения', text, re.I) or not all(re.search(r'с дн[её]м матери', part, re.I) for part in choruses):
-            raise AudioServiceError('Песня должна поздравлять с Днём матери, без подмены праздника.')
+        if (re.search(r'с дн[её]м матери' if birthday else r'с дн[её]м рождения', text, re.I)
+                or not all(re.search(r'с дн[её]м рождения' if birthday else r'с дн[её]м матери', part, re.I) for part in choruses)):
+            raise AudioServiceError('Песня должна поздравлять с днём рождения мамы, без подмены праздника.' if birthday else 'Песня должна поздравлять с Днём матери, без подмены праздника.')
     if required_phrase:
         choruses = re.findall(r'\[Chorus\]\s*\n(.*?)(?=\n\[|$)', text, flags=re.S)
         if len(choruses) != 3 or not all(required_phrase in part for part in choruses):

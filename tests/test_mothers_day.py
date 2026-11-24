@@ -67,7 +67,10 @@ async def test_ordinary_and_music_menu_and_song_options_are_wired(credit_db):
     e=callback_event('video_style:cat_cards')
     c=await ready_context();await c.update_data(video_flow=True,video_product='direct',video_amount_kopecks=29900)
     await dispatch_callback(handlers.create_router(admin_user_id=456),e,c)
-    assert 'video_style:mode_mother' in str(e.send.await_args_list)
+    buttons=e.send.await_args.kwargs['attachments'][0].payload.buttons
+    payloads=[b.payload for row in buttons for b in row]
+    assert 'video_style:mode_mother' not in payloads
+    assert 'video_style:mode_mother_bday' in payloads
 
 
 async def test_non_admin_mother_cartoon_still_requires_payment(credit_db):

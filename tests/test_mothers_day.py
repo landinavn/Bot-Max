@@ -272,13 +272,16 @@ async def test_issued_35_second_receipt_still_valid_after_minute_tariff(credit_d
     assert order['product_name']==old and order['amount_kopecks']==79000
 
 
-async def test_unknown_alignment_result_does_not_trigger_another_request_or_any_visuals(renderer):
+async def test_alignment_timeout_has_two_bounded_attempts_and_never_starts_visuals(renderer):
     import song_alignment
     song_alignment.detect_song_start.side_effect=TimeoutError('unknown transcription response')
     data={}
-    with pytest.raises(TimeoutError):await story.generate(data,'https://cdn.example/mom.png','https://cdn.example/song.mp3',checkpoint=AsyncMock(),progress=AsyncMock())
-    with pytest.raises(ValueError,match='ответ неизвестен'):await story.generate(data,'https://cdn.example/mom.png','https://cdn.example/song.mp3',checkpoint=AsyncMock(),progress=AsyncMock())
-    song_alignment.detect_song_start.assert_awaited_once()
+    with pytest.raises(song_alignment.SongAlignmentError):
+        await story.generate(data,'https://cdn.example/mom.png','https://cdn.example/song.mp3',checkpoint=AsyncMock(),progress=AsyncMock())
+    with pytest.raises(song_alignment.SongAlignmentError,match='Две попытки'):
+        await story.generate(data,'https://cdn.example/mom.png','https://cdn.example/song.mp3',checkpoint=AsyncMock(),progress=AsyncMock())
+    assert song_alignment.detect_song_start.await_count==2
+    assert data['cartoon_kling_story']['alignment_submitting'] is None
     renderer[0].assert_not_awaited();renderer[1].assert_not_awaited()
 
 

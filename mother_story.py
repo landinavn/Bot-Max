@@ -95,8 +95,7 @@ async def generate(data, reference_url, audio_url, *, checkpoint, progress):
     from image_service import generate_photosession_frame,_store_image
     from heygen import HeyGenAdapter
     from media_service import _download,audio_duration,_storage_client,_upload_video,MediaServiceError
-    from song_alignment import detect_song_start
-    import hashlib
+    from song_alignment import resolve_song_start
     if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
         raise MediaServiceError('Для мультфильма установите ffmpeg и ffprobe.')
     story=data.get('cartoon_kling_story')
@@ -129,15 +128,8 @@ async def generate(data, reference_url, audio_url, *, checkpoint, progress):
                 audio_start=0.
                 if not old:
                     lyrics=data.get('song_review_lyrics') or data.get('video_song_lyrics') or ''
-                    alignment_source=[audio_url,hashlib.sha256(lyrics.encode()).hexdigest()]
-                    if story.get('alignment_source')!=alignment_source:
-                        if story.get('alignment_submitting')==alignment_source:
-                            raise ValueError('Начало песни уже проверялось, но ответ неизвестен. Нужна проверка поддержки; повторный запрос не отправлялся.')
-                        story['alignment_submitting']=alignment_source;await checkpoint()
-                        audio_start=await detect_song_start(audio,lyrics,root)
-                        story.update(alignment_source=alignment_source,audio_start=audio_start)
-                        await checkpoint()
-                    else:audio_start=story['audio_start']
+                    await progress('🎵 Подготавливаю песню для мультфильма. Готовая музыка и картинка сохранены.')
+                    audio_start = await resolve_song_start(story, audio, lyrics, audio_url, root, checkpoint)
                     if seconds-audio_start<DURATION:
                         raise ValueError('После музыкального вступления осталось меньше минуты песни. Сцены ещё не создавались.')
                 duration=min(35.,seconds) if old else float(DURATION)

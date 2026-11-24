@@ -2309,6 +2309,9 @@ async def test_category_screens_ordered_album_and_buttons(credit_db, example_pho
     assert replies[-1].kwargs["text"] == handlers.CATEGORY_MENUS[screen][1]
     buttons = replies[-1].kwargs["attachments"][0].payload.buttons
     assert [button.payload for row in buttons for button in row] == payloads
+    if screen=='cat_audio':
+        assert all(len(row)==1 for row in buttons if any(len(button.text)>18 for button in row))
+        assert any(len(row)==2 for row in buttons)
     assert await context.get_state() == PosterStates.waiting_for_mode
     assert await context.get_data() == {}
     assert await credit_db.get_user(456) is None  # Навигация не начисляет и не списывает кредиты.
@@ -4477,9 +4480,13 @@ async def test_video_menu_first_and_matches_existing_style_labels(credit_db, exa
         event = callback_event(payload)
         await dispatch_callback(router, event, context)
         rows = event.send.await_args.kwargs['attachments'][0].payload.buttons
-        expected_labels=[label for label, _ in handlers.CATEGORY_MENUS[screen][2]]
+        expected_labels=[label for label, mode in handlers.CATEGORY_MENUS[screen][2] if mode!='mode_mother']
         if screen=='cat_cards':expected_labels.insert(1,handlers.BIRTHDAY_TITLE)
         assert [button.text for row in rows for button in row] == expected_labels
+        if screen=='cat_cards':
+            for target in ('video_style:sub_bday','video_style:mode_mother_bday'):
+                assert len(next(row for row in rows if any(button.payload==target for button in row)))==1
+            assert all(button.payload!='video_style:mode_mother' for row in rows for button in row)
         assert all(button.payload.startswith('video_style:') or button.payload == 'back_to_main' for row in rows for button in row)
     await dispatch_callback(router, callback_event('video_style:cat_cards'), context)
     assert (await context.get_data())['video_amount_kopecks'] == 29900

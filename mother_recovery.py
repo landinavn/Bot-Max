@@ -82,10 +82,19 @@ def can_recover_start(data):
         or shot.get('video_url') or shot.get('video_submitting') for shot in story.get('shots', []))
 
 
-def manual_start(data, seconds):
+def manual_start(data, seconds, *, variant=None):
     import math
     story = data.get('cartoon_kling_story') or {}
-    image, audio = urls(data)
+    if variant is not None and (isinstance(variant, bool) or variant not in (1, 2)):
+        raise ValueError('Номер варианта — 1 или 2: /mother_song_start 13 2')
+    if variant is None and data.get('selected_song_variant') not in (1, 2) and data.get('song_2_url'):
+        raise ValueError('Укажите вариант явно: /mother_song_start 13 2 — 13 секунд для варианта 2.')
+    target = dict(data)
+    if variant is not None:
+        target['selected_song_variant'] = variant
+    image, audio = urls(target)
+    if variant is not None and audio != data.get(f'song_{variant}_url'):
+        raise ValueError('Выбранное исполнение ещё не сохранено.')
     lyrics = data.get('song_review_lyrics') or data.get('video_song_lyrics') or ''
     if (not isinstance(seconds, (int, float)) or isinstance(seconds, bool)
             or not math.isfinite(seconds) or not 0 <= seconds <= 29):
@@ -94,21 +103,42 @@ def manual_start(data, seconds):
         and story.get('alignment_source') == alignment_source(audio, lyrics) and not story.get('result_url')
         and not any((shot.get('image_submitting') and not shot.get('image_url'))
                     or (shot.get('video_submitting') and not shot.get('task_id')) for shot in story.get('shots', [])))
-    if not image or not audio or not lyrics or not (alignment_only(data, allow_exhausted=True) or revising):
+    old_source = story.get('alignment_source') or []
+    if (variant is None and story.get('alignment_method') == 'admin' and len(old_source) == 2
+            and old_source[0] != audio and old_source[1] == alignment_source(audio, lyrics)[1]):
+        marked = [i for i in (1, 2) if data.get(f'song_{i}_url') == old_source[0]]
+        raise ValueError(f'Старая отметка относится к варианту {marked or "другому"}. '
+                         f'Для текущего исполнения укажите явно: /mother_song_start {seconds:g} '
+                         f'{target.get("selected_song_variant") or 1}.')
+    rebind = (variant is not None and data.get('cartoon_theme') == 'theme_mother'
+        and story.get('alignment_method') == 'admin' and len(old_source) == 2
+        and old_source[1] == alignment_source(audio, lyrics)[1]
+        and old_source[0] in (data.get('song_1_url'), data.get('song_2_url'))
+        and not story.get('result_url') and not data.get('video_merged_url')
+        and not any(any(shot.get(k) for k in ('image_submitting', 'image_url', 'video_submitting', 'task_id', 'video_url'))
+                    for shot in story.get('shots', [])))
+    if not image or not audio or not lyrics or not (alignment_only(target, allow_exhausted=True) or revising or rebind):
         raise ValueError('Нет сохранённого сбоя проверки песни. Неизвестные запросы сцен этой командой не сбрасываются.')
+    if rebind and old_source != alignment_source(audio, lyrics):
+        story.setdefault('alignment_manual_history', []).append({
+            'source': old_source, 'audio_start': story.get('audio_start'), 'method': 'admin'})
+    if variant is not None:
+        data.update(selected_song_variant=variant, video_song_url=audio, chosen_song_url=audio, audio_url=audio)
     story.update(alignment_source=alignment_source(audio, lyrics), audio_start=float(seconds),
                  alignment_method='admin', alignment_submitting=None, alignment_error=None)
     data['cartoon_video_failed'] = False
 
 
-async def recover_order(order, state, *, start=None):
+async def recover_order(order, state, *, start=None, variant=None):
     """Only undo manual routing for a confirmed paid order blocked by alignment."""
     data = json.loads(order.get('fsm_data') or '{}')
     restore_start_selection(data)
-    if order['status'] != 'manual' or not order.get('paid_at') or not (alignment_only(data, allow_exhausted=True) if start is not None else can_recover_start(data)):
+    if order['status'] != 'manual' or not order.get('paid_at'):
         return False
     if start is not None:
-        manual_start(data, start)
+        manual_start(data, start, variant=variant)
+    elif not can_recover_start(data):
+        return False
     data['cartoon_video_failed'] = False
     async with aiosqlite.connect(database.DATABASE_PATH, timeout=30) as db:
         cursor = await db.execute("UPDATE cartoon_orders SET status='paid',fsm_data=?,fsm_state=? "

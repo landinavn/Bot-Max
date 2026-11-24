@@ -951,10 +951,31 @@ GIFT_SCENARIO_STATES = {
 }
 
 
-def navigation_keyboard(buttons, *, footer=()):
+def navigation_keyboard(buttons, *, footer=(), columns=1):
+    """Pair catalogue choices without squeezing navigation or long labels."""
+    if columns not in (1, 2):
+        raise ValueError('Меню поддерживает один или два столбца.')
     keyboard = InlineKeyboardBuilder()
+    pending = []
     for text, payload in buttons:
-        keyboard.row(CallbackButton(text=text, payload=payload))
+        wide = (columns == 1 or len(text) > 28 or '\n' in text
+                or text.startswith(('⬅', '🏠')) or payload.startswith('back_to_')
+                or payload in ('audio_tariff_fun', 'gift_scen_custom')
+                or payload.startswith(('song_setup:voice:mixed:', 'song_review:voice:mixed:',
+                                       'song_setup:genre:custom:')))
+        button = CallbackButton(text=text, payload=payload)
+        if wide:
+            if pending:
+                keyboard.row(*pending)
+                pending = []
+            keyboard.row(button)
+        else:
+            pending.append(button)
+            if len(pending) == columns:
+                keyboard.row(*pending)
+                pending = []
+    if pending:
+        keyboard.row(*pending)
     if footer:
         keyboard.row(*(CallbackButton(text=text, payload=payload) for text, payload in footer))
     return keyboard.as_markup()
@@ -2692,7 +2713,7 @@ def create_router(
             await _reply(event,str(exc))
 
     def cartoon_style_keyboard(screen='cat_cards'):
-        return navigation_keyboard((*((label+(' — 590 ₽' if key in MOTHER_THEMES else ' — 390 ₽'), key) for key, label in CARTOON_THEMES.items()), ('⬅️ Назад', 'back_to_main')))
+        return navigation_keyboard((*((label+(' — 590 ₽' if key in MOTHER_THEMES else ' — 390 ₽'), key) for key, label in CARTOON_THEMES.items()), ('⬅️ Назад', 'back_to_main')), columns=2)
 
     async def ensure_cartoon_access(event, context, *, acknowledged=False):
         user_id = event.get_ids()[1]
@@ -2896,7 +2917,7 @@ def create_router(
         await context.set_state(PosterStates.waiting_for_cartoon_song)
         buttons = [(label, 'cartoon_song:' + key) for key, (label, _) in AUDIO_FUN_SCENARIOS.items()]
         await _reply(event, 'Теперь выберите песню для вашего мультфильма:',
-                     attachments=[navigation_keyboard((*buttons, ('⬅️ Назад', 'back_to_main')))])
+                     attachments=[navigation_keyboard((*buttons, ('⬅️ Назад', 'back_to_main')), columns=2)])
 
 
     async def resume_repeat_checkout(event,user_id,category):
@@ -3891,7 +3912,7 @@ def create_router(
                       'video_style:cat_cards' if payload == 'back_to_cards' else 'video_style:' + payload)
             buttons.append((label, target))
         if screen=='cat_cards':buttons.insert(1,(BIRTHDAY_TITLE,'video_style:mode_mother_bday'))
-        return navigation_keyboard(buttons)
+        return navigation_keyboard(buttons, columns=2)
 
     async def show_video_songs(event, context):
         await context.update_data(video_teacher_session_id=None, video_audio_delivery_session=None)
@@ -3906,7 +3927,7 @@ def create_router(
         if data.get('mode') in MOTHER_MODES:scenarios={key:AUDIO_FUN_SCENARIOS[key] for key in ('audio_fun_'+mother_suffix(data.get('mode')),)}
         buttons = [(label, key if key == 'audio_video_teacher' else 'video_song:' + key) for key, (label, _) in scenarios.items()]
         await _reply(event, '🎵 Выберите сценарий песни для видео-поздравления:',
-                     attachments=[navigation_keyboard((*buttons, ('⬅️ Назад', 'cat_video')))])
+                     attachments=[navigation_keyboard((*buttons, ('⬅️ Назад', 'cat_video')), columns=2)])
 
     @router.message_callback(F.callback.payload == 'cat_video')
     async def video_menu(event: MessageCallback, context: MemoryContext):
@@ -4468,7 +4489,7 @@ def create_router(
         if interest_event is not None and user_id is not None:
             await increment_counter(interest_event, user_id=user_id)
         await send_menu_examples(event, filenames)
-        await _reply(event, text=text, attachments=[navigation_keyboard(buttons)])
+        await _reply(event, text=text, attachments=[navigation_keyboard(buttons, columns=2 if screen in ('cat_cards','cat_vision','cat_audio') or screen.startswith('sub_') else 1)])
 
     @router.message_callback(F.callback.payload.in_(set(AUDIO_CLICK_EVENTS)))
     async def audio_tariff_soon(event: MessageCallback, context: MemoryContext) -> None:
@@ -4484,7 +4505,7 @@ def create_router(
         if event.callback.payload == "audio_tariff_fun":
             buttons = [(label, payload) for payload, (label, _) in AUDIO_FUN_SCENARIOS.items()]
             await _reply(event, AUDIO_FUN_MENU_TEXT,
-                         attachments=[navigation_keyboard((*buttons, ("⬅️ Назад", "cat_audio")))])
+                         attachments=[navigation_keyboard((*buttons, ("⬅️ Назад", "cat_audio")), columns=2)])
             return
         await _reply(
             event,
@@ -4522,7 +4543,7 @@ def create_router(
         await context.set_state(PosterStates.waiting_for_mode)
         buttons = [(label, payload) for payload, (label, _) in AUDIO_GIFT_SCENARIOS.items()]
         await _reply(event, AUDIO_GIFT_SCENARIO_TEXT,
-                     attachments=[navigation_keyboard((*buttons, ("⬅️ Назад", "audio_tariff_gift")))])
+                     attachments=[navigation_keyboard((*buttons, ("⬅️ Назад", "audio_tariff_gift")), columns=2)])
 
     @router.message_callback(F.callback.payload.in_(set(AUDIO_GIFT_SCENARIOS)))
     async def gift_scenario(event: MessageCallback, context: MemoryContext) -> None:
@@ -4920,7 +4941,7 @@ def create_router(
         buttons = [(label, payload) for payload, (label, _) in AUDIO_GIFT_SCENARIOS.items()]
         await _reply(event, 'Песня в подарок стоит 490 ₽. ' +
                      'Сначала выберите сценарий и напишите детали песни. После превью я пришлю ссылку на оплату по действующей цене.',
-                     attachments=[navigation_keyboard((*buttons, ('⬅️ Назад', 'cat_audio')))])
+                     attachments=[navigation_keyboard((*buttons, ('⬅️ Назад', 'cat_audio')), columns=2)])
 
     @router.message_callback(F.callback.payload.startswith('audio_gift_checkout:'))
     async def gift_preview_checkout(event: MessageCallback):
@@ -5818,7 +5839,7 @@ def create_router(
         choices=(tuple((v,'song_product_theme:'+k) for k,v in CARTOON_THEMES.items()) if kind=='cartoon'
                  else tuple((label,'song_product_mode:'+mode) for label,mode in MODE_BUTTONS if mode in POSTCARD_PROMPTS and mode!='mode_vision'))
         await context.set_state(PosterStates.waiting_for_mode)
-        await _reply(event,'🎨 Выберите оформление. Текст и выбранный голос сохранятся; затем выставим счёт.',attachments=[navigation_keyboard((*choices,('🏠 Главный экран','back_to_main')))])
+        await _reply(event,'🎨 Выберите оформление. Текст и выбранный голос сохранятся; затем выставим счёт.',attachments=[navigation_keyboard((*choices,('🏠 Главный экран','back_to_main')), columns=2)])
 
     async def checkout_song_product(event,context,kind,target):
         data=await context.get_data();seed=data.get('song_product_seed');user=event.get_ids()[1]

@@ -43,6 +43,45 @@ def alignment_only(data, *, allow_exhausted=False):
         or (shot.get('video_submitting') and not shot.get('task_id')) for shot in story.get('shots', []))
 
 
+def saved_start(data):
+    """Return an offset only for the exact selected audio and current approved words."""
+    import math
+    story = data.get('cartoon_kling_story') or {}
+    _, audio = urls(data)
+    lyrics = data.get('song_review_lyrics') or data.get('video_song_lyrics') or ''
+    start = story.get('audio_start')
+    if (data.get('cartoon_theme') == 'theme_mother' and audio and lyrics
+            and story.get('alignment_source') == alignment_source(audio, lyrics)
+            and isinstance(start, (int, float)) and not isinstance(start, bool)
+            and math.isfinite(start) and 0 <= start <= 29):
+        return float(start)
+    return None
+
+
+def restore_start_selection(data):
+    """A restored selector may have lost its selection; retain the verified audio, never guess another."""
+    if data.get('selected_song_variant') in (1, 2):
+        return
+    story = data.get('cartoon_kling_story') or {}
+    source = story.get('alignment_source') or []
+    if len(source) != 2:
+        return
+    matches = [i for i in (1, 2) if data.get(f'song_{i}_url') == source[0]]
+    if len(matches) == 1:
+        data['selected_song_variant'] = matches[0]
+
+
+def can_recover_start(data):
+    if alignment_only(data):
+        return True
+    story = data.get('cartoon_kling_story') or {}
+    # A stale failure before any visual request can be cleared after verified/manual alignment.
+    # Once visual work has begun, its failure must be inspected separately.
+    return saved_start(data) is not None and not story.get('result_url') and not any(
+        shot.get('image_url') or shot.get('image_submitting') or shot.get('task_id')
+        or shot.get('video_url') or shot.get('video_submitting') for shot in story.get('shots', []))
+
+
 def manual_start(data, seconds):
     import math
     story = data.get('cartoon_kling_story') or {}
@@ -65,7 +104,8 @@ def manual_start(data, seconds):
 async def recover_order(order, state, *, start=None):
     """Only undo manual routing for a confirmed paid order blocked by alignment."""
     data = json.loads(order.get('fsm_data') or '{}')
-    if order['status'] != 'manual' or not order.get('paid_at') or not alignment_only(data, allow_exhausted=start is not None):
+    restore_start_selection(data)
+    if order['status'] != 'manual' or not order.get('paid_at') or not (alignment_only(data, allow_exhausted=True) if start is not None else can_recover_start(data)):
         return False
     if start is not None:
         manual_start(data, start)

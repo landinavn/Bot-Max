@@ -6089,21 +6089,68 @@ def create_router(
             await _reply(event,'Сохранённых этапов тестового мультфильма нет. Картинку можно вернуть через /restore_cartoon_image.');return
         async with lock:
             data,saved_state=snapshot
-            from mother_recovery import alignment_only, recover_order
-            if alignment_only(data):
+            from mother_recovery import can_recover_start, recover_order, saved_start, restore_start_selection, urls
+            restore_start_selection(data)
+            if can_recover_start(data):
                 if data.get('cartoon_order_id'):
                     order = await get_cartoon_order(data['cartoon_order_id'])
                     if order and order['user_id'] == admin_user_id:
                         await recover_order(order, PosterStates.waiting_for_cartoon_song_phrase)
+                        order = await get_cartoon_order(order['order_id'])
+                        if order['status'] != 'paid':
+                            await _reply(event, 'Заказ сохранён для проверки поддержки. Новые запросы не запускались.'); return
                 data['cartoon_video_failed'] = False
             await context.set_data(data)
             if not data.get('chosen_avatar') or not song_review.approved(data,data.get('chosen_song_phrase') or data.get('song_review_details')):
                 await context.set_state(saved_state)
                 await _reply(event,'Данные теста восстановлены. Сначала выберите картинку и утвердите слова песни. Для правок — /rewrite_song, для готовой картинки — /restore_cartoon_image.');return
             await context.set_state(PosterStates.waiting_for_cartoon_music_review)
+            start = saved_start(data)
+            if start is not None and not data.get('cartoon_video_failed'):
+                token = uuid4().hex
+                selected = data.get('selected_song_variant') or 1
+                image, audio = urls(data)
+                await context.update_data(selected_song_variant=selected, video_song_url=audio,
+                    chosen_song_url=audio, cartoon_resume_token=token, cartoon_preview_token=None)
+                await persist_cartoon_state(context)
+                # Always retain the admin checkpoint, including older tests without song_review_user.
+                from mother_admin_sessions import save
+                await save(admin_user_id, await context.get_data(), PosterStates.waiting_for_cartoon_music_review)
+                await _reply(event, f'🎵 Сохранён вариант {selected}. При сборке первые {start:g} секунд песни будут убраны. '
+                    'Картинка, песня и задания сцен сохранены. Продолжить создание видео?',
+                    attachments=[navigation_keyboard((('🎬 Продолжить создание видео','mother_continue_saved:'+token),))])
+                return
+            if data.get('cartoon_video_failed'):
+                await _reply(event, 'Материалы сохранены, но блокировка ещё активна. '
+                    'Нельзя повторять неизвестные запросы сцен. Для проверки нужны последние записи журнала; '
+                    'песню и картинку можно получить через /mother_assets.')
+                return
             await _reply(event,'Восстановлен последний тестовый мультфильм: '+data['cartoon_session_id']+
                 '. Картинка, песня и ID сцен сохранены. Продолжение — после подтверждения под песней.')
             await prepare_cartoon_music_preview(event,context)
+
+    @router.message_callback(F.callback.payload.startswith('mother_continue_saved:'))
+    async def mother_continue_saved(event: MessageCallback, context: MemoryContext):
+        if admin_user_id is None or event.get_ids()[1] != admin_user_id or event.message is None:
+            await event.ack(notification='Недоступно.'); return
+        lock = cartoon_locks.setdefault(admin_user_id, asyncio.Lock())
+        if lock.locked():
+            await event.ack(notification='Создание уже выполняется.'); return
+        async with lock:
+            data = dict(await context.get_data())
+            from mother_recovery import saved_start, urls
+            if (event.callback.payload.split(':')[-1] != data.get('cartoon_resume_token')
+                    or await context.get_state() != PosterStates.waiting_for_cartoon_music_review
+                    or saved_start(data) is None):
+                await event.ack(notification='Используйте актуальную кнопку после /mother_resume.'); return
+            if not await ensure_cartoon_access(event, context):
+                return
+            await event.ack(notification='Продолжаю с сохранённой песней…')
+            image, audio = urls(data)
+            data.update(video_song_url=audio, chosen_song_url=audio)
+            await context.update_data(cartoon_resume_token=None, video_song_url=audio, chosen_song_url=audio)
+            await persist_cartoon_state(context)
+            await generate_confirmed_cartoon_video(event, context, data)
 
     @router.message_created(Command('mother_minute'))
     async def mother_minute(event:MessageCreated,context:MemoryContext):

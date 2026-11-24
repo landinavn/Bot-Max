@@ -37,7 +37,8 @@ async def test_transcribes_only_sample_and_requests_word_timestamps(tmp_path,mon
     assert b'full.mp3' not in raw and b'vocal-start-sample.mp3' in raw
 
 
-async def test_render_removes_real_non_silent_music_intro_and_discards_native_clip_audio(tmp_path):
+@pytest.mark.parametrize('intro',[2.,13.])
+async def test_render_removes_real_non_silent_music_intro_and_discards_native_clip_audio(tmp_path,intro):
     import mother_story
     from array import array
     import math
@@ -45,10 +46,10 @@ async def test_render_removes_real_non_silent_music_intro_and_discards_native_cl
     subprocess.run(['ffmpeg','-v','error','-y','-f','lavfi','-i','color=c=blue:s=160x90:r=25:d=10',
         '-f','lavfi','-i','sine=frequency=900:duration=10','-c:v','libx264','-pix_fmt','yuv420p','-c:a','aac',str(clip)],check=True)
     # Intro is audible (220 Hz), so silencedetect alone could not remove it. The vocal stand-in is 660 Hz.
-    subprocess.run(['ffmpeg','-v','error','-y','-f','lavfi','-i','sine=frequency=220:duration=2',
+    subprocess.run(['ffmpeg','-v','error','-y','-f','lavfi','-i',f'sine=frequency=220:duration={intro}',
         '-f','lavfi','-i','sine=frequency=660:duration=61','-filter_complex','[0:a][1:a]concat=n=2:v=0:a=1[a]',
         '-map','[a]',str(song)],check=True)
-    await mother_story.render_local([clip]*6,song,out,60,audio_start=2.)
+    await mother_story.render_local([clip]*6,song,out,60,audio_start=intro)
     raw=subprocess.check_output(['ffmpeg','-v','error','-i',str(out),'-t','0.5','-ac','1','-ar','16000','-f','f32le','-'])
     samples=array('f');samples.frombytes(raw)
     power={f:abs(sum(v*complex(math.cos(2*math.pi*f*i/16000),math.sin(2*math.pi*f*i/16000))

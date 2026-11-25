@@ -387,7 +387,7 @@ def create_router(admin_id, settings, assets):
                 await tell(event,'Запуск отменён, старая кнопка подтверждения больше не действует.',[('Проекты','home')])
             elif action=='confirm':
                 item=await repo.confirm(parts[1],admin_id)
-                await tell(event,'Статус задания: '+item['status']+'. ID: '+item['id'],[('Проект','p:'+item['project_id'])])
+                await tell(event,'Статус задания: '+item['status']+'. ID: '+item['id']+'\n'+await repo.queue_wait_reason(item),[('Проект','p:'+item['project_id'])])
             elif action=='approve':
                 await repo.approve_asset(parts[1],admin_id)
                 await tell(event,'Изображение утверждено. Генерация видео не запускается автоматически.',[('Проекты','home')])
@@ -458,7 +458,7 @@ def create_router(admin_id, settings, assets):
                 if item['status']=='manual' and item['kind']=='video':
                     buttons.append(('Завершить проверку задачи','resolve:'+item['id']))
                 await tell(event,json.dumps({k:item[k] for k in ('id','kind','status','provider_id','result_url','error','attempts')},ensure_ascii=False,indent=2)
-                           + ('\nРезультат: '+item['result_url'] if links else '')
+                           + ('\nРезультат: '+item['result_url'] if links else '')+'\n'+await repo.queue_wait_reason(item)
                            +'\nПри неизвестном результате платного запроса сначала проверьте статус задачи в кабинете. Новый запрос — только с новым подтверждением.',
                            buttons+[('Проект','p:'+item['project_id'])],links)
             elif action=='show_image':
@@ -493,11 +493,11 @@ def create_router(admin_id, settings, assets):
                 if not item: raise ValueError('Задание не найдено.')
                 await owner('project',item['project_id'])
                 await tell(event,'Подтвердите, что проверили кабинет провайдера и эта задача больше НЕ выполняется. '
-                           'Это разблокирует следующую задачу очереди. Повторная платная генерация автоматически не запускается.',
+                           'Это разблокирует очередь. Уже подтверждённые задания смогут запуститься, включая платные повторы. Сама проверка новый запрос не создаёт.',
                            [('✅ Задача больше не выполняется','resolved:'+item['id']),('Отмена','job:'+item['id'])])
             elif action=='resolved':
                 await repo.resolve_video(parts[1],admin_id)
-                await tell(event,'Проверка задачи завершена. Повторный POST не отправлен.',[('Проекты','home')])
+                await tell(event,'Проверка задачи завершена. Уже подтверждённые задания продолжатся из очереди; новые задания не созданы.',[('Проекты','home')])
             elif action=='export':
                 await owner('project',parts[1])
                 url=await export_project(parts[1],assets)

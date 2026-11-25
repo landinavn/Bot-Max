@@ -481,3 +481,64 @@ async def test_episode_srt_uses_actual_scene_durations_and_database_dialogue(stu
     for scene in snap['scenes']:
         for line in scene['spec']['dialogue']:
             assert line['text'] in text
+
+
+async def mark_local_video(key):
+    item=await repo.job(key)
+    snap=json.loads(item['snapshot'])
+    snap['spec']['local_dream_video']=True
+    snap['quote']['video_provider']='local'
+    async with repo.connect() as db:
+        await db.execute('UPDATE cartoon_jobs SET snapshot=? WHERE id=?',(json.dumps(snap),key))
+        await db.commit()
+
+
+async def test_manual_provider_job_does_not_block_local_montage(studio):
+    jobs=await seven_videos(studio)
+    await repo.update_job(jobs[0]['id'],status='manual',error='ProviderFailed',provider_id='existing-video')
+    await mark_local_video(jobs[2]['id'])
+    reason=await repo.queue_wait_reason(await repo.job(jobs[1]['id']))
+    assert jobs[0]['id'] in reason and 'провер' in reason
+    assert await repo.queue_wait_reason(await repo.job(jobs[2]['id']))==''
+    claims=await asyncio.gather(repo.claim(),repo.claim())
+    assert [item['id'] for item in claims if item]==[jobs[2]['id']]
+    # The paid repeat is still blocked; nothing changed in the failed provider job.
+    assert (await repo.job(jobs[0]['id']))['status']=='manual'
+    assert (await repo.job(jobs[1]['id']))['status']=='queued'
+
+
+@pytest.mark.parametrize('status',['preparing','manual'])
+async def test_local_jobs_do_not_hold_provider_slot(studio,status):
+    jobs=await seven_videos(studio)
+    await mark_local_video(jobs[0]['id'])
+    await repo.update_job(jobs[0]['id'],status=status,lease_until=9999999999)
+    item=await repo.claim()
+    assert item['id']==jobs[1]['id']
+    assert await repo.begin_submission(item['id']) is True
+
+
+@pytest.mark.parametrize('snapshot',[
+    {}, {'spec':{'local_dream_video':True}},
+    {'quote':{'video_provider':'local'}},
+    {'spec':{'local_dream_video':True},'quote':{'video_provider':'heygen'}},
+    {'spec':{'local_dream_video':False},'quote':{'video_provider':'local'}},
+    None, [], {'spec':None},
+])
+def test_local_bypass_requires_both_retained_spec_and_quote(snapshot):
+    assert not repo.local_video({'kind':'video','snapshot':json.dumps(snapshot)})
+
+
+async def test_blocked_front_page_does_not_starve_provider_poll(studio):
+    jobs=await seven_videos(studio)
+    first=jobs[0]['id']
+    async with repo.connect() as db:
+        for i in range(25):
+            await db.execute('''INSERT INTO cartoon_jobs(id,project_id,target,target_id,kind,snapshot,fingerprint,status,estimate,expires,approved_by)
+                SELECT ?,project_id,target,target_id,kind,snapshot,fingerprint,'queued',estimate,expires,approved_by
+                FROM cartoon_jobs WHERE id=?''',('extra-queued-'+str(i),first))
+        await db.execute('''INSERT INTO cartoon_jobs(id,project_id,target,target_id,kind,snapshot,fingerprint,status,estimate,expires,approved_by,provider_id)
+                SELECT 'active-last',project_id,target,target_id,kind,snapshot,fingerprint,'polling',estimate,expires,approved_by,'existing-task'
+                FROM cartoon_jobs WHERE id=?''',(first,))
+        await db.commit()
+    assert (await repo.claim())['id']=='active-last'
+    assert (await repo.job(first))['status']=='queued'

@@ -874,9 +874,37 @@ async def reconcile(key, actor, actual):
         await db.commit()
 
 
+def local_video(item):
+    """Only the retained FFmpeg job snapshot can bypass provider serialization."""
+    if item['kind'] != 'video':
+        return False
+    try:
+        snap = json.loads(item['snapshot'])
+        return (snap.get('spec', {}).get('local_dream_video') is True
+                and snap.get('quote', {}).get('video_provider') == 'local')
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
 async def video_busy(db, exclude):
-    return await one(db, '''SELECT id FROM cartoon_jobs WHERE kind='video' AND id!=? AND
-      (status IN ('preparing','submitting','polling','avatar_polling','video_preparing') OR (status='manual' AND result_url IS NULL)) LIMIT 1''', (exclude,))
+    candidates = await rows(db, '''SELECT * FROM cartoon_jobs WHERE kind='video' AND id!=? AND
+      (status IN ('preparing','submitting','polling','avatar_polling','video_preparing') OR (status='manual' AND result_url IS NULL))
+      ORDER BY rowid''', (exclude,))
+    return next((item for item in candidates if not local_video(item)), None)
+
+
+async def queue_wait_reason(item):
+    if item['status'] != 'queued' or item['kind'] != 'video' or local_video(item):
+        return ''
+    async with connect() as db:
+        blocker = await video_busy(db, item['id'])
+    if not blocker:
+        return ''
+    if blocker['status'] == 'manual':
+        return ('Ожидает проверки предыдущего задания '+blocker['id']+
+                '. Откройте его, проверьте статус у провайдера и завершите проверку. '
+                'Новый повтор создавать не нужно: это задание уже в очереди.')
+    return 'Ожидает завершения видеозадания '+blocker['id']+'. Новый повтор создавать не нужно.'
 
 
 async def claim():
@@ -885,16 +913,20 @@ async def claim():
         await db.execute('BEGIN IMMEDIATE')
         await db.execute("UPDATE cartoon_jobs SET status='manual',error='unknown_submission',lease_until=0 WHERE status='submitting' AND lease_until<?", (now,))
         await db.execute("UPDATE cartoon_jobs SET status='queued',lease_until=0 WHERE status='preparing' AND lease_until<?", (now,))
-        candidates = await rows(db, "SELECT * FROM cartoon_jobs WHERE status IN ('queued','polling','publishing','avatar_polling','video_preparing') AND lease_until<? AND next_attempt<=? ORDER BY rowid LIMIT 20", (now, now))
-        for item in candidates:
-            # One studio Kling task IN FLIGHT, not just one concurrent HTTP POST.
-            if item['kind']=='video' and item['status']=='queued' and await video_busy(db,item['id']):
-                continue
-            project = await one(db, 'SELECT * FROM cartoon_projects WHERE id=?', (item['project_id'],))
-            status = 'preparing' if item['status'] == 'queued' else item['status']
-            await db.execute('UPDATE cartoon_jobs SET status=?,lease_until=? WHERE id=?', (status, now+120, item['id']))
-            await db.commit()
-            return dict(item, status=status)
+        cursor = 0
+        while True:
+            candidates = await rows(db, "SELECT rowid AS queue_rowid,* FROM cartoon_jobs WHERE status IN ('queued','polling','publishing','avatar_polling','video_preparing') AND lease_until<? AND next_attempt<=? AND rowid>? ORDER BY rowid LIMIT 20", (now, now, cursor))
+            if not candidates:
+                break
+            for item in candidates:
+                cursor = item.pop('queue_rowid')
+                # Unknown provider outcomes block paid submissions, never local FFmpeg work.
+                if item['kind']=='video' and item['status']=='queued' and not local_video(item) and await video_busy(db,item['id']):
+                    continue
+                status = 'preparing' if item['status'] == 'queued' else item['status']
+                await db.execute('UPDATE cartoon_jobs SET status=?,lease_until=? WHERE id=?', (status, now+120, item['id']))
+                await db.commit()
+                return dict(item, status=status)
         await db.commit()
 
 

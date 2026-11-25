@@ -17,6 +17,7 @@ from uuid import uuid4
 import aiohttp
 from yarl import URL
 
+import black_friday as friday
 from config import Config
 from database import AUDIO_TARIFFS, valid_audio_tariff, photo_tariff_value, repeat_order_value, validate_repeat_invoice, get_photo_order, set_photo_payment_link, PHOTO_TARIFFS, get_cartoon_order, update_cartoon_order, CARTOON_TARIFFS, cartoon_tariff_value, get_musical_order, update_musical_order, MUSICAL_TARIFFS, create_payment_order, get_payment_order, create_audio_order, get_audio_order, update_audio_order, SONG_PROMO_PRODUCT
 from database import get_animation_order, update_animation_order, ANIMATION_TARIFFS
@@ -215,6 +216,7 @@ class ProdamusPayments:
         order_id = f"max-{user_id}-{uuid4().hex}"
         # Создать заказ/проверить срок скидки до обращения к платёжному сервису.
         order_id = await create_payment_order(order_id, user_id, credits, amount, title, promo=promo)
+        amount = (await get_payment_order(order_id))["amount_kopecks"]
         package_id = "promo_3" if promo else f"package_{credits}"
         data = {
             "do": "link", "order_id": order_id,
@@ -293,7 +295,7 @@ class ProdamusPayments:
             raise ValueError('Аудиозаказ уже оплачен.')
         if order['payment_link'] and valid_audio_tariff(order):
             return order['payment_link']
-        if AUDIO_TARIFFS.get(audio_format)!=(order['amount_kopecks'],order['product_name']):
+        if AUDIO_TARIFFS.get(audio_format)!=(friday.base_order(order)['amount_kopecks'],order['product_name']):
             raise ValueError('Для новой ссылки выберите действующий аудиотариф.')
         package_id = order['package_id']
         data = {
@@ -314,7 +316,7 @@ class ProdamusPayments:
         tariff = ANIMATION_TARIFFS.get(order['tariff']) if order else None
         if (isinstance(amount, bool) or not isinstance(amount, int) or not order
                 or order['status'] != 'pending' or order['is_admin'] or order['user_id'] != user_id
-                or tariff != (order['amount_kopecks'], order['quantity'], order['product_name'])
+                or tariff != (friday.base_order(order)['amount_kopecks'], order['quantity'], order['product_name'])
                 or amount * 100 != order['amount_kopecks'] or description != order['product_name']):
             raise ValueError('Параметры оплаты не совпадают с заказом оживления фото.')
         if order['payment_link']:
@@ -468,40 +470,43 @@ class ProdamusPayments:
             _validate_customer_metadata(data, order, package_id)
         # Сумма уже сверена с сохранённым заказом выше: смена прайса не должна
         # блокировать оплату ссылки, выданной до изменения цены.
-        if order.get('order_type') == 'ded_moroz':
+        checked = friday.base_order(order)
+        checked.pop('sale_campaign', None)
+        if checked.get('order_type') == 'ded_moroz':
             from ded_moroz_sales import validate_order
-            validate_order(order)
-        elif order.get('order_type') == 'animation':
-            if (order['is_admin'] or ANIMATION_TARIFFS.get(order['tariff']) !=
-                    (order['amount_kopecks'], order['quantity'], order['product_name'])):
+            validate_order(checked)
+        elif checked.get('order_type') == 'animation':
+            if (checked['is_admin'] or ANIMATION_TARIFFS.get(checked['tariff']) !=
+                    (checked['amount_kopecks'], checked['quantity'], checked['product_name'])):
                 raise ValueError('Неизвестный тариф оживления фото.')
-        elif order.get('order_type') == 'audio':
-            expected_package = 'audio_gift_first' if order['amount_kopecks']==39200 else 'audio_'+order['audio_format']
-            if not valid_audio_tariff(order) or order['package_id']!=expected_package:
+        elif checked.get('order_type') == 'audio':
+            expected_package = 'audio_gift_first' if checked['amount_kopecks']==39200 else 'audio_'+checked['audio_format']
+            if not valid_audio_tariff(checked) or checked['package_id']!=expected_package:
                 raise ValueError('Неизвестный аудиотариф.')
-        elif order.get('order_type') == 'photo':
-            if repeat_order_value(order,'photo',photo_tariff_value(order)) != (order['amount_kopecks'], order['product_name']):
+        elif checked.get('order_type') == 'photo':
+            if repeat_order_value(checked,'photo',photo_tariff_value(checked)) != (checked['amount_kopecks'], checked['product_name']):
                 raise ValueError('Неизвестный фототариф.')
-        elif order.get('order_type') == 'cartoon':
+        elif checked.get('order_type') == 'cartoon':
             # Сумма уже сверена с сохранённым заказом: ранее выданные счета
             # остаются действительными после изменения прайса.
-            tariff = cartoon_tariff_value(order)
+            tariff = cartoon_tariff_value(checked)
             # Сохраняем совместимость с уже выданными счетами короткого формата.
             names = {tariff[1]} if tariff else set()
-            if order['tariff'] == 'short':
+            if checked['tariff'] == 'short':
                 names.add('Мульт-открытка (10-15 сек)')
-            if order.get('promo_token'):
-                if repeat_order_value(order,'cartoon',tariff)!=(order['amount_kopecks'],order['product_name']):
+            if checked.get('promo_token'):
+                if repeat_order_value(checked,'cartoon',tariff)!=(checked['amount_kopecks'],checked['product_name']):
                     raise ValueError('Некорректная скидка мульт-тарифа.')
-            elif order['product_name'] not in names or order_id.startswith('promo_'):
+            elif checked['product_name'] not in names or order_id.startswith('promo_'):
                 raise ValueError('Неизвестный мульт-тариф.')
-        elif order.get('order_type') == 'musical':
-            if repeat_order_value(order,'music_card',MUSICAL_TARIFFS.get(order['tariff'])) != (order['amount_kopecks'], order['product_name']):
+        elif checked.get('order_type') == 'musical':
+            if repeat_order_value(checked,'music_card',MUSICAL_TARIFFS.get(checked['tariff'])) != (checked['amount_kopecks'], checked['product_name']):
                 raise ValueError('Неизвестный музыкальный тариф.')
-        elif (order.get('package_id') or '').startswith('promo1111_'):
+        elif (checked.get('package_id') or '').startswith('promo1111_'):
             from promo1111 import validate_order
-            validate_order(order)
-        elif order["credits"] not in PACKAGES or PACKAGES[order["credits"]][1] != order["product_name"]:
+            validate_order(checked)
+        elif (checked["credits"] not in PACKAGES or PACKAGES[checked["credits"]][1] != checked["product_name"]
+              or (order.get("sale_campaign") and checked["amount_kopecks"] != PACKAGES[checked["credits"]][0])):
             raise ValueError("Неизвестный пакет.")
         return order, payment_id
 

@@ -65,3 +65,10 @@ def mock_cartoon_theme_media(monkeypatch):
     monkeypatch.setattr(handlers, 'upload_audio_for_max', AsyncMock(return_value=AttachmentUpload(type='audio',payload={'token':'song-preview-token'})))
     monkeypatch.setattr(handlers, 'create_video_task', AsyncMock(return_value='cartoon-kling-job'))
     monkeypatch.setattr(handlers, 'poll_video_task', AsyncMock(return_value='https://video.example/cartoon-kling.mp4'))
+
+
+@pytest.fixture(autouse=True)
+def outside_black_friday_by_default(monkeypatch):
+    # Existing tariff regressions describe ordinary prices. Campaign tests set their own time.
+    import black_friday
+    monkeypatch.setattr(black_friday, 'now', lambda: black_friday.END)

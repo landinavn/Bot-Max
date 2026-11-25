@@ -10,6 +10,7 @@ from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo
 
 import aiosqlite
+import black_friday as friday
 
 DATABASE_PATH = Path(__file__).resolve().parent / "database.sqlite3"
 PROMO_SECONDS = 24 * 60 * 60
@@ -324,6 +325,7 @@ async def init_db() -> None:
         await init_ded_moroz(db)
         await db.execute("CREATE TABLE IF NOT EXISTS mother_events (user_id INTEGER NOT NULL,event_name TEXT NOT NULL,source TEXT NOT NULL,PRIMARY KEY(user_id,event_name,source))")
         await _init_repeat_promos(db)
+        await friday.init(db)
         await _backfill_sale_counters(db, force=not counters_exist or not user_counters_exist)
         await db.commit()
 
@@ -593,6 +595,7 @@ async def create_payment_order(
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (order_id, user_id, credits, amount_kopecks, product_name, "promo_3" if promo else f"package_{credits}", campaign_id),
         )
+        await friday.apply(db, 'payment_orders', order_id, eligible=not promo)
         await db.commit()
         return order_id
 
@@ -922,6 +925,7 @@ AUDIO_TARIFFS = {'fun': (15900, 'Песня по фану'), 'gift': (29000, 'П
 
 
 def valid_audio_tariff(order):
+    order = friday.base_order(order)
     current = AUDIO_TARIFFS.get(order['audio_format'])
     saved = (order['amount_kopecks'], order['product_name'])
     historical = {'fun': {(19900, 'Песня по фану')},
@@ -973,19 +977,21 @@ async def song_checkout_order(order_id: str) -> dict:
         order = dict(row)
         target_id = order_id
         if order['status'] != 'paid' and not order['free_access']:
-            amount = AUDIO_TARIFFS['gift'][0]
-            if order['amount_kopecks'] != amount:
+            amount = friday.price(AUDIO_TARIFFS['gift'][0])
+            if order['amount_kopecks'] != amount and not order.get('sale_campaign'):
                 if not order['preview_url'] or not order['tracks_json']:
                     raise ValueError('Сначала необходимо создать превью.')
                 target_id = order_id.split('-songprice-')[0] + '-songprice-' + str(amount)
-                await db.execute("""INSERT INTO audio_orders
+                copied = await db.execute("""INSERT INTO audio_orders
                     (order_id,user_id,audio_format,scenario,details,style,prompt,tags,title,amount_kopecks,product_name,
                      lyrics,tracks_json,preview_url,job_id,submit_started,preview_delivered)
                     SELECT ?,user_id,audio_format,scenario,details,style,prompt,tags,title,?,?,
                            lyrics,tracks_json,preview_url,job_id,submit_started,1
                     FROM audio_orders WHERE order_id = ?
                     ON CONFLICT(order_id) DO NOTHING""",
-                    (target_id, amount, 'Песня в подарок', order_id))
+                    (target_id, AUDIO_TARIFFS['gift'][0], 'Песня в подарок', order_id))
+                if copied.rowcount:
+                    await friday.apply(db, 'audio_orders', target_id)
         await db.commit()
     return await get_audio_order(target_id)
 
@@ -1002,11 +1008,13 @@ async def create_audio_order(order_id: str, user_id: int, audio_format: str, sce
         raise PromoUnavailableError('Скидка FIRST больше не действует. Песня в подарок стоит 290 ₽.')
     values = (order_id, user_id, audio_format, scenario, details, style, prompt, tags, title, amount, product)
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
-        await db.execute('''INSERT INTO audio_orders
+        cursor = await db.execute('''INSERT INTO audio_orders
             (order_id,user_id,audio_format,scenario,details,style,prompt,tags,title,amount_kopecks,product_name)
             VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(order_id) DO NOTHING''', values)
+        if cursor.rowcount:
+            await friday.apply(db, 'audio_orders', order_id)
         await db.commit()
-    order = await get_audio_order(order_id)
+    order = friday.base_order(await get_audio_order(order_id))
     keys = ('order_id','user_id','audio_format','scenario','details','style','prompt','tags','title','amount_kopecks','product_name')
     if tuple(order[key] for key in keys) != values:
         raise ValueError('Нельзя изменить сохранённый аудиозаказ.')
@@ -1390,6 +1398,7 @@ PHOTO_TARIFFS = {
 
 # Stable tariff IDs preserve old callbacks, saved packages and generation recipes.
 def photo_tariff_value(order):
+    order = friday.base_order(order)
     current = PHOTO_TARIFFS.get(order['tariff'])
     saved = ((order.get('promo_base_amount_kopecks'), order.get('promo_base_product_name'))
              if order.get('promo_token') else (order['amount_kopecks'], order['product_name']))
@@ -1455,6 +1464,7 @@ async def _backfill_sale_counters(db, *, force=False) -> None:
         ('animation', 'animation_orders', 'tariff', "status='paid' AND is_admin=0 AND promo_bonus=0"),
         ('ded_moroz','ded_moroz_payments','amount_kopecks,variant',"status='paid'"),
     ):
+        fields=','.join(dict.fromkeys((fields+',amount_kopecks,sale_campaign,sale_base_amount,sale_created_at').split(',')))
         async with db.execute(f'SELECT user_id,{fields},COUNT(*) FROM {table} WHERE {status} GROUP BY user_id,{fields}') as cursor:
             names = [column[0] for column in cursor.description]
             for row in await cursor.fetchall():
@@ -1664,7 +1674,7 @@ async def clear_promo(user_id,category,*,connection=None,token=None):
 async def quote_repeat_price(user_id,category,base_amount,base_name):
     if await get_active_promo(user_id,category) is not None:
         return repeat_discount(base_amount),base_name+REPEAT_SUFFIX
-    return base_amount,base_name
+    return friday.price(base_amount),base_name
 
 
 async def get_promo_reservation(user_id,category):
@@ -1690,6 +1700,8 @@ async def _create_repeat_order(db,table,order_id,identity,base_amount,base_name,
         raise PromoUnavailableError('Срок действия скидки истёк.')
     amount,name=base_amount,base_name
     values={'order_id':order_id,**identity,'amount_kopecks':amount,'product_name':name}
+    if not promo:
+        values.update(friday.fields(base_amount))
     if promo:
         order_id=f"promo_{category}_{identity['user_id']}_{_now_ts()}_{token_urlsafe(6)}"
         values.update(order_id=order_id,amount_kopecks=repeat_discount(base_amount),product_name=base_name+REPEAT_SUFFIX,
@@ -1705,6 +1717,7 @@ async def _create_repeat_order(db,table,order_id,identity,base_amount,base_name,
 
 def cartoon_tariff_value(order):
     """Validate historical receipt snapshots without repricing already issued orders."""
+    order=friday.base_order(order)
     base=CARTOON_TARIFFS.get(order['tariff'])
     value=((order.get('promo_base_amount_kopecks'),order.get('promo_base_product_name'))
            if order.get('promo_token') else (order.get('amount_kopecks'),order.get('product_name')))
@@ -1728,6 +1741,11 @@ def repeat_order_value(order,category,base_value,*,creation=False):
     if not order.get('promo_token'):
         if order['order_id'].startswith('promo_'):
             raise ValueError('У скидочного заказа нет сохранённого промо.')
+        if order.get('sale_campaign'):
+            friday.base_order(order)
+            if not base_value or order['sale_base_amount'] != base_value[0]:
+                raise ValueError('Базовая цена акции не соответствует тарифу.')
+            return friday.discount(base_value[0]),base_value[1]
         return base_value
     if not order['order_id'].startswith(f'promo_{category}_{order["user_id"]}_'):
         raise ValueError('Категория скидочного заказа не соответствует продукту.')
@@ -1764,7 +1782,9 @@ def repeat_sale_counter(kind,order):
 
 
 def sale_counter_keys(kind,order):
-    keys=_base_sale_counter_keys(kind,order)
+    keys=_base_sale_counter_keys(kind,friday.base_order(order))
+    if order.get('sale_campaign'):
+        keys+=('black_friday_paid','black_friday_paid_'+kind)
     key=repeat_sale_counter(kind,order)
     return keys+((key,) if key else ())
 
@@ -1960,7 +1980,7 @@ async def create_animation_order(user_id,package,*,admin=False):
             async with db.execute("SELECT * FROM animation_orders WHERE user_id=? AND status='pending' AND tariff IN (?,?) ORDER BY created_at LIMIT 1",
                                   (user_id,package,'intro' if package=='one' else package)) as cursor:
                 row=await cursor.fetchone()
-            if row:
+            if row and row['amount_kopecks']==friday.price(ANIMATION_TARIFFS[row['tariff']][0]):
                 return dict(row)
         tariff=package
         if package=='one' and not admin:
@@ -1970,6 +1990,7 @@ async def create_animation_order(user_id,package,*,admin=False):
         key=f'animate_{user_id}_{token_urlsafe(12)}'
         await db.execute('''INSERT INTO animation_orders(order_id,user_id,tariff,amount_kopecks,quantity,product_name,package_id,status,is_admin)
             VALUES (?,?,?,?,?,?,?,?,?)''',(key,user_id,tariff,amount,quantity,title,'animation_'+tariff,'paid' if admin else 'pending',int(admin)))
+        await friday.apply(db, 'animation_orders', key, eligible=not admin)
         await db.commit()
     return await get_animation_order(key)
 

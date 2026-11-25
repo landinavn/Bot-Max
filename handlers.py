@@ -63,6 +63,7 @@ from database import (
     check_song_promo, song_checkout_order, latest_gift_preview, claim_audio_order,
     save_pending_video, get_all_pending_videos, mark_video_completed, save_pending_video_result,
 )
+import black_friday as friday
 from prodamus import PACKAGES, ProdamusPayments
 from audio_service import generate_song, wait_for_song, wait_for_song_result, make_protected_preview, TEACHER_SCENARIO_TITLE, song_tracks, build_song_request, write_song_lyrics, validate_song_arguments, InvalidSongArguments, AudioNotConfigured, SongFailed
 from audio_orders import PaidAudioWorker, SUPPORT_URL
@@ -842,7 +843,7 @@ def packages_keyboard(*, promo: bool = False, promo1111_active: bool = False):
     if promo:
         builder.row(CallbackButton(text="Купить 3 генерации за 149 ₽", payload="buy_3_promo"))
     for credits, label in ((1, "1 генерацию"), (3, "3 генерации"), (5, "5 генераций"), (15, "15 генераций")):
-        builder.row(CallbackButton(text=f"Купить {label} — {PACKAGES[credits][0] // 100} ₽", payload=f"buy_{credits}"))
+        builder.row(CallbackButton(text=f"Купить {label} — {friday.price(PACKAGES[credits][0]) // 100} ₽", payload=f"buy_{credits}"))
     return builder.as_markup()
 
 
@@ -948,13 +949,14 @@ GIFT_SCENARIO_STATES = {
 }
 
 
-def navigation_keyboard(buttons, *, footer=(), columns=1, wide_payloads=(), max_pair_label=28):
+def navigation_keyboard(buttons, *, footer=(), columns=1, wide_payloads=(), max_pair_label=28, sale_prices=False):
     """Pair catalogue choices without squeezing navigation or long labels."""
     if columns not in (1, 2):
         raise ValueError('Меню поддерживает один или два столбца.')
     keyboard = InlineKeyboardBuilder()
     pending = []
     for text, payload in buttons:
+        text = friday.menu_text(text) if sale_prices else text
         wide = (columns == 1 or payload in wide_payloads or len(text) > max_pair_label or '\n' in text
                 or text.startswith(('⬅', '🏠')) or payload.startswith('back_to_')
                 or payload in ('audio_tariff_fun', 'gift_scen_custom')
@@ -989,9 +991,9 @@ def campaign_bot_link(bot_link, source):
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(params), parts.fragment))
 
 
-def photo_trial_payment_keyboard(url):
+def photo_trial_payment_keyboard(url,amount=490):
     return InlineKeyboardBuilder().row(
-        LinkButton(text="Оплатить 490 ₽", url=url)
+        LinkButton(text=f"Оплатить {amount} ₽", url=url)
     ).row(CallbackButton(text="Выбрать сюжет", payload="photo_choose_template")).row(
         CallbackButton(text="⬅️ Назад", payload="photo_tariff_back")
     ).as_markup()
@@ -1339,7 +1341,7 @@ def create_router(
                         f'Стоимость: {amount} ₽.\n\n'
                         'Оплатите заказ по ссылке, затем вернитесь в бот. '
                         'Фото девочки понадобится только после подтверждения оплаты.')
-            keyboard=(photo_trial_payment_keyboard(link) if tariff==590 else
+            keyboard=(photo_trial_payment_keyboard(link,amount) if tariff==590 else
                       InlineKeyboardBuilder().row(LinkButton(text=f'Оплатить {amount} ₽',url=link)).as_markup())
             if tariff==590 and amount!=490:
                 keyboard=InlineKeyboardBuilder().row(LinkButton(text=f'Оплатить {amount} ₽',url=link)).row(
@@ -1885,6 +1887,9 @@ def create_router(
             f"- Стандарт со скидкой: {c('promo_buy_photo_standard_690')}\n"
             f"- Премиум со скидкой: {c('promo_buy_photo_premium_990')}\n"
             f"- Прежние фототарифы со скидкой: {c('promo_buy_photo_590')} / {c('promo_buy_photo_990')} / {c('promo_buy_photo_1490')}\n\n"
+            "🖤 Чёрная пятница:\n"
+            f"- Покупок: {c('black_friday_paid')}\n"
+            f"- Переходов из рассылки: {c('black_friday_click')}\n\n"
             "📍 Рекламные метки:\n" + "\n".join(
                 f"- {label}: {ad_sources.get(tag, 0)}" for tag,label in AD_SOURCE_LABELS.items()
             ) + "\n\n"
@@ -2470,7 +2475,7 @@ def create_router(
             await _reply(event, attachments=[image])
         except Exception:
             logger.exception('Не удалось отправить картинку приветствия %s:', MAIN_SCREEN_IMAGE)
-        await _reply(event, text=WELCOME_TEXT, attachments=[main_keyboard()])
+        await _reply(event, text=WELCOME_TEXT+('\n\n'+friday.NOTICE if friday.active() else ''), attachments=[main_keyboard()])
         if trial_granted:
             await _reply(event, "Вам начислен 1 бесплатный кредит!")
 
@@ -2487,12 +2492,14 @@ def create_router(
             parts = ((body.text or "").split(maxsplit=1) if body else [])
             await send_welcome_message(event, context, payload=parts[1].strip() if len(parts) > 1 else getattr(event, "payload", None))
 
-    @router.message_callback(F.callback.payload.in_({"open_main_menu", "back_to_main", "open_promo_menu"}))
+    @router.message_callback(F.callback.payload.in_({"open_main_menu", "back_to_main", "open_promo_menu", "black_friday_menu"}))
     async def open_main_menu(event: MessageCallback, context: MemoryContext) -> None:
         if event.message is None:
             await event.ack(notification="Отправьте /start, чтобы открыть меню.")
             return
         await event.ack(notification="Открываю меню…")
+        if event.callback.payload == 'black_friday_menu':
+            await increment_counter('black_friday_click',user_id=event.get_ids()[1])
         if event.callback.payload == 'open_promo_menu':
             user_id = event.get_ids()[1]
             if user_id is None:
@@ -2609,6 +2616,30 @@ def create_router(
         from ded_moroz_customer import review
         await review(event,context,admin_user_id)
 
+    @router.message_created(Command('broadcast_black_friday_preview'))
+    @router.message_created(Command('broadcast_black_friday'))
+    async def broadcast_black_friday_preview(event: MessageCreated):
+        if is_bot_message(event) or admin_user_id is None or event.get_ids()[1]!=admin_user_id:return
+        from black_friday_broadcast import preview
+        await preview(event,confirm=(event.message.body.text or '').split()[0]=='/broadcast_black_friday')
+
+    @router.message_created(Command('broadcast_black_friday_status'))
+    async def broadcast_black_friday_status(event: MessageCreated):
+        if is_bot_message(event) or admin_user_id is None or event.get_ids()[1]!=admin_user_id:return
+        from black_friday_broadcast import report
+        await report(event)
+
+    @router.message_callback(F.callback.payload=='black_friday_broadcast_confirm')
+    async def black_friday_broadcast_confirm(event: MessageCallback):
+        if admin_user_id is None or event.get_ids()[1]!=admin_user_id:
+            await event.ack(notification='Недоступно.');return
+        await event.ack(notification='Начинаю рассылку…')
+        from black_friday_broadcast import send
+        try:await send(event,broadcast_lock)
+        except Exception:
+            logger.exception('Рассылка Чёрной пятницы остановлена:')
+            await _reply(event,'Рассылка остановлена. Прогресс сохранён; неизвестные результаты требуют проверки перед повтором.')
+
     @router.message_created(Command('broadcast_mother_preview'))
     @router.message_created(Command('broadcast_mother'))
     async def broadcast_mother_preview(event: MessageCreated):
@@ -2713,7 +2744,7 @@ def create_router(
             await _reply(event,str(exc))
 
     def cartoon_style_keyboard(screen='cat_cards'):
-        return navigation_keyboard((*((label+(' — 590 ₽' if key in MOTHER_THEMES else ' — 390 ₽'), key) for key, label in CARTOON_THEMES.items()), ('⬅️ Назад', 'back_to_main')), columns=2)
+        return navigation_keyboard((*((label+(' — 590 ₽' if key in MOTHER_THEMES else ' — 390 ₽'), key) for key, label in CARTOON_THEMES.items()), ('⬅️ Назад', 'back_to_main')), columns=2, sale_prices=True)
 
     async def ensure_cartoon_access(event, context, *, acknowledged=False):
         user_id = event.get_ids()[1]
@@ -2791,7 +2822,7 @@ def create_router(
         user_id=event.get_ids()[1]
         if theme in MOTHER_THEMES:
             product=CARTOON_PRODUCTS['cat_cartoon_'+mother_suffix(theme)]
-            await _reply(event,mother_description(theme))
+            await _reply(event,friday.menu_text(mother_description(theme)))
         try:
             data=await context.get_data()
             quoted,name=await quote_repeat_price(user_id,'cartoon',product[1],CARTOON_TARIFFS[product[0]][1])
@@ -3028,14 +3059,14 @@ def create_router(
             if order['remaining'] > 0:
                 choices.append((f"📷 Продолжить пакет (осталось {order['remaining']})", 'animation_resume:' + order['order_id']))
         choices.append(('⬅️ Назад', 'back_to_main'))
-        await _reply(event, '✨ Оживление фотографий\n\n'
+        await _reply(event, friday.menu_text('✨ Оживление фотографий\n\n'
             'Превратим вашу фотографию в живое видео: естественные улыбки, моргание и лёгкие движения. '
             'Сохраняем лица и исходный стиль фотографии.\n\n'
             '• 1 оживлённая фотография, 5 секунд видео — 249 ₽\n'
             '• При первом запуске — 199 ₽ (один раз)\n'
             '• 3 фотографии — 599 ₽\n• 5 фотографий — 899 ₽\n\n'
-            'Каждая фотография — отдельный ролик на 5 секунд. Выберите пакет:',
-            attachments=[navigation_keyboard(choices)])
+            'Каждая фотография — отдельный ролик на 5 секунд. Выберите пакет:'),
+            attachments=[navigation_keyboard(choices,sale_prices=True)])
 
     @router.message_callback(F.callback.payload == 'animation_free_1111')
     async def animation_free_1111(event: MessageCallback, context: MemoryContext):
@@ -3103,7 +3134,7 @@ def create_router(
             await _reply(event, 'Текущая генерация ещё не завершена. Пожалуйста, подождите.')
             return
         await context.clear()
-        await _reply(event, CUSTOM_ORDER_TEXT, attachments=[navigation_keyboard((
+        await _reply(event, friday.menu_text(CUSTOM_ORDER_TEXT), attachments=[navigation_keyboard((
             ('📝 Заполнить заявку', 'custom_start_form'), ('⬅️ Назад', 'back_to_main')))])
 
     # Старые неоплаченные кнопки длинного продукта ведут в ручной заказ.
@@ -3131,6 +3162,8 @@ def create_router(
             return
         await context.clear()
         await context.set_state(PosterStates.waiting_for_custom_occasion)
+        if friday.active():
+            await context.update_data(custom_sale_campaign=friday.CAMPAIGN)
         await _reply(event, CUSTOM_FORM_STEPS[0][3])
 
     @router.message_callback(F.callback.payload.in_(set(CUSTOM_DEADLINES)))
@@ -3153,6 +3186,8 @@ def create_router(
                     f'👤 Клиент ID: {user_id}\n📞 Контакт: {data["custom_contact"]}\n'
                     f'🎉 Повод: {data["custom_occasion"]}\n🏢 Имена/Бренд: {data["custom_names"]}\n'
                     f'💡 Идея: {data["custom_idea"]}\n⏳ Срок: {deadline}')
+            if data.get('custom_sale_campaign')==friday.CAMPAIGN:
+                text+='\n🖤 Чёрная пятница: скидка 20% на согласованную стоимость, без суммирования с другими скидками.'
             try:
                 if admin_user_id is None:
                     raise RuntimeError('ADMIN_USER_ID не настроен.')
@@ -3193,7 +3228,7 @@ def create_router(
         await context.set_state(PosterStates.waiting_for_cartoon_style)
         if flow == 'short':
             await send_cartoon_video_examples(event)
-        await _reply(event, text, attachments=[cartoon_style_keyboard()])
+        await _reply(event, friday.menu_text(text), attachments=[cartoon_style_keyboard()])
 
     @router.message_callback(F.callback.payload.startswith('cartoon_style:') | F.callback.payload.in_(set(CARTOON_THEMES)))
     async def cartoon_style(event: MessageCallback, context: MemoryContext):
@@ -3246,7 +3281,7 @@ def create_router(
             await increment_counter(target + '_click', user_id=event.get_ids()[1])
             await context.update_data(cartoon_theme=target, cartoon_mode=target, avatar_attempt=1, avatar_urls={}, avatar_preview_urls={})
             await context.set_state(PosterStates.waiting_for_avatar_photo)
-            await _reply(event, (mother_description(target)+'\n\n'+CARTOON_PHOTO_PROMPT) if target in MOTHER_THEMES else CARTOON_PHOTO_PROMPT)
+            await _reply(event, (friday.menu_text(mother_description(target))+'\n\n'+CARTOON_PHOTO_PROMPT) if target in MOTHER_THEMES else CARTOON_PHOTO_PROMPT)
         elif target in POSTCARD_PROMPTS:
             await context.update_data(cartoon_mode=target, avatar_attempt=1, avatar_urls={})
             await context.set_state(PosterStates.waiting_for_avatar_photo)
@@ -3257,7 +3292,7 @@ def create_router(
             if target == 'cat_cards':
                 text = product[2]
             await send_menu_examples(event, filenames)
-            await _reply(event, text, attachments=[cartoon_style_keyboard(target)])
+            await _reply(event, friday.menu_text(text), attachments=[cartoon_style_keyboard(target)])
 
     async def collect_cartoon_photo(event: MessageCreated, context: MemoryContext):
         if is_bot_message(event) or not await ensure_cartoon_access(event, context):
@@ -4129,7 +4164,7 @@ def create_router(
         scenarios = VIDEO_SHORT_SCENARIOS if data.get('video_product') in {'animate', 'upsell'} else VIDEO_SONG_SCENARIOS
         expected_price = {'direct': 29900, 'upsell': 14900, 'animate': 14900}.get(data.get('video_product'))
         if (not data.get('video_flow') or scenario not in scenarios or expected_price is None
-                or data.get('video_amount_kopecks') != expected_price
+                or data.get('video_amount_kopecks') not in (expected_price,friday.discount(expected_price))
                 or await context.get_state() not in (PosterStates.waiting_for_video_song, PosterStates.waiting_for_video_payment)):
             await event.ack(notification='Выберите видео и заполните данные заново.')
             return
@@ -4417,7 +4452,7 @@ def create_router(
                             and (order['image_url'], order['audio_url']) == (image_url, previous[1]))
             if (not order or order['user_id'] != event.get_ids()[1] or order['tariff'] != 'upsell'
                     or (previous != key and not legacy_match)
-                    or order['amount_kopecks'] != 14900):
+                    or friday.base_order(order)['amount_kopecks'] != 14900):
                 order = None
             order_id = order['order_id'] if order else None
             if (await context.get_data()).get('music_checkout_session') != token:
@@ -4492,7 +4527,7 @@ def create_router(
         if interest_event is not None and user_id is not None:
             await increment_counter(interest_event, user_id=user_id)
         await send_menu_examples(event, filenames)
-        await _reply(event, text=text, attachments=[navigation_keyboard(buttons, columns=2 if screen in ('cat_cards','cat_vision','cat_audio') or screen.startswith('sub_') else 1, max_pair_label=18 if screen=='cat_audio' else 28)])
+        await _reply(event, text=friday.menu_text(text), attachments=[navigation_keyboard(buttons, columns=2 if screen in ('cat_cards','cat_vision','cat_audio') or screen.startswith('sub_') else 1, max_pair_label=18 if screen=='cat_audio' else 28, sale_prices=True)])
 
     @router.message_callback(F.callback.payload.in_(set(AUDIO_CLICK_EVENTS)))
     async def audio_tariff_soon(event: MessageCallback, context: MemoryContext) -> None:
@@ -4507,7 +4542,7 @@ def create_router(
         await context.set_state(PosterStates.waiting_for_mode)
         if event.callback.payload == "audio_tariff_fun":
             buttons = [(label, payload) for payload, (label, _) in AUDIO_FUN_SCENARIOS.items()]
-            await _reply(event, AUDIO_FUN_MENU_TEXT,
+            await _reply(event, friday.menu_text(AUDIO_FUN_MENU_TEXT),
                          attachments=[navigation_keyboard((*buttons, ("⬅️ Назад", "cat_audio")), columns=2, max_pair_label=18)])
             return
         await _reply(
@@ -4529,7 +4564,7 @@ def create_router(
             await increment_counter(AUDIO_FUN_COUNTERS[event.callback.payload], user_id=user_id)
         await context.clear()
         if 'audio_fun_'+scenario in MOTHER_SCENARIOS:
-            await _reply(event,'🎵 Для мамы подготовим полную песню. Стоимость — 290 ₽.')
+            await _reply(event,friday.menu_text('🎵 Для мамы подготовим полную песню. Стоимость — 290 ₽.'))
         await context.update_data(song_scenario=scenario)
         if await song_review.start_questions(event,context,flow='fun',prompt=AUDIO_FUN_SCENARIOS[event.callback.payload][1],state=PosterStates.waiting_for_song_details):return
         await context.set_state(PosterStates.waiting_for_song_details)
@@ -4712,6 +4747,9 @@ def create_router(
                 keyboard = InlineKeyboardBuilder()
                 pay_payload = 'audio_fun_payment_soon' if audio_format == 'fun' else 'gift_payment_soon'
                 for text, payload in buttons:
+                    if payload == pay_payload:
+                        order=await get_audio_order(order_id)
+                        text=re.sub(r'\d+ ₽',f"{order['amount_kopecks']//100} ₽",text)
                     keyboard.row(LinkButton(text=text, url=link) if payload == pay_payload else CallbackButton(text=text, payload=payload))
                 return keyboard.as_markup()
         except Exception as exc:
@@ -4919,6 +4957,8 @@ def create_router(
             order['user_id'], 'gift', order['scenario'], order['details'], order['style'],
             order['prompt'], order['tags'], order['title'], order_id=order['order_id'])
         label = f"Оплатить {order['amount_kopecks'] // 100} ₽ и получить полный трек"
+        if introductory_text:
+            introductory_text=re.sub(r'\d+ ₽',f"{order['amount_kopecks']//100} ₽",introductory_text)
         await _reply(event, introductory_text or 'Оплатите доступ к полной песне по ссылке ниже.',
                      attachments=[InlineKeyboardBuilder().row(LinkButton(text=label, url=link)).as_markup()])
 
@@ -4942,7 +4982,7 @@ def create_router(
         await context.clear()
         await context.set_state(PosterStates.waiting_for_mode)
         buttons = [(label, payload) for payload, (label, _) in AUDIO_GIFT_SCENARIOS.items()]
-        await _reply(event, 'Песня в подарок стоит 290 ₽. ' +
+        await _reply(event, friday.menu_text('Песня в подарок стоит 290 ₽. ') +
                      'Сначала выберите сценарий и напишите детали песни. После превью я пришлю ссылку на оплату по действующей цене.',
                      attachments=[navigation_keyboard((*buttons, ('⬅️ Назад', 'cat_audio')), columns=2, max_pair_label=18)])
 
@@ -5115,8 +5155,8 @@ def create_router(
                 buttons.append((f'{name} — {amount//100} ₽',f'photo_tariff_{tariff}'))
             await _reply(event,'Выберите фотопакет:',attachments=[navigation_keyboard((*buttons,('⬅️ Назад','promo_photo')))])
         else:
-            await _reply(event,PHOTO_TARIFF_TEXT.format(style_name=PHOTO_STYLES[style]),
-                         attachments=[navigation_keyboard(PHOTO_TARIFF_BUTTONS)])
+            await _reply(event,friday.menu_text(PHOTO_TARIFF_TEXT.format(style_name=PHOTO_STYLES[style])),
+                         attachments=[navigation_keyboard(PHOTO_TARIFF_BUTTONS, sale_prices=True)])
 
     @router.message_callback(F.callback.payload.in_(set(PHOTO_STYLES)))
     async def photo_style_menu(event: MessageCallback, context: MemoryContext) -> None:
@@ -5449,7 +5489,7 @@ def create_router(
         if is_bot_message(event):
             return
         await _reply(event,
-            PACKAGES_TEXT+(('\n\n🔥 Акция 11.11 — до 23:59 11 ноября по Москве. Генерации и подарки не сгорают.')
+            friday.menu_text(PACKAGES_TEXT)+(('\n\n🔥 Акция 11.11 — до 23:59 11 ноября по Москве. Генерации и подарки не сгорают.')
                            if await promo1111.eligible(event.get_ids()[1]) else ''),
             attachments=[await purchase_keyboard(event.get_ids()[1])],
         )
@@ -5516,6 +5556,8 @@ def create_router(
             logger.error("Не удалось создать ссылку Prodamus (%s).", type(exc).__name__)
             await _reply(event, "Не удалось создать ссылку на оплату. Попробуйте /buy позже.")
             return
+        if not promo:
+            amount=friday.price(amount)
         keyboard = InlineKeyboardBuilder().row(
             LinkButton(text=f"Оплатить {amount // 100} ₽", url=link)
         ).as_markup()
@@ -5624,7 +5666,7 @@ def create_router(
         if event.callback.payload == "help_payment":
             text = (
                 "Выберите пакет ниже и нажмите «Оплатить» в следующем сообщении.\n\n"
-                + PAYMENT_PACKAGES_TEXT
+                + friday.menu_text(PAYMENT_PACKAGES_TEXT)
                 if payments else HELP_ANSWERS["help_payment"]
             )
             await _reply(event, text, attachments=[await purchase_keyboard(event.get_ids()[1])])
@@ -5710,7 +5752,7 @@ def create_router(
 
     async def finish_fun_details(event,context):
         await context.set_state(PosterStates.waiting_for_audio_fun_payment)
-        await _reply(event,AUDIO_FUN_PAYMENT_TEXT,attachments=[await audio_payment_keyboard(event,context,'fun',(
+        await _reply(event,friday.menu_text(AUDIO_FUN_PAYMENT_TEXT),attachments=[await audio_payment_keyboard(event,context,'fun',(
             ('Оплатить 159 ₽ и получить 2 варианта','audio_fun_payment_soon'),('⬅️ Назад','audio_tariff_fun')))])
 
     async def start_card_song_review(event,context,kind,target):
@@ -5758,7 +5800,7 @@ def create_router(
             except Exception:
                 logger.warning('Не удалось показать пример мульт-открытки ко Дню матери.')
                 await _reply(event,'Пример временно недоступен.')
-            await _reply(event,mother_description(target))
+            await _reply(event,friday.menu_text(mother_description(target)))
         await song_review.setup_voice(event,context)
 
     @router.message_created(PosterStates.waiting_for_card_song_details)
@@ -5827,7 +5869,7 @@ def create_router(
             elif payments is None:await _reply(event,'Оплата временно недоступна. Текст сохранён.')
             else:
                 order_id,link=await prepare_audio_checkout(context,event.get_ids()[1],'gift',await context.get_data())
-                b=InlineKeyboardBuilder().row(LinkButton(text='💳 Оплатить песню — 290 ₽',url=link)).row(home_button())
+                b=InlineKeyboardBuilder().row(LinkButton(text=f"💳 Оплатить песню — {(await get_audio_order(order_id))['amount_kopecks']//100} ₽",url=link)).row(home_button())
                 await _reply(event,'🎵 Слова и голос выбраны. После оплаты создадим песню и пришлём её в этот чат.',attachments=[b.as_markup()])
         elif flow=='cartoon':
             if not await ensure_cartoon_access(event,context,acknowledged=True):return

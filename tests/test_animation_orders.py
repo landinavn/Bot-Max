@@ -8,6 +8,7 @@ import aiosqlite
 import pytest
 from maxapi.types import AttachmentUpload
 
+from test_handlers import report_text
 import handlers
 import video_service
 from animation_orders import PaidAnimationWorker
@@ -201,7 +202,7 @@ async def test_stats_remove_retired_product_split_interest_and_include_links(cre
         await credit_db.increment_counter(key,user_id=999)
     event=message_event('/stats');event.get_ids=lambda:(123,999)
     await call_handler(create_router(admin_user_id=999,bot_link='https://max.ru/my_bot'),'stats',event)
-    text=event.message.answer.await_args.args[0]
+    text=report_text(event.message.answer)
     assert 'Мульт-поздравление' not in text and 'Мульт-услуги' not in text and '1290' not in text
     assert '- Мульт-открытки: 1' in text and '- Эксклюзив (ручная работа): 1' in text
     assert '- Оживление фотографий: 1' in text and '- Отправлено заявок: 1' in text

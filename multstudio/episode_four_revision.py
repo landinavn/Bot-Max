@@ -1,5 +1,6 @@
 """Replace only the unpublished fourth draft; archive previous revisions and files."""
 from uuid import uuid4
+import json
 from . import repository as repo
 from .episode_two import SPEEDS, _insert
 from .rules import normalize
@@ -7,10 +8,9 @@ from .timeline import ordered
 
 TITLE = 'Мечты больше не ждут!'
 MIGRATION = 'anya-s1-e4-dreams-now-v1'
-OPENAI_BLOCK = ('Сцена Маши: в текущей Мультстудии нет проверенного OpenAI-маршрута lip-sync '
-                'с сохранённой озвучкой Yandex и голосом Маши. Sora генерирует собственное аудио; '
-                'подмена утверждённого голоса не разрешена. Остановлена только анимация этой сцены, '
-                'запрос не отправлен. HeyGen и другие платные сервисы для Маши не используются.')
+OPENAI_BLOCK = ('Это устаревшее задание OpenAI для сцены Маши. Запрос не отправлен. '
+                'Текущий маршрут — Kling Avatar с утверждённым MP3. '
+                'Обновите черновик и создайте новое подтверждение видео; старое задание не перенаправляется автоматически.')
 SCENES = [
     ('Хватит откладывать!', 'Аня', 'Всё! Хватит откладывать. Сделаю карту желаний!', 'medium_wide',
      'Аня за прежним столом с блокнотом и телефоном. Снег за окном, тёплые новогодние огни. Исходный момент: блокнот закрыт, телефон в руке.',
@@ -52,7 +52,7 @@ async def apply(project_id, actor):
         episode = repo.unpack(await repo.one(db,'SELECT * FROM cartoon_episodes WHERE project_id=? AND number=4',(project_id,)))
         if not episode: raise ValueError('Сначала подготовьте исходный черновик серии 4.')
         if await repo.one(db,'SELECT name FROM cartoon_editing_migrations WHERE name=?',(MIGRATION,)):
-            return episode['id']
+            return await _upgrade_masha(db,episode)
         from .episode_four import TITLE as OLD_TITLE
         if episode['title'] != OLD_TITLE: raise ValueError('Номер 4 занят другим сценарием; серия сохранена.')
         published = await repo.one(db,"SELECT id FROM cartoon_assets WHERE target='episode' AND target_id=? AND kind='assemble' LIMIT 1",(episode['id'],))
@@ -104,10 +104,10 @@ async def apply(project_id, actor):
                 speech_speeds={cast[speaker]:SPEEDS[speaker]} if speaker else {},
                 location_reference_scene_id=earlier[-1]['id'],episode_four_revision=MIGRATION,
                 sound='Только общая музыка.' if not speaker else 'Тёплая музыка с приглушением во время речи.')
-            if speaker=='Маша': spec.update(video_provider='openai',openai_audio_sync_required=True,provider_block_reason=OPENAI_BLOCK)
+            if speaker=='Маша': spec.update(kling_audio_required=True)
             if number in (4,7): spec.update(local_dream_video=True,dream_materials_required=True)
             if number==4: spec.update(local_dream_image=True,new_location=True);spec.pop('location_reference_scene_id')
-            if speaker in ('Аня','Дима'): spec.update(tail_cutaway_scene_id=by_number[4]['id'])
+            if speaker: spec.update(tail_cutaway_scene_id=by_number[4]['id'])
             if number==7: spec['final_dream_card']=True
             await db.execute('''INSERT INTO cartoon_scene_editing(scene_id,speech_start,video_start) VALUES (?,0,0)
                 ON CONFLICT(scene_id) DO UPDATE SET speech_start=0,video_start=0''',(row['id'],))
@@ -128,4 +128,36 @@ async def apply(project_id, actor):
             WHERE (target_id=? OR target_id IN (SELECT id FROM cartoon_scenes WHERE episode_id=?)) AND status IN ('draft','quoted')""",(episode['id'],episode['id']))
         await db.execute('INSERT INTO cartoon_editing_migrations VALUES (?,?)',(MIGRATION,project_id))
         await db.commit()
+    return episode['id']
+
+
+async def _upgrade_masha(db, episode):
+    """Upgrade the already installed OpenAI draft without regenerating image or voice."""
+    row=repo.unpack(await repo.one(db,'SELECT * FROM cartoon_scenes WHERE episode_id=? AND number=2',(episode['id'],)))
+    if not row or row['spec'].get('video_provider')!='openai':return episode['id']
+    if row['spec'].get('episode_four_revision')!=MIGRATION:return episode['id']
+    busy=await repo.one(db,"""SELECT id FROM cartoon_jobs WHERE target_id=? AND
+        (status IN ('queued','preparing','submitting','polling','publishing') OR (status='manual' AND provider_id IS NOT NULL)) LIMIT 1""",(row['id'],))
+    before=await repo._snapshot(db,'scene',row['id'])
+    if busy or before['assets'].get('video'):
+        raise ValueError('У сцены Маши уже есть видео или незавершённый запрос. Материалы сохранены; дождитесь завершения перед сменой маршрута.')
+    cutaway=await repo.one(db,'SELECT id FROM cartoon_scenes WHERE episode_id=? AND number=4',(episode['id'],))
+    if not cutaway:raise ValueError('Не найдена карта для немого плана после речи Маши.')
+    spec=dict(row['spec'],kling_audio_required=True,tail_cutaway_scene_id=cutaway['id'])
+    spec.pop('openai_audio_sync_required',None);spec.pop('provider_block_reason',None)
+    spec=normalize(spec);revision=row['revision']+1
+    await db.execute('UPDATE cartoon_scenes SET spec=?,revision=? WHERE id=?',(repo.encoded(spec),revision,row['id']))
+    await db.execute('INSERT INTO cartoon_versions VALUES (?,?,?,?,CURRENT_TIMESTAMP)',('scene',row['id'],revision,repo.encoded(spec)))
+    current=await repo._snapshot(db,'scene',row['id'])
+    for kind in ('image','speech'):
+        source=before['assets'].get(kind)
+        if not source:continue
+        metadata=json.loads(source.get('metadata') or '{}')
+        metadata['route_change_source_asset_id']=source['id']
+        await db.execute('''INSERT INTO cartoon_assets
+            (id,project_id,target,target_id,kind,context_hash,path,sha256,public_url,approved,metadata)
+            VALUES (?,?,'scene',?,?,?,?,?,?,?,?)''',
+            (uuid4().hex,before['project_id'],row['id'],kind,current['context_hash'],source['path'],source['sha256'],source.get('public_url'),source['approved'],repo.encoded(metadata)))
+    await db.execute("UPDATE cartoon_jobs SET status='cancelled',error='masha_route_changed_to_kling' WHERE target_id=? AND status IN ('quoted','draft')",(row['id'],))
+    await db.commit()
     return episode['id']

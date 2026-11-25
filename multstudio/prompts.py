@@ -80,7 +80,7 @@ def scene_image_prompt(snap, location_reference_url=None):
         camera=('ONE continuous '+str(spec.get('framing','medium'))+' shot. '+spec['camera_direction']+
                 ' Do not substitute a facial close-up. Keep the scripted environment and objects visible, '
                 'with safe margins for vertical 9:16 export. '+
-                (('Only the scripted child speaker is present. Their face and closed lips remain clearly visible, ' if spec.get('video_provider')=='openai' else 'Only the adult speaker is present. Their face and closed lips remain clearly visible, ')+
+                (('Only the scripted child speaker is present. Their face and closed lips remain clearly visible, ' if spec.get('video_provider') in ('openai','kling_avatar') else 'Only the adult speaker is present. Their face and closed lips remain clearly visible, ')+
                  'unobscured and large enough for later lip-sync; a three-quarter angle is allowed, never a hidden face.'
                  if spec.get('speaker_id') else 'Show only the listed cast; no extra people.'))
     for original, keyframe in zip(SCENES, KEYFRAMES):

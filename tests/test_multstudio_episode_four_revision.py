@@ -12,7 +12,7 @@ from multstudio.episode_three import prepare as third
 from multstudio.episode_three_revision import apply as revise_three
 from multstudio.episode_three_trim import apply as trim_three
 from multstudio.episode_four import prepare as old_four
-from multstudio.episode_four_revision import apply,TITLE,SCENES,OPENAI_BLOCK,MIGRATION
+from multstudio.episode_four_revision import apply,TITLE,SCENES,MIGRATION
 from multstudio.episode_four_media import card_bytes,clip,splice_tail
 from multstudio.render import Renderer,duration,probe,process
 from multstudio.worker import Worker
@@ -89,10 +89,10 @@ async def test_started_or_assembled_episode_not_replaced(studio,busy):
     assert (await repo.get('episode',key))['spec']==before['spec']
 
 
-async def test_provider_and_speed_assignment_and_isolated_masha_stop(studio):
+async def test_provider_and_speed_assignment_routes_masha_to_kling(studio):
     key=await setup(studio);await apply(studio[0],456)
     shots=await repo.children('scene',key)
-    assert [s['spec']['video_provider'] for s in shots]==['heygen','openai','heygen','heygen_video','heygen','heygen','heygen_video']
+    assert [s['spec']['video_provider'] for s in shots]==['heygen','kling_avatar','heygen','heygen_video','heygen','heygen','heygen_video']
     assert [s['spec']['framing'] for s in shots]==['medium_wide','medium','medium_side','montage','medium','medium_wide','object_topdown']
     for s in shots:
         spec=s['spec'];rules.validate(spec)
@@ -101,9 +101,9 @@ async def test_provider_and_speed_assignment_and_isolated_masha_stop(studio):
             assert profiles[spec['speaker_id']]['speed']==({'Аня':1.05,'Дима':.95,'Маша':1.10}[profiles[spec['speaker_id']]['name']])
     snap=await repo.snapshot('scene',shots[1]['id'])
     assert 'child speaker' in scene_image_prompt(snap) and 'Only the adult speaker' not in scene_image_prompt(snap)
-    with pytest.raises(ValueError,match='Сцена Маши'):await repo.quote('scene',snap['id'],'video',studio[1])
-    with pytest.raises(ValueError,match='OpenAI'):studio[1].quote('video',snap)
-    result=await plan(key,studio[1]);assert any('Маши' in x for x in result['errors'])
+    quote=studio[1].quote('video',snap)
+    assert quote['model']=='kling/avatar/std' and quote['video_provider']=='kling_avatar'
+    result=await plan(key,studio[1]);assert not any('Маши' in x for x in result['errors'])
     assert result['utterances']==5 and result['silent']==2
 
 
@@ -169,30 +169,48 @@ async def test_actual_speech_tail_is_replaced_and_final_assembly_35_seconds(stud
     assert abs(await duration(output)-35)<.035
 
 
-async def test_provider_worker_never_falls_back_for_masha(studio,monkeypatch):
-    from multstudio.adapters import Providers
-    from config import Config
-    key=await setup(studio);await apply(studio[0],456);await prepare_jobs(key,studio[1])
+async def test_provider_worker_uses_approved_audio_and_polls_without_resubmitting(studio,monkeypatch):
+    from types import SimpleNamespace
+    from multstudio.adapters import TemporaryPollError
+    key=await setup(studio);await apply(studio[0],456)
+    for c in await repo.children('character',studio[0]):await add_image(studio[2],await repo.snapshot('character',c['id']))
     shots=await repo.children('scene',key)
-    async with repo.connect() as db:
-        row=await repo.one(db,"SELECT * FROM cartoon_jobs WHERE target_id=? AND kind='video' AND status='draft'",(shots[1]['id'],))
-        await db.execute("UPDATE cartoon_jobs SET status='preparing' WHERE id=?",(row['id'],));await db.commit()
-    row=await repo.job(row['id'])
-    providers=Providers(studio[1],Config(token='test',photo_path=Path('unused')),studio[2])
-    monkeypatch.setattr(providers.kling,'submit',AsyncMock())
-    monkeypatch.setattr(providers.studio_heygen,'scene_video',AsyncMock())
-    monkeypatch.setattr(providers.studio_heygen,'silent_video',AsyncMock())
-    worker=Worker(None,456,studio[1],providers,studio[2]);await worker.execute(row)
-    result=await repo.job(row['id'])
-    assert result['status']=='preflight_failed' and 'Сцена Маши' in result['error']
-    providers.kling.submit.assert_not_awaited();providers.studio_heygen.scene_video.assert_not_awaited();providers.studio_heygen.silent_video.assert_not_awaited()
+    await image(studio[2],await repo.snapshot('scene',shots[1]['spec']['location_reference_scene_id']))
+    await materials(studio,key)
+    snap=await repo.snapshot('scene',shots[1]['id']);await image(studio[2],snap)
+    snap=await attach_audio(studio,await repo.snapshot('scene',shots[1]['id']))
+    q=await repo.quote('scene',snap['id'],'video',studio[1]);await repo.confirm(q['id'],456)
+    row=await repo.claim()
+    kling=SimpleNamespace(avatar=AsyncMock(return_value='kling-masha-task'),submit=AsyncMock(),poll=AsyncMock(side_effect=TemporaryPollError()))
+    heygen=SimpleNamespace(scene_video=AsyncMock(),silent_video=AsyncMock())
+    providers=SimpleNamespace(preflight=lambda kind:None,kling=kling,studio_heygen=heygen)
+    monkeypatch.setattr(studio[2],'asset_url',AsyncMock(side_effect=lambda a:'https://cdn.example/'+a['id']))
+    worker=Worker(None,456,studio[1],providers,studio[2])
+    await worker.execute(row)
+    current=await repo.job(row['id'])
+    assert current['status']=='polling' and current['provider_id']=='kling-masha-task'
+    args=kling.avatar.await_args.args
+    assert args[:2]==('https://cdn.example/'+snap['assets']['image']['id'],'https://cdn.example/'+snap['assets']['speech']['id'])
+    assert json.loads(q['snapshot'])['quote']['speech_profiles'][snap['spec']['speaker_id']]['speed']==1.10
+    await worker.execute(current)
+    kling.avatar.assert_awaited_once();kling.poll.assert_awaited_once_with('kling-masha-task')
+    kling.submit.assert_not_awaited();heygen.scene_video.assert_not_awaited();heygen.silent_video.assert_not_awaited()
+    # Kling Avatar may stop at the MP3's length: extend using the approved map, never frozen lips.
+    raw=await make_clip(studio[2],3.1,audio_seconds=3)
+    monkeypatch.setattr(studio[2],'download',AsyncMock(return_value=(raw.name,'hash')))
+    kling.poll=AsyncMock(return_value={'url':'https://cdn.example/kling.mp4'})
+    worker.save_result=AsyncMock()
+    await worker.execute(await repo.job(row['id']))
+    worker.save_result.assert_awaited_once()
+    assert worker.save_result.await_args.kwargs['metadata']['tail_policy']=='approved-dream-card-no-freeze'
+    kling.avatar.assert_awaited_once()
 
 
 async def test_production_report_marks_missing_costs_and_counts_materials(studio):
     from multstudio.episode_four_media import production_report
     key=await setup(studio);await apply(studio[0],456)
     text='\n'.join(await production_report(key,studio[1]))
-    assert '4; OpenAI: 1' in text and 'немых локальных сцен: 2' in text
+    assert '4; Kling Avatar: 1' in text and 'немых локальных сцен: 2' in text
     assert '0 из 3' in text and 'пока не определена' in text
 
 
@@ -228,7 +246,7 @@ async def test_materials_ui_and_cost_plan_are_available_only_to_owner(studio):
     e=event('studio:dream_materials:'+key);await dispatch_callback(router,e,ctx)
     assert 'настоящих изображения' in str(e.bot.send_message.await_args_list)
     e=event('studio:episode_plan:'+key);await dispatch_callback(router,e,ctx)
-    assert 'Общая стоимость' in str(e.bot.send_message.await_args_list) and 'Маши' in str(e.bot.send_message.await_args_list)
+    assert 'Общая стоимость' in str(e.bot.send_message.await_args_list) and 'Kling Avatar' in str(e.bot.send_message.await_args_list)
     e=event('studio:dream_materials:'+key,actor=999);await dispatch_callback(router,e,ctx)
     e.bot.send_message.assert_not_awaited()
 
@@ -265,3 +283,26 @@ async def test_local_card_worker_does_not_require_a_paid_image_api(studio,monkey
 async def test_revised_episode_cannot_assemble_without_background_music(studio):
     key=await setup(studio);await apply(studio[0],456)
     with pytest.raises(ValueError,match='фоновую музыку'):await repo.quote('episode',key,'assemble',studio[1])
+
+
+async def test_existing_openai_draft_switches_to_kling_and_reuses_image_audio_when_map_arrives(studio):
+    key=await setup(studio);await apply(studio[0],456)
+    shots=await repo.children('scene',key);masha=shots[1]
+    old=dict(masha['spec'],openai_audio_sync_required=True)
+    old.pop('kling_audio_required');old.pop('tail_cutaway_scene_id')
+    await repo.edit('scene',masha['id'],rules.normalize(old))
+    before=await repo.snapshot('scene',masha['id']);await image(studio[2],before)
+    before=await attach_audio(studio,await repo.snapshot('scene',masha['id']))
+    assert await apply(studio[0],456)==key
+    after=await repo.snapshot('scene',masha['id'])
+    assert after['spec']['video_provider']=='kling_avatar'
+    for kind in ('image','speech'):
+        assert after['assets'][kind]['path']==before['assets'][kind]['path']
+        assert after['assets'][kind]['sha256']==before['assets'][kind]['sha256']
+    await materials(studio,key)
+    ready=await repo.snapshot('scene',masha['id'])
+    assert ready['assets']['image']['id']==after['assets']['image']['id']
+    assert ready['assets']['speech']['id']==after['assets']['speech']['id']
+    assert (await repo.quote('scene',masha['id'],'video',studio[1]))['status']=='quoted'
+    assert await apply(studio[0],456)==key
+    assert (await repo.snapshot('scene',masha['id']))['revision']==after['revision']

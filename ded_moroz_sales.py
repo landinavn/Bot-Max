@@ -13,6 +13,7 @@ from maxapi.enums import UploadType
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
 import database
+import black_friday as friday
 from config import BASE_DIR
 from ded_moroz_intro import INTRO_SECONDS
 
@@ -57,7 +58,8 @@ def family_price_text(timestamp=None):
     if price==99000:
         return ('🔥 До 22 ноября 23:59 МСК — 990 ₽.\n'
                 'С 23 по 30 ноября — 1490 ₽.\nВ декабре — 1990 ₽.')
-    if price==149000:return '🎁 До 30 ноября — 1490 ₽.\nВ декабре — 1990 ₽.'
+    if price==149000:
+        return (f'🖤 До 29 ноября 23:59 МСК — {friday.discount(price)//100} ₽ вместо 1490 ₽.\n30 ноября — 1490 ₽.\nВ декабре — 1990 ₽.' if friday.active() else '🎁 До 30 ноября — 1490 ₽.\nВ декабре — 1990 ₽.')
     return '🎁 В декабре — 1990 ₽.'
 
 
@@ -101,7 +103,7 @@ async def payment(order_id):
 
 
 def validate_order(row):
-    row=dict(row)
+    row=friday.base_order(row)
     variant=row.get('variant','single')
     family=variant=='family'
     expected=FAMILY_PRODUCT if family else PRODUCT
@@ -126,13 +128,14 @@ async def checkout(user_id,*,variant='single',children_count=None):
     package=('ded_moroz_family_' if family else 'ded_moroz_')+str(price//100)
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
         await db.execute('BEGIN IMMEDIATE');db.row_factory=aiosqlite.Row
-        async with db.execute("SELECT * FROM ded_moroz_payments WHERE user_id=? AND status='pending' AND amount_kopecks=? AND variant=? AND children_count IS ? ORDER BY rowid DESC LIMIT 1",(user_id,price,variant,children_count)) as cur:
+        async with db.execute("SELECT * FROM ded_moroz_payments WHERE user_id=? AND status='pending' AND amount_kopecks=? AND variant=? AND children_count IS ? ORDER BY rowid DESC LIMIT 1",(user_id,friday.price(price),variant,children_count)) as cur:
             row=await cur.fetchone()
         if row:return dict(row,order_type='ded_moroz')
         key='dm_'+uuid4().hex
         await db.execute('INSERT INTO ded_moroz_payments(order_id,user_id,amount_kopecks,product_name,package_id,variant,children_count) VALUES (?,?,?,?,?,?,?)',
                          (key,user_id,price,product,package,variant,children_count))
         await database.increment_counter('dm_family_checkout' if family else 'dm_checkout',user_id=user_id,connection=db)
+        await friday.apply(db, 'ded_moroz_payments', key)
         await db.commit()
     return await payment(key)
 
@@ -205,7 +208,10 @@ async def mark_paid(key,payment_id):
         await database.increment_purchases(row['user_id'],connection=db)
         prefix='buy_ded_moroz_family' if row.get('variant')=='family' else 'buy_ded_moroz'
         await database.increment_counter(prefix,user_id=row['user_id'],connection=db)
-        await database.increment_counter(prefix+'_'+str(row['amount_kopecks']//100),user_id=row['user_id'],connection=db)
+        await database.increment_counter(prefix+'_'+str(friday.base_order(row)['amount_kopecks']//100),user_id=row['user_id'],connection=db)
+        if row.get('sale_campaign'):
+            await database.increment_counter('black_friday_paid',user_id=row['user_id'],connection=db)
+            await database.increment_counter('black_friday_paid_ded_moroz',user_id=row['user_id'],connection=db)
         await _claim(db,row['user_id'],key)
         await db.commit();return True
 
@@ -233,7 +239,7 @@ async def offer(event,*,admin=None):
             buttons.row(CallbackButton(text='Продолжить · '+row['id'][:8]+' · '+row['status'],payload='dm_open:'+row['id']))
     buttons.row(CallbackButton(text='🎬 Мои готовые поздравления',payload='dm_last'))
     buttons.row(CallbackButton(text='⬅️ Назад',payload='back_to_main'))
-    await tell(event,DESCRIPTION,attachments=[buttons.as_markup()])
+    await tell(event,(DESCRIPTION.replace(PRICE_TEXT,f'🖤 До 29 ноября 23:59 МСК — {friday.discount(149000)//100} ₽ вместо 1490 ₽.\n30 ноября — 1490 ₽. В декабре — 1990 ₽.') if friday.active() else DESCRIPTION),attachments=[buttons.as_markup()])
 
 
 async def start(event,context,admin,payments,*,new=False):

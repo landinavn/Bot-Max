@@ -918,6 +918,16 @@ async def get_shared_image(key: str) -> str | None:
 
 
 SONG_PROMO_PRODUCT = 'Песня в подарок (Скидка 20%)'
+AUDIO_TARIFFS = {'fun': (15900, 'Песня по фану'), 'gift': (29000, 'Песня в подарок')}
+
+
+def valid_audio_tariff(order):
+    current = AUDIO_TARIFFS.get(order['audio_format'])
+    saved = (order['amount_kopecks'], order['product_name'])
+    historical = {'fun': {(19900, 'Песня по фану')},
+                  'gift': {(49000, 'Песня в подарок'), (39200, SONG_PROMO_PRODUCT)}}
+    return saved == current or saved in historical.get(order['audio_format'], set())
+
 
 
 async def set_song_promo(user_id: int, hours=48) -> None:
@@ -949,7 +959,7 @@ async def latest_gift_preview(user_id: int) -> dict | None:
 
 
 async def song_checkout_order(order_id: str) -> dict:
-    """Новые подарочные счета — 490 ₽; старые счета неизменны, для новой цены отдельный заказ.
+    """Новые подарочные счета — 290 ₽; старые счета неизменны, для новой цены отдельный заказ.
 
     Готовые треки/превью переносятся без повторного обращения к TTAPI.
     """
@@ -963,7 +973,7 @@ async def song_checkout_order(order_id: str) -> dict:
         order = dict(row)
         target_id = order_id
         if order['status'] != 'paid' and not order['free_access']:
-            amount = 49000
+            amount = AUDIO_TARIFFS['gift'][0]
             if order['amount_kopecks'] != amount:
                 if not order['preview_url'] or not order['tracks_json']:
                     raise ValueError('Сначала необходимо создать превью.')
@@ -987,9 +997,9 @@ async def create_audio_order(order_id: str, user_id: int, audio_format: str, sce
         raise ValueError('Некорректный пользователь или аудиоформат.')
     if not scenario or not details.strip() or not prompt or len(prompt) > 5000 or len(tags) > 1000 or len(title) > 80:
         raise ValueError('Некорректные детали песни.')
-    amount, product = (19900, 'Песня по фану') if audio_format == 'fun' else (49000, 'Песня в подарок')
+    amount, product = AUDIO_TARIFFS[audio_format]
     if song_discount:
-        raise PromoUnavailableError('Скидка FIRST больше не действует. Песня в подарок стоит 490 ₽.')
+        raise PromoUnavailableError('Скидка FIRST больше не действует. Песня в подарок стоит 290 ₽.')
     values = (order_id, user_id, audio_format, scenario, details, style, prompt, tags, title, amount, product)
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         await db.execute('''INSERT INTO audio_orders
@@ -1372,10 +1382,28 @@ async def finish_cartoon_order(order_id: str, user_id: int, *, manual=False):
 
 
 PHOTO_TARIFFS = {
-    590: (59000, 'Фотосессия Попробовать'),
-    990: (99000, 'Фотосессия Стандарт'),
-    1490: (149000, 'Фотосессия Премиум'),
+    590: (49000, 'Фотосессия Попробовать'),
+    990: (69000, 'Фотосессия Стандарт'),
+    1490: (99000, 'Фотосессия Премиум'),
 }
+
+
+# Stable tariff IDs preserve old callbacks, saved packages and generation recipes.
+def photo_tariff_value(order):
+    current = PHOTO_TARIFFS.get(order['tariff'])
+    saved = ((order.get('promo_base_amount_kopecks'), order.get('promo_base_product_name'))
+             if order.get('promo_token') else (order['amount_kopecks'], order['product_name']))
+    historical = {590: (59000,'Фотосессия Попробовать'), 990: (99000,'Фотосессия Стандарт'),
+                  1490: (149000,'Фотосессия Премиум')}
+    return saved if saved in (current, historical.get(order['tariff'])) else current
+
+
+def photo_sale_counter(order, *, promo=False):
+    base = order.get('promo_base_amount_kopecks') if order.get('promo_token') else order.get('amount_kopecks')
+    current = PHOTO_TARIFFS.get(order['tariff'])
+    names = {590:'trial',990:'standard',1490:'premium'}
+    suffix = (names[order['tariff']]+'_'+str(base//100) if current and base==current[0] else str(order['tariff']))
+    return ('promo_buy_photo_' if promo else 'buy_photo_')+suffix
 
 
 def _base_sale_counter_keys(kind: str, order: dict) -> tuple[str, ...]:
@@ -1388,14 +1416,16 @@ def _base_sale_counter_keys(kind: str, order: dict) -> tuple[str, ...]:
                 5: ('buy_credit_299',), 15: ('buy_credit_799',)}.get(credits, ())
         return keys + (('buy_credit_149',) if credits == 3 and order['package_id'] == 'promo_3' else ())
     if kind == 'audio':
-        return ('buy_song_199' if order['audio_format'] == 'fun' else 'buy_song_490',)
+        price = order.get('amount_kopecks')
+        return (('buy_song_159' if price==15900 else 'buy_song_199') if order['audio_format']=='fun'
+                else ('buy_song_290' if price==29000 else 'buy_song_490'),)
     if kind == 'musical':
         return (('buy_music_direct',) if order['tariff'] == 'direct'
                 else ('buy_music_upsell', 'buy_music_card_149'))
     if kind == 'cartoon':
         return (cartoon_sale_counter(order),)
     if kind == 'photo':
-        return (f"buy_photo_{order['tariff']}",)
+        return (photo_sale_counter(order),)
     if kind == 'animation':
         return (f"buy_animation_{order['tariff']}",)
     if kind == 'ded_moroz':
@@ -1418,10 +1448,10 @@ async def _backfill_sale_counters(db, *, force=False) -> None:
     totals = {}
     for kind, table, fields, status in (
         ('credit', 'payment_orders', 'credits,package_id', "status='paid'"),
-        ('audio', 'audio_orders', 'audio_format', "status='paid'"),
+        ('audio', 'audio_orders', 'audio_format,amount_kopecks', "status='paid'"),
         ('musical', 'musical_orders', 'tariff,promo_token', "status='paid'"),
         ('cartoon', 'cartoon_orders', 'tariff,promo_token,amount_kopecks,promo_base_amount_kopecks', "status IN ('paid','completed','manual')"),
-        ('photo', 'photo_orders', 'tariff,promo_token', "status='paid'"),
+        ('photo', 'photo_orders', 'tariff,promo_token,amount_kopecks,promo_base_amount_kopecks', "status='paid'"),
         ('animation', 'animation_orders', 'tariff', "status='paid' AND is_admin=0 AND promo_bonus=0"),
         ('ded_moroz','ded_moroz_payments','amount_kopecks,variant',"status='paid'"),
     ):
@@ -1729,7 +1759,7 @@ def repeat_sale_counter(kind,order):
     if kind=='cartoon':
         return cartoon_sale_counter(order,promo=True)
     if kind=='photo':
-        return f"promo_buy_photo_{order['tariff']}"
+        return photo_sale_counter(order,promo=True)
     return None
 
 

@@ -1,3 +1,4 @@
+from test_handlers import report_text
 """Five-frame NY mother/daughter standard package: price, quotas, costume groups and recovery."""
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -46,14 +47,14 @@ async def test_admin_generates_five_with_two_separate_costume_groups(credit_db):
     assert_frame_calls(frames)
     assert sum('Генерирую кадр' in str(c) for c in event.message.answer.await_args_list)==5
     assert 'из 5' in str(event.message.answer.await_args_list)
-    assert 'Все 5 фотографий отправлены' in event.message.answer.await_args.args[0]
+    assert 'Все 5 фотографий отправлены' in report_text(event.message.answer)
     assert event.bot.send_message.await_count==5
     payments.create_payment_link.assert_not_awaited()
     assert (await credit_db.get_user(456))['balance']==1
     assert await credit_db.get_active_promo(456,'photo') is None
 
 
-@pytest.mark.parametrize('promo,amount',[(False,99000),(True,79200)])
+@pytest.mark.parametrize('promo,amount',[(False,69000),(True,55200)])
 async def test_paid_five_package_links_webhook_five_slots_and_promo_after_last(credit_db,sales_payments,promo,amount):
     if promo: await credit_db.set_promo(456,'photo')
     frames=AsyncMock(side_effect=[f'https://cdn.example/frame-{i}.jpg' for i in range(1,6)])
@@ -79,7 +80,7 @@ async def test_paid_five_package_links_webhook_five_slots_and_promo_after_last(c
     assert len(await credit_db.get_photo_results(key))==5
     stats=await credit_db.get_photo_template_stats('mom_daughter_5',admin_id=999)
     assert stats=={'paid_packages':1,'revenue_kopecks':amount,'generated_photos':5,'completed_packages':1}
-    assert (await credit_db.get_all_counters())['buy_photo_990']==1
+    assert (await credit_db.get_all_counters())['buy_photo_standard_690']==1
     assert await credit_db.get_active_promo(456,'photo') is not None
     await dispatch_callback(router,resume,context)
     assert frames.await_count==5
@@ -169,8 +170,8 @@ async def test_990_mom_stats_exclude_admin_and_do_not_merge_with_590(credit_db,s
         await deliver_webhook(sales_payments,await credit_db.get_photo_order(key),payment_id=f'p-{user}-{tariff}')
     event=message_event('/stats');event.get_ids=lambda:(123,999)
     await call_handler(create_router(admin_user_id=999),'stats',event)
-    block=event.message.answer.await_args.args[0].split('👩‍👧 Мама + дочка — 990 ₽ / 5 фото:',1)[1].split('👑 Эксклюзив',1)[0]
-    assert '- Оплачено пакетов: 1' in block and '- Выбор сюжета (клики): 1' in block and '- Выручка: 990,00 ₽' in block
+    block=report_text(event.message.answer).split('👩‍👧 Мама + дочка — 690 ₽ / 5 фото:',1)[1].split('👑 Эксклюзив',1)[0]
+    assert '- Оплачено пакетов: 1' in block and '- Выбор сюжета (клики): 1' in block and '- Выручка: 690,00 ₽' in block
 
 
 async def test_first_frame_real_sdk_request_is_landscape(config,storage,api,monkeypatch):

@@ -62,10 +62,10 @@ async def test_change_personal_words_then_confirm_keeps_final_lyrics_for_paid_wo
     e=callback_event('song_review:approve:'+token)
     await dispatch_callback(router,e,ctx)
     data=await ctx.get_data();order=await database.get_audio_order(data['audio_checkout_id'])
-    assert order['status']=='pending' and order['amount_kopecks']==49000
+    assert order['status']=='pending' and order['amount_kopecks']==29000
     assert order['lyrics']==newer and 'male and female vocals' in order['tags']
     assert not order['job_id'] and not order['submit_started'] and not order['preview_requested']
-    assert '490 ₽' in str(e.send.await_args_list)
+    assert '290 ₽' in str(e.send.await_args_list)
     assert not await database.pending_audio_orders()
     await database.mark_audio_paid(order['order_id'],'song-review-paid')
     generator=AsyncMock(return_value='known-job')
@@ -175,7 +175,7 @@ async def test_short_song_keeps_199_price_with_approved_text_and_female_voice(cr
     token=(await ctx.get_data())['song_review_token']
     await dispatch_callback(router,callback_event('song_review:approve:'+token),ctx)
     order=await database.get_audio_order((await ctx.get_data())['audio_checkout_id'])
-    assert order['amount_kopecks']==19900 and order['lyrics']==WORDS
+    assert order['amount_kopecks']==15900 and order['lyrics']==WORDS
     assert 'female solo vocals' in order['tags'] and 'jazz' in order['tags']
     assert order['status']=='pending' and not order['job_id']
     assert not await database.pending_audio_orders()

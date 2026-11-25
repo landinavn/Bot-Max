@@ -160,6 +160,14 @@ class Renderer:
             old_seconds=seconds;seconds=min(seconds,shortened)
             logger.info('Монтаж HeyGen %s: запрошено %.3f с с конца, убрано %.3f с; конец MP3 %.3f с сохранён',
                         scene.get('number',scene.get('id','?')),requested,old_seconds-seconds,offset+voice_seconds)
+        if scene.get('omit_dream_tail') and scene['spec'].get('dialogue') and scene['spec'].get('tail_cutaway_scene_id'):
+            # Existing five-second previews retain their map; only the episode montage is shortened.
+            from .episode_four_media import talking_end
+            cutoff=talking_end(source)
+            _,last=await self.speech_bounds(self.assets.path(voice['path']))
+            if last>cutoff+0.001:
+                raise ValueError('Конец речи выходит за начало вставки карты. Обрезка слов запрещена; нужна проверка сцены.')
+            seconds=min(seconds,cutoff)
         extension=max(0.0,seconds-video_seconds) if source['kind']!='image' else 0.0
         logger.info('Монтаж сцены %s: video=%.3f speech=%.3f start=%.3f output=%.3f freeze=%.3f cut=%.3f',
                     scene.get('number',scene.get('id','?')),video_seconds,voice_seconds,offset,seconds,extension,trim)
@@ -260,11 +268,12 @@ class Renderer:
         if snapshot['spec'].get('production',{}).get('episode_four_revision') and not snapshot['assets'].get('music'):
             raise ValueError('Загрузите фоновую музыку серии перед финальной сборкой.')
         paths, lengths, cues, elapsed = [], [], [], 0.0
+        omit_tails=bool(snapshot['spec'].get('production',{}).get('episode_four_revision'))
         for index, scene in enumerate(snapshot['scenes']):
             ending = snapshot['spec'].get('ending') if index == len(snapshot['scenes'])-1 else None
             path=(await self.closing(scene,snapshot['spec']['closing_card'])
                   if index==len(snapshot['scenes'])-1 and snapshot['spec'].get('closing_card')
-                  else await self.scene(dict(scene,assembly_job_id=snapshot.get('job_id')), ending))
+                  else await self.scene(dict(scene,assembly_job_id=snapshot.get('job_id'),omit_dream_tail=omit_tails), ending))
             paths.append(path)
             seconds=await duration(path)
             lengths.append(seconds)
@@ -326,7 +335,8 @@ class Renderer:
             expected=sum(lengths)
             if abs(actual-expected)>rules.TOLERANCE:
                 raise ValueError(f'Итоговая длина монтажа {actual:.3f} с не совпадает с суммой сцен {expected:.3f} с.')
-            if not any(s.get('assembly_editing',{}).get('video_end_trim') for s in snapshot['scenes']):
+            trimmed_tails=omit_tails and any(s['spec'].get('dialogue') and s['spec'].get('tail_cutaway_scene_id') for s in snapshot['scenes'])
+            if not trimmed_tails and not any(s.get('assembly_editing',{}).get('video_end_trim') for s in snapshot['scenes']):
                 rules.video_seconds(actual,len(paths))
         return result
 

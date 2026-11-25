@@ -306,3 +306,45 @@ async def test_existing_openai_draft_switches_to_kling_and_reuses_image_audio_wh
     assert (await repo.quote('scene',masha['id'],'video',studio[1]))['status']=='quoted'
     assert await apply(studio[0],456)==key
     assert (await repo.snapshot('scene',masha['id']))['revision']==after['revision']
+
+
+@pytest.mark.parametrize('metadata',[
+    {}, {'tail_policy':'approved-dream-card-no-freeze','cutaway_start':2,'speech_end':3},
+    {'tail_policy':'approved-dream-card-no-freeze','cutaway_start':float('nan'),'speech_end':3},
+    {'tail_policy':'approved-dream-card-no-freeze','cutaway_start':True,'speech_end':1},
+    {'tail_policy':'approved-dream-card-no-freeze','cutaway_start':6,'speech_end':3},
+])
+def test_assembly_never_guesses_where_the_map_starts(metadata):
+    from multstudio.episode_four_media import talking_end
+    with pytest.raises(ValueError):talking_end({'metadata':json.dumps(metadata)})
+
+
+async def test_episode_removes_retained_map_tail_but_keeps_separate_silent_shot(studio):
+    key=await setup(studio);await apply(studio[0],456);shots=await materials(studio,key)
+    snap=await repo.snapshot('scene',shots[0]['id']);await image(studio[2],snap)
+    snap=await attach_audio(studio,await repo.snapshot('scene',snap['id']))
+    snap['quote']={'speech_profiles':await speech_profiles(snap)}
+    renderer=Renderer(studio[2]);raw=await make_clip(studio[2],5,audio_seconds=3)
+    voice=studio[2].path(snap['assets']['speech']['path'])
+    retained=await splice_tail(renderer,snap,raw,voice,3.0)
+    metadata=dict(duration_seconds=5,image_id=snap['assets']['image']['id'],
+                  speech_id=snap['assets']['speech']['id'],**snap['normalization_metadata'])
+    snap['assets']['video']={'kind':'video','path':retained.name,'approved':1,'metadata':json.dumps(metadata)}
+    cutoff=metadata['cutaway_start']
+    assert abs(await duration(await renderer.scene(snap))-5)<.035  # Preview stays in the archive.
+    silent_source=await make_clip(studio[2],5)
+    silent=dict(number=7,spec=rules.normalize(dict(visual='Карта желаний',characters=[],dialogue=[],duration=5)),
+                assets={'video':{'kind':'video','path':silent_source.name,'approved':1,
+                        'metadata':json.dumps(dict(duration_seconds=5,image_id=None,speech_id=None))}})
+    output=await renderer.assemble(dict(spec={'production':{'episode_four_revision':MIGRATION}},
+                                       scenes=[snap,silent],assets={'music':{'path':voice.name}}))
+    assert abs(await duration(output)-(cutoff+5))<.035
+    # The last frame before the scene boundary is still the blue talking shot, not the map.
+    pixel=await process('ffmpeg','-v','error','-ss',str(cutoff-.05),'-i',output,
+                        '-frames:v','1','-vf','crop=20:20:20:20,scale=1:1','-f','rawvideo','-pix_fmt','rgb24','-')
+    assert pixel[2]>180 and pixel[0]<60 and pixel[1]<60
+    assert abs(await duration(retained)-5)<.035  # No originals were overwritten.
+    bad=dict(snap,omit_dream_tail=True)
+    bad_meta=dict(metadata,cutaway_start=2.9,speech_end=2.8)
+    bad['assets']=dict(snap['assets'],video=dict(snap['assets']['video'],metadata=json.dumps(bad_meta)))
+    with pytest.raises(ValueError,match='Обрезка слов запрещена'):await renderer.scene(bad)

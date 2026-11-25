@@ -1,6 +1,7 @@
 """Approved dream images and offline five-second montage/cutaways for revised episode 4."""
 import asyncio
 import io
+import json
 import math
 from uuid import uuid4
 
@@ -158,3 +159,18 @@ async def production_report(episode_id,settings):
     known=sum(t['known'] for t in totals.values())
     lines.append('Общая стоимость: '+('пока не определена; известная часть ' if any(t['unknown'] for t in totals.values()) else '')+dollars(known)+'.')
     return lines
+
+
+def talking_end(video):
+    """Use the retained transition, never a guessed two-second cut or current prompt."""
+    from .render import FPS
+    meta=json.loads(video.get('metadata') or '{}')
+    cutoff=meta.get('cutaway_start');last=meta.get('speech_end')
+    if (meta.get('tail_policy')!='approved-dream-card-no-freeze'
+            or any(isinstance(v,bool) or not isinstance(v,(int,float)) or not math.isfinite(v) for v in (cutoff,last))
+            or not 0<last<=cutoff<=5):
+        raise ValueError('Нет проверенной границы вставки карты. Исходное видео сохранено; нужна проверка сцены.')
+    # Cut before the first map frame. Keep the original speech rate and safe post-speech margin.
+    end=math.floor(cutoff*FPS+1e-7)/FPS
+    if end<last:raise ValueError('Граница вставки пересекает речь; обрезка слов запрещена.')
+    return end

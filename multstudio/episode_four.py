@@ -68,6 +68,8 @@ async def prepare(project_id,actor):
         beach=await repo.one(db,'SELECT id FROM cartoon_scenes WHERE episode_id=? AND number=5',(previous['id'],))
         if not beach:raise ValueError('Не найдена сохранённая сцена моря из третьей серии.')
         episode=await repo.one(db,'SELECT * FROM cartoon_episodes WHERE project_id=? AND number=4',(project_id,))
+        from .episode_four_revision import TITLE as REVISED_TITLE
+        if episode and episode['title']==REVISED_TITLE:return episode['id']
         if episode and episode['title']!=TITLE:raise ValueError('Номер серии 4 занят; существующая серия не изменена.')
         if not episode:
             key=uuid4().hex

@@ -27,7 +27,7 @@ def normalize(spec):
         if speaker not in result.get('characters', []):
             raise ValueError('Говорящий должен присутствовать в characters.')
         result['characters'] = [speaker]
-        result['video_provider'] = 'heygen'
+        result['video_provider'] = 'openai' if result.get('openai_audio_sync_required') else 'heygen'
         result['camera'] = result.get('camera_direction') or ('Один средний план по пояс: только говорящий персонаж, обе руки, телефон и край стола.'
                             if result.get('framing')=='medium' else
                             'Один крупный или средний план только говорящего персонажа. Остальные за кадром.')
@@ -70,7 +70,7 @@ def validate(spec):
         text = lines[0].get('text')
         if not isinstance(text, str) or not text.strip():
             raise ValueError('Укажите непустую реплику говорящего.')
-        if spec.get('video_provider') != 'heygen':
+        if spec.get('video_provider') not in ('heygen','openai') or (spec.get('video_provider')=='openai' and not spec.get('openai_audio_sync_required')):
             raise ValueError('Говорящие новые сцены используют HeyGen с утверждённой озвучкой.')
     elif speaker is not None:
         raise ValueError('У немой сцены speaker_id должен быть null.')
@@ -135,6 +135,10 @@ def validate_video_asset(snap):
         raise ValueError('Сначала просмотрите и утвердите пятисекундное видео сцены.')
     metadata=json.loads(video.get('metadata') or '{}')
     video_seconds(float(metadata.get('duration_seconds',0)))
+    if snap['spec'].get('tail_cutaway_scene_id'):
+        if (metadata.get('tail_policy')!='approved-dream-card-no-freeze'
+                or metadata.get('cutaway_id')!=(snap.get('cutaway_reference') or {}).get('id')):
+            raise ValueError('В этой версии нужен проверенный немой план карты после речи; неподвижный хвост не допускается.')
     if metadata.get('image_id')!=snap.get('assets',{}).get('image',{}).get('id'):
         raise ValueError('Видео снято по другому изображению. Выберите соответствующие исходники или перегенерируйте сцену.')
     if metadata.get('speech_id')!=snap.get('assets',{}).get('speech',{}).get('id'):

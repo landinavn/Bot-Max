@@ -493,6 +493,9 @@ async def _snapshot(db, target, key):
             ref=await _snapshot(db,'scene',ref_id);image=ref['assets'].get('image')
             if image and image.get('approved'):
                 snap['prop_references'].append(dict(scene_id=ref_id,title=ref['spec'].get('title',''),image=image))
+    if target=='scene' and (row['spec'].get('dream_materials_required') or row['spec'].get('tail_cutaway_scene_id')):
+        from .episode_four_media import attach
+        await attach(db,snap,episode)
     if target == 'episode':
         snap['music'] = await one(db, "SELECT * FROM cartoon_assets WHERE target='episode' AND target_id=? AND kind='music' ORDER BY rowid DESC LIMIT 1", (key,))
     snap['context_hash'] = digest(snap)
@@ -631,7 +634,10 @@ async def quote(target, key, kind, settings):
         raise ValueError('Недопустимый тип задания.')
     snap = await snapshot(target, key)
     from .rules import strict, validate, validate_audio_asset
-    if target == 'scene': validate(snap['spec'])
+    if target == 'scene':
+        validate(snap['spec'])
+        from .episode_four_media import validate as validate_four
+        validate_four(snap,kind)
     if kind == 'image' and target == 'scene':
         if not snap['spec'].get('approved') or (not snap.get('cast') and not strict(snap['spec'])):
             raise ValueError('Сначала утвердите сценарий и укажите персонажей.')
@@ -648,6 +654,8 @@ async def quote(target, key, kind, settings):
         raise ValueError('Для этой серии сначала создайте озвучку и измерьте её длительность, затем запускайте анимацию.')
     if kind == 'speech' and not snap['spec'].get('dialogue'):
         raise ValueError('В сцене нет реплик.')
+    if kind=='assemble' and snap['spec'].get('production',{}).get('episode_four_revision') and not snap['assets'].get('music'):
+        raise ValueError('Загрузите фоновую музыку серии: без неё немые сцены и финал не собираются.')
     if kind == 'assemble':
         if not snap.get('scenes') or any(not (s['assets'].get('image') or s['assets'].get('video'))
              or (s['spec'].get('dialogue') and not s['assets'].get('speech')) for s in snap['scenes']):

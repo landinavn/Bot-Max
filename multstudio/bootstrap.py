@@ -39,6 +39,8 @@ async def configure(bot, dispatcher, config):
     from .episode_four import prepare as prepare_four
     try:
         episode_four = await prepare_four(project,config.admin_user_id)
+        from .episode_four_revision import apply as revise_four
+        await revise_four(project,config.admin_user_id)
         await prepare_jobs(episode_four,settings)
     except ValueError:
         import logging

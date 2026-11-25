@@ -140,7 +140,7 @@ async def prepare_jobs(episode_id, settings):
                 speech_profiles=profiles, error=error, audio_before_animation=True))
             async with repo.connect() as db:
                 await db.execute('BEGIN IMMEDIATE')
-                if not await repo.one(db, 'SELECT id FROM cartoon_jobs WHERE target=? AND target_id=? AND kind=?', (snap['target'], snap['id'], kind)):
+                if not await repo.one(db, "SELECT id FROM cartoon_jobs WHERE target=? AND target_id=? AND kind=? AND status NOT IN ('cancelled','stale')", (snap['target'], snap['id'], kind)):
                     await db.execute('''INSERT INTO cartoon_jobs(id,project_id,target,target_id,kind,snapshot,fingerprint,status,estimate,expires)
                         VALUES (?,?,?,?,?,?,?,'draft',?,0)''',
                         (uuid4().hex, snap['project_id'], snap['target'], snap['id'], kind,

@@ -42,7 +42,8 @@ async def test_every_plot_preview_precedes_invoice(credit_db, sales_payments, ex
     assert event.bot.upload_media.await_args.args[0].path.endswith(handlers.PHOTO_TEMPLATE_EXAMPLE_FILES[template])
     order = await credit_db.get_photo_order((await context.get_data())['photo_order_id'])
     assert order['template'] == template and order['tariff'] == tariff
-    expected = tariff * 80 // 100 if promo else tariff
+    price={590:490,990:690,1490:990}[tariff]
+    expected = price * 80 // 100 if promo else price
     assert order['amount_kopecks'] == expected * 100
     assert sales_payments._request_payment_link.await_args.args[0]['products'][0]['price'] == f'{expected}.00'
     sales_payments._request_payment_link.assert_awaited_once()
@@ -104,5 +105,5 @@ async def test_reserved_discount_still_requires_plot_and_preview(credit_db, sale
     assert (await credit_db.get_photo_order(first))['template'] == 'woman_red'
     restored = callback_event('photo_temp_woman_red')
     await dispatch_callback(router, restored, context)
-    assert restored.send.await_args.kwargs['attachments'][0].payload.buttons[0][0].text == 'Оплатить 792 ₽'
+    assert restored.send.await_args.kwargs['attachments'][0].payload.buttons[0][0].text == 'Оплатить 552 ₽'
     assert (await context.get_data())['photo_order_id'] == first

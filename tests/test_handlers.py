@@ -2616,19 +2616,19 @@ async def test_photo_style_tariff_preview_has_no_payment_or_generation(credit_db
     text = event.send.await_args.args[0]
     assert text == (
         f"Вы выбрали стиль: {style_name}.\n\nТеперь выберите тариф, который вам подходит:\n\n"
-        "🔹 «Попробовать» — 590 ₽\n"
+        "🔹 «Попробовать» — 490 ₽\n"
         "Вы получите 3 профессиональных фото в одном стиле. Отличный вариант, чтобы оценить качество!\n\n"
-        "🔹 «Фотосессия» — 990 ₽\n"
+        "🔹 «Фотосессия» — 690 ₽\n"
         "Вы получите 5 фото в одном стиле. Полноценная мини-сессия для вашего портфолио или соцсетей.\n\n"
-        "🔹 «Премиум» — 1490 ₽\n"
+        "🔹 «Премиум» — 990 ₽\n"
         "7 фото (5 в одном стиле и 2 в другом). Снимки в максимальном разрешении 4K — готовы к печати "
         "в большом формате! Вы сможете загрузить два разных фото для разных образов."
     )
     buttons = event.send.await_args.kwargs["attachments"][0].payload.buttons
     assert [(row[0].text, row[0].payload) for row in buttons] == [
-        ("Тариф «Попробовать» (590 ₽)", "photo_tariff_590"),
-        ("Тариф «Фотосессия» (990 ₽)", "photo_tariff_990"),
-        ("Тариф «Премиум» (1490 ₽)", "photo_tariff_1490"), ("⬅️ Назад", "cat_photo"),
+        ("Тариф «Попробовать» (490 ₽)", "photo_tariff_590"),
+        ("Тариф «Фотосессия» (690 ₽)", "photo_tariff_990"),
+        ("Тариф «Премиум» (990 ₽)", "photo_tariff_1490"), ("⬅️ Назад", "cat_photo"),
     ]
     assert await context.get_data() == {"photo_style": style}
     assert await context.get_state() == PosterStates.waiting_for_mode
@@ -2763,15 +2763,15 @@ async def test_legacy_ny_template_buttons_use_real_checkout(credit_db, example_p
     assert data["photo_tariff"] == "photo_tariff_590"
     assert data["template"] == template
     assert data["photo_product_name"] == "Фотосессия Попробовать"
-    assert data["photo_amount_kopecks"] == 59000
+    assert data["photo_amount_kopecks"] == 49000
     assert event.send.await_args.args[0] == (
-        "Вы выбрали тариф «Попробовать» (3 фото) за 590 ₽.\n\n"
+        "Вы выбрали тариф «Попробовать» (3 фото) за 490 ₽.\n\n"
         "Для продолжения, пожалуйста, оплатите заказ по ссылке ниже. После оплаты обязательно вернитесь в бота!"
     )
     buttons = event.send.await_args.kwargs["attachments"][0].model_dump()["payload"]["buttons"]
     pay = buttons[0][0]
     assert pay["type"] == "link"
-    assert pay["text"] == "Оплатить 590 ₽"
+    assert pay["text"] == "Оплатить 490 ₽"
     assert pay["url"] == "https://shop.payform.ru/personal-photo"
     assert "payload" not in pay
     assert buttons[-1][0]["payload"] == "photo_tariff_back"
@@ -2845,7 +2845,7 @@ async def test_ny_trial_tariff_opens_plots_before_real_payment_link(credit_db, e
     assert event.send.await_args_list[0].kwargs['text'] == 'Примеры работ:'
     assert event.send.await_args.args[0] == handlers.PHOTO_TRIAL_CHECKOUT_TEXT
     button = event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0]
-    assert button.text == 'Оплатить 590 ₽' and button.url == 'https://shop.payform.ru/personal-photo'
+    assert button.text == 'Оплатить 490 ₽' and button.url == 'https://shop.payform.ru/personal-photo'
     payments.create_payment_link.assert_awaited_once()
 
 
@@ -3345,7 +3345,7 @@ async def test_audio_stats_default_to_zero(credit_db):
     event = message_event('/stats')
     await call_handler(create_router(admin_user_id=456), 'stats', event)
     text = report_text(event.message.answer)
-    assert '- Песня по фану (199 ₽): 0\n- Песня в подарок (490 ₽): 0' in text
+    assert '- Песня по фану (159 ₽): 0\n- Песня в подарок (290 ₽): 0' in text
 
 
 @pytest.mark.parametrize('payload', list(handlers.AUDIO_FUN_SCENARIOS))
@@ -3631,7 +3631,7 @@ async def test_fun_payment_screen_has_placeholder_and_back_without_charging(cred
     assert text.message.answer.await_args.args[0] == handlers.AUDIO_FUN_PAYMENT_TEXT
     buttons = text.message.answer.await_args.kwargs['attachments'][0].payload.buttons
     assert [(row[0].text, row[0].payload) for row in buttons] == [
-        ('Оплатить 199 ₽ и получить 2 варианта', 'audio_fun_payment_soon'),
+        ('Оплатить 159 ₽ и получить 2 варианта', 'audio_fun_payment_soon'),
         ('⬅️ Назад', 'audio_tariff_fun'),
     ]
     payment = callback_event('audio_fun_payment_soon')
@@ -4055,7 +4055,7 @@ async def test_audio_checkout_creates_personal_link_and_keeps_snapshot_without_g
     order_id = data['audio_checkout_id']
     saved = await credit_db.get_audio_order(order_id)
     assert saved['user_id'] == 456 and saved['audio_format'] == kind
-    assert saved['amount_kopecks'] == (19900 if kind == 'fun' else 49000)
+    assert saved['amount_kopecks'] == (15900 if kind == 'fun' else 29000)
     assert saved['details'] == ('Сергей, любит кофе' if kind == 'fun' else 'Аня, любит горы')
     assert saved['status'] == 'pending'
     retry = callback_event(event.callback.payload)
@@ -4294,7 +4294,7 @@ async def test_admin_direct_wait_finishes_in_the_callback_without_background_wai
     submit.assert_awaited_once()
 
 
-@pytest.mark.parametrize('active,price', [(True, 490), (False, 490)])
+@pytest.mark.parametrize('active,price', [(True, 290), (False, 290)])
 async def test_song_upsell_checkout_uses_personal_order_and_current_promo(credit_db, active, price):
     import json
     await credit_db.create_audio_order('upsell-ready', 456, 'gift', 'bday', 'Аня', None, 'lyrics', 'pop', 'Для Ани')
@@ -4309,7 +4309,7 @@ async def test_song_upsell_checkout_uses_personal_order_and_current_promo(credit
     saved = await credit_db.get_audio_order(call.kwargs['order_id'])
     assert saved['user_id'] == 456 and saved['amount_kopecks'] == price * 100
     assert saved['product_name'] == 'Песня в подарок'
-    assert event.send.await_args.args[0] == 'Песня в подарок стоит 490 ₽. Перейдите по ссылке для оплаты:'
+    assert event.send.await_args.args[0] == 'Песня в подарок стоит 290 ₽. Перейдите по ссылке для оплаты:'
     button = event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0]
     assert button.type == 'link' and button.url == 'https://pay.example/personal'
     assert str(price) in button.text
@@ -4328,7 +4328,7 @@ async def test_song_upsell_without_song_collects_details_before_payment(credit_d
     assert await context.get_state() == PosterStates.waiting_for_mode
     buttons = event.send.await_args.kwargs['attachments'][0].payload.buttons
     assert buttons[0][0].payload == 'gift_scen_bday'
-    assert '490' in event.send.await_args.args[0]
+    assert '290' in event.send.await_args.args[0]
     payments.create_audio_payment_link.assert_not_awaited()
 
 
@@ -4668,7 +4668,7 @@ async def test_new_year_audio_scenarios_use_correct_fsm_prompt_and_stats(credit_
     data = await context.get_data()
     if payload == 'audio_gift_ny':
         saved = await credit_db.get_audio_order(data['audio_checkout_id'])
-        assert saved['scenario'] == 'ny' and saved['amount_kopecks'] == 49000
+        assert saved['scenario'] == 'ny' and saved['amount_kopecks'] == 29000
         assert saved['preview_delivered'] == 1
         assert '2-3 minutes' in saved['tags'] and 'семейные' in saved['prompt']
         args = handlers.generate_song.await_args.args
@@ -4736,8 +4736,8 @@ async def test_video_admin_stub_failure_has_traceback_and_allows_song_retry(cred
 
 
 @pytest.mark.parametrize('payload,kind,price,duration', [
-    ('audio_fun_ny', 'fun', 19900, '30-40 seconds'),
-    ('audio_gift_ny', 'gift', 49000, '2-3 minutes'),
+    ('audio_fun_ny', 'fun', 15900, '30-40 seconds'),
+    ('audio_gift_ny', 'gift', 29000, '2-3 minutes'),
 ])
 async def test_new_year_checkout_keeps_scenario_format_and_regular_price(credit_db, payload, kind, price, duration):
     async def checkout(user_id, fmt, scenario, details, style, prompt, tags, title, *, order_id):
@@ -5126,7 +5126,7 @@ async def test_gift_teacher_uses_formal_prompt_and_existing_paid_gift_preview(cr
     await call_handler(router, 'echo', message_event('Ирина Петровна, математика, поддерживает учеников'), context)
     data = await context.get_data()
     saved = await credit_db.get_audio_order(data['audio_checkout_id'])
-    assert saved['scenario'] == 'teacher' and saved['amount_kopecks'] == 49000 and saved['preview_delivered'] == 1
+    assert saved['scenario'] == 'teacher' and saved['amount_kopecks'] == 29000 and saved['preview_delivered'] == 1
     assert '2-3 minutes' in saved['tags'] and 'upbeat pop rock, energetic, stadium anthem, motivational' in saved['tags']
     assert writer.await_args.args[2].startswith(handlers.TEACHER_SCENARIO_TITLE + ':')
     assert handlers.generate_song.await_args.args[0] == TEACHER_TEST_LYRICS
@@ -7089,7 +7089,7 @@ async def test_photo_checkout_personal_order_is_reused_for_template(credit_db, e
     await dispatch_callback(router,template,context)
     order_id=(await context.get_data())['photo_order_id']
     order=await credit_db.get_photo_order(order_id)
-    assert order['template']=='fam3' and order['amount_kopecks']==59000 and order['status']=='pending'
+    assert order['template']=='fam3' and order['amount_kopecks']==49000 and order['status']=='pending'
     await dispatch_callback(router,template,context)
     assert (await context.get_data())['photo_order_id']==order_id
     assert template.send.await_args.kwargs['attachments'][0].payload.buttons[0][0].url=='https://shop.payform.ru/photo-personal'
@@ -7113,7 +7113,7 @@ async def test_mom_daughter_collage_precedes_checkout_or_photo_prompt(credit_db,
         assert await context.get_state() == PosterStates.waiting_for_photosession_photo
         payments.create_payment_link.assert_not_awaited()
     else:
-        assert replies[-1].kwargs['attachments'][0].payload.buttons[0][0].text == 'Оплатить 590 ₽'
+        assert replies[-1].kwargs['attachments'][0].payload.buttons[0][0].text == 'Оплатить 490 ₽'
         payments.create_payment_link.assert_awaited_once()
     assert (await context.get_data())['template'] == 'mom_daughter'
 
@@ -7133,7 +7133,7 @@ async def test_rabbit_collage_precedes_checkout_or_photo_request(credit_db, exam
         assert await context.get_state() == PosterStates.waiting_for_photosession_photo
         payments.create_payment_link.assert_not_awaited()
     else:
-        assert event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0].text == 'Оплатить 590 ₽'
+        assert event.send.await_args.kwargs['attachments'][0].payload.buttons[0][0].text == 'Оплатить 490 ₽'
         payments.create_payment_link.assert_awaited_once()
     assert (await context.get_data())['template'] == 'rabbit'
 

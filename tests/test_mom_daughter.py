@@ -1,3 +1,4 @@
+from test_handlers import report_text
 """Mother/daughter NY trial: style consistency, paid/resumed generation and YouTube attribution."""
 from email.parser import BytesParser
 from email.policy import default
@@ -53,7 +54,7 @@ async def test_customer_payment_unlocks_three_mom_frames_and_attributes_youtube_
     await choose_trial(router,context)
     data=await context.get_data()
     order=await credit_db.get_photo_order(data['photo_order_id'])
-    assert order['amount_kopecks']==59000 and order['template']=='mom_daughter' and order['style']=='photo_style_ny'
+    assert order['amount_kopecks']==49000 and order['template']=='mom_daughter' and order['style']=='photo_style_ny'
     frames.assert_not_awaited()
     assert (await credit_db.get_photo_template_stats('mom_daughter'))['paid_packages']==0
     assert (await deliver_webhook(sales_payments,order,payment_id='mom-paid')).status==200
@@ -66,10 +67,10 @@ async def test_customer_payment_unlocks_three_mom_frames_and_attributes_youtube_
     await call_handler(router,'collect_photosession_photo',photo_event(),context)
     assert frames.await_count==3
     stats=await credit_db.get_photo_template_stats('mom_daughter',admin_id=999)
-    assert stats=={'paid_packages':1,'revenue_kopecks':59000,'generated_photos':3,'completed_packages':1}
-    assert (await credit_db.get_all_counters())['buy_photo_590']==1
+    assert stats=={'paid_packages':1,'revenue_kopecks':49000,'generated_photos':3,'completed_packages':1}
+    assert (await credit_db.get_all_counters())['buy_photo_trial_490']==1
     source=next(r for r in await credit_db.get_source_stats(admin_id=999) if r['source']=='youtube')
-    assert source['total_users']==1 and source['buyers']==1 and source['revenue_kopecks']==59000
+    assert source['total_users']==1 and source['buyers']==1 and source['revenue_kopecks']==49000
     assert await credit_db.get_active_promo(456,'photo') is not None
     # An already delivered paid package cannot generate extra frames.
     await dispatch_callback(router,callback_event('photo_resume:'+order['order_id']),context)
@@ -107,13 +108,13 @@ async def test_mom_trial_promo_price_and_selection_after_payment_are_counted(cre
     key=await credit_db.create_photo_order('photo_legacy_mom',456,590)
     await credit_db.update_photo_order(key,style='photo_style_ny')
     order=await credit_db.get_photo_order(key)
-    assert order['amount_kopecks']==47200
+    assert order['amount_kopecks']==39200
     await deliver_webhook(sales_payments,order)
     await context.update_data(photo_order_id=key)
     assert (await credit_db.get_photo_template_stats('mom_daughter'))['paid_packages']==0
     await dispatch_callback(router,callback_event('photo_temp_mom_daughter'),context)
     stats=await credit_db.get_photo_template_stats('mom_daughter')
-    assert stats['paid_packages']==1 and stats['revenue_kopecks']==47200
+    assert stats['paid_packages']==1 and stats['revenue_kopecks']==39200
     await dispatch_callback(router,callback_event('photo_temp_mom_daughter'),context)
     assert (await credit_db.get_photo_template_stats('mom_daughter'))['paid_packages']==1
 
@@ -192,10 +193,10 @@ async def test_mom_stats_and_youtube_link_exclude_admin(credit_db,sales_payments
         await deliver_webhook(sales_payments,await credit_db.get_photo_order(key),payment_id=f'pay-{actor}')
     event=message_event('/stats');event.get_ids=lambda:(123,999)
     await call_handler(create_router(admin_user_id=999),'stats',event)
-    text=event.message.answer.await_args.args[0]
+    text=report_text(event.message.answer)
     assert '- Выбор сюжета (клики): 1' in text and '- Оплачено пакетов: 1' in text
-    assert '- Выручка: 590,00 ₽' in text
-    assert '- YouTube: 1 польз. / 1 покуп. / 590,00 ₽' in text
+    assert '- Выручка: 490,00 ₽' in text
+    assert '- YouTube: 1 польз. / 1 покуп. / 490,00 ₽' in text
     assert 'https://max.ru/se14596751_1_bot?start=youtube' in text
 
 

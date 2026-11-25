@@ -48,13 +48,13 @@ SALE_CASES = [
     ('credit', 1, ('buy_credit_99',)), ('credit', 3, ('buy_credit_199',)),
     ('credit_promo', 3, ('buy_credit_199','buy_credit_149')),
     ('credit', 5, ('buy_credit_299',)), ('credit', 15, ('buy_credit_799',)),
-    ('audio', 'fun', ('buy_song_199',)), ('audio', 'gift', ('buy_song_490',)),
+    ('audio', 'fun', ('buy_song_159',)), ('audio', 'gift', ('buy_song_290',)),
     ('gift_discount', 'gift', ('buy_song_490',)),
     ('musical', 'direct', ('buy_music_direct',)),
     ('musical', 'upsell', ('buy_music_upsell','buy_music_card_149')),
     ('cartoon', 'short', ('buy_cartoon_390',)), ('cartoon', 'long', ('buy_cartoon_1290',)),
-    ('photo', 590, ('buy_photo_590',)), ('photo', 990, ('buy_photo_990',)),
-    ('photo', 1490, ('buy_photo_1490',)),
+    ('photo', 590, ('buy_photo_trial_490',)), ('photo', 990, ('buy_photo_standard_690',)),
+    ('photo', 1490, ('buy_photo_premium_990',)),
 ]
 
 
@@ -127,13 +127,13 @@ async def test_invalid_photo_webhooks_never_count_sales(credit_db,sales_payments
 async def test_photo_personal_signed_link_matches_persisted_product(credit_db,sales_payments,tariff):
     order = await make_order(credit_db,'photo',tariff)
     link = await sales_payments.create_payment_link(101,order_id=order['order_id'],
-                                                   amount=tariff,description=order['product_name'])
+                                                   amount=order['amount_kopecks']//100,description=order['product_name'])
     assert await sales_payments.create_payment_link(101,order_id=order['order_id'],
-             amount=tariff,description=order['product_name']) == link
+             amount=order['amount_kopecks']//100,description=order['product_name']) == link
     fields = parse_form_fields(parse_qsl(urlsplit(link).query))
     assert fields['_param_package_id'] == f'photo_{tariff}'
     assert fields['order_id'] == order['order_id']
-    assert fields['products'][0]['price'] == f'{tariff}.00'
+    assert fields['products'][0]['price'] == f"{order['amount_kopecks']//100}.00"
     assert sign_link_payload({k:v for k,v in fields.items() if k!='sign'},sales_payments.secret) == fields['sign']
     assert sales_payments._request_payment_link.await_count == (2 if tariff in (590, 990) else 1)
 
@@ -198,5 +198,5 @@ async def test_all_source_names_are_listed_once_with_confirmed_revenue(credit_db
         await deliver_webhook(sales_payments,order,payment_id=str(user))
     rows = await credit_db.get_source_stats(admin_id=999)
     assert len({r['source'] for r in rows}) == len(rows)
-    assert next(r for r in rows if r['source']=='partner')['revenue_kopecks'] == 59000
+    assert next(r for r in rows if r['source']=='partner')['revenue_kopecks'] == 49000
     assert next(r for r in rows if r['source']=='partner')['total_users'] == 1

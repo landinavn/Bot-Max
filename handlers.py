@@ -394,7 +394,7 @@ PHOTO_FAMILY_EXAMPLE_FILES = (
 )
 PHOTO_NY_TARIFF_EXAMPLE_FILES = (r"photo_fam_3.webp", *NEW_PHOTO_EXAMPLE_FILES)
 
-SONG_PROMO_EXPIRED_TEXT = 'К сожалению, 48 часов уже прошли. Вы можете приобрести песню по обычной цене 490 ₽.'
+SONG_PROMO_EXPIRED_TEXT = 'К сожалению, 48 часов уже прошли. Вы можете приобрести песню по обычной цене 290 ₽.'
 
 CATEGORY_BUTTONS = (
     ('🔮 Карты желаний', 'cat_vision'),
@@ -533,19 +533,19 @@ CATEGORY_MENUS = {
         (
             "🎵 Музыкальная мастерская!\n\n"
             "Мы создаем персональные песни с вашим именем или поздравлением. Выберите формат:\n\n"
-            "🔥 «Песня по фану» (199 ₽)\n"
+            "🔥 «Песня по фану» (159 ₽)\n"
             "2 варианта на выбор. Без превью — сразу после оплаты. "
             "Если не понравится — 1 бесплатная перегенерация (ещё 2 варианта). "
             "Идеально, чтобы удивить друга или коллегу.\n\n"
-            "🎁 «Песня в подарок» (490 ₽)\n"
+            "🎁 «Песня в подарок» (290 ₽)\n"
             "Полный трек 2–3 минуты + минусовка + текст. "
             "Сначала послушайте превью с защитой (10–15 сек), чтобы понять стиль. "
             "После оплаты — чистый звук без водяных знаков и звуковой метки. "
             "Если что-то не так — бесплатно перегенерируем."
         ),
         (
-            ("🔥 Песня по фану (199 ₽)", "audio_tariff_fun"),
-            ("🎁 Песня в подарок (490 ₽)", "audio_tariff_gift"),
+            ("🔥 Песня по фану (159 ₽)", "audio_tariff_fun"),
+            ("🎁 Песня в подарок (290 ₽)", "audio_tariff_gift"),
             ("⬅️ Назад", "back_to_main"),
         ),
     ),
@@ -579,7 +579,7 @@ AUDIO_FUN_PAYMENT_TEXT = (
     "Мы сгенерируем 2 варианта специально под ваш сценарий. Вы сможете выбрать лучший и скачать его в MP3.\n\n"
     "Что если не понравится? Мы бесплатно перегенерируем песню 1 раз — без вопросов и доплат. "
     "Просто нажмите «Не то, ещё раз» после прослушивания.\n\n"
-    "199 ₽ — и через минуту у вас будет два трека на выбор."
+    "159 ₽ — и через минуту у вас будет два трека на выбор."
 )
 
 AUDIO_FUN_SUCCESS_TEXT = (
@@ -623,7 +623,7 @@ AUDIO_GIFT_SCENARIOS = {
     "gift_scen_mother_bday": (BIRTHDAY_TITLE, MOTHER_DETAILS_PROMPT),
 }
 
-CATEGORY_MENUS['cat_audio']=((), '🎵 Создадим вашу личную песню!\n\nВыберите повод, затем жанр и голос. Расскажите, кому посвящена песня и что хотите передать. Мы покажем слова до оплаты.\n\nПосле проверки можно выбрать песню, музыкальную или мульт-открытку.', tuple((label,key) for key,(label,_) in AUDIO_GIFT_SCENARIOS.items())+(('🔥 Короткая песня — 199 ₽','audio_tariff_fun'),('🏠 Главный экран','back_to_main')))
+CATEGORY_MENUS['cat_audio']=((), '🎵 Создадим вашу личную песню!\n\nВыберите повод, затем жанр и голос. Расскажите, кому посвящена песня и что хотите передать. Мы покажем слова до оплаты.\n\nПосле проверки можно выбрать песню, музыкальную или мульт-открытку.', tuple((label,key) for key,(label,_) in AUDIO_GIFT_SCENARIOS.items())+(('🔥 Короткая песня — 159 ₽','audio_tariff_fun'),('🏠 Главный экран','back_to_main')))
 
 AUDIO_GIFT_SCENARIO_TEXT = (
     "Для кого песня?\n\n"
@@ -712,18 +712,18 @@ PHOTO_CLICK_EVENTS = {
 PHOTO_TARIFF_TEXT = (
     "Вы выбрали стиль: {style_name}.\n\n"
     "Теперь выберите тариф, который вам подходит:\n\n"
-    "🔹 «Попробовать» — 590 ₽\n"
+    "🔹 «Попробовать» — 490 ₽\n"
     "Вы получите 3 профессиональных фото в одном стиле. Отличный вариант, чтобы оценить качество!\n\n"
-    "🔹 «Фотосессия» — 990 ₽\n"
+    "🔹 «Фотосессия» — 690 ₽\n"
     "Вы получите 5 фото в одном стиле. Полноценная мини-сессия для вашего портфолио или соцсетей.\n\n"
-    "🔹 «Премиум» — 1490 ₽\n"
+    "🔹 «Премиум» — 990 ₽\n"
     "7 фото (5 в одном стиле и 2 в другом). Снимки в максимальном разрешении 4K — готовы к печати "
     "в большом формате! Вы сможете загрузить два разных фото для разных образов."
 )
 PHOTO_TARIFF_BUTTONS = (
-    ("Тариф «Попробовать» (590 ₽)", "photo_tariff_590"),
-    ("Тариф «Фотосессия» (990 ₽)", "photo_tariff_990"),
-    ("Тариф «Премиум» (1490 ₽)", "photo_tariff_1490"),
+    ("Тариф «Попробовать» (490 ₽)", "photo_tariff_590"),
+    ("Тариф «Фотосессия» (690 ₽)", "photo_tariff_990"),
+    ("Тариф «Премиум» (990 ₽)", "photo_tariff_1490"),
     ("⬅️ Назад", "cat_photo"),
 )
 PHOTO_TARIFF_SOON_TEXT = (
@@ -745,7 +745,7 @@ PHOTO_NY_STANDARD_TEMPLATES = {
 }
 PHOTO_NY_ALL_TEMPLATES = {**PHOTO_NY_TRIAL_TEMPLATES, **PHOTO_NY_STANDARD_TEMPLATES}
 PHOTO_TRIAL_CHECKOUT_TEXT = (
-    "Вы выбрали тариф «Попробовать» (3 фото) за 590 ₽.\n\n"
+    "Вы выбрали тариф «Попробовать» (3 фото) за 490 ₽.\n\n"
     "Для продолжения, пожалуйста, оплатите заказ по ссылке ниже. После оплаты обязательно вернитесь в бота!"
 )
 
@@ -991,7 +991,7 @@ def campaign_bot_link(bot_link, source):
 
 def photo_trial_payment_keyboard(url):
     return InlineKeyboardBuilder().row(
-        LinkButton(text="Оплатить 590 ₽", url=url)
+        LinkButton(text="Оплатить 490 ₽", url=url)
     ).row(CallbackButton(text="Выбрать сюжет", payload="photo_choose_template")).row(
         CallbackButton(text="⬅️ Назад", payload="photo_tariff_back")
     ).as_markup()
@@ -1329,7 +1329,7 @@ def create_router(
                                                    amount=order['amount_kopecks']//100,description=order['product_name'])
             amount=order['amount_kopecks']//100
             await context.update_data(photo_amount_kopecks=order['amount_kopecks'],photo_product_name=order['product_name'])
-            text=(PHOTO_TRIAL_CHECKOUT_TEXT if amount==590 and tariff==590 else
+            text=(PHOTO_TRIAL_CHECKOUT_TEXT if amount==490 and tariff==590 else
                   f"Вы выбрали {name} ({PHOTO_PACKAGE_SIZES[tariff]} фото). Стоимость: {amount} ₽. "+
                   ("Скидка 20%. " if order.get('promo_token') else "")+
                   "После оплаты вернитесь в бота.")
@@ -1341,7 +1341,7 @@ def create_router(
                         'Фото девочки понадобится только после подтверждения оплаты.')
             keyboard=(photo_trial_payment_keyboard(link) if tariff==590 else
                       InlineKeyboardBuilder().row(LinkButton(text=f'Оплатить {amount} ₽',url=link)).as_markup())
-            if tariff==590 and amount!=590:
+            if tariff==590 and amount!=490:
                 keyboard=InlineKeyboardBuilder().row(LinkButton(text=f'Оплатить {amount} ₽',url=link)).row(
                     CallbackButton(text='Выбрать сюжет',payload='photo_choose_template')).as_markup()
             if tariff==990 and data.get('photo_style')=='photo_style_ny':
@@ -1852,12 +1852,14 @@ def create_router(
             f"- Использовано кредитов на изображения: {c('use_promo_image_credit')}\n"
             f"- Использовано бесплатных оживлений: {c('use_free_animation')}\n\n"
             "📸 Фотосессии:\n"
-            f"- Попробовать (590 ₽): {c('buy_photo_590')}\n"
-            f"- Стандарт (990 ₽): {c('buy_photo_990')}\n"
-            f"- Премиум (1490 ₽): {c('buy_photo_1490')}\n\n"
+            f"- Попробовать (490 ₽): {c('buy_photo_trial_490')}\n"
+            f"- Стандарт (690 ₽): {c('buy_photo_standard_690')}\n"
+            f"- Премиум (990 ₽): {c('buy_photo_premium_990')}\n"
+            f"- Прежние тарифы 590 / 990 / 1490 ₽: {c('buy_photo_590')} / {c('buy_photo_990')} / {c('buy_photo_1490')}\n\n"
             "🎵 Аудиопесни:\n"
-            f"- Песня по фану (199 ₽): {c('buy_song_199')}\n"
-            f"- Песня в подарок (490 ₽): {c('buy_song_490')}\n\n"
+            f"- Песня по фану (159 ₽): {c('buy_song_159')}\n"
+            f"- Песня в подарок (290 ₽): {c('buy_song_290')}\n"
+            f"- Прежние тарифы 199 / 490 ₽: {c('buy_song_199')} / {c('buy_song_490')}\n\n"
             "💌 Музыкальные открытки:\n"
             f"- Прямая покупка (299 ₽): {c('buy_music_direct')}\n"
             f"- Апгрейд к открытке (доплата 149 ₽): {c('buy_music_upsell')}\n\n"
@@ -1879,9 +1881,10 @@ def create_router(
             f"- Ранее мульт-открытки (590): {c('promo_buy_cartoon_590')}\n"
             f"- День матери — мультфильм (590): {c('promo_buy_cartoon_mother_590')}\n"
             f"- Ранее День матери (790): {c('promo_buy_cartoon_790')}\n"
-            f"- Фотосессии (590): {c('promo_buy_photo_590')}\n"
-            f"- Фотосессии (990): {c('promo_buy_photo_990')}\n"
-            f"- Фотосессии (1490): {c('promo_buy_photo_1490')}\n\n"
+            f"- Попробовать со скидкой: {c('promo_buy_photo_trial_490')}\n"
+            f"- Стандарт со скидкой: {c('promo_buy_photo_standard_690')}\n"
+            f"- Премиум со скидкой: {c('promo_buy_photo_premium_990')}\n"
+            f"- Прежние фототарифы со скидкой: {c('promo_buy_photo_590')} / {c('promo_buy_photo_990')} / {c('promo_buy_photo_1490')}\n\n"
             "📍 Рекламные метки:\n" + "\n".join(
                 f"- {label}: {ad_sources.get(tag, 0)}" for tag,label in AD_SOURCE_LABELS.items()
             ) + "\n\n"
@@ -1931,13 +1934,13 @@ def create_router(
             f"- Сгенерировано фото: {rabbit_stats['generated_photos']}\n"
             f"- Завершено фотосессий: {rabbit_stats['completed_packages']}\n"
             f"- Выручка: {rabbit_stats['revenue_kopecks'] // 100},{rabbit_stats['revenue_kopecks'] % 100:02d} ₽\n\n"
-            "👩‍👧 Мама + дочка — 990 ₽ / 5 фото:\n"
+            "👩‍👧 Мама + дочка — 690 ₽ / 5 фото:\n"
             f"- Выбор сюжета (клики): {c('select_photo_mom_daughter_5')}\n"
             f"- Оплачено пакетов: {mom_five_stats['paid_packages']}\n"
             f"- Сгенерировано фото: {mom_five_stats['generated_photos']}\n"
             f"- Завершено фотосессий: {mom_five_stats['completed_packages']}\n"
             f"- Выручка: {mom_five_stats['revenue_kopecks'] // 100},{mom_five_stats['revenue_kopecks'] % 100:02d} ₽\n\n"
-            "💃 Женщина в красном — 990 ₽ / 5 фото:\n"
+            "💃 Женщина в красном — 690 ₽ / 5 фото:\n"
             f"- Выбор сюжета (клики): {c('select_photo_woman_red')}\n"
             f"- Оплачено пакетов: {woman_red_stats['paid_packages']}\n"
             f"- Сгенерировано фото: {woman_red_stats['generated_photos']}\n"
@@ -4526,7 +4529,7 @@ def create_router(
             await increment_counter(AUDIO_FUN_COUNTERS[event.callback.payload], user_id=user_id)
         await context.clear()
         if 'audio_fun_'+scenario in MOTHER_SCENARIOS:
-            await _reply(event,'🎵 Для мамы подготовим полную песню. Стоимость — 490 ₽.')
+            await _reply(event,'🎵 Для мамы подготовим полную песню. Стоимость — 290 ₽.')
         await context.update_data(song_scenario=scenario)
         if await song_review.start_questions(event,context,flow='fun',prompt=AUDIO_FUN_SCENARIOS[event.callback.payload][1],state=PosterStates.waiting_for_song_details):return
         await context.set_state(PosterStates.waiting_for_song_details)
@@ -4765,7 +4768,7 @@ def create_router(
                     if (await context.get_data()).get('audio_checkout_id') != order_id:
                         return
                     order = await get_audio_order(order_id)
-                    label = 'Оплатить 199 ₽ и получить 2 варианта' if audio_format == 'fun' else f"Оплатить {order['amount_kopecks'] // 100} ₽ и получить полный трек"
+                    label = f"Оплатить {order['amount_kopecks'] // 100} ₽ и получить 2 варианта" if audio_format == 'fun' else f"Оплатить {order['amount_kopecks'] // 100} ₽ и получить полный трек"
                     keyboard = InlineKeyboardBuilder().row(LinkButton(text=label, url=link)).row(
                         CallbackButton(text='⬅️ Назад', payload='audio_tariff_fun' if audio_format == 'fun' else 'gift_choose_scenario')).as_markup()
                     await _reply(event, f'💳 Для оплаты перейдите по ссылке ниже. После оплаты я автоматически пришлю песню.\nЗаказ: {order_id}', attachments=[keyboard])
@@ -4926,7 +4929,7 @@ def create_router(
             await event.ack(notification='Отправьте /start, чтобы открыть меню.')
             return
         await event.ack(notification='Открываю подарок…')
-        text = 'Песня в подарок стоит 490 ₽. Перейдите по ссылке для оплаты:'
+        text = 'Песня в подарок стоит 290 ₽. Перейдите по ссылке для оплаты:'
         order = await latest_gift_preview(user_id)
         if order:
             try:
@@ -4939,7 +4942,7 @@ def create_router(
         await context.clear()
         await context.set_state(PosterStates.waiting_for_mode)
         buttons = [(label, payload) for payload, (label, _) in AUDIO_GIFT_SCENARIOS.items()]
-        await _reply(event, 'Песня в подарок стоит 490 ₽. ' +
+        await _reply(event, 'Песня в подарок стоит 290 ₽. ' +
                      'Сначала выберите сценарий и напишите детали песни. После превью я пришлю ссылку на оплату по действующей цене.',
                      attachments=[navigation_keyboard((*buttons, ('⬅️ Назад', 'cat_audio')), columns=2, max_pair_label=18)])
 
@@ -5708,7 +5711,7 @@ def create_router(
     async def finish_fun_details(event,context):
         await context.set_state(PosterStates.waiting_for_audio_fun_payment)
         await _reply(event,AUDIO_FUN_PAYMENT_TEXT,attachments=[await audio_payment_keyboard(event,context,'fun',(
-            ('Оплатить 199 ₽ и получить 2 варианта','audio_fun_payment_soon'),('⬅️ Назад','audio_tariff_fun')))])
+            ('Оплатить 159 ₽ и получить 2 варианта','audio_fun_payment_soon'),('⬅️ Назад','audio_tariff_fun')))])
 
     async def start_card_song_review(event,context,kind,target):
         # Reopening an already reviewed checkout never loses its words or creates a second bill.
@@ -5824,7 +5827,7 @@ def create_router(
             elif payments is None:await _reply(event,'Оплата временно недоступна. Текст сохранён.')
             else:
                 order_id,link=await prepare_audio_checkout(context,event.get_ids()[1],'gift',await context.get_data())
-                b=InlineKeyboardBuilder().row(LinkButton(text='💳 Оплатить песню — 490 ₽',url=link)).row(home_button())
+                b=InlineKeyboardBuilder().row(LinkButton(text='💳 Оплатить песню — 290 ₽',url=link)).row(home_button())
                 await _reply(event,'🎵 Слова и голос выбраны. После оплаты создадим песню и пришлём её в этот чат.',attachments=[b.as_markup()])
         elif flow=='cartoon':
             if not await ensure_cartoon_access(event,context,acknowledged=True):return

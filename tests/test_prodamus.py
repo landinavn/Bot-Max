@@ -505,7 +505,7 @@ async def audio_notification(payments, kind='fun', user_id=456, payment_id='audi
             '_param_user_id': str(user_id), '_param_credits': '0', '_param_package_id': fields['_param_package_id']}
 
 
-@pytest.mark.parametrize('kind,amount', [('fun', '199.00'), ('gift', '490.00')])
+@pytest.mark.parametrize('kind,amount', [('fun', '159.00'), ('gift', '290.00')])
 @pytest.mark.parametrize('encoding', ['form', 'json', 'multipart'])
 async def test_audio_webhook_queues_paid_order_once_without_crediting_images(client, payments, credit_db, kind, amount, encoding):
     data = await audio_notification(payments, kind)

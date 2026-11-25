@@ -23,9 +23,9 @@ RATES=[
     ('music_card','direct',29900,23900,'buy_music_direct','promo_buy_music_card'),
     ('cartoon','short',39000,31200,'buy_cartoon_390','promo_buy_cartoon_390'),
     ('cartoon','long',129000,103200,'buy_cartoon_1290','promo_buy_cartoon_1290'),
-    ('photo',590,59000,47200,'buy_photo_590','promo_buy_photo_590'),
-    ('photo',990,99000,79200,'buy_photo_990','promo_buy_photo_990'),
-    ('photo',1490,149000,119200,'buy_photo_1490','promo_buy_photo_1490'),
+    ('photo',590,49000,39200,'buy_photo_trial_490','promo_buy_photo_trial_490'),
+    ('photo',990,69000,55200,'buy_photo_standard_690','promo_buy_photo_standard_690'),
+    ('photo',1490,99000,79200,'buy_photo_premium_990','promo_buy_photo_premium_990'),
 ]
 
 
@@ -152,7 +152,7 @@ async def test_counter_error_rolls_back_payment_coupon_and_redemption(credit_db,
     original=credit_db.increment_counter
     async def fail(key,**kwargs):
         await original(key,**kwargs)
-        if key=='promo_buy_photo_590':
+        if key=='promo_buy_photo_trial_490':
             raise __import__('sqlite3').OperationalError('counter failed')
     monkeypatch.setattr(credit_db,'increment_counter',fail)
     assert (await deliver_webhook(sales_payments,order)).status==503
@@ -295,7 +295,7 @@ async def test_promo_cartoon_theme_then_tariff_checkout(credit_db,sales_payments
     assert pay.send.await_args.kwargs['attachments'][0].payload.buttons[0][0].text.endswith(f'Оплатить {amount} ₽')
 
 
-@pytest.mark.parametrize('tariff,amount',[(590,472),(990,792),(1490,1192)])
+@pytest.mark.parametrize('tariff,amount',[(590,392),(990,552),(1490,792)])
 async def test_promo_photo_style_then_tariff_checkout(credit_db,sales_payments,tariff,amount):
     await credit_db.set_promo(456,'photo')
     router,context=create_router(admin_user_id=999,payments=sales_payments),await ready_context()
@@ -321,7 +321,7 @@ async def test_repeat_stats_block_after_sales_excludes_admin(credit_db):
     assert text.index('Всего покупок:')<text.index('🔁 Повторные покупки')<text.index('📍 ИСТОЧНИКИ')
     assert 'Мульт-открытки (1290)' not in text
     for label in ('Музыкальные открытки','Мульт-открытки (390)',
-                  'Фотосессии (590)','Фотосессии (990)','Фотосессии (1490)'):
+                  'Попробовать со скидкой','Стандарт со скидкой','Премиум со скидкой'):
         assert f'- {label}: 1' in text
 
 

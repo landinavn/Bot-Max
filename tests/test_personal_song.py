@@ -120,7 +120,7 @@ async def test_music_draft_can_become_song_or_cartoon_without_paying_for_wrong_p
     await dispatch_callback(router,callback_event('song_review:'+product+':'+token),ctx)
     if product=='audio':
         order=await database.get_audio_order((await ctx.get_data())['audio_checkout_id'])
-        assert order['lyrics']==WORDS and order['amount_kopecks']==49000 and not order['preview_requested']
+        assert order['lyrics']==WORDS and order['amount_kopecks']==29000 and not order['preview_requested']
         assert not order['job_id'] and order['status']=='pending'
     else:
         assert (await ctx.get_data())['song_product_kind']=='cartoon'

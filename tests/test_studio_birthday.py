@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+import aiosqlite
 
 import handlers
 from photo_orders import PaidPhotoWorker
@@ -21,6 +22,9 @@ async def birthday_context():
 
 async def old_order(db, payments, *, paid=True, number='11'):
     key = await db.create_photo_order('photo_456_old_birthday', 456, 590)
+    async with aiosqlite.connect(db.DATABASE_PATH) as connection:
+        await connection.execute('UPDATE photo_orders SET amount_kopecks=59000 WHERE order_id=?',(key,))
+        await connection.commit()
     await db.update_photo_order(key, style='photo_style_studio', template='birthday_girl', birthday_number=number)
     if paid:
         assert (await deliver_webhook(payments, await db.get_photo_order(key))).status == 200

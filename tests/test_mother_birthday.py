@@ -68,7 +68,7 @@ async def test_product_review_invoice_and_paid_resume(credit_db,payments,monkeyp
     d=await ctx.get_data();picture.assert_not_awaited();handlers.generate_song.assert_not_awaited()
     if entry=='audio':
         order=await database.get_audio_order(d['audio_checkout_id'])
-        assert order['amount_kopecks']==49000 and order['scenario']==occasion and order['lyrics']==words
+        assert order['amount_kopecks']==29000 and order['scenario']==occasion and order['lyrics']==words
         assert not order['job_id'] and not order['submit_started']
     elif entry=='music':
         order=await database.get_musical_order(d['music_prepaid_id'])

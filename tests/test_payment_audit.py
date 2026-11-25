@@ -24,11 +24,11 @@ CATALOG = [
     ('credit',1,99,'1 генерация (Открытка)'), ('credit',3,199,'3 генерации'),
     ('credit_promo',3,149,'3 генерации'), ('credit',5,299,'5 генераций'),
     ('credit',15,799,'15 генераций'),
-    ('photo',590,590,'Фотосессия Попробовать'), ('photo',990,990,'Фотосессия Стандарт'),
-    ('photo',1490,1490,'Фотосессия Премиум'),
-    ('audio','fun',199,'Песня по фану'), ('audio','gift',490,'Песня в подарок'),
+    ('photo',590,490,'Фотосессия Попробовать'), ('photo',990,690,'Фотосессия Стандарт'),
+    ('photo',1490,990,'Фотосессия Премиум'),
+    ('audio','fun',159,'Песня по фану'), ('audio','gift',290,'Песня в подарок'),
     ('musical','direct',299,'Музыкальная открытка'), ('musical','upsell',149,'Апгрейд открытки с песней'),
-    ('cartoon','short',590,'Мульт-открытка'), ('cartoon','long',1290,'Мульт-поздравление (до 30 сек)'),
+    ('cartoon','short',390,'Мульт-открытка'), ('cartoon','long',1290,'Мульт-поздравление (до 30 сек)'),
 ]
 
 
@@ -197,7 +197,7 @@ async def test_legacy_gift_preview_reprices_without_second_music_generation(cred
     await credit_db.update_audio_order(old['order_id'],preview_url='https://cdn.example/preview.mp3',
                                       tracks_json=json.dumps(tracks),lyrics='[Verse]\nLyrics',preview_delivered=1)
     new=await credit_db.song_checkout_order(old['order_id'])
-    assert new['order_id']!=old['order_id'] and new['amount_kopecks']==49000
+    assert new['order_id']!=old['order_id'] and new['amount_kopecks']==29000
     assert new['tracks_json']==json.dumps(tracks)
     assert new['preview_url']=='https://cdn.example/preview.mp3'
     assert (await credit_db.get_audio_order(old['order_id']))['amount_kopecks']==39200

@@ -1,3 +1,4 @@
+from test_handlers import report_text
 """Rabbit trial uses one mother's portrait, one son's portrait, then a shared family frame."""
 from email.parser import BytesParser
 from email.policy import default
@@ -56,7 +57,7 @@ async def test_rabbit_paid_checkout_webhook_and_result_stats(credit_db,sales_pay
     context=await ready_context()
     await select_rabbit(router,context)
     order=await credit_db.get_photo_order((await context.get_data())['photo_order_id'])
-    assert order['amount_kopecks']==(47200 if promo else 59000)
+    assert order['amount_kopecks']==(39200 if promo else 49000)
     assert order['template']=='rabbit' and order['style']=='photo_style_ny'
     frames.assert_not_awaited()
     assert (await credit_db.get_photo_template_stats('rabbit'))['paid_packages']==0
@@ -68,7 +69,7 @@ async def test_rabbit_paid_checkout_webhook_and_result_stats(credit_db,sales_pay
     await call_handler(router,'collect_photosession_photo',photo_event(),context)
     stats=await credit_db.get_photo_template_stats('rabbit',admin_id=999)
     assert stats=={'paid_packages':1,'revenue_kopecks':order['amount_kopecks'],'generated_photos':3,'completed_packages':1}
-    assert (await credit_db.get_all_counters())['buy_photo_590']==1
+    assert (await credit_db.get_all_counters())['buy_photo_trial_490']==1
     assert (await credit_db.get_photo_package_balance(order['order_id']))==0
     assert await credit_db.get_active_promo(456,'photo') is not None
     source=next(r for r in await credit_db.get_source_stats(admin_id=999) if r['source']=='youtube')
@@ -173,9 +174,9 @@ async def test_rabbit_stats_exclude_admin_and_count_payments_once(credit_db,sale
         await deliver_webhook(sales_payments,await credit_db.get_photo_order(key),payment_id=f'p-{actor}')
     event=message_event('/stats');event.get_ids=lambda:(123,999)
     await call_handler(create_router(admin_user_id=999),'stats',event)
-    block=event.message.answer.await_args.args[0].split('🐰 Фотосессия «С кроликом»:',1)[1].split('👑 Эксклюзив',1)[0]
+    block=report_text(event.message.answer).split('🐰 Фотосессия «С кроликом»:',1)[1].split('👑 Эксклюзив',1)[0]
     assert '- Выбор сюжета (клики): 1' in block and '- Оплачено пакетов: 1' in block
-    assert '- Выручка: 590,00 ₽' in block and '- Сгенерировано фото: 0' in block
+    assert '- Выручка: 490,00 ₽' in block and '- Сгенерировано фото: 0' in block
 
 
 @pytest.fixture(autouse=True)

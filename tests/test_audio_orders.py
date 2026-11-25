@@ -32,7 +32,7 @@ async def test_audio_order_is_immutable_and_survives_reinitialization(credit_db)
     await credit_db.init_db()
     saved = await credit_db.get_audio_order(name)
     assert saved['user_id'] == 123 and saved['details'] == 'Аня, любит горы'
-    assert saved['prompt'] == '[Verse]\nАня' and saved['amount_kopecks'] == 19900
+    assert saved['prompt'] == '[Verse]\nАня' and saved['amount_kopecks'] == 15900
 
 
 async def test_audio_payment_is_atomic_idempotent_and_counts_actual_revenue(credit_db):
@@ -42,7 +42,7 @@ async def test_audio_payment_is_atomic_idempotent_and_counts_actual_revenue(cred
     assert sum(accepted) == 1
     user = await credit_db.get_user(123)
     assert user['balance'] == 0 and user['total_purchases'] == 1 and user['total_generations'] == 0
-    assert (await credit_db.get_stats_by_source('yandex_newyear'))['total_revenue'] == 199
+    assert (await credit_db.get_stats_by_source('yandex_newyear'))['total_revenue'] == 159
     assert (await credit_db.get_all_counters())['buy_audio_fun'] == 1
     with pytest.raises(ValueError):
         await credit_db.mark_audio_paid(name, 'another-payment')
@@ -326,7 +326,7 @@ async def test_song_checkout_reprices_atomically_and_keeps_issued_invoices(credi
     current = candidates[0]
     assert len({item['order_id'] for item in candidates}) == 1
     assert current['order_id'] != name
-    assert current['amount_kopecks'] == 49000 and current['package_id'] == 'audio_gift'
+    assert current['amount_kopecks'] == 29000 and current['package_id'] == 'audio_gift'
     assert current['tracks_json'] == tracks and current['lyrics'] == 'saved lyrics'
     assert current['payment_link'] is None
     historical = await credit_db.get_audio_order(name)
@@ -334,7 +334,7 @@ async def test_song_checkout_reprices_atomically_and_keeps_issued_invoices(credi
     assert historical['amount_kopecks'] == 39200
     now += 48 * 3600
     full = await credit_db.song_checkout_order(current['order_id'])
-    assert full['amount_kopecks'] == 49000 and full['tracks_json'] == tracks
+    assert full['amount_kopecks'] == 29000 and full['tracks_json'] == tracks
     # Already issued 392 RUB invoices remain valid; cached tracks need no second API call.
     await credit_db.mark_audio_paid(name, 'discount-payment')
     submit = AsyncMock()
@@ -355,10 +355,10 @@ async def test_background_gift_preview_uses_current_price_without_charging_or_re
     await PaidAudioWorker(bot, generator=submit, waiter=wait).process(name)
     buttons = bot.send_message.await_args.kwargs['attachments'][0].payload.buttons
     pay = buttons[1][0]
-    assert pay.text == 'Оплатить 490 ₽ и получить полный трек'
+    assert pay.text == 'Оплатить 290 ₽ и получить полный трек'
     assert pay.payload.startswith('audio_gift_checkout:')
     saved = await credit_db.get_audio_order(pay.payload.split(':', 1)[1])
-    assert saved['amount_kopecks'] == 49000 and saved['tracks_json']
+    assert saved['amount_kopecks'] == 29000 and saved['tracks_json']
     assert 'https://audio.example/one.mp3' not in bot.send_message.await_args.kwargs['text']
     assert (await credit_db.get_user(123))['total_purchases'] == 0
     submit.assert_awaited_once()

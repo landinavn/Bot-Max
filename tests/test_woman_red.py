@@ -1,3 +1,4 @@
+from test_handlers import report_text
 """Paid five-frame solo session: ownership, continuation, styling and fulfillment."""
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -46,7 +47,7 @@ async def test_admin_gets_solo_photo_request_and_five_portraits_without_payment(
     assert await credit_db.get_active_promo(456, 'photo') is None
 
 
-@pytest.mark.parametrize('promo,amount', [(False, 99000), (True, 79200)])
+@pytest.mark.parametrize('promo,amount', [(False, 69000), (True, 55200)])
 async def test_paid_red_webhook_notification_resume_and_five_slot_delivery(credit_db, sales_payments, promo, amount):
     if promo:
         await credit_db.set_promo(456, 'photo')
@@ -73,7 +74,7 @@ async def test_paid_red_webhook_notification_resume_and_five_slot_delivery(credi
     await call_handler(router, 'collect_photosession_photo', photo_event(), context)
     assert await credit_db.get_photo_template_stats('woman_red', admin_id=999) == {
         'paid_packages': 1, 'revenue_kopecks': amount, 'generated_photos': 5, 'completed_packages': 1}
-    assert (await credit_db.get_all_counters())['buy_photo_990'] == 1
+    assert (await credit_db.get_all_counters())['buy_photo_standard_690'] == 1
     assert await credit_db.get_active_promo(456, 'photo') is not None
     assert await credit_db.get_photo_package_balance(key) == 0
     await dispatch_callback(router, callback_event('photo_resume:' + key), context)
@@ -160,11 +161,11 @@ async def test_stats_separate_red_from_other_990_template_and_admin(credit_db, s
     event = message_event('/stats')
     event.get_ids = lambda: (123,999)
     await call_handler(create_router(admin_user_id=999), 'stats', event)
-    text = event.message.answer.await_args.args[0]
-    block = text.split('💃 Женщина в красном — 990 ₽ / 5 фото:',1)[1].split('👑 Эксклюзив',1)[0]
+    text = report_text(event.message.answer)
+    block = text.split('💃 Женщина в красном — 690 ₽ / 5 фото:',1)[1].split('👑 Эксклюзив',1)[0]
     assert '- Оплачено пакетов: 1' in block and '- Выбор сюжета (клики): 1' in block
-    assert '- Выручка: 990,00 ₽' in block
-    assert len(text) < 4000
+    assert '- Выручка: 690,00 ₽' in block
+    assert all(len(c.args[0])<4000 for c in event.message.answer.await_args_list if c.args)
 
 
 @pytest.mark.parametrize('scope,expected', [('wardrobe','match ONLY its exact outfit'), ('all','its exact outfits')])

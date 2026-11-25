@@ -18,7 +18,7 @@ import aiohttp
 from yarl import URL
 
 from config import Config
-from database import repeat_order_value, validate_repeat_invoice, get_photo_order, set_photo_payment_link, PHOTO_TARIFFS, get_cartoon_order, update_cartoon_order, CARTOON_TARIFFS, cartoon_tariff_value, get_musical_order, update_musical_order, MUSICAL_TARIFFS, create_payment_order, get_payment_order, create_audio_order, get_audio_order, update_audio_order, SONG_PROMO_PRODUCT
+from database import AUDIO_TARIFFS, valid_audio_tariff, photo_tariff_value, repeat_order_value, validate_repeat_invoice, get_photo_order, set_photo_payment_link, PHOTO_TARIFFS, get_cartoon_order, update_cartoon_order, CARTOON_TARIFFS, cartoon_tariff_value, get_musical_order, update_musical_order, MUSICAL_TARIFFS, create_payment_order, get_payment_order, create_audio_order, get_audio_order, update_audio_order, SONG_PROMO_PRODUCT
 from database import get_animation_order, update_animation_order, ANIMATION_TARIFFS
 
 PACKAGES = {
@@ -291,11 +291,10 @@ class ProdamusPayments:
             raise ValueError('Нельзя изменить сохранённый аудиозаказ.')
         if order['status'] != 'pending':
             raise ValueError('Аудиозаказ уже оплачен.')
-        expected = {'fun': (19900,'Песня по фану'), 'gift': (49000,'Песня в подарок')}.get(audio_format)
-        if expected != (order['amount_kopecks'],order['product_name']):
-            raise ValueError('Для новой ссылки выберите действующий аудиотариф.')
-        if order['payment_link']:
+        if order['payment_link'] and valid_audio_tariff(order):
             return order['payment_link']
+        if AUDIO_TARIFFS.get(audio_format)!=(order['amount_kopecks'],order['product_name']):
+            raise ValueError('Для новой ссылки выберите действующий аудиотариф.')
         package_id = order['package_id']
         data = {
             'do': 'link', 'order_id': order_id,
@@ -340,7 +339,7 @@ class ProdamusPayments:
         # A saved Prodamus URL may have expired or been disabled by the provider.
         if order['payment_link'] and order['tariff'] not in (590, 990):
             return order['payment_link']
-        if repeat_order_value(order,'photo',PHOTO_TARIFFS.get(order['tariff']),creation=True) != (order['amount_kopecks'],order['product_name']):
+        if repeat_order_value(order,'photo',photo_tariff_value(order),creation=True) != (order['amount_kopecks'],order['product_name']):
             raise ValueError('Для новой ссылки выберите действующий тариф.')
         await validate_repeat_invoice(order,'photo')
         data = {
@@ -477,12 +476,11 @@ class ProdamusPayments:
                     (order['amount_kopecks'], order['quantity'], order['product_name'])):
                 raise ValueError('Неизвестный тариф оживления фото.')
         elif order.get('order_type') == 'audio':
-            expected = {'audio_fun': (19900, 'Песня по фану'), 'audio_gift': (49000, 'Песня в подарок'),
-                        'audio_gift_first': (39200, SONG_PROMO_PRODUCT)}
-            if expected.get(order['package_id']) != (order['amount_kopecks'], order['product_name']):
+            expected_package = 'audio_gift_first' if order['amount_kopecks']==39200 else 'audio_'+order['audio_format']
+            if not valid_audio_tariff(order) or order['package_id']!=expected_package:
                 raise ValueError('Неизвестный аудиотариф.')
         elif order.get('order_type') == 'photo':
-            if repeat_order_value(order,'photo',PHOTO_TARIFFS.get(order['tariff'])) != (order['amount_kopecks'], order['product_name']):
+            if repeat_order_value(order,'photo',photo_tariff_value(order)) != (order['amount_kopecks'], order['product_name']):
                 raise ValueError('Неизвестный фототариф.')
         elif order.get('order_type') == 'cartoon':
             # Сумма уже сверена с сохранённым заказом: ранее выданные счета

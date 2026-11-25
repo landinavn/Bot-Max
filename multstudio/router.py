@@ -364,7 +364,8 @@ def create_router(admin_id, settings, assets):
                 await owner('character' if action=='reference' else 'episode',key)
                 await context.update_data(studio_input=dict(action=action,key=key))
                 await context.set_state(StudioStates.input)
-                await tell(event,'Пришлите публичную HTTPS-ссылку на файл (для референса можно отправить фотографию).',[('Отмена','home')])
+                prompt=('🎵 Отправьте MP3 прямо в чат через «Файл» или как аудио. Можно также прислать публичную HTTPS-ссылку на MP3.\nДо 20 МБ и 10 минут. Лучше выбрать инструментальную музыку без слов. При сборке фон станет тише речи и повторится, если серия длиннее трека.' if action=='music' else 'Пришлите публичную HTTPS-ссылку на файл или фотографию референса.')
+                await tell(event,prompt,[('Отмена','home')])
             elif action=='make':
                 kind,entity,key=parts[1:4]
                 await owner(entity,key)
@@ -563,10 +564,21 @@ def create_router(admin_id, settings, assets):
                         if attachment.type=='image' and getattr(attachment.payload,'url',None):
                             text=attachment.payload.url; break
                 snap=await repo.snapshot(entity,key)
-                asset_id=await assets.retain(snap,'image' if action=='reference' else 'music',url=text,
-                                             suffix='png' if action=='reference' else 'mp3')
-                if action=='reference':
-                    await repo.edit('character',key,dict(row['spec'],reference=asset_id))
+                if action=='music':
+                    attachments=getattr(event.message.body,'attachments',None) or []
+                    if attachments:
+                        tracks=[a for a in attachments if a.type in ('audio','file') and getattr(a.payload,'url',None)]
+                        if len(attachments)!=1 or len(tracks)!=1:
+                            raise ValueError('Отправьте один MP3 через «Файл» или как аудио.')
+                        text=tracks[0].payload.url
+                    from .music import upload_music
+                    await upload_music(assets,snap,text)
+                    await context.clear()
+                    await tell(event,'✅ Фоновая музыка сохранена для этой серии. Теперь можно запустить сборку; сцены заново генерировать не нужно.',
+                               [('🎞 Собрать серию','make:assemble:episode:'+key),('Серия','e:'+key)])
+                    return
+                asset_id=await assets.retain(snap,'image',url=text,suffix='png')
+                await repo.edit('character',key,dict(row['spec'],reference=asset_id))
             elif action=='video_start':
                 value=await repo.set_scene_video_start(key,admin_id,text)
                 await context.clear()

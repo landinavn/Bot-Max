@@ -61,6 +61,7 @@ class Worker:
             video_provider=snap.get('quote',{}).get('video_provider',snap['spec'].get('video_provider'))
             heygen = kind=='video' and video_provider=='heygen'
             silent_heygen = kind=='video' and video_provider=='heygen_video'
+            kling_avatar = kind=='video' and video_provider=='kling_avatar'
             if strict:
                 rules.validate(snap['spec'])
                 from .episode_four_media import validate as validate_four
@@ -120,7 +121,7 @@ class Worker:
             image_url = speech_url = None
             if kind == 'video':
                 image_url = await self.assets.asset_url(snap['assets']['image'])
-                if heygen:
+                if heygen or kling_avatar:
                     speech_url = await self.assets.asset_url(snap['assets']['speech'])
             if not await repo.begin_submission(key):
                 return
@@ -128,6 +129,13 @@ class Worker:
             if kind == 'image':
                 data = await self.providers.image(snap)
                 await self.save_result(item,snap,data=data)
+            elif kind=='video' and kling_avatar:
+                task=await self.providers.kling.avatar(image_url,speech_url,
+                    snap['spec'].get('motion','')+' Preserve the approved cartoon character, framing and apartment. '
+                    'Speak only the supplied audio; no extra speech, subtitles or other characters.')
+                await asyncio.shield(repo.update_job(key,status='polling',provider_id=task,
+                    usage=repo.encoded({'provider':'kling_avatar','stage':'video','input_type':'image_and_approved_audio'}),
+                    lease_until=0,next_attempt=int(time.time())+15))
             elif kind == 'video' and silent_heygen:
                 task=await self.providers.studio_heygen.silent_video(image_url,snap['spec'],key+'-video')
                 await asyncio.shield(repo.update_job(key,status='polling',provider_id=task,usage=repo.encoded({'provider':'heygen_video','stage':'video','input_type':'image_to_video'}),lease_until=0,next_attempt=int(time.time())+15))

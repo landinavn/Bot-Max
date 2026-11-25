@@ -35,6 +35,7 @@ def validate(snap, kind):
     if kind=='video' and snap['spec'].get('video_provider')=='openai':
         from .episode_four_revision import OPENAI_BLOCK
         raise ValueError(OPENAI_BLOCK)
+    if snap['spec'].get('kling_audio_required') and kind in ('image','speech'):return
     if snap['spec'].get('dream_materials_required') or snap['spec'].get('tail_cutaway_scene_id'):
         if len(snap.get('dream_references',[]))!=3 or any(not r.get('image') for r in snap['dream_references']):
             raise ValueError('Сначала подготовьте и утвердите три изображения мечтаний в «Материалы карты». Пустой шаблон не используется.')
@@ -150,7 +151,7 @@ async def production_report(episode_id,settings):
             else:totals[kind]['unknown']+=1
     labels={'image':'Изображения, включая материалы карты','speech':'Озвучка','video':'Анимация'}
     lines=[f"Дополнительных материалов карты готово: {ready} из 3. Новых платных изображений по плану: {totals['image']['calls']}.",
-           'Говорящих сцен HeyGen: 4; OpenAI: 1 (Маша, этап остановлен); немых локальных сцен: 2.',
+           'Говорящих сцен HeyGen: 4; Kling Avatar: 1 (Маша, с утверждённой озвучкой); немых локальных сцен: 2.',
            'Сборка карты желаний и два немых видеоплана: локально, без платного API.']
     for kind,total in totals.items():
         lines.append(labels[kind]+': '+('оценка неполная; известная часть ' if total['unknown'] else '')+dollars(total['known']))

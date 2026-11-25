@@ -173,6 +173,24 @@ class KlingAdapter:
             raise ProviderFailed('Kling не вернул task_id; требуется ручная сверка.')
         return task_id
 
+    async def avatar(self, image_url, audio_url, prompt):
+        """Kling Avatar: image plus the exact approved MP3, no separate avatar creation."""
+        self.ready()
+        from .assets import https_url
+        https_url(image_url);https_url(audio_url)
+        async with httpx.AsyncClient(timeout=60,trust_env=False,transport=self.transport) as client:
+            response=await client.post(self.ENDPOINT,headers={'X-API-Key':self.key},json={
+                'model':'kling','task_type':'avatar',
+                'input':dict(image_url=image_url,local_dubbing_url=audio_url,prompt=prompt,mode='std',batch_size=1),
+                'config':{'service_mode':'public'}})
+        # POST is never automatically retried: a timeout can hide an accepted paid task.
+        if not response.is_success:
+            raise ProviderFailed('Kling Avatar: запрос требует ручной сверки; HTTP '+str(response.status_code))
+        task=response.json().get('data',{}).get('task_id')
+        if not isinstance(task,str) or not task:
+            raise ProviderFailed('Kling Avatar не вернул task_id; требуется ручная сверка.')
+        return task
+
     async def poll(self, task_id):
         self.ready()
         try:
@@ -238,12 +256,12 @@ class Providers:
         else:
             refs = [c['assets']['image'] for c in snap['cast']]
             refs.extend(r['image'] for r in snap.get('prop_references',[]))
-            refs.extend(r['image'] for r in snap.get('dream_references',[]) if r.get('image'))
+            refs.extend(r['image'] for r in snap.get('dream_references',[]) if r.get('image') and not snap['spec'].get('kling_audio_required'))
             if snap.get('location_reference'):
                 refs.append(snap['location_reference'])
         urls = [await self.assets.asset_url(a) for a in refs]
         if snap['target'] == 'scene':
-            prompt_snap=dict(snap,prop_references=[*snap.get('prop_references',[]),*snap.get('dream_references',[])]) if snap.get('dream_references') else snap
+            prompt_snap=dict(snap,prop_references=[*snap.get('prop_references',[]),*snap.get('dream_references',[])]) if snap.get('dream_references') and not snap['spec'].get('kling_audio_required') else snap
             prompt = scene_image_prompt(prompt_snap, urls[-1] if snap.get('location_reference') else None)
         await self.assets.retain(snap,'image_prompt',data=prompt.encode(),suffix='txt',job_id=snap.get('job_id'))
         if refs:

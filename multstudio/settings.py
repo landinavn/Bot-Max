@@ -1,5 +1,6 @@
 """Independent studio settings; never change customer models, prices or credits."""
 import os
+import json
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
@@ -45,6 +46,7 @@ class Settings:
     speech_v3_price: int = 0  # Estimate per 250 characters per utterance.
     heygen_key: str = field(default='', repr=False)
     heygen_price: int = 0  # Optional estimate for one Talking Photo video, no avatar setup.
+    kling_avatar_second_price: int = 52000  # PiAPI std estimate, USD 0.052 per audio second.
     concurrency: int = 1
     enabled: bool = False
 
@@ -61,6 +63,7 @@ class Settings:
                    speech_v3_price=price_from_env('STUDIO_TTS_V3_250_CHARS_USD'),
                    heygen_key=os.getenv('HEYGEN_API_KEY','').strip(),
                    heygen_price=price_from_env('STUDIO_HEYGEN_SCENE_USD'),
+                   kling_avatar_second_price=money(os.getenv('STUDIO_KLING_AVATAR_SECOND_USD','0.052')),
                    concurrency=max(1, min(3, int(os.getenv('STUDIO_CONCURRENCY', '1')))),
                    enabled=os.getenv('STUDIO_ENABLED', '0') == '1')
 
@@ -82,6 +85,13 @@ class Settings:
                 price,model,size=0,'FFmpeg/local dream montage','1080x1920 / 30 FPS'
             elif provider=='heygen_video':
                 price,model,size=0,'heygen-video-1','1080p; итог 1080x1920 / 30 FPS'
+            elif provider=='kling_avatar':
+                metadata=json.loads(snapshot.get('assets',{}).get('speech',{}).get('metadata') or '{}')
+                billing=metadata.get('audio_duration_seconds',5)
+                from .rules import audio_seconds
+                if billing!=5:audio_seconds(billing)
+                price=int((Decimal(self.kling_avatar_second_price)*Decimal(str(billing))).to_integral_value(rounding=ROUND_CEILING))
+                model,size='kling/avatar/std','9:16; итог 1080x1920 / 30 FPS'
             elif provider=='heygen':
                 price,model,size=self.heygen_price,'heygen/avatar_iv','9:16 / 1080p; итог 1080x1920'
             else:
@@ -104,5 +114,7 @@ class Settings:
             raise ValueError('Сначала настройте модель генерации.')
         result=dict(estimate=price, model=model, resolution=size, duration=duration,
                     image_quality=self.image_quality, currency='USD',estimate_available=(price>0 or kind=='assemble' or model.startswith(('FFmpeg/','PIL/'))))
-        if kind=='video': result['video_provider']=provider
+        if kind=='video':
+            result['video_provider']=provider
+            if provider=='kling_avatar':result['billing_seconds']=billing
         return result

@@ -27,7 +27,7 @@ def normalize(spec):
         if speaker not in result.get('characters', []):
             raise ValueError('Говорящий должен присутствовать в characters.')
         result['characters'] = [speaker]
-        result['video_provider'] = 'openai' if result.get('openai_audio_sync_required') else 'heygen'
+        result['video_provider'] = ('kling_avatar' if result.get('kling_audio_required') else 'openai' if result.get('openai_audio_sync_required') else 'heygen')
         result['camera'] = result.get('camera_direction') or ('Один средний план по пояс: только говорящий персонаж, обе руки, телефон и край стола.'
                             if result.get('framing')=='medium' else
                             'Один крупный или средний план только говорящего персонажа. Остальные за кадром.')
@@ -70,8 +70,8 @@ def validate(spec):
         text = lines[0].get('text')
         if not isinstance(text, str) or not text.strip():
             raise ValueError('Укажите непустую реплику говорящего.')
-        if spec.get('video_provider') not in ('heygen','openai') or (spec.get('video_provider')=='openai' and not spec.get('openai_audio_sync_required')):
-            raise ValueError('Говорящие новые сцены используют HeyGen с утверждённой озвучкой.')
+        if spec.get('video_provider') not in ('heygen','openai','kling_avatar') or (spec.get('video_provider')=='openai' and not spec.get('openai_audio_sync_required')) or (spec.get('video_provider')=='kling_avatar' and not spec.get('kling_audio_required')):
+            raise ValueError('Для говорящей сцены нужен поддерживаемый маршрут с утверждённой озвучкой.')
     elif speaker is not None:
         raise ValueError('У немой сцены speaker_id должен быть null.')
 

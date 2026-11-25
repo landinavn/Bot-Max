@@ -240,10 +240,8 @@ def create_router(admin_id, settings, assets):
                     lines.append(f"{kind}: {', '.join(sorted(value['models']))}; {', '.join(sorted(value['resolutions']))}; длительность по плану {value['duration']} сек")
                 episode=await repo.get('episode',parts[1])
                 if episode['spec'].get('production',{}).get('episode_four_revision'):
-                    from .episode_four_revision import OPENAI_BLOCK
                     from .episode_four_media import production_report
                     lines.extend(await production_report(parts[1],settings))
-                    lines.append(OPENAI_BLOCK)
                 lines.append('Каждый запуск подтверждается отдельно.')
                 lines.extend(result['errors'])
                 episode=await repo.get('episode',parts[1])

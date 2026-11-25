@@ -498,7 +498,10 @@ async def _snapshot(db, target, key):
         await attach(db,snap,episode)
     if target == 'episode':
         snap['music'] = await one(db, "SELECT * FROM cartoon_assets WHERE target='episode' AND target_id=? AND kind='music' ORDER BY rowid DESC LIMIT 1", (key,))
-    snap['context_hash'] = digest(snap)
+    # The cutaway changes video, not Masha's image or approved MP3. Video fingerprints
+    # still include these dependencies and validate_video_asset checks the actual card ID.
+    visual_context={k:v for k,v in snap.items() if k not in ('dream_references','cutaway_reference')} if snap['spec'].get('kling_audio_required') else snap
+    snap['context_hash'] = digest(visual_context)
     snap['assets'] = {}
     for kind in ('image', 'video', 'speech', 'assemble', 'music', 'ending'):
         asset = await _latest(db, target, key, kind, snap['context_hash'])

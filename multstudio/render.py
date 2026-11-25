@@ -192,9 +192,14 @@ class Renderer:
             current = 'sub'
         if ending:
             overlay = self.assets.path(uuid4().hex + '.png')
-            await asyncio.to_thread(self.endcard, ending, overlay)
+            if scene['spec'].get('final_dream_card'):
+                from .episode_four_media import end_titles
+                await asyncio.to_thread(end_titles,ending,overlay)
+            else:
+                await asyncio.to_thread(self.endcard, ending, overlay)
             args += ['-loop','1','-i',str(overlay)]
-            filters += f';[2:v]setpts=PTS-STARTPTS[title];[{current}][title]overlay=0:0[out]'
+            enable=":enable='gte(t,2)'" if scene['spec'].get('final_dream_card') else ''
+            filters += f';[2:v]setpts=PTS-STARTPTS[title];[{current}][title]overlay=0:0{enable}[out]'
             current = 'out'
         delay=f',adelay={round(offset*48000)}S:all=1' if voice and offset else ''
         filters += (f';[1:a:0]asetpts=PTS-STARTPTS,atrim=start={voice_trim:.9f},asetpts=N/SR/TB,aresample=48000,'
@@ -252,6 +257,8 @@ class Renderer:
 
     async def assemble(self, snapshot):
         self.ready()
+        if snapshot['spec'].get('production',{}).get('episode_four_revision') and not snapshot['assets'].get('music'):
+            raise ValueError('Загрузите фоновую музыку серии перед финальной сборкой.')
         paths, lengths, cues, elapsed = [], [], [], 0.0
         for index, scene in enumerate(snapshot['scenes']):
             ending = snapshot['spec'].get('ending') if index == len(snapshot['scenes'])-1 else None
@@ -301,8 +308,9 @@ class Renderer:
         current='voice'
         if music:
             args += ['-stream_loop','-1','-i',str(self.assets.path(music['path']))]
+            music_fade=f',afade=t=out:st={max(0,elapsed-1.2):.9f}:d=1.2' if snapshot['spec'].get('production',{}).get('episode_four_revision') else ''
             filters.append(f'[{len(paths)+1}:a:0]asetpts=PTS-STARTPTS,aresample=48000,'
-                'aformat=sample_rates=48000:channel_layouts=stereo,volume=0.12[m]')
+                f'aformat=sample_rates=48000:channel_layouts=stereo,volume=0.12{music_fade}[m]')
             if all(rules.strict(s['spec']) for s in snapshot['scenes']):
                 filters.append('[voice]asplit=2[speech][control]')
                 filters.append('[m][control]sidechaincompress=threshold=0.02:ratio=8:attack=10:release=250[ducked]')
@@ -343,6 +351,9 @@ class Renderer:
                 raise ValueError('Речь HeyGen выходит за 5 секунд. Обрезка слов запрещена; видео сохранено для проверки.')
             if abs(last-voice_last)>0.15:
                 raise ValueError('HeyGen изменил или обрезал конец речи. Видео не принято; повторный платный запрос автоматически не запускается.')
+        if speaking and snap['spec'].get('tail_cutaway_scene_id'):
+            from .episode_four_media import splice_tail
+            return await splice_tail(self,snap,source,speech,max(last,voice_last))
         extension=max(0,5-seconds)
         result=self.assets.path(uuid4().hex+'.mp4')
         args=['ffmpeg','-nostdin','-v','error','-y','-i',str(source)]

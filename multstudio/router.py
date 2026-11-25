@@ -17,6 +17,7 @@ from handlers import _reply
 from . import repository as repo
 from .timeline import label as scene_label
 from .seed import seed
+from .settings import dollars
 from .tts import VOICES, speech_settings, MASHA_PROFILE
 
 
@@ -149,6 +150,8 @@ def create_router(admin_id, settings, assets):
             buttons += [('➕ Сцена','new:scene:'+key),('✏️ Серия / финальная заставка','edit:episode:'+key),
                         ('🎵 Загрузить фоновую музыку','music:'+key),('🎞 Собрать серию','make:assemble:episode:'+key),
                         ('📥 Получить MP4','view:episode:'+key),('⬅️ Проект','p:'+project['id'])]
+            if row['spec'].get('production',{}).get('episode_four_revision'):
+                buttons.insert(-2,('🖼 Материалы карты желаний','dream_materials:'+key))
             timing = '\nЕстественная речь без ускорения; целевая длительность 40 секунд, допустимо 42–45.\n'
             if row['spec'].get('production',{}).get('audio_first'):
                 buttons.insert(-2,('📋 План серии','episode_plan:'+key))
@@ -211,6 +214,23 @@ def create_router(admin_id, settings, assets):
                 restored=', '.join('картинка' if kind=='image' else 'видео' for kind in result['restored'])
                 missing=(' Не найдено в архиве: '+', '.join('картинка' if k=='image' else 'видео' for k in result['missing'])+'.') if result['missing'] else ''
                 await show(event,'scene',key,notice='♻️ Восстановлено из архива: '+restored+'.'+missing,replace=True)
+            elif action=='dream_materials':
+                episode,_=await owner('episode',parts[1])
+                ids=episode['spec'].get('dream_scene_ids',[])
+                if len(ids)!=3:raise ValueError('Для этой серии не настроены три материала карты.')
+                buttons=[]
+                for key in ids:
+                    scene,_=await owner('scene',key)
+                    snap=await repo.snapshot('scene',key)
+                    image=snap['assets'].get('image')
+                    state='✅' if image and image.get('approved') else '⏳'
+                    buttons.append((state+' '+scene['spec']['title'],'s:'+key))
+                await tell(event,'Нужны три настоящих изображения желаний Ани: море, своя студия и семейный отдых. '
+                    'Готовые утверждённые результаты уже переиспользуются. Для недостающего материала откройте карточку: '
+                    'загрузите сохранённый результат бота либо создайте изображение и отдельно утвердите. '
+                    'Проверьте узнаваемость Ани; не утверждайте случайные картинки. '
+                    'Затем создайте и утвердите изображение сцены 4 — готовую карту. '
+                    'Без этих материалов сцены не отправляются на платную генерацию.',buttons+[('⬅️ Серия','e:'+episode['id'])])
             elif action=='episode_plan':
                 from .episode_two import plan
                 await owner('episode',parts[1])
@@ -218,6 +238,12 @@ def create_router(admin_id, settings, assets):
                 lines=[f"Изображений: {result['images']}; видео: {result['videos']}; отдельных реплик: {result['utterances']}; немых сцен: {result['silent']}."]
                 for kind,value in result['services'].items():
                     lines.append(f"{kind}: {', '.join(sorted(value['models']))}; {', '.join(sorted(value['resolutions']))}; длительность по плану {value['duration']} сек")
+                episode=await repo.get('episode',parts[1])
+                if episode['spec'].get('production',{}).get('episode_four_revision'):
+                    from .episode_four_revision import OPENAI_BLOCK
+                    from .episode_four_media import production_report
+                    lines.extend(await production_report(parts[1],settings))
+                    lines.append(OPENAI_BLOCK)
                 lines.append('Каждый запуск подтверждается отдельно.')
                 lines.extend(result['errors'])
                 episode=await repo.get('episode',parts[1])
@@ -354,7 +380,7 @@ def create_router(admin_id, settings, assets):
                     for p in q.get('speech_profiles',{}).values())+'\n') if kind=='speech' else ''
                 await tell(event, f"Подтверждение задания {item['id']}\nМодель: {q['model']}\nРазрешение: {q['resolution']}\n"
                     f"Длительность: {q['duration']} сек (озвучка — по естественной речи)\n"
-                    +speech_info+
+                    +speech_info+(('Оценка: '+(dollars(q['estimate']) if q.get('estimate_available') else 'не настроена; это не означает бесплатно')+'\n') if snap['spec'].get('episode_four_revision') or snap['spec'].get('material_only') else '')+
                     'Платная генерация выполняется по тарифу провайдера после вашего подтверждения. '
                     'При перегенерации предыдущий результат останется в архиве.',
                     [('✅ Подтвердить запуск','confirm:'+item['id']),('Отмена','cancel:'+item['id'])])

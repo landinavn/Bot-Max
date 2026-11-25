@@ -224,6 +224,10 @@ class Providers:
 
     async def image(self, snap):
         validate_scene_image_references(snap)
+        from .episode_four_media import validate as validate_four, card_bytes
+        validate_four(snap,'image')
+        if snap['spec'].get('local_dream_image'):
+            return card_bytes(snap,self.assets)
         config = replace(self.config, image_model=snap['quote']['model'], image_quality=snap['quote']['image_quality'])
         if snap['target'] == 'character':
             prompt = ('Create a single canonical character reference portrait, full body and clear face. '
@@ -234,11 +238,13 @@ class Providers:
         else:
             refs = [c['assets']['image'] for c in snap['cast']]
             refs.extend(r['image'] for r in snap.get('prop_references',[]))
+            refs.extend(r['image'] for r in snap.get('dream_references',[]) if r.get('image'))
             if snap.get('location_reference'):
                 refs.append(snap['location_reference'])
         urls = [await self.assets.asset_url(a) for a in refs]
         if snap['target'] == 'scene':
-            prompt = scene_image_prompt(snap, urls[-1] if snap.get('location_reference') else None)
+            prompt_snap=dict(snap,prop_references=[*snap.get('prop_references',[]),*snap.get('dream_references',[])]) if snap.get('dream_references') else snap
+            prompt = scene_image_prompt(prompt_snap, urls[-1] if snap.get('location_reference') else None)
         await self.assets.retain(snap,'image_prompt',data=prompt.encode(),suffix='txt',job_id=snap.get('job_id'))
         if refs:
             images = await _generate_image_bytes(urls[0], 'Мультстудия', config, count=1,

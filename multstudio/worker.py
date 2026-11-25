@@ -63,6 +63,8 @@ class Worker:
             silent_heygen = kind=='video' and video_provider=='heygen_video'
             if strict:
                 rules.validate(snap['spec'])
+                from .episode_four_media import validate as validate_four
+                validate_four(snap,kind)
             if heygen and item['status']=='avatar_polling':
                 result=await self.providers.studio_heygen.poll(item['provider_id'],avatar=True)
                 if result is None:
@@ -90,7 +92,7 @@ class Worker:
                     relative,_=await self.assets.download(result['url'],'mp4',job_id=key,name='provider-video.mp4')
                     await self.assets.retain(snap,'video_source',data=self.assets.path(relative).read_bytes(),suffix='mp4',job_id=key)
                     path=await self.renderer.normalize_video(snap,self.assets.path(relative))
-                    await self.save_result(item,snap,data=path.read_bytes(),suffix='mp4',metadata={'duration_seconds':5,'production_rules':rules.VERSION,'image_id':snap['assets']['image']['id'],'speech_id':snap['assets'].get('speech',{}).get('id')})
+                    await self.save_result(item,snap,data=path.read_bytes(),suffix='mp4',metadata={'duration_seconds':5,'production_rules':rules.VERSION,'image_id':snap['assets']['image']['id'],'speech_id':snap['assets'].get('speech',{}).get('id'),**snap.get('normalization_metadata',{})})
                     await repo.scene_validation(snap,'video_ready')
                 else:
                     await self.save_result(item,snap,url=result['url'],suffix='mp4')
@@ -99,8 +101,14 @@ class Worker:
                 path = await self.renderer.assemble(snap)
                 await self.save_result(item,snap,data=path.read_bytes(),suffix='mp4')
                 return
+            if kind=='video' and snap['spec'].get('local_dream_video'):
+                from .episode_four_media import clip
+                path=await clip(self.renderer,snap)
+                await self.save_result(item,snap,data=path.read_bytes(),suffix='mp4',metadata={'duration_seconds':5,'production_rules':rules.VERSION,'image_id':snap['assets']['image']['id'],'speech_id':None,'provider':'local'})
+                return
             if heygen or silent_heygen: self.providers.studio_heygen.ready()
-            self.providers.preflight('heygen_video' if heygen or silent_heygen else kind)
+            if not (kind=='image' and snap['spec'].get('local_dream_image')):
+                self.providers.preflight('heygen_video' if heygen or silent_heygen else kind)
             if strict and kind=='video': self.renderer.ready()
             if strict and kind=='video': await self.validate_scene_audio(snap)
             if kind == 'image':

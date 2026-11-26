@@ -47,46 +47,71 @@ async def _objects(db):
     return {row['name'].lower(): dict(row) for row in await cursor.fetchall()}
 
 
+def versions():
+    # v1 DDL and CHECKSUM above are unchanged. Only the runner learns about v2.
+    from auth.schema import DDL as auth_ddl, NAME as auth_name
+    auth_checksum = hashlib.sha256('\n'.join(canonical(sql) for sql in auth_ddl.values()).encode()).hexdigest()
+    return {1: (NAME, CHECKSUM, DDL), 2: (auth_name, auth_checksum, auth_ddl)}
+
+
 async def _validate(db):
+    known = versions()
     objects = await _objects(db)
-    for name, sql in DDL.items():
+    all_names = set().union(*(set(v[2]) for v in known.values()))
+    if not all_names.intersection(objects):
+        return 0
+    ledger = objects.get('account_schema_migrations')
+    if not ledger or not ledger['sql'] or canonical(ledger['sql']) != canonical(DDL['account_schema_migrations']):
+        raise SchemaCompatibilityError('Несовместимый журнал миграций аккаунтов.')
+    cursor = await db.execute('SELECT version,name,checksum FROM account_schema_migrations ORDER BY version')
+    applied = [tuple(r) for r in await cursor.fetchall()]
+    if not applied or [r[0] for r in applied] != list(range(1,len(applied)+1)):
+        raise SchemaCompatibilityError('Нарушена последовательность миграций.')
+    for version, name, checksum in applied:
+        if version not in known or (name,checksum) != known[version][:2]:
+            raise SchemaCompatibilityError('Неизвестная версия или контрольная сумма миграции.')
+    expected = {}
+    for version, _, _ in applied:
+        expected.update(known[version][2])
+    for name, sql in expected.items():
         obj = objects.get(name)
         if not obj or not obj['sql'] or canonical(obj['sql']) != canonical(sql):
-            raise SchemaCompatibilityError('Несовместимая схема аккаунтов: '+name+'. Миграция остановлена.')
-    tables = ('accounts', 'account_identities', 'account_schema_migrations')
+            raise SchemaCompatibilityError('Несовместимая схема: '+name)
+    if (all_names-set(expected)).intersection(objects):
+        raise SchemaCompatibilityError('Обнаружена частичная неприменённая миграция.')
+    tables = {name for name, sql in expected.items() if sql.startswith('CREATE TABLE')}
     for obj in objects.values():
-        if obj['tbl_name'] in tables and obj['type'] in ('index', 'trigger') and obj['sql'] and obj['name'] not in DDL:
-            raise SchemaCompatibilityError('Обнаружены незарегистрированные ограничения/триггеры таблиц аккаунтов.')
-    cursor = await db.execute('SELECT version,name,checksum FROM account_schema_migrations ORDER BY version')
-    versions = [tuple(r) for r in await cursor.fetchall()]
-    if versions != [(VERSION, NAME, CHECKSUM)]:
-        raise SchemaCompatibilityError('Неизвестная версия или изменённая контрольная сумма миграции аккаунтов.')
-    cursor = await db.execute('PRAGMA foreign_key_check(account_identities)')
-    if await cursor.fetchone():
-        raise SchemaCompatibilityError('Нарушена связь идентичности с аккаунтом.')
+        if obj['tbl_name'] in tables and obj['type'] in ('index','trigger') and obj['sql'] and obj['name'] not in expected:
+            raise SchemaCompatibilityError('Незарегистрированные ограничения/триггеры.')
+    for table in tables:
+        cursor = await db.execute('PRAGMA foreign_key_check('+table+')')
+        if await cursor.fetchone():
+            raise SchemaCompatibilityError('Нарушены внешние ключи.')
+    return len(applied)
 
 
 async def inspect_schema(path, *, timeout=5):
-    """Read-only preflight: return pending/applied; fail closed on an unmanaged schema."""
     async with connect(path, timeout, readonly=True) as db:
-        objects = await _objects(db)
-        if not set(DDL).intersection(objects):
-            return 'pending'
-        await _validate(db)
-        return 'applied'
+        current = await _validate(db)
+        return 'applied' if current == max(versions()) else 'pending'
 
 
-async def migrate(path, *, timeout=5):
-    """Apply to an EXISTING explicitly selected file; no journal-mode changes or legacy writes."""
+async def migrate(path, *, timeout=5, target=None):
+    known = versions()
+    target = max(known) if target is None else target
+    if type(target) is not int or target not in known:
+        raise SchemaCompatibilityError('Неизвестная целевая версия.')
     async with connect(path, timeout) as db:
         async with transaction(db):
-            objects = await _objects(db)
-            if set(DDL).intersection(objects):
+            current = await _validate(db)
+            if current > target:
+                raise SchemaCompatibilityError('Понижение версии запрещено.')
+            changed = current < target
+            for version in range(current+1,target+1):
+                name, checksum, definitions = known[version]
+                for sql in definitions.values():
+                    await db.execute(sql)
+                await db.execute('INSERT INTO account_schema_migrations(version,name,checksum) VALUES(?,?,?)',
+                                 (version,name,checksum))
                 await _validate(db)
-                return False
-            for sql in DDL.values():
-                await db.execute(sql)
-            await db.execute('INSERT INTO account_schema_migrations(version,name,checksum) VALUES(?,?,?)',
-                             (VERSION, NAME, CHECKSUM))
-            await _validate(db)
-            return True
+            return changed

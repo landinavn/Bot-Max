@@ -130,3 +130,19 @@ class AccountRepository:
                 if not await _one(db, 'SELECT id FROM accounts WHERE id=?', (key,)):
                     raise AccountNotFound('Аккаунт не найден.')
                 return await self._insert_identity(db, key, verification)
+
+    async def _get_or_create_verified_email_in_transaction(self, db, verification):
+        """Trusted auth-service bridge. Caller owns ONE active write transaction on this DB.
+
+        No commit or independent connection here. Never pass client-supplied assertions.
+        """
+        if not isinstance(verification, VerifiedIdentity) or verification.provider != 'email':
+            raise InvalidIdentity('Нужно доверенное подтверждение email.')
+        verified_time(verification.verified_at)
+        row = await _one(db, '''SELECT a.* FROM accounts a JOIN account_identities i ON a.id=i.account_id
+            WHERE i.provider='email' AND i.provider_subject=?''', (verification.provider_subject,))
+        if row:
+            return Account(**row)
+        account = await self._new(db)
+        await self._insert_identity(db, account.id, verification)
+        return Account(**await _one(db, 'SELECT * FROM accounts WHERE id=?', (account.id,)))

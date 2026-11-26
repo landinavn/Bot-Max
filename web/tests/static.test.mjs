@@ -156,3 +156,22 @@ test("production prerender gate refuses publishing and leaves preview intact", (
   assert.match(result.stderr, /Production indexing is blocked/);
   assert.equal(fs.readFileSync("dist/index.html", "utf8"), before);
 });
+
+test('public media use explicit approvals; no SVG placeholder is presented as a real result', async () => {
+  const {media,exampleFor}=await import('../src/config.ts');
+  const manifest=JSON.parse(fs.readFileSync('public/media/works/manifest.json','utf8'));
+  for(const item of media){
+    assert.equal(item.demo,false);
+    for(const asset of [item.poster,item.src].filter(Boolean)){
+      const provenance=manifest.find(x=>x.file===asset);
+      assert.ok(provenance,asset+' must have source + approval');
+      assert.ok(provenance.approval&&provenance.sourceSha256);
+      assert.equal(fs.statSync('public'+asset).size,provenance.bytes);
+    }
+  }
+  assert.equal(exampleFor('animation'),undefined,'Never invent matching animation');
+  assert.equal(exampleFor('custom-order'),undefined,'Custom order is not a fixed result');
+  assert.equal(media.filter(m=>m.kind==='video').length,4);
+  assert.equal(media.filter(m=>m.kind==='audio').length,1);
+  for(const r of routes)assert.ok(!/<(?:img|source)[^>]+(?:src|srcset)="[^"]+\.svg/.test(htmlFor(r)));
+});

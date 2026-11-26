@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { commonFAQ, products } from "./catalog.ts";
-import { season, site } from "./config.ts";
+import { season, site, media, seasonalCards } from "./config.ts";
 import type { Route } from "./site.ts";
 import {
   Comparison,
@@ -10,6 +10,8 @@ import {
   Header,
   OrderAction,
   Picture,
+  ProductVisual,
+  MobileNav,
   ProductGrid,
   SectionHeading,
 } from "./components.tsx";
@@ -20,100 +22,27 @@ function Home() {
     <>
       <section className="hero container">
         <div className="hero-copy">
-          <p className="eyebrow">
-            <span className="tiny-flower" aria-hidden="true">
-              ✦
-            </span>{" "}
-            Подарки с вашей историей
-          </p>
-          <h1>
-            Маленькое волшебство <em>для больших эмоций.</em>
-          </h1>
-          <p className="hero-description">
-            Создавайте персональные открытки, воплощайте мечты, дарите песни и
-            удивляйте близких настоящими мультфильмами с вашими фотографиями.
-          </p>
-          <div className="hero-actions">
-            <OrderAction
-              product={products[0]}
-              label="Создать открытку бесплатно"
-            />
-            <a className="button button-outline" href="/gallery">
-              Посмотреть примеры
-            </a>
-          </div>
-          <p className="trial-note">
-            <span aria-hidden="true">✧</span> Первая генерация открытки —
-            бесплатно.
-            <br />
-            <span>Доступность попытки проверяется в MAX.</span>
-          </p>
+          <p className="eyebrow">Персональные подарки с искусственным интеллектом</p>
+          <h1>Маленькое волшебство <em>для больших эмоций</em></h1>
+          <p className="hero-description">Превращайте обычные фотографии в уникальные открытки, фотосессии, мультфильмы и подарки для близких</p>
+          <div className="hero-actions"><OrderAction product={products[0]} label="Создать открытку бесплатно"/><a className="button button-outline" href="/#catalog">Посмотреть все возможности</a></div>
+          <p className="trial-note">Сейчас создание доступно в MAX.<br/>Первая генерация открытки — бесплатно. Другие продукты оплачиваются отдельно.</p>
         </div>
-        <div
-          className="hero-art"
-          aria-label="Коллаж демонстрационных иллюстраций"
-        >
-          <div className="hero-orbit" aria-hidden="true" />
-          <figure className="hero-postcard">
-            <Picture
-              src="/media/postcards/bouquet.svg"
-              alt="Демонстрационная открытка с цветами"
-              eager
-            />
-            <figcaption>Для самых близких</figcaption>
-          </figure>
-          <figure className="hero-dream">
-            <Picture
-              src="/media/vision-board/window.svg"
-              alt="Демонстрационная карта желаний: море за окном"
-              eager
-            />
-            <figcaption>Туда, где сбываются мечты</figcaption>
-          </figure>
-          <div className="hero-caption">
-            <span aria-hidden="true">✦</span>
-            <p>
-              Ваша фотография.
-              <br />
-              <em>Совсем другая история.</em>
-            </p>
+        <div className="hero-art" aria-label="Реальные примеры подарков">
+          <figure className="hero-feature"><Picture src="/media/works/family-1.webp" alt="Пример новогодней семейной нейрофотосессии" eager/><figcaption><span>Ваши фотографии</span><strong>Совсем другая история</strong></figcaption></figure>
+          <div className="hero-mini-grid">
+            {[["card", "Открытки"],["mom", "Мультик"],["santa", "Дед Мороз"],["dream", "Карты желаний"]].map(([id,label])=> { const item=media.find(m=>m.id===id)!; return <a href={id === "card" ? "/postcards" : id === "mom" ? "/cartoons" : id === "santa" ? "/ded-moroz" : "/vision-board"} key={id}><Picture src={item.poster} alt={item.title}/><span>{label}</span></a>; })}
           </div>
-          <span className="art-caption">Демонстрационные макеты</span>
         </div>
       </section>
-      <div className="promise-strip">
-        <div className="container">
-          <span>Не просто картинка — ваше настроение</span>
-          <span>Не просто песня — ваши слова</span>
-          <span>Не просто подарок — ваша история</span>
-        </div>
-      </div>
-      {season.enabled && (
-        <section className="season-section container">
-          <div className="season-panel">
-            <div className="season-copy">
-              <p className="eyebrow">{season.eyebrow}</p>
-              <h2>{season.title}</h2>
-              <p>{season.text}</p>
-              <div className="season-links">
-                {season.links.map(([label, path]) => (
-                  <a key={label} href={path}>
-                    {label}
-                  </a>
-                ))}
-              </div>
-            </div>
-            <Picture
-              className="season-image"
-              src="/media/ded-moroz/winter.svg"
-              alt="Демонстрационная зимняя иллюстрация"
-            />
-            <span className="season-star" aria-hidden="true">
-              ✧
-            </span>
-          </div>
-        </section>
-      )}
+      <div className="promise-strip"><div className="container"><span>Ваше фото</span><span>Ваши слова</span><span>Подарок с личной историей</span></div></div>
+      {season.enabled && <section className="season-section container"><div className="season-panel">
+        <div className="season-heading"><p className="eyebrow">{season.eyebrow} · 2027</p><h2>Дарите тепло.<br/><em>Создавайте чудеса.</em></h2><p>{season.text}</p></div>
+        <div className="season-grid">{seasonalCards.map(card=><a className="season-card" key={card.path} href={card.path}>
+          <Picture src={media.find(m=>m.id===card.mediaId)!.poster} alt={media.find(m=>m.id===card.mediaId)!.title}/>
+          <div><h3>{card.title}</h3><p>{card.text}</p><span className="card-cta">{card.action} <span aria-hidden="true">↗</span></span></div>
+        </a>)}</div>
+      </div></section>}
       <section id="catalog" className="section container">
         <SectionHeading
           eyebrow="Каждому чувству — свой подарок"
@@ -269,13 +198,9 @@ function ProductPage({ route }: { route: Route }) {
             </p>
           )}
         </div>
-        <figure>
-          <Picture
-            src={p.image}
-            alt={"Демонстрационный макет: " + p.name}
-            eager
-          />
-          <figcaption>Демонстрационная иллюстрация</figcaption>
+        <figure className={"product-main-visual visual-" + p.id}>
+          <ProductVisual productId={p.id} eager playable />
+          <figcaption>{p.id === "animation" || p.id === "custom-order" ? "" : "Реальный пример · ваш результат создаётся по вашим фото и словам"}</figcaption>
         </figure>
       </section>
       {p.id === "ded-moroz" && (
@@ -337,13 +262,10 @@ function ProductPage({ route }: { route: Route }) {
         <SectionHeading
           eyebrow="Вдохновение"
           title="Как это может выглядеть"
-          text="Иллюстрации показывают настроение. Они не являются готовыми работами клиентов."
+          text="Посмотрите примеры сервиса и выберите настроение для своего подарка."
         />
         <div className="product-example">
-          <Picture
-            src={p.image}
-            alt={"Демонстрационная иллюстрация: " + p.name}
-          />
+          <ProductVisual productId={p.id} />
           <div>
             <h3>{p.label}</h3>
             <p>{p.summary}</p>
@@ -471,8 +393,7 @@ export function App({ route }: { route: Route }) {
             <p className="eyebrow">Немного вдохновения</p>
             <h1>У подарков есть характер.</h1>
             <p className="page-intro">
-              Выберите настроение своей истории. Реальные фото, видео и песни
-              будут добавлены после согласования материалов.
+              Открытки, фотосессии, мультфильмы и песни, созданные сервисом. Откройте работу, чтобы рассмотреть или включить запись.
             </p>
             <Gallery />
           </section>
@@ -509,6 +430,7 @@ export function App({ route }: { route: Route }) {
         )}
       </main>
       <Footer />
+      <MobileNav />
     </>
   );
 }

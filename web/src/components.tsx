@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { products } from "./catalog.ts";
 import type { Product } from "./catalog.ts";
-import { categoryLabels, media, site } from "./config.ts";
+import { categoryLabels, media, site, exampleFor } from "./config.ts";
 import type { Category, MediaItem } from "./config.ts";
 import { trackEvent } from "./analytics.ts";
 
@@ -92,20 +92,13 @@ export function Header() {
     <header className="header">
       <div className="container header-inner">
         <a href="/" className="brand" aria-label={site.name}>
-          {site.logo ? (
-            <img src={site.logo} alt={site.name} width="190" height="50" />
-          ) : (
-            <>
-              <span>Открытки и Карта желаний</span>
-              <strong>
-                Нейрофото<span className="brand-period">.</span>
-              </strong>
-            </>
-          )}
+          {site.logo && <img className="brand-logo" src={site.logo} alt="" width="52" height="52" />}
+          <span className="brand-copy"><span>Открытки и Карта желаний</span><strong>Нейрофото<span className="brand-period">.</span></strong></span>
         </a>
         <button
           ref={button}
           className="menu-toggle"
+          aria-label={open ? "Закрыть меню" : "Открыть меню"}
           aria-expanded={open}
           aria-controls="main-navigation"
           onClick={() => setOpen(!open)}
@@ -209,40 +202,36 @@ export function SectionHeading({
     </div>
   );
 }
+export function ProductVisual({ productId, eager = false, playable = false }: { productId: string; eager?: boolean; playable?: boolean }) {
+  const item = exampleFor(productId);
+  if (!item) return <div className={"pending-art pending-" + productId}>
+    <span aria-hidden="true">{productId === "animation" ? "↗" : "✦"}</span>
+    <strong>{productId === "animation" ? "Оживите момент" : "Ваша особенная идея"}</strong>
+    <p>{productId === "animation" ? "Видеопример готовится" : "Индивидуальный результат — после обсуждения"}</p>
+  </div>;
+  if (playable) return <MediaPlayer item={item} />;
+  return <Picture src={item.poster} alt={item.title} eager={eager} />;
+}
 export function ProductCard({ product }: { product: Product }) {
-  return (
-    <article className={"product-card " + product.color}>
-      <a
-        className="product-image"
-        href={product.path}
-        onClick={() => trackEvent("product_click", { product: product.id })}
-      >
-        <Picture
-          src={product.image}
-          alt={"Демонстрационная иллюстрация: " + product.name}
-        />
-        <span className="product-label">{product.label}</span>
-      </a>
-      <div className="product-card-copy">
-        <h3>
-          <a
-            href={product.path}
-            onClick={() => trackEvent("product_click", { product: product.id })}
-          >
-            {product.name}
-          </a>
-        </h3>
-        <p>{product.summary}</p>
-        <a
-          className="text-link"
-          href={product.path}
-          onClick={() => trackEvent("product_click", { product: product.id })}
-        >
-          Подробнее
-        </a>
+  return <article className={"product-card " + product.color}>
+    <a className="product-card-link" href={product.path} onClick={() => trackEvent("product_click", { product: product.id })}>
+      <div className={"product-image visual-" + product.id}>
+        <ProductVisual productId={product.id} />
+        <span className="product-label">{product.id === "songs" ? "♫ Персональная песня" : product.label}</span>
       </div>
-    </article>
-  );
+      <div className="product-card-copy"><h3>{product.name}</h3><p>{product.summary}</p>
+        {product.pricing.display && <p className="verified-price">{product.pricing.display.label}</p>}
+        <span className="card-cta">Подробнее <span aria-hidden="true">↗</span></span>
+      </div>
+    </a>
+  </article>;
+}
+export function MobileNav() {
+  return <nav className="mobile-bottom-nav" aria-label="Быстрые переходы">
+    <a href="/">Главная</a><a href="/#catalog">Каталог</a>
+    <OrderAction label="Создать" className="mobile-create" />
+    <a href="/gallery">Примеры</a><a href="/login">Профиль</a>
+  </nav>;
 }
 export function FAQ({ items }: { items: [string, string][] }) {
   return (
@@ -352,10 +341,10 @@ export function Gallery({ compact = false }: { compact?: boolean }) {
         ))}
       </div>
       <p className="demo-notice">
-        Демонстрационные иллюстрации — не фотографии клиентов и не результаты
-        заказов.
+        Реальные примеры сервиса. Видео и песни загружаются только по вашему нажатию.
       </p>
       <div className="gallery-grid" aria-live="polite">
+        {shown.length === 0 && <p className="empty-gallery">Пример для этой категории готовится. Посмотрите другие работы или узнайте о продукте в каталоге.</p>}
         {shown.map((item) => (
           <figure key={item.id}>
             <button
@@ -404,7 +393,7 @@ export function Gallery({ compact = false }: { compact?: boolean }) {
             <h2 id="lightbox-title">{chosen.title}</h2>
             <MediaPlayer key={chosen.id} item={chosen} />
             <p className="demo-notice">
-              Демонстрационный макет. Реальные примеры будут добавлены отдельно.
+              {chosen.demo ? "Демонстрационный макет." : "Пример результата сервиса. Ваш подарок будет создан по вашим фото и словам."}
             </p>
           </div>
         )}
@@ -414,110 +403,30 @@ export function Gallery({ compact = false }: { compact?: boolean }) {
 }
 export function Comparison() {
   const [position, setPosition] = useState(50);
-  const [kind, setKind] = useState<"dream" | "card" | "video">("dream");
-  const pair =
-    kind === "card"
-      ? ["/media/gallery/source.svg", "/media/postcards/bouquet.svg"]
-      : ["/media/gallery/source.svg", "/media/vision-board/window.svg"];
-  return (
-    <div className="comparison-layout">
-      <div className="comparison-copy">
-        <p className="eyebrow">Одна фотография — много историй</p>
-        <h2>
-          Посмотрите на привычное
-          <br />
-          <em>по-новому.</em>
-        </h2>
-        <p>
-          Из снимка — в открытку, мечту или маленькую историю. Здесь можно
-          посмотреть, как устроено сравнение.
-        </p>
-        <div
-          className="comparison-tabs"
-          role="group"
-          aria-label="Варианты сравнения"
-        >
-          {(
-            [
-              ["dream", "Карта желаний"],
-              ["card", "Открытка"],
-              ["video", "Анимация"],
-            ] as const
-          ).map(([key, label]) => (
-            <button
-              key={key}
-              aria-pressed={kind === key}
-              onClick={() => setKind(key)}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-        <p className="small-note">Пока используются демонстрационные макеты.</p>
+  const [kind, setKind] = useState("dream");
+  const choices = [ ["card", "Открытка"], ["photo", "Нейрофотосессия"], ["dream", "Карта желаний"], ["cartoon", "Мультфильм"], ["animation", "Оживление фотографии"] ];
+  return <div className="comparison-layout">
+    <div className="comparison-copy"><p className="eyebrow">Из фотографии — в новую историю</p><h2>Знакомое лицо.<br/><em>Новые возможности.</em></h2>
+      <p>Перемещайте разделитель и сравнивайте исходное фото с результатом.</p>
+      <div className="comparison-tabs" role="group" aria-label="Варианты сравнения">
+        {choices.map(([key,label]) => <button key={key} aria-pressed={kind === key} onClick={() => setKind(key)}>{label}</button>)}
       </div>
-      <div>
-        {kind === "video" ? (
-          <div className="comparison-video">
-            <figure>
-              <Picture
-                src="/media/animation/frame.svg"
-                alt="Демонстрационный исходный кадр для анимации"
-              />
-              <figcaption>Исходное изображение</figcaption>
-            </figure>
-            <div>
-              <MediaPlayer
-                item={{
-                  id: "comparison-video",
-                  title: "Сравнение исходника и анимации",
-                  category: "animation",
-                  kind: "video",
-                  poster: "/media/animation/frame.svg",
-                  demo: true,
-                }}
-              />
-              <p>Видео из этого изображения</p>
-            </div>
-          </div>
-        ) : (
-          <div
-            className="comparison"
-            style={{ "--position": position + "%" } as React.CSSProperties}
-          >
-            <img
-              src={pair[0]}
-              alt="Демонстрационный макет исходника"
-              width="600"
-              height="720"
-              loading="lazy"
-            />
-            <img
-              className="comparison-after"
-              src={pair[1]}
-              alt="Демонстрационный макет результата"
-              width="600"
-              height="720"
-              loading="lazy"
-            />
-            <span className="compare-label before">Макет исходника</span>
-            <span className="compare-label after">Макет результата</span>
-            <div className="compare-divider" aria-hidden="true">
-              <span>↔</span>
-            </div>
-            <input
-              type="range"
-              min="0"
-              max="100"
-              value={position}
-              aria-label="Сравнить исходник и результат"
-              aria-valuetext={`${position}% исходника`}
-              onChange={(e) => setPosition(Number(e.target.value))}
-            />
-          </div>
-        )}
-      </div>
+      <p className="small-note">Показываем только связанные исходник и результат. Для остальных форматов пока доступен просмотр готовых работ.</p>
     </div>
-  );
+    <div className="comparison-result">
+      {kind === "dream" ? <div className="comparison" style={{ "--position": position + "%" } as React.CSSProperties}>
+        <img src="/media/works/vision-before.webp" alt="Исходное фото женщины на набережной" width="600" height="720" loading="lazy" />
+        <img className="comparison-after" src="/media/works/vision-after.webp" alt="Карта желаний, созданная по этому фото" width="600" height="720" loading="lazy" />
+        <span className="compare-label before">До</span><span className="compare-label after">После</span>
+        <div className="compare-divider" aria-hidden="true"><span>↔</span></div>
+        <input type="range" min="0" max="100" value={position} aria-label="Сравнить исходник и результат" aria-valuetext={`${position}% исходника`} onChange={e=>setPosition(Number(e.target.value))}/>
+      </div> : <div className="comparison-alternative">
+        {kind !== "animation" && <MediaPlayer key={kind} item={media.find(item => item.id === ({ card:"card", photo:"family", cartoon:"mom" }[kind]))!} />}
+        <p className="small-note">{kind === "animation" ? "Видео и соответствующий ему исходник ещё не добавлены." : "Готовая работа. Соответствующий исходник ещё не добавлен — сравнение появится вместе с ним."}</p>
+        {kind === "animation" && <a className="button button-outline" href="/animation">Об оживлении фото</a>}
+      </div>}
+    </div>
+  </div>;
 }
 export function ProductGrid({ items = products }: { items?: Product[] }) {
   return (

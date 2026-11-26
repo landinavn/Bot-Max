@@ -54,7 +54,7 @@ export const routes: Route[] = [
     path: "/gallery",
     title: "Вдохновение и примеры творческих подарков — Нейрофото",
     description:
-      "Галерея открыток, карт желаний и идей персональных подарков. На этапе подготовки представлены демонстрационные иллюстрации.",
+      "Реальные примеры открыток, карт желаний, фотосессий, мультфильмов и песен. Посмотрите изображения и включите видео или аудио по запросу.",
     kind: "gallery",
     noindex: true,
   },
@@ -126,5 +126,7 @@ export function validateCatalogue(items: Product[] = products) {
       throw Error("Web ordering is not connected");
     if (!p.pricing.source || !/^\d{4}-\d{2}-\d{2}$/.test(p.pricing.reviewedAt))
       throw Error("Missing pricing provenance");
+    if (p.pricing.display && (!p.pricing.display.label.trim() || !p.pricing.display.source.trim() || !/^\d{4}-\d{2}-\d{2}$/.test(p.pricing.display.reviewedAt)))
+      throw Error("Missing display pricing provenance");
   }
 }

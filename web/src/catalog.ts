@@ -15,7 +15,7 @@ export interface Product {
   features: string[];
   steps: string[];
   faq: [string, string][];
-  pricing: { source: string; reviewedAt: string; note: string };
+  pricing: { source: string; reviewedAt: string; note: string; display?: { label: string; source: string; reviewedAt: string } };
 }
 const pricing = (source: string) => ({
   source,
@@ -31,7 +31,7 @@ export const products: Product[] = [
     summary: "Ваше фото, важные слова и повод, который хочется запомнить.",
     intro:
       "Поздравьте с днём рождения, Новым годом или просто пожелайте доброго утра. Добавьте фотографию и свои слова — из них сложится персональная открытка.",
-    image: "/media/postcards/bouquet.svg",
+    image: "/media/works/musical-card.webp",
     color: "rose",
     label: "Сказать самое важное",
     mode: "max_redirect",
@@ -70,7 +70,7 @@ export const products: Product[] = [
     summary: "Увидеть себя там, где давно хочется оказаться.",
     intro:
       "Море, любимое дело или новый ритм жизни — опишите свою мечту и добавьте фото. Карта желаний станет её персональным визуальным напоминанием.",
-    image: "/media/vision-board/window.svg",
+    image: "/media/works/vision-after.webp",
     color: "cream",
     label: "Мечтать по-крупному",
     mode: "max_redirect",
@@ -111,7 +111,7 @@ export const products: Product[] = [
     summary: "Творческие образы для вас и вашей семьи.",
     intro:
       "Создайте фотографии в выбранном образе без поездки в студию. Сейчас особенно много поводов для новогодних семейных историй.",
-    image: "/media/photosessions/interior.svg",
+    image: "/media/works/family-1.webp",
     color: "sand",
     label: "Увидеть себя по-новому",
     mode: "max_redirect",
@@ -152,7 +152,7 @@ export const products: Product[] = [
     summary: "Персональная открытка и песня, которая скажет за вас.",
     intro:
       "Соедините фотографию или готовую открытку с песней. Расскажите, кому она адресована и что хочется передать: любовь, благодарность или поздравление.",
-    image: "/media/musical-postcards/record.svg",
+    image: "/media/works/musical-card.webp",
     color: "plum",
     label: "Добавить чувства",
     mode: "max_redirect",
@@ -193,7 +193,7 @@ export const products: Product[] = [
     summary: "Имя, воспоминания и чувства — в одной песне.",
     intro:
       "Подарите песню про человека, которого хорошо знаете. Любимые фразы, привычки и общие воспоминания помогут сделать текст личным.",
-    image: "/media/songs/record.svg",
+    image: "/media/works/mother-cartoon.webp",
     color: "peach",
     label: "Подарить свой саундтрек",
     mode: "max_redirect",
@@ -232,7 +232,7 @@ export const products: Product[] = [
     summary: "Бережный творческий взгляд на любимый снимок.",
     intro:
       "Превратите фотографию в короткий видеоролик с движением. Подойдёт для личного архива или необычного подарка близким.",
-    image: "/media/animation/frame.svg",
+    image: "",
     color: "sage",
     label: "Вернуться к мгновению",
     mode: "max_redirect",
@@ -271,7 +271,7 @@ export const products: Product[] = [
     summary: "Узнаваемые детали и маленькая история с песней.",
     intro:
       "Создайте мультяшный образ по фотографии. Для мамы есть отдельные истории ко Дню матери и дню рождения — с персональной песней за кадром.",
-    image: "/media/cartoons/interior.svg",
+    image: "/media/works/mother-cartoon.webp",
     color: "rose",
     label: "Оказаться в своей сказке",
     mode: "max_redirect",
@@ -310,7 +310,7 @@ export const products: Product[] = [
     summary: "Дедушка Мороз знает имя и замечает маленькие победы.",
     intro:
       "Персональное видеопоздравление для одного ребёнка или семьи с двумя–шестью детьми. Вы расскажете о каждом, а Дедушка Мороз обратится по имени и озвучит ваши факты.",
-    image: "/media/ded-moroz/winter.svg",
+    image: "/media/works/santa-family.webp",
     color: "wine",
     label: "Самое ожидаемое чудо",
     mode: "max_redirect",
@@ -355,7 +355,7 @@ export const products: Product[] = [
     summary: "Авторская история начинается с разговора.",
     intro:
       "Нужен свой сюжет, длинный мультфильм или необычное поздравление? Расскажите о задумке — такой заказ обсуждается индивидуально.",
-    image: "/media/gallery/gift.svg",
+    image: "",
     color: "cream",
     label: "Придумать что-то своё",
     mode: "max_redirect",

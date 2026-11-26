@@ -1,13 +1,36 @@
-# Медиаресурсы витрины
+# Public media — Frontend 1.1
 
-Все текущие SVG нарисованы программно специально для этого макета (`scripts/create-demo-media.py`), содержат только геометрические формы и текст. Это демонстрационные иллюстрации, не фотографии и не результаты клиентских генераций. Сторонние изображения, лица и рабочая база не использованы. `hero/og-cover.png` — собственная текстовая OG-обложка 1200×630.
+Owner explicitly approved publication of the nine named files on 26 November 2026, including identifiable adults and children. The additional two postcard banners and `ded_moroz_kids.mp4` were supplied in this same design task for public use. This is the owner's authorization; it is not an independently verified music or likeness licence.
 
-Каталоги: `logo`, `hero`, `postcards`, `vision-board`, `photosessions`, `ded-moroz`, `cartoons`, `songs`, `musical-postcards`, `animation`, `gallery`.
+Only the allowlisted source files were processed. `works/manifest.json` records the exact source, SHA-256, public output, byte count, transformation and authorization. Metadata is removed by re-encoding; private URLs, order IDs, DB records and credentials are never copied. Audio/video are opt-in, without autoplay, with `preload="none"`.
 
-Логотип владельца добавлять в `logo/` и указывать `site.logo` в `src/config.ts`; текущий текстовый бренд не является новым логотипом.
+| Source | Actual content / use |
+| --- | --- |
+| before.jpg + after.jpg | Woman on embankment → personalized vision collage. Only verified matching standalone pair; interactive comparison. |
+| photo_fam_1.webp | New Year family photo collage; hero/catalog/season. |
+| photo_fam_2.webp, photo_fam_3.webp | Additional family photosession collages; gallery. PNG names in brief are absent; these WEBP counterparts exist. |
+| photo_main_1.webp | Byte-identical to photo_fam_1.webp; deduplicated, not copied again. |
+| cartoon_example.mp4 | Birthday cartoon with girl; video + poster, public use explicitly approved. |
+| musical-card.mp4 | Christmas/New Year musical postcard; video + poster. Static frame is explicitly labeled as such. |
+| den_mama.mp4 | One-minute film about mother; video + poster + same soundtrack as an audio excerpt (not a full-length song sample). Found in owner's earlier upload, not in examples. |
+| ded_moroz_kids.mp4 | Owner's new upload; family greeting; poster at 8s shows actual Santa. |
+| c60aa946-daf8-4616-8945-19c0136ef7d8.png | Birthday postcard promotional before/after banner, kept intact. |
+| 035c843a-5992-42b4-8c4b-8dfe63cd409c.png | Mother's Day postcard promotional before/after banner, kept intact. |
 
-Заменять примеры через `src/config.ts` и `src/catalog.ts`. Перед публикацией нужны согласие владельцев изображений/голосов, права на музыку и разрешение на использование материалов в публичной витрине. Не извлекать фото клиентов или детей из production без отдельного согласованного основания.
+Banners contain an embedded Telegram symbol. That is part of the original artwork, not an active link. All site creation buttons use the verified MAX URL. Banner halves are not invented as separate source files.
 
-Для фотографий подготовить AVIF/WebP и fallback JPEG/PNG, оптимизированные под отображаемый размер, с осмысленным alt. В `Picture` есть `avif`, `webp` и `src`. Для видео/аудио задать `MediaItem.src`, `poster`, `kind`, `demo:false` только после получения настоящего материала; видео MP4 H.264/AAC и аудио MP3 наиболее совместимы. Не вшивать API-ключи и приватные подписанные ссылки в публичную конфигурацию. Медиа загружается по кнопке пользователя, `preload=none`, звук не включается автоматически.
+Missing: `animated_photo.mp4`, `cartoon_example1.mp4`, `mark_ded_moroz.mp4`, `NY_card.png`. No matching before/after pairs for photosessions/cartoons/animation have been supplied; their comparison tabs show actual finished work or an explicit unavailable state. No random image is substituted for the input.
 
-Отдельно нужны пары исходник/результат для разных продуктов; сейчас сравнение лишь демонстрирует интерфейс. Не удалять уведомления о макетах, пока все показанные примеры не заменены и тексты галереи не обновлены.
+Original square logo received in 412b5728-b2e3-4df7-b50d-3e2e1a52a2be.zip; PNG 1254×1254. Resized without cropping or stretching to 512px WebP, ICO (16–64), 32px PNG and 180px Apple icon. Used alongside the official title, not as a horizontal replacement.
+
+Other files in owner examples (including rabbit, mother/daughter and unlisted postcard images) have not been copied: explicit publication approval for those file names has not been recorded.
+
+## Reproduce
+
+Requires Pillow and ffmpeg, no network/generative API:
+
+```sh
+python scripts/prepare-media.py --examples /path/to/examples --mother-video /path/to/den_mama.mp4 --santa-video /path/to/ded_moroz_kids.mp4 --banners /path/to/unpacked-approved-banners --logo /path/to/original-logo.png
+```
+
+Old SVG demo assets from Frontend 1.0 are unused legacy files, never displayed as genuine examples. The existing text-only OG cover is retained; it makes no claim to be a customer result. Do not run the legacy demo generation script to fill missing media.

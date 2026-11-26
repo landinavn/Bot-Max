@@ -15,7 +15,10 @@ async def csrf_token(request: Request, response: Response):
     value=request.cookies.get(s.session_cookie) if account else request.cookies.get(s.preauth_cookie)
     if not account:
         try:
-            browser_context(s,value,service(request).clock())
+            auth=service(request)
+            context=browser_context(s,value,auth.clock())
+            if context[1]-int(auth.clock()) < auth.settings.code_ttl or not await auth.repository.browser_context_available(context):
+                raise APIError(403,'preauth_required')
         except APIError:
             value=new_preauth(s,service(request).clock())
             set_cookie(response,s,s.preauth_cookie,value,900)
@@ -35,6 +38,8 @@ async def preauth(request):
 @router.post('/email/request',response_model=RequestResponse)
 async def request_code(body: EmailRequest,request: Request):
     context=await preauth(request)
+    if context[1]-int(service(request).clock()) < service(request).settings.code_ttl:
+        raise APIError(403,'preauth_required')
     result=await service(request).request_email_code(body.email,source=client_source(request,request.app.state.settings),browser_context=context)
     return {'challenge_id':result.challenge_id,'expires_in':result.expires_in}
 

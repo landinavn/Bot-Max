@@ -68,6 +68,16 @@ class AuthRepository:
                     await db.execute('INSERT INTO auth_browser_challenges VALUES(?,?)',(key,context_mac))
 
 
+    async def browser_context_available(self, context):
+        """Read-only recovery check for a lost successful HTTP login response."""
+        context_mac, expires_at = context
+        now = int(self.clock())
+        if expires_at <= now:
+            return False
+        async with connect(self.path,self.timeout,readonly=True) as db:
+            row = await one(db,'SELECT consumed_at,expires_at FROM auth_browser_contexts WHERE context_mac=?',(context_mac,))
+        return row is None or (row['consumed_at'] is None and row['expires_at'] > now)
+
     async def mark_delivery(self, key, state):
         if state not in ('sent','failed','unknown'):raise ValueError('Некорректное состояние доставки.')
         async with connect(self.path,self.timeout) as db:

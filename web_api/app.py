@@ -104,8 +104,8 @@ def create_app(settings: APISettings | None=None, *, sender=None, auth_settings=
                                               service_name='Открытки и Карта желаний | Нейрофото')
     if auth_settings.secret!=settings.secret or auth_settings.environment!=settings.environment:
         raise ValueError('Inconsistent auth settings')
-    if auth_settings.code_digits!=6:
-        raise ValueError('HTTP contract requires six digit codes')
+    if auth_settings.code_digits!=6 or auth_settings.code_ttl>900:
+        raise ValueError('HTTP contract requires six digit codes and a code TTL at most 900 seconds')
     app=FastAPI(title='Wish browser auth API',version='1.2A.1',debug=False,
                 docs_url=None if settings.environment=='production' else '/docs',redoc_url=None,
                 openapi_url=None if settings.environment=='production' else '/openapi.json',

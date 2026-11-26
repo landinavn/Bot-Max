@@ -393,3 +393,26 @@ def test_checked_in_openapi_matches_factory(env):
     exported=json.loads((Path(__file__).resolve().parents[2]/'docs/web-auth-openapi.json').read_text())
     assert exported==env[3].openapi()
     assert 'cookie' in exported['components']['securitySchemes']['sessionCookie']['in']
+
+
+async def test_nearly_expired_preauth_does_not_send_unusable_code(env):
+    async with client(env) as c:
+        h=await bootstrap(c);old=c.cookies.get(env[0].preauth_cookie)
+        env[2].now+=301
+        r=await c.post('/api/v1/auth/email/request',headers=h,json={'email':'a@example.test'})
+        assert r.status_code==403 and not env[1].messages
+        renewed=await bootstrap(c)
+        assert c.cookies.get(env[0].preauth_cookie)!=old and renewed!=h
+        assert (await c.post('/api/v1/auth/email/request',headers=renewed,json={'email':'a@example.test'})).status_code==200
+
+
+async def test_bootstrap_recovers_after_lost_successful_login_response(env):
+    async with client(env) as c:
+        headers=await bootstrap(c);old=c.cookies.get(env[0].preauth_cookie)
+        await login(c,env)
+        # Simulate the client losing the response including the new session/clear cookie.
+        c.cookies.clear();c.cookies.set(env[0].preauth_cookie,old,domain='app.wish-bot.ru',path='/')
+        fresh=await bootstrap(c)
+        assert fresh!=headers and c.cookies.get(env[0].preauth_cookie)!=old
+        env[2].now+=60
+        assert (await c.post('/api/v1/auth/email/request',headers=fresh,json={'email':'a@example.test'})).status_code==200

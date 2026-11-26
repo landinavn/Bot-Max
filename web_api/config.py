@@ -19,10 +19,19 @@ class APISettings:
     secure_cookies: bool = True
     body_limit: int = 4096
     database_timeout: float = 1
+    max_linking_enabled: bool = False
+    linking_secret: bytes | None = field(default=None,repr=False)
 
     def __post_init__(self):
         object.__setattr__(self, 'database', Path(self.database).expanduser().resolve())
         AuthSettings(secret=self.secret, environment=self.environment)
+        if type(self.max_linking_enabled) is not bool:
+            raise ValueError('Linking flag must be boolean')
+        if self.max_linking_enabled:
+            from account_linking.settings import LinkingSettings
+            LinkingSettings(secret=self.linking_secret)
+            if self.linking_secret==self.secret:
+                raise ValueError('Use a separate linking key, not the email authentication key')
         for origin in self.origins:
             u = urlsplit(origin)
             if (u.scheme not in ('http','https') or not u.hostname or u.username or u.password
@@ -61,4 +70,6 @@ class APISettings:
             environment=os.getenv('WEB_API_ENV','production'),origin=os.getenv('WEB_API_ORIGIN','https://app.wish-bot.ru'),
             development_origins=tuple(filter(None,os.getenv('WEB_API_DEV_ORIGINS','').split(','))),
             trusted_proxies=tuple(filter(None,os.getenv('WEB_API_TRUSTED_PROXIES','').split(','))),
-            secure_cookies=os.getenv('WEB_API_SECURE_COOKIES','true')=='true')
+            secure_cookies=os.getenv('WEB_API_SECURE_COOKIES','true')=='true',
+            max_linking_enabled=os.getenv('WEB_MAX_LINKING_ENABLED','false')=='true',
+            linking_secret=os.environ['ACCOUNT_LINKING_SECRET'].encode() if os.getenv('WEB_MAX_LINKING_ENABLED','false')=='true' else None)

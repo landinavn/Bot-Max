@@ -25,6 +25,7 @@ def validate_bot_link(value: str) -> str:
 class Config:
     token: str = field(repr=False)
     photo_path: Path
+    max_linking_enabled: bool = False
     image_api_key: str | None = field(default=None, repr=False)
     image_model: str = ""
     storage_bucket: str | None = None
@@ -69,6 +70,7 @@ class Config:
             raise ValueError("ADMIN_USER_ID должен быть положительным числовым user_id или пустым.")
         return cls(
             token=token,
+            max_linking_enabled=os.getenv("MAX_ACCOUNT_LINKING_ENABLED", "false")=="true",
             photo_path=photo_path,
             image_api_key=image_api_key,
             ttapi_key=os.environ.get("TTAPI_KEY", "").strip() or None,

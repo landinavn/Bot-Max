@@ -8,7 +8,9 @@
 - Репозиторий `landinavn/Bot-Max`.
 - Основа `feature/web-max-linking`, `04b91be474e99922be7ced4c56f3ca22a38174b4`.
 - Для baseline создан отдельный detached worktree того же коммита.
-- Новая ветка `feature/web-entitlements`, зависимый draft PR в ветку основы.
+- Новая ветка `feature/web-entitlements`, [draft PR №262](https://github.com/landinavn/Bot-Max/pull/262) в ветку основы.
+- Проверенный implementation commit: `a72357a9d683a0a9cee562089a6d7fafc48cf6f3`.
+  После него добавлен только итоговый отчёт в документацию; Python/DDL/test blobs неизменны.
 - Frontend PR №257 не затрагивается.
 
 | Прогон | Passed | Failed | Примечание |
@@ -19,8 +21,9 @@
 | **Повтор baseline 04b91be, полный** | **3540** | **12** | 382.87 s, 4 warnings |
 | Окончательные целевые, новая ветка | **493** | **0** | 17.75 s, 1 aiosqlite thread warning в прежнем auth test |
 | Промежуточный полный новой ветки | 3720 | 12 | 398.27 s; после него добавлены 7 тестов и финальные проверки входных данных |
+| **Окончательный полный новой ветки** | **3727** | **12** | **398.98 s, 0 warnings; все 12 node IDs совпадают с повторённым baseline** |
 
-Результат окончательного полного прогона фиксируется ниже после его завершения.
+Новых падений относительно повторённого baseline: **0**. Все 187 новых тестов прошли.
 Полный прогон с падениями **не считается успешным**.
 
 ## Команды и изоляция
@@ -123,7 +126,7 @@ tests/test_welcome_ads.py::test_stats_shows_eight_labels_and_clicks
 Они относятся к прежним avatar restore, меню/историческим checkout, family stats,
 photo-link refresh и welcome/stats ожиданиям. Product code и эти падающие tests
 в этом PR не исправлялись, ожидания не ослаблялись. Точные node IDs сравниваются
-между повторным baseline и окончательным прогоном. Нестабильные aiosqlite worker
+между повторным baseline и окончательным прогоном и совпадают полностью. Нестабильные aiosqlite worker
 warnings `Event loop is closed` также фиксируются, а не скрываются фильтром.
 
 ## Diff и границы
@@ -136,3 +139,12 @@ registry миграций и два теста с ожиданиями верс�
 Состав прав, операции, таблицы, dry-run пример, спорные бизнес-правила, стратегия
 cutover/rollback и отдельный TLS compatibility plan: [web-entitlements.md](web-entitlements.md).
 До owner review остановиться: **не deploy, не merge, не применять реальные миграции**.
+
+
+## Итоговый diff
+
+`16 files changed, 2106 insertions(+), 5 deletions(-)`
+
+В рабочей копии после коммита отчёта не остаётся незакоммиченных изменений.
+Остановка на draft PR для owner review. Автоматический импорт, live cutover,
+публичный balance API, реальные trial/bonus/payment/provider операции отсутствуют.

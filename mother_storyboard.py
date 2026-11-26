@@ -1,12 +1,17 @@
 """Versioned minute-long story. These exact strings form image and HeyGen prompts."""
-POLICY='mother-one-character-heygen-six-ten-second-shots-v2'
+POLICY='mother-approved-identity-six-ten-second-shots-v3'
 SHOT_SECONDS=10
 DURATION=60
 BASE=(
-    'A coherent, gentle, high-quality stylized 3D animated family film, horizontal 16:9. '
+    'A coherent, gentle, high-quality animated family film, horizontal 16:9. '
+    'The single supplied image is the APPROVED character master for this entire film. '
+    'Match its exact rendering style, realism and facial proportions in EVERY shot; do not invent a new cartoon style. '
     'Exactly ONE visible character: the same adult mother from the identity reference. '
-    'Preserve her recognizable face, real age, grey or natural hair, cream cardigan, pearl earrings, '
-    'necklace, body proportions and outfit throughout. Do not beautify or make her younger. '
+    'Preserve her recognizable facial structure, eye shape and color, skin tone, visible age, '
+    'exact hair color, length, fringe and parting, body proportions and silhouette. '
+    "Copy the master's exact clothing layers, colors, knit texture, patterns, buttons and accessories. "
+    'Do not replace her clothes, add jewelry or glasses, recolor her hair, enlarge her eyes, '
+    'smooth away age, beautify, make her younger or substitute a different person. '
     'Use the reference portrait for identity ONLY, never copy its close-up composition. '
     'Wide or medium-wide 35mm eye-level camera, full body or knees-up with surrounding furniture. '
     'Her figure occupies at most 60% of frame height; her face is a small part of the frame. '
@@ -16,8 +21,9 @@ BASE=(
     'table at center, cream armchair and warm floor lamp at right. Warm natural light stays constant. '
     'Dining table has exactly three cream plates, three matching cups and cutlery, fixed in place. '
     'The flower vase belongs on the SIDEBOARD, never on the dining table. '
-    'Use the establishing frame for room layout and appearance; the latest continuity frame records '
-    'the completed actions. Follow the specified starting state of THIS shot. '
+    'Follow the same written apartment layout and object locations in every shot. '
+    'The approved portrait is the ONLY visual identity authority; do not reconstruct her face '
+    'from a previous generated scene. Follow the specified starting state of THIS shot. '
     'Objects keep their positions after being placed; do not reset, remove, duplicate or teleport them. '
     'No other people, reflected faces, visible photo portraits, crowds, animals, readable text, subtitles, '
     'logos, watermarks, birthday decorations or Christmas ornaments. One uninterrupted composition. '
@@ -32,6 +38,8 @@ MOTION_RULE=(
     'Do not restart, reverse, loop or repeat the action. No extra hand gestures or business, '
     'no freeze frame, speed ramp, time lapse, internal cuts or repeated manipulation. '
     'Camera remains locked or drifts laterally by less than 10 cm; never moves closer. '
+    'Her facial identity, age, hair color, hairstyle, clothing and rendering style remain unchanged '
+    'from the input frame throughout the take. No face morphing, age transition or wardrobe change. '
 )
 SHOTS=(
     {'label':'Цветы — один бережный жест',
@@ -99,7 +107,7 @@ def video_prompt(index, *, birthday=False):
     return base+'\nSTARTING STATE: '+shot['start']+'\nACTION AND END STATE: '+shot['action']+'\n'+MOTION_RULE
 
 
-BIRTHDAY_POLICY='mother-birthday-six-ten-second-shots-v1'
+BIRTHDAY_POLICY='mother-birthday-approved-identity-six-shots-v2'
 BIRTHDAY_BASE=BASE.replace('birthday decorations or Christmas ornaments', 'Christmas ornaments').replace(
     'Warm natural light stays constant.',
     'Warm natural light stays constant. Festive birthday room: restrained cream-and-gold balloons '

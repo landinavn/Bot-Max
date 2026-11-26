@@ -11,6 +11,8 @@ import httpx
 
 from mother_storyboard import POLICY,SHOTS,BASE,SHOT_SECONDS,DURATION,image_prompt,video_prompt,storyboard
 import mother_story_legacy as legacy
+import mother_storyboard as current_board
+import mother_storyboard_legacy_v2 as previous_board
 
 
 async def submit_animation(adapter,image_url,prompt,key,*,duration=SHOT_SECONDS):
@@ -101,11 +103,16 @@ async def generate(data, reference_url, audio_url, *, checkpoint, progress):
     story=data.get('cartoon_kling_story')
     old=bool(story and story.get('source',[None])[0]==legacy.POLICY)
     birthday=data.get('cartoon_theme')=='theme_mother_bday'
-    current_policy,current_shots,_=storyboard(birthday)
+    saved_policy=(story.get('source') or [None])[0] if story else None
+    board=previous_board if saved_policy in (previous_board.POLICY,previous_board.BIRTHDAY_POLICY) else current_board
+    identity_locked=not old and board is current_board
+    current_policy,current_shots,_=board.storyboard(birthday)
     policy=legacy.POLICY if old else current_policy
     shots=legacy.SHOTS if old else current_shots
     shot_seconds=5 if old else SHOT_SECONDS
     source=[policy,reference_url]
+    if identity_locked and data.get('chosen_avatar') and data['chosen_avatar']!=reference_url:
+        raise ValueError('Для новой версии нужен утверждённый персонаж. Подмена референса запрещена.')
     if story is not None and story.get('source')!=source:
         raise ValueError('В этом заказе уже сохранён другой аватар. Обратитесь в поддержку; сцены сохранены.')
     if story is None:
@@ -138,8 +145,8 @@ async def generate(data, reference_url, audio_url, *, checkpoint, progress):
                 clips=[]
                 for index,item in enumerate(shots):
                     label=item[0] if old else item['label']
-                    frame_prompt=legacy.BASE+item[1] if old else image_prompt(index,birthday=birthday)
-                    motion_prompt=(legacy.BASE+item[1]+' Natural continuous motion for five seconds.') if old else video_prompt(index,birthday=birthday)
+                    frame_prompt=legacy.BASE+item[1] if old else board.image_prompt(index,birthday=birthday)
+                    motion_prompt=(legacy.BASE+item[1]+' Natural continuous motion for five seconds.') if old else board.video_prompt(index,birthday=birthday)
                     shot=story['shots'][index]
                     shot.setdefault('image_prompt',frame_prompt);shot.setdefault('video_prompt',motion_prompt)
                     await progress(f'🎬 Создаю сцену {index+1} из {len(shots)}: {label.lower()}. Пожалуйста, подождите.')
@@ -148,7 +155,11 @@ async def generate(data, reference_url, audio_url, *, checkpoint, progress):
                             raise ValueError('Результат запроса картинки неизвестен. Нужна проверка поддержки; повторная генерация не запускалась.')
                         shot['image_submitting']=True;await checkpoint()
                         location=story['shots'][0].get('image_url') or reference_url
-                        if old:
+                        if identity_locked:
+                            # One immutable approved master, never a face generated in a prior scene.
+                            shot['image_url']=await generate_photosession_frame(reference_url,shot['image_prompt'],
+                                image_size='1536x1024')
+                        elif old:
                             shot['image_url']=await generate_photosession_frame(reference_url,shot['image_prompt'],
                                 style_reference_url=location,image_size='1536x1024')
                         else:
@@ -173,7 +184,7 @@ async def generate(data, reference_url, audio_url, *, checkpoint, progress):
                     if not old:
                         if await video_duration(path)<9.75:
                             raise ValueError('Получена сцена короче 10 секунд. ID сохранён; повторная генерация не запускалась.')
-                        if index<len(shots)-1 and not shot.get('end_frame_url'):
+                        if not identity_locked and index<len(shots)-1 and not shot.get('end_frame_url'):
                             last=root/f'end-{index}.png'
                             await extract_last_frame(path,last)
                             shot['end_frame_url']=await asyncio.to_thread(_store_image,client,settings,last)

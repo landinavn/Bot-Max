@@ -55,9 +55,12 @@ def versions():
     browser_checksum = hashlib.sha256('\n'.join(canonical(sql) for sql in browser_ddl.values()).encode()).hexdigest()
     from account_linking.schema import DDL as linking_ddl, NAME as linking_name
     linking_checksum = hashlib.sha256('\n'.join(canonical(sql) for sql in linking_ddl.values()).encode()).hexdigest()
+    from entitlements.schema import DDL as rights_ddl, NAME as rights_name
+    rights_checksum = hashlib.sha256('\n'.join(canonical(sql) for sql in rights_ddl.values()).encode()).hexdigest()
     return {1: (NAME, CHECKSUM, DDL), 2: (auth_name, auth_checksum, auth_ddl),
             3: (browser_name, browser_checksum, browser_ddl),
-            4: (linking_name, linking_checksum, linking_ddl)}
+            4: (linking_name, linking_checksum, linking_ddl),
+            5: (rights_name, rights_checksum, rights_ddl)}
 
 
 async def _validate(db):

@@ -265,7 +265,7 @@ async def test_migration_v1_v2_checksums_and_legacy_rows_unchanged(tmp_path):
     with sqlite3.connect(path) as d:
         assert d.execute('SELECT * FROM account_schema_migrations WHERE version<=2').fetchall()==before
         assert d.execute('SELECT * FROM users').fetchall()==[(1,'unchanged')]
-        assert d.execute('SELECT MAX(version) FROM account_schema_migrations').fetchone()[0]==4
+        assert d.execute('SELECT MAX(version) FROM account_schema_migrations').fetchone()[0]==5
     assert CHECKSUM==hashlib.sha256('\n'.join(' '.join(v.split()).rstrip(';') for v in DDL.values()).encode()).hexdigest()
 
 

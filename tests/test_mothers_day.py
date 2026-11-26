@@ -117,7 +117,8 @@ async def test_six_different_ten_second_mother_shots_are_retained_and_reused(ren
     assert images.await_count==submit.await_count==poll.await_count==6
     assert len({c.args[1] for c in images.await_args_list})==6
     assert all('Exactly ONE' in c.args[1] and '16:9' in c.args[1] for c in images.await_args_list)
-    assert images.await_args_list[1].kwargs['style_reference_urls']==('https://cdn.example/image-0.png','https://cdn.example/end-0.png')
+    assert all(c.args[0]=='https://cdn.example/mom.png' for c in images.await_args_list)
+    assert all('style_reference_urls' not in c.kwargs and 'style_reference_url' not in c.kwargs for c in images.await_args_list)
     assert all(c.kwargs['duration']==10 for c in submit.await_args_list)
     assert all(x['task_id'].startswith('heygen-') and x['request_key'] for x in data['cartoon_kling_story']['shots'])
     assert any(s['cartoon_kling_story']['shots'][0].get('video_submitting') and not s['cartoon_kling_story']['shots'][0].get('task_id') for s in snapshots)

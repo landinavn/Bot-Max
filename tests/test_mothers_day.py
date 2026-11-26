@@ -98,7 +98,7 @@ def renderer(monkeypatch):
     async def end(video,target):target.write_bytes(b'png')
     monkeypatch.setattr(story,'extract_last_frame',AsyncMock(side_effect=end))
     async def render(clips,song,target,duration,**kwargs):
-        assert len(clips)==6 and duration==60. and kwargs['audio_start']==2.;target.write_bytes(b'mp4')
+        assert len(clips)==6 and duration==60. and kwargs['audio_start'] in (2.,13.);target.write_bytes(b'mp4')
     monkeypatch.setattr(story,'render_local',AsyncMock(side_effect=render))
     images=AsyncMock(side_effect=['https://cdn.example/image-'+str(i)+'.png' for i in range(6)])
     monkeypatch.setattr(image_service,'generate_photosession_frame',images)

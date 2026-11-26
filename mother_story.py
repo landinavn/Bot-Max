@@ -103,6 +103,17 @@ async def generate(data, reference_url, audio_url, *, checkpoint, progress):
     story=data.get('cartoon_kling_story')
     old=bool(story and story.get('source',[None])[0]==legacy.POLICY)
     birthday=data.get('cartoon_theme')=='theme_mother_bday'
+    # Existing alignment failures can safely receive the identity fix before ANY paid visual work.
+    previous_policies=(previous_board.POLICY,previous_board.BIRTHDAY_POLICY)
+    if (story and (story.get('source') or [None])[0] in previous_policies
+            and story.get('source',[None,None])[1:]==[reference_url]
+            and data.get('chosen_avatar')==reference_url
+            and data.get('cartoon_theme') in ('theme_mother','theme_mother_bday')
+            and len(story.get('shots',[]))==6 and all(shot=={} for shot in story['shots'])
+            and not story.get('result_url') and not data.get('video_merged_url')
+            and not data.get('cartoon_kling_task_id') and not data.get('cartoon_kling_video_url')):
+        story['source']=[current_board.storyboard(birthday)[0],reference_url]
+        await checkpoint()
     saved_policy=(story.get('source') or [None])[0] if story else None
     board=previous_board if saved_policy in (previous_board.POLICY,previous_board.BIRTHDAY_POLICY) else current_board
     identity_locked=not old and board is current_board
@@ -138,7 +149,9 @@ async def generate(data, reference_url, audio_url, *, checkpoint, progress):
                 if not old:
                     lyrics=data.get('song_review_lyrics') or data.get('video_song_lyrics') or ''
                     await progress('🎵 Подготавливаю песню для мультфильма. Готовая музыка и картинка сохранены.')
-                    audio_start = await resolve_song_start(story, audio, lyrics, audio_url, root, checkpoint)
+                    from mother_song_timing import fixed_intro_for
+                    audio_start = await resolve_song_start(story, audio, lyrics, audio_url, root, checkpoint,
+                        fixed_start=fixed_intro_for(data))
                     if seconds-audio_start<DURATION:
                         raise ValueError('После музыкального вступления осталось меньше минуты песни. Сцены ещё не создавались.')
                 duration=min(35.,seconds) if old else float(DURATION)

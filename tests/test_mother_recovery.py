@@ -93,7 +93,9 @@ async def test_manual_paid_alignment_order_can_resume_without_losing_media(credi
     assert result['status']=='paid' and result['provider_payment_id']=='paid-cartoon'
     restored=json.loads(result['fsm_data'])
     assert not restored['cartoon_video_failed'] and recovery.urls(restored)==(IMAGE,AUDIO)
-    assert restored['cartoon_kling_story']==data['cartoon_kling_story']
+    assert restored['cartoon_kling_story']['shots']==data['cartoon_kling_story']['shots']
+    assert restored['cartoon_kling_story']['audio_start']==13.
+    assert restored['cartoon_kling_story']['alignment_method']=='mother-fixed-intro-v1'
     assert not await recovery.recover_order(order,handlers.PosterStates.waiting_for_cartoon_song_phrase)
 
 

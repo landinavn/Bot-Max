@@ -26,13 +26,13 @@ class AuthService:
             raise ValueError('Некорректный источник запроса.')
         return digest(self.settings.secret,'source',source)
 
-    async def request_email_code(self, email, *, source):
+    async def request_email_code(self, email, *, source, browser_context=None):
         if not isinstance(email,str) or len(email)>512:raise ValueError('Некорректный email.')
         email=normalize_email(email); source_key=self._source(source)
         key=str(uuid4()); code=generate_code(self.settings.code_digits)
         email_key=digest(self.settings.secret,'email',email)
         mac=digest(self.settings.secret,'email-code',key,email,code)
-        await self.repository.create_challenge(key,email,email_key,mac,source_key,int(self.clock()))
+        await self.repository.create_challenge(key,email,email_key,mac,source_key,int(self.clock()),browser_context=browser_context)
         state='unknown'
         try:
             await asyncio.wait_for(self.sender.send(login_email(email,code,key,self.settings)),self.settings.delivery_timeout)
@@ -48,12 +48,12 @@ class AuthService:
         await self.repository.mark_delivery(key,state)
         return CodeRequest(key,self.settings.code_ttl)
 
-    async def verify_email_code(self, challenge, code, *, source):
+    async def verify_email_code(self, challenge, code, *, source, browser_context=None):
         if not isinstance(code,str) or len(code)>128 or not isinstance(challenge,str) or len(challenge)>128:
             raise InvalidCode()
         if not re.fullmatch(r'[0-9]{'+str(self.settings.code_digits)+'}',code):
             code='invalid-code'
-        return await self.repository.verify(challenge,code,self._source(source),int(self.clock()))
+        return await self.repository.verify(challenge,code,self._source(source),int(self.clock()),browser_context=browser_context)
 
     async def get_current_account(self, token):
         return await self.repository.current(token,int(self.clock()))

@@ -1,0 +1,6 @@
+# Isolated HTTP process. Does not include bot.py / MAX dependencies.
+fastapi==0.141.1
+starlette==1.6.0
+pydantic==2.13.4
+uvicorn==0.52.1
+aiosqlite==0.22.1

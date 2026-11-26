@@ -1,4 +1,4 @@
-"""Ports only: no SMTP connection/config loading and no real email implementation yet."""
+"""Email ports: no connections or configuration reads at import time."""
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -18,7 +18,7 @@ class EmailSender(Protocol):
 
 
 class SMTPTransport(EmailSender, Protocol):
-    """Future injected SMTP adapter must implement the same acceptance/error contract."""
+    """An injected SMTP adapter must implement the same acceptance/error contract."""
 
 
 class FakeEmailSender:

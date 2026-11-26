@@ -159,7 +159,7 @@ test("production prerender gate refuses publishing and leaves preview intact", (
 
 test('public media use explicit approvals; no SVG placeholder is presented as a real result', async () => {
   const {media,exampleFor}=await import('../src/config.ts');
-  const manifest=JSON.parse(fs.readFileSync('public/media/works/manifest.json','utf8'));
+  const manifest=JSON.parse(fs.readFileSync('media/manifest.json','utf8'));
   for(const item of media){
     assert.equal(item.demo,false);
     for(const asset of [item.poster,item.src].filter(Boolean)){
@@ -174,4 +174,62 @@ test('public media use explicit approvals; no SVG placeholder is presented as a 
   assert.equal(media.filter(m=>m.kind==='video').length,4);
   assert.equal(media.filter(m=>m.kind==='audio').length,1);
   for(const r of routes)assert.ok(!/<(?:img|source)[^>]+(?:src|srcset)="[^"]+\.svg/.test(htmlFor(r)));
+});
+
+test('release keeps provenance private, unique and bound to every public file', async () => {
+  const {checkPublic,checkDist,readRegistry}=await import('../scripts/release-safety.mjs');
+  const registry=readRegistry(process.cwd());
+  assert.equal(registry.length,21);
+  assert.equal(new Set(registry.map(x=>x.file)).size,registry.length);
+  const os=await import('node:os');
+  const temporary=fs.mkdtempSync(path.join(os.tmpdir(),'wish-registry-test-'));
+  try{
+    fs.mkdirSync(path.join(temporary,'media'));
+    fs.writeFileSync(path.join(temporary,'media/manifest.json'),JSON.stringify([...registry,registry[0]]));
+    assert.throws(()=>readRegistry(temporary),/Duplicate provenance/);
+  }finally{fs.rmSync(temporary,{recursive:true,force:true});}
+  assert.equal(checkPublic(process.cwd()).length,21);
+  const result=checkDist(process.cwd());
+  assert.equal(result.html,20);
+  assert.equal(result.files.length,45);
+  for(const name of ['media/works/manifest.json','media/README.md','media/logo/README.md','.vite/manifest.json'])
+    assert.ok(!result.files.includes(name),name+' must not be public');
+});
+
+test('release rejects leaked service/source files and symlinks', async () => {
+  const {mkdtempSync,cpSync,writeFileSync,mkdirSync,unlinkSync,rmSync,symlinkSync}=fs;
+  const os=await import('node:os');
+  const {checkDist}=await import('../scripts/release-safety.mjs');
+  const temporary=mkdtempSync(path.join(os.tmpdir(),'wish-release-test-'));
+  try{
+    const dist=path.join(temporary,'dist');cpSync('dist',dist,{recursive:true});
+    for(const name of ['.env','.git/config','database.sqlite3','worker.py','README.md','media/manifest.json','private.json','node_modules/index.js','assets/source.ts','assets/script.js.map']){
+      const file=path.join(dist,name);mkdirSync(path.dirname(file),{recursive:true});writeFileSync(file,'synthetic sensitive file');
+      assert.throws(()=>checkDist(process.cwd(),dist),undefined,name);
+      unlinkSync(file);
+      let parent=path.dirname(file);
+      while(parent!==dist&&fs.readdirSync(parent).length===0){fs.rmdirSync(parent);parent=path.dirname(parent);}
+      assert.doesNotThrow(()=>checkDist(process.cwd(),dist));
+    }
+    const link=path.join(dist,'private-link');symlinkSync(path.resolve('package.json'),link);
+    assert.throws(()=>checkDist(process.cwd(),dist),/Symlink/);unlinkSync(link);
+  }finally{rmSync(temporary,{recursive:true,force:true});}
+});
+
+test('release rejects modified media and detectable credentials', async () => {
+  const os=await import('node:os');
+  const {checkDist,secretPatterns}=await import('../scripts/release-safety.mjs');
+  const temporary=fs.mkdtempSync(path.join(os.tmpdir(),'wish-integrity-test-'));
+  try{
+    const dist=path.join(temporary,'dist');fs.cpSync('dist',dist,{recursive:true});
+    const media=path.join(dist,'media/works/vision-before.webp');const original=fs.readFileSync(media);
+    const corrupt=Buffer.from(original);corrupt[20]^=1;fs.writeFileSync(media,corrupt);
+    assert.throws(()=>checkDist(process.cwd(),dist),/integrity mismatch/);fs.writeFileSync(media,original);
+    const jsName=fs.readdirSync(path.join(dist,'assets')).find(x=>x.endsWith('.js'));
+    assert.ok(jsName);const js=path.join(dist,'assets',jsName);
+    const saved=fs.readFileSync(js);fs.appendFileSync(js,'\n// '+['sk','proj', 'X'.repeat(32)].join('-'));
+    assert.throws(()=>checkDist(process.cwd(),dist),/Possible credential/);fs.writeFileSync(js,saved);
+    for(const value of ['-----BEGIN PRIVATE KEY-----','https://name:password@example.test/file','postgresql://user:password@db.test/main'])
+      assert.ok(secretPatterns.some(p=>p.test(value)));
+  }finally{fs.rmSync(temporary,{recursive:true,force:true});}
 });

@@ -1,0 +1,28 @@
+// Produce a static-only, deterministic release. Sidecars are OUTSIDE the archive.
+import fs from 'node:fs';
+import path from 'node:path';
+import {execFileSync,spawnSync} from 'node:child_process';
+import {checkDist,distDigest,sha256} from './release-safety.mjs';
+const webRoot=process.cwd(),dist=path.join(webRoot,'dist');
+if(!process.argv[2])throw Error('Usage: npm run package:preview -- /absolute/artifact-directory');
+const output=path.resolve(process.argv[2]);
+if(output===webRoot||output.startsWith(webRoot+path.sep))throw Error('Artifacts must be outside the source checkout');
+const git=(...args)=>execFileSync('git',args,{cwd:webRoot,encoding:'utf8'}).trim();
+if(git('status','--porcelain','--untracked-files=normal','--','.'))throw Error('Commit web sources before packaging');
+const commit=git('rev-parse','HEAD'),timestamp=git('show','-s','--format=%ct','HEAD');
+const result=checkDist(webRoot,dist);
+const receipt=JSON.parse(fs.readFileSync(path.join(webRoot,'.ssr/build-receipt.json'),'utf8'));
+if(!receipt.sourceClean||receipt.sourceCommit!==commit||receipt.distSha256!==distDigest(dist,result.files))throw Error('Build is stale or not from this clean commit: rebuild and test before packaging');
+const tar=spawnSync('tar',['--null','--verbatim-files-from','--sort=name',`--mtime=@${timestamp}`,'--owner=0','--group=0','--numeric-owner','--mode=0644','--format=ustar','-C',dist,'-cf','-','-T','-'],{input:result.files.join('\0')+'\0',maxBuffer:64*1024*1024});
+if(tar.status!==0)throw Error('tar failed: '+tar.stderr.toString());
+const gzip=spawnSync('gzip',['-n','-9'],{input:tar.stdout,maxBuffer:64*1024*1024});
+if(gzip.status!==0)throw Error('gzip failed');
+fs.mkdirSync(output,{recursive:true});
+const name='wish-app-preview.tar.gz',hash=sha256(gzip.stdout);
+fs.writeFileSync(path.join(output,name),gzip.stdout);
+fs.writeFileSync(path.join(output,name+'.sha256'),hash+'  '+name+'\n');
+fs.writeFileSync(path.join(output,'wish-app-preview-files.txt'),result.files.join('\n')+'\n');
+const files=result.files.map(file=>{const content=fs.readFileSync(path.join(dist,file));return {file,bytes:content.length,sha256:sha256(content)};});
+const metadata={sourceCommit:commit,sourceBranch:git('branch','--show-current'),buildMode:'preview',archive:name,archiveSha256:hash,archiveBytes:gzip.stdout.length,unpackedBytes:result.bytes,fileCount:files.length,files};
+fs.writeFileSync(path.join(output,'wish-app-preview-metadata.json'),JSON.stringify(metadata,null,2)+'\n');
+console.log(JSON.stringify({sourceCommit:commit,archive:path.join(output,name),sha256:hash,archiveBytes:gzip.stdout.length,unpackedBytes:result.bytes,fileCount:files.length},null,2));

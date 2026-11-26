@@ -6,10 +6,13 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 4173",
     "typecheck": "tsc --noEmit",
-    "build": "npm run typecheck && vite build && vite build --ssr src/prerender.tsx --outDir .ssr && node .ssr/prerender.js",
+    "build": "npm run check:media && npm run typecheck && vite build && vite build --ssr src/prerender.tsx --outDir .ssr && node .ssr/prerender.js && npm run check:dist",
     "test": "node --test tests/static.test.mjs",
     "test:browser": "node tests/browser.mjs",
-    "preview": "vite preview --host 127.0.0.1 --port 4173"
+    "preview": "vite preview --host 127.0.0.1 --port 4173",
+    "check:media": "node scripts/check-media.mjs",
+    "check:dist": "node scripts/check-dist.mjs",
+    "package:preview": "node scripts/package-preview.mjs"
   },
   "dependencies": {
     "react": "^19.2.0",

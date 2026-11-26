@@ -76,6 +76,11 @@ try{
   await page.setViewportSize({width,height});await page.goto(base);await page.evaluate(async()=>{for(let y=0;y<document.body.scrollHeight;y+=700){scrollTo(0,y);await new Promise(r=>setTimeout(r,25));}scrollTo(0,0);});await page.screenshot({path:`${out}/home-full-${width}.png`,fullPage:true});report.screenshots.push(`home-full-${width}.png`);
  }
  assert.deepEqual(errors,[],'browser errors');assert.deepEqual(missing,[],'missing files');expected404=true;assert.equal((await page.goto(base+'/does-not-exist')).status(),404);
+ for(const privatePath of ['/media/works/manifest.json','/media/README.md','/media/logo/README.md','/.env','/.git/config','/worker.py','/database.sqlite3','/.vite/manifest.json']){
+  const r=await page.request.get(base+privatePath);assert.equal(r.status(),404,privatePath);
+  assert.ok((await r.text()).includes('Страница не найдена'),privatePath);
+ }
+ report.privatePathsBlocked=8;
  await writeFile(out+'/browser-report.json',JSON.stringify({...report,errors,missing},null,2));
  console.log('PASS: menu/focus, keyboard/mouse/touch comparison, filters/dialog, FAQ, family anchor, MAX event, no-JS, 404; zero browser errors/missing assets.');
 }finally{await browser.close();}

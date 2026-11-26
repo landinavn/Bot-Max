@@ -1,8 +1,8 @@
-# Public media — Frontend 1.1
+# Private media provenance — Frontend 1.2
 
 Owner explicitly approved publication of the nine named files on 26 November 2026, including identifiable adults and children. The additional two postcard banners and `ded_moroz_kids.mp4` were supplied in this same design task for public use. This is the owner's authorization; it is not an independently verified music or likeness licence.
 
-Only the allowlisted source files were processed. `works/manifest.json` records the exact source, SHA-256, public output, byte count, transformation and authorization. Metadata is removed by re-encoding; private URLs, order IDs, DB records and credentials are never copied. Audio/video are opt-in, without autoplay, with `preload="none"`.
+Only the allowlisted source files were processed. `media/manifest.json` (outside public) records the exact source, SHA-256, public output, byte count, transformation and authorization. Metadata is removed by re-encoding; private URLs, order IDs, DB records and credentials are never copied. Audio/video are opt-in, without autoplay, with `preload="none"`.
 
 | Source | Actual content / use |
 | --- | --- |
@@ -33,4 +33,7 @@ Requires Pillow and ffmpeg, no network/generative API:
 python scripts/prepare-media.py --examples /path/to/examples --mother-video /path/to/den_mama.mp4 --santa-video /path/to/ded_moroz_kids.mp4 --banners /path/to/unpacked-approved-banners --logo /path/to/original-logo.png
 ```
 
-Old SVG demo assets from Frontend 1.0 are unused legacy files, never displayed as genuine examples. The existing text-only OG cover is retained; it makes no claim to be a customer result. Do not run the legacy demo generation script to fill missing media.
+Unused SVG demo assets from Frontend 1.0 have been removed from public and the static release. The existing text-only OG cover is retained; it makes no claim to be a customer result. Do not run the legacy demo generation script to fill missing media.
+
+
+Frontend 1.2: two duplicate postcard records and the accidental logo README entry were removed. Every public media file has one provenance record and an output SHA-256. The public folder contains no README or registry. Both advertising banners still include the original Telegram mark: owner-approved replacement artwork is required before public launch; the originals were not retouched. The preview requires server-side Basic Auth, not merely noindex.

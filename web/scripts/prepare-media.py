@@ -7,6 +7,8 @@ from pathlib import Path
 from PIL import Image, ImageOps
 p=argparse.ArgumentParser(); p.add_argument('--examples',type=Path,required=True); p.add_argument('--mother-video',type=Path,required=True); p.add_argument('--santa-video',type=Path); p.add_argument('--banners',type=Path); p.add_argument('--logo',type=Path); a=p.parse_args()
 out=Path(__file__).resolve().parents[1]/'public/media/works'; out.mkdir(parents=True,exist_ok=True)
+registry=Path(__file__).resolve().parents[1]/'media/manifest.json'
+manifest_by_file={x['file']:x for x in json.loads(registry.read_text())} if registry.exists() else {}
 manifest=[]
 def record(source, dest, kind, note=''):
     manifest.append(dict(source=source.name,file='/media/works/'+dest.name,kind=kind,sourceSha256=hashlib.sha256(source.read_bytes()).hexdigest(),bytes=dest.stat().st_size,approval=('Uploaded by owner for public Frontend 1.1 use on 2026-11-26.' if source.name=='ded_moroz_kids.mp4' or source.suffix=='.png' else 'User explicitly approved public use on 2026-11-26, including people and children.'),note=note))
@@ -35,6 +37,12 @@ if a.logo:
     copy=im.copy();copy.thumbnail((512,512));copy.save(logo_dir/'bot-logo.webp',quality=91,method=6)
     for size,name in [(32,'favicon-32.png'),(180,'apple-touch-icon.png')]: im.resize((size,size),Image.Resampling.LANCZOS).save(logo_dir/name,optimize=True)
     im.resize((64,64),Image.Resampling.LANCZOS).save(logo_dir/'favicon.ico',sizes=[(16,16),(32,32),(48,48),(64,64)])
-    for file in sorted(logo_dir.iterdir()): manifest.append(dict(source=a.logo.name,file='/media/logo/'+file.name,kind='logo',sourceSha256=hashlib.sha256(a.logo.read_bytes()).hexdigest(),bytes=file.stat().st_size,approval='Owner supplied original bot logo for this website on 2026-11-26.',note='Square original resized only, no redraw or stretching.'))
-(out/'manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+'\n')
+    for file in [logo_dir/name for name in ('bot-logo.webp','favicon-32.png','apple-touch-icon.png','favicon.ico')]: manifest.append(dict(source=a.logo.name,file='/media/logo/'+file.name,kind='logo',sourceSha256=hashlib.sha256(a.logo.read_bytes()).hexdigest(),bytes=file.stat().st_size,approval='Owner supplied original bot logo for this website on 2026-11-26.',note='Square original resized only, no redraw or stretching.'))
+for item in manifest:
+    output=Path(__file__).resolve().parents[1]/'public'/item['file'].lstrip('/')
+    item['bytes']=output.stat().st_size
+    item['sha256']=hashlib.sha256(output.read_bytes()).hexdigest()
+    manifest_by_file[item['file']]=item
+registry.parent.mkdir(parents=True,exist_ok=True)
+registry.write_text(json.dumps(sorted(manifest_by_file.values(),key=lambda x:x['file']),ensure_ascii=False,indent=2)+'\n')
 print('Prepared',len(manifest),'approved assets, bytes',sum(x['bytes'] for x in manifest))

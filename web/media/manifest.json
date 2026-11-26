@@ -1,0 +1,212 @@
+[
+  {
+    "source": "scripts/create-demo-media.py",
+    "file": "/media/hero/og-cover.png",
+    "kind": "brand",
+    "sourceSha256": "f2d30aae430b7b4359839c747ac6c90e3d48f4b4042e05011589a11ed4649b80",
+    "approval": "Site-owned text-only OG cover retained from the previously reviewed storefront.",
+    "note": "Existing brand typography artwork; not presented as a customer result.",
+    "bytes": 30351,
+    "sha256": "b9a90f95749fc3acc26ca12855a09091f48e8e671cf3fb1afd3c2a02af4edaee"
+  },
+  {
+    "source": "412b5728-b2e3-4df7-b50d-3e2e1a52a2be.png",
+    "file": "/media/logo/apple-touch-icon.png",
+    "kind": "logo",
+    "sourceSha256": "ae3d381a0b57c41ef3cb518a6b4b15ab8cde7da439e9e777b4810f57652e937f",
+    "bytes": 61584,
+    "approval": "Owner supplied original bot logo for this website on 2026-11-26.",
+    "note": "Square original resized only, no redraw or stretching.",
+    "sha256": "b0a7a8e28fd7f339e43d5afc22181475b35bd9989bfa03b7432ae453233da6c3"
+  },
+  {
+    "source": "412b5728-b2e3-4df7-b50d-3e2e1a52a2be.png",
+    "file": "/media/logo/bot-logo.webp",
+    "kind": "logo",
+    "sourceSha256": "ae3d381a0b57c41ef3cb518a6b4b15ab8cde7da439e9e777b4810f57652e937f",
+    "bytes": 64082,
+    "approval": "Owner supplied original bot logo for this website on 2026-11-26.",
+    "note": "Square original resized only, no redraw or stretching.",
+    "sha256": "d510e488361aa7e1f2e76483616631e37ed68a5a9dda8dac1c0bfc8250c23ab0"
+  },
+  {
+    "source": "412b5728-b2e3-4df7-b50d-3e2e1a52a2be.png",
+    "file": "/media/logo/favicon-32.png",
+    "kind": "logo",
+    "sourceSha256": "ae3d381a0b57c41ef3cb518a6b4b15ab8cde7da439e9e777b4810f57652e937f",
+    "bytes": 2758,
+    "approval": "Owner supplied original bot logo for this website on 2026-11-26.",
+    "note": "Square original resized only, no redraw or stretching.",
+    "sha256": "265f5c1be5ff06b40ad2a49e6040d289b20eb241064b711eb2b80eee66f88cfa"
+  },
+  {
+    "source": "412b5728-b2e3-4df7-b50d-3e2e1a52a2be.png",
+    "file": "/media/logo/favicon.ico",
+    "kind": "logo",
+    "sourceSha256": "ae3d381a0b57c41ef3cb518a6b4b15ab8cde7da439e9e777b4810f57652e937f",
+    "bytes": 19249,
+    "approval": "Owner supplied original bot logo for this website on 2026-11-26.",
+    "note": "Square original resized only, no redraw or stretching.",
+    "sha256": "bc9383e345b15feb69982004e3b3393cb540833e33f5c88611d5602e00e94de2"
+  },
+  {
+    "source": "cartoon_example.mp4",
+    "file": "/media/works/birthday-cartoon.mp4",
+    "kind": "video",
+    "sourceSha256": "e3e919af493be9d96aeaf901f13121c32ac9ed0901bd2fce44f08fb74476794a",
+    "bytes": 2735950,
+    "approval": "User explicitly approved public use on 2026-11-26, including people and children.",
+    "note": "",
+    "sha256": "dfb7b9c567fb75b00cdafaf2ef43a5597449c4dcd8c6400d593dbeb134c9fa44"
+  },
+  {
+    "source": "cartoon_example.mp4",
+    "file": "/media/works/birthday-cartoon.webp",
+    "kind": "poster",
+    "sourceSha256": "e3e919af493be9d96aeaf901f13121c32ac9ed0901bd2fce44f08fb74476794a",
+    "bytes": 33872,
+    "approval": "User explicitly approved public use on 2026-11-26, including people and children.",
+    "note": "Frame at 1s, not a separate generated result.",
+    "sha256": "98b0050ab8ff835d36d293c98cdfd6624486c56977b6d5d7946b46fc97876bed"
+  },
+  {
+    "source": "photo_fam_1.webp",
+    "file": "/media/works/family-1.webp",
+    "kind": "image",
+    "sourceSha256": "924c3ba1a8b61c8224871829fa4720a6864f7c58bf1d957d77a442a6dcd7d259",
+    "bytes": 290512,
+    "approval": "User explicitly approved public use on 2026-11-26, including people and children.",
+    "note": "",
+    "sha256": "1167fa2cdd1c9c77034a40f9d2129f5ac28ffe5a07e1be334c2b897107aef94f"
+  },
+  {
+    "source": "photo_fam_2.webp",
+    "file": "/media/works/family-2.webp",
+    "kind": "image",
+    "sourceSha256": "20eefd41d3d4e32155d5f2a2f8301ddcaf3bf120daa4cc025b2c5d866a6e07bd",
+    "bytes": 237158,
+    "approval": "User explicitly approved public use on 2026-11-26, including people and children.",
+    "note": "",
+    "sha256": "bad6cfd6194f5a366db00907f5178ffa3904e83c977e48670eb8bf61e365c638"
+  },
+  {
+    "source": "photo_fam_3.webp",
+    "file": "/media/works/family-3.webp",
+    "kind": "image",
+    "sourceSha256": "f8d403806785b316e9523f480f61055efd504de9f5f25879d3205566ad26c7de",
+    "bytes": 269208,
+    "approval": "User explicitly approved public use on 2026-11-26, including people and children.",
+    "note": "",
+    "sha256": "fa879a51b6bfc6e2aca1cef63df92107afea94eb0a986dc1a35b453436779526"
+  },
+  {
+    "source": "den_mama.mp4",
+    "file": "/media/works/mother-cartoon.mp4",
+    "kind": "video",
+    "sourceSha256": "60b8ced0c858628e906f18ba0f010c74384d8731a92e137a13146f01bfb68d7c",
+    "bytes": 5593027,
+    "approval": "User explicitly approved public use on 2026-11-26, including people and children.",
+    "note": "",
+    "sha256": "7f4cc59d3095a27c44170b6e3a29a1592ba3ed82b8bfcfc6a9a31712c1eff4db"
+  },
+  {
+    "source": "den_mama.mp4",
+    "file": "/media/works/mother-cartoon.webp",
+    "kind": "poster",
+    "sourceSha256": "60b8ced0c858628e906f18ba0f010c74384d8731a92e137a13146f01bfb68d7c",
+    "bytes": 73928,
+    "approval": "User explicitly approved public use on 2026-11-26, including people and children.",
+    "note": "Frame at 1s, not a separate generated result.",
+    "sha256": "7869a0b2405408a60cb30ba4c3095b5db32fba14b9a88d3c0bfac8ded0f493ef"
+  },
+  {
+    "source": "den_mama.mp4",
+    "file": "/media/works/mother-song.mp3",
+    "kind": "audio",
+    "sourceSha256": "60b8ced0c858628e906f18ba0f010c74384d8731a92e137a13146f01bfb68d7c",
+    "bytes": 961299,
+    "approval": "User explicitly approved public use on 2026-11-26, including people and children.",
+    "note": "Same soundtrack as approved den_mama.mp4; one-minute excerpt, not a full-length song example.",
+    "sha256": "feec8edab4814026e9a418ae22e459fb45937dd4cd2e6d0cc24ac6681a9b69b9"
+  },
+  {
+    "source": "musical-card.mp4",
+    "file": "/media/works/musical-card.mp4",
+    "kind": "video",
+    "sourceSha256": "b4effe5758453bf08905d23a315d75850c84902166eec1e865e849b5dfb9efa8",
+    "bytes": 888488,
+    "approval": "User explicitly approved public use on 2026-11-26, including people and children.",
+    "note": "",
+    "sha256": "3b17b8000c1034d74e2c498ce14e10de7e28ecada13c2260b568576519c86778"
+  },
+  {
+    "source": "musical-card.mp4",
+    "file": "/media/works/musical-card.webp",
+    "kind": "poster",
+    "sourceSha256": "b4effe5758453bf08905d23a315d75850c84902166eec1e865e849b5dfb9efa8",
+    "bytes": 150466,
+    "approval": "User explicitly approved public use on 2026-11-26, including people and children.",
+    "note": "Frame at 1s, not a separate generated result.",
+    "sha256": "c04a716791492dc345b2c7cb0d35e97e779fae8248c73e0d59c3dc6d6ff3f1f0"
+  },
+  {
+    "source": "c60aa946-daf8-4616-8945-19c0136ef7d8.png",
+    "file": "/media/works/postcard-birthday.webp",
+    "kind": "image",
+    "sourceSha256": "361127d1c5fcebedae90560fea1e14d091e4f34af6780b9b10eb77601fe9eaf8",
+    "bytes": 203282,
+    "approval": "Uploaded by owner for public Frontend 1.1 examples on 2026-11-26.",
+    "note": "Original promotional banner, kept complete. Embedded Telegram icon is part of source art; site actions use MAX.; Original promotional banner, kept complete.",
+    "sha256": "70511521e34e5769817194d371ba933d32b303ea433eef74548ee2c2384126d2"
+  },
+  {
+    "source": "035c843a-5992-42b4-8c4b-8dfe63cd409c.png",
+    "file": "/media/works/postcard-mother.webp",
+    "kind": "image",
+    "sourceSha256": "632907f5b5dd96e32871d3d6c926d1fba41384f1f4ba00a467ee3fe5c12b9959",
+    "bytes": 210380,
+    "approval": "Uploaded by owner for public Frontend 1.1 examples on 2026-11-26.",
+    "note": "Original promotional banner, kept complete. Embedded Telegram icon is part of source art; site actions use MAX.; Original promotional banner, kept complete.",
+    "sha256": "9c6b4fccbd0fe059128b7a26a2dda4edc6624ba03cad90860492e564ad7591b8"
+  },
+  {
+    "source": "ded_moroz_kids.mp4",
+    "file": "/media/works/santa-family.mp4",
+    "kind": "video",
+    "sourceSha256": "3c7478c908ffbccf1db020c8e8f57c6d099155ca99735c014a3d731bc971df45",
+    "bytes": 1575822,
+    "approval": "Uploaded by owner for public Frontend 1.1 use on 2026-11-26.",
+    "note": "",
+    "sha256": "580e314b394cdf2b76744e731e19f5d2977611980ded670d3a59065773fde5fb"
+  },
+  {
+    "source": "ded_moroz_kids.mp4",
+    "file": "/media/works/santa-family.webp",
+    "kind": "poster",
+    "sourceSha256": "3c7478c908ffbccf1db020c8e8f57c6d099155ca99735c014a3d731bc971df45",
+    "bytes": 141582,
+    "approval": "Uploaded by owner for public Frontend 1.1 use on 2026-11-26.",
+    "note": "Video frame at 8s, shows Santa and children; not a generated replacement.",
+    "sha256": "983bbc38f00abbc36129843574e109b1d240b9b3661eb23a7db5fab3a32ab8c4"
+  },
+  {
+    "source": "after.jpg",
+    "file": "/media/works/vision-after.webp",
+    "kind": "image",
+    "sourceSha256": "9607f9cefcae97b421074f8a4a6b3373f809c4817d6c3c17ff392b19c3f138d3",
+    "bytes": 209486,
+    "approval": "User explicitly approved public use on 2026-11-26, including people and children.",
+    "note": "",
+    "sha256": "4c26dabdcb6e523234981754535e664154b1244af4b5f53f0ee89ea618b48d86"
+  },
+  {
+    "source": "before.jpg",
+    "file": "/media/works/vision-before.webp",
+    "kind": "image",
+    "sourceSha256": "18bf3055776d86e440ac6ff7b4d626b57aaab79baaab76c709e9a5d59fe0faef",
+    "bytes": 41758,
+    "approval": "User explicitly approved public use on 2026-11-26, including people and children.",
+    "note": "",
+    "sha256": "a77d848f82d51a51c1c43a8fc3132977d5fc5c1a110d2b23d35e003b7039b16d"
+  }
+]

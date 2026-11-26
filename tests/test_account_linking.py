@@ -243,12 +243,12 @@ async def test_operation_attempt_limit_and_collision_protection(link_env,monkeyp
     assert len(read(e.path,'SELECT * FROM account_link_operations'))==1
 
 
-async def test_immutable_versions_and_explicit_migration_v1_to_v4(tmp_path):
+async def test_immutable_versions_and_explicit_migration_v1_to_v5(tmp_path):
     path=tmp_path/'synthetic.sqlite3';path.touch();known=versions()
-    assert set(known)=={1,2,3,4} and known[1][1]==CHECKSUM
+    assert set(known)=={1,2,3,4,5} and known[1][1]==CHECKSUM
     for v,ddl in [(2,auth_schema.DDL),(3,browser_schema.DDL)]:
         assert known[v][1]==hashlib.sha256('\n'.join(' '.join(x.split()).rstrip(';') for x in ddl.values()).encode()).hexdigest()
-    for v in range(1,5):
+    for v in range(1,6):
         await migrate(path,target=v)
         assert len(read(path,'SELECT * FROM account_schema_migrations'))==v
     assert not await migrate(path)

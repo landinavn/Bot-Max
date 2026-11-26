@@ -106,12 +106,21 @@ def create_app(settings: APISettings | None=None, *, sender=None, auth_settings=
         raise ValueError('Inconsistent auth settings')
     if auth_settings.code_digits!=6 or auth_settings.code_ttl>900:
         raise ValueError('HTTP contract requires six digit codes and a code TTL at most 900 seconds')
-    app=FastAPI(title='Wish browser auth API',version='1.2A.1',debug=False,
+    app=FastAPI(title='Wish browser auth API',version='1.2B',debug=False,
                 docs_url=None if settings.environment=='production' else '/docs',redoc_url=None,
                 openapi_url=None if settings.environment=='production' else '/openapi.json',
                 responses={status:{'model':ErrorResponse} for status in (400,401,403,409,413,415,422,429,503)})
     app.state.settings=settings
     app.state.auth=AuthService(settings.database,auth_settings,sender,clock=clock,timeout=settings.database_timeout)
+    app.state.linking=None
+    if settings.max_linking_enabled:
+        from account_linking import LinkingService, LinkingSettings
+        from account_linking.errors import LinkingError
+        app.state.linking=LinkingService(settings.database,LinkingSettings(secret=settings.linking_secret),
+                                        clock=clock,timeout=settings.database_timeout)
+        @app.exception_handler(LinkingError)
+        async def link_error(request,error):
+            return error_response(error.status,error.code)
     if settings.development_origins:
         app.add_middleware(CORSMiddleware,allow_origins=list(settings.development_origins),
             allow_credentials=True,allow_methods=['GET','POST'],allow_headers=['Content-Type','X-CSRF-Token'],max_age=600)
@@ -138,8 +147,8 @@ def create_app(settings: APISettings | None=None, *, sender=None, auth_settings=
         # Never serialize/log raw exception text, request bodies or credentials.
         return JSONResponse({'error':{'code':'service_unavailable'}},status_code=503,headers={'Cache-Control':'no-store'})
 
-    from .routes import auth, account, health
-    for router in (health.router,auth.router,account.router):app.include_router(router)
+    from .routes import auth, account, health, linking
+    for router in (health.router,auth.router,account.router,linking.router):app.include_router(router)
     def contract():
         if app.openapi_schema is not None:
             return app.openapi_schema
@@ -154,9 +163,9 @@ def create_app(settings: APISettings | None=None, *, sender=None, auth_settings=
                 if method=='post':
                     operation.setdefault('parameters',[]).append({'name':'Origin','in':'header','required':True,
                         'schema':{'type':'string'},'description':'Exact configured origin; absent Origin is rejected.'})
-                    session=path.endswith('/logout') or path.endswith('/logout-all')
+                    session=path.endswith('/logout') or path.endswith('/logout-all') or path.startswith('/api/v1/account/')
                     operation['security']=[{'sessionCookie' if session else 'preauthCookie':[], 'csrfHeader':[]}]
-                elif path=='/api/v1/me':
+                elif path=='/api/v1/me' or path.startswith('/api/v1/account/'):
                     operation['security']=[{'sessionCookie':[]}]
         app.openapi_schema=schema
         return schema

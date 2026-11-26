@@ -14,14 +14,14 @@ from config import MAX_API_URL
 class MaxAPIConnector(TCPConnector):
     """SSL-исключение для отдельного клиента MAX, включая upload-серверы."""
 
-    def __init__(self) -> None:
-        super().__init__(ssl=False)
+    def __init__(self, *, verify_ssl: bool = False) -> None:
+        super().__init__(ssl=verify_ssl)
 
 
 @asynccontextmanager
-async def create_max_bot(token: str, *, auto_requests: bool = True):
+async def create_max_bot(token: str, *, auto_requests: bool = True, verify_ssl: bool = False):
     # Сессии ProxyAPI, S3 и Prodamus создаются отдельно с проверкой TLS.
-    async with MaxAPIConnector() as connector:
+    async with MaxAPIConnector(verify_ssl=verify_ssl) as connector:
         bot = Bot(
             token=token,
             auto_requests=auto_requests,

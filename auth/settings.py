@@ -22,6 +22,8 @@ class AuthSettings:
     session_idle: int = 7 * 86400
     session_touch: int = 300
     retention: int = 86400
+    active_email_challenges: int = 3
+    active_global_challenges: int = 1000
 
     def __post_init__(self):
         if not isinstance(self.secret, bytes) or len(self.secret) < 32:
@@ -32,7 +34,7 @@ class AuthSettings:
             raise ValueError('Некорректное название сервиса.')
         integers = ('code_digits','code_ttl','resend_interval','challenge_attempts','rate_window','email_requests',
                     'source_requests','global_requests','email_attempts','source_attempts','global_attempts',
-                    'session_lifetime','session_idle','session_touch','retention')
+                    'session_lifetime','session_idle','session_touch','retention','active_email_challenges','active_global_challenges')
         if any(type(getattr(self, k)) is not int or getattr(self, k) <= 0 for k in integers):
             raise ValueError('Лимиты авторизации должны быть положительными целыми числами.')
         if (not 6 <= self.code_digits <= 8 or self.session_touch >= self.session_idle

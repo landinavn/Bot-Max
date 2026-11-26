@@ -45,12 +45,15 @@ async def main() -> None:
         except ValueError as exc:
             logger.error("Ошибка настройки Prodamus: %s", exc)
             raise
-    async with create_max_bot(config.token) as bot:
+    async with create_max_bot(config.token, verify_ssl=config.max_linking_enabled) as bot:
         dispatcher = Dispatcher(
             storage=MemoryContext,
             use_create_task=True,
             event_isolation=SimpleEventIsolation(),
         )
+        if config.max_linking_enabled:
+            from account_linking.bootstrap import configure as configure_linking
+            configure_linking(dispatcher,config)
         studio_worker = None
         try:
             studio_worker = await configure_studio(bot, dispatcher, config)

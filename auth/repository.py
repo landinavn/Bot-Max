@@ -56,8 +56,20 @@ class AuthRepository:
                 for event, subject, limit in rules:
                     if not await self._limit(db,event,subject,now,limit):raise RateLimited()
                 for event, subject, _ in rules:await self._record(db,event,subject,now)
-                await db.execute('''UPDATE auth_challenges SET invalidated_at=? WHERE email_key=?
-                    AND consumed_at IS NULL AND invalidated_at IS NULL''',(now,email_key))
+                # Supersede only this browser. Legacy v2 calls supersede only unbound codes.
+                browser_table = await one(db,"SELECT name FROM sqlite_master WHERE name='auth_browser_challenges'")
+                if browser_context is not None:
+                    await db.execute("""UPDATE auth_challenges SET invalidated_at=? WHERE challenge_id IN
+                        (SELECT challenge_id FROM auth_browser_challenges WHERE context_mac=?)
+                        AND consumed_at IS NULL AND invalidated_at IS NULL""",(now,context_mac))
+                else:
+                    unbound = ' AND NOT EXISTS (SELECT 1 FROM auth_browser_challenges b WHERE b.challenge_id=auth_challenges.challenge_id)' if browser_table else ''
+                    await db.execute("UPDATE auth_challenges SET invalidated_at=? WHERE email_key=? AND consumed_at IS NULL AND invalidated_at IS NULL"+unbound,(now,email_key))
+                live = "consumed_at IS NULL AND invalidated_at IS NULL AND locked_at IS NULL AND expires_at>?"
+                active_email = await one(db,'SELECT COUNT(*) AS n FROM auth_challenges WHERE '+live+' AND email_key=?',(now,email_key))
+                active_global = await one(db,'SELECT COUNT(*) AS n FROM auth_challenges WHERE '+live,(now,))
+                if active_email['n']>=s.active_email_challenges or active_global['n']>=s.active_global_challenges:
+                    raise RateLimited()
                 await db.execute('''INSERT INTO auth_challenges(challenge_id,purpose,email,email_key,code_mac,created_at,expires_at,delivery_status)
                     VALUES(?,'email_login',?,?,?,?,?,'pending')''',(key,email,email_key,mac,now,now+s.code_ttl))
                 if browser_context is not None:
@@ -103,6 +115,8 @@ class AuthRepository:
                     row = await one(db,'SELECT * FROM auth_challenges WHERE challenge_id=?',(challenge_id(key),))
                     if not row:
                         error = InvalidCode()
+                    elif not await self._browser_matches(db,row,browser_context,now):
+                        error = InvalidCode()
                     elif not await self._limit(db,'attempt_email',row['email_key'],now,s.email_attempts):
                         error = RateLimited()
                     else:
@@ -137,6 +151,9 @@ class AuthRepository:
                             token=generate_token(); session=str(uuid4())
                             await self._insert_session(db,session,account.id,token,now)
                             await db.execute('UPDATE auth_challenges SET consumed_at=? WHERE challenge_id=?',(now,row['challenge_id']))
+                            # A successful proof closes all other outstanding codes for this email.
+                            # Existing authenticated sessions in other browsers are unaffected.
+                            await db.execute("UPDATE auth_challenges SET invalidated_at=? WHERE email_key=? AND consumed_at IS NULL AND invalidated_at IS NULL",(now,row['email_key']))
                             if browser_context is not None:
                                 await db.execute('UPDATE auth_browser_contexts SET consumed_at=? WHERE context_mac=?',(now,browser_context[0]))
                                 await db.execute("""UPDATE auth_challenges SET invalidated_at=? WHERE challenge_id IN
@@ -146,6 +163,18 @@ class AuthRepository:
         # Rejections COMMIT attempt counters; raising inside the transaction would reset the budget.
         if error:raise error
         return result
+
+    async def _browser_matches(self, db, row, context, now):
+        exists = await one(db,"SELECT name FROM sqlite_master WHERE name='auth_browser_challenges'")
+        if not exists:
+            return context is None
+        binding = await one(db,"""SELECT b.context_mac,c.consumed_at,c.expires_at
+            FROM auth_browser_challenges b JOIN auth_browser_contexts c ON c.context_mac=b.context_mac
+            WHERE b.challenge_id=?""",(row['challenge_id'],))
+        if context is None:
+            return binding is None
+        return bool(binding and hmac.compare_digest(binding['context_mac'],context[0])
+            and binding['consumed_at'] is None and binding['expires_at']>now and context[1]>now)
 
     async def _insert_session(self, db, session, account, token, now):
         s=self.settings

@@ -352,7 +352,7 @@ async def test_v1_checksum_and_upgrade_preserve_v1_and_legacy(tmp_path):
         for name in DDL:assert db.execute('SELECT sql FROM sqlite_master WHERE name=?',(name,)).fetchone()[0]==before[name]
 
 
-@pytest.mark.parametrize('change',["UPDATE account_schema_migrations SET version=3 WHERE version=2",
+@pytest.mark.parametrize('change',["UPDATE account_schema_migrations SET version=99 WHERE version=2",
     "DELETE FROM account_schema_migrations WHERE version=1",'DROP INDEX auth_session_owner',
     'ALTER TABLE auth_sessions ADD COLUMN incompatible TEXT'])
 async def test_migration_unknown_gaps_and_drift(auth_env,change):

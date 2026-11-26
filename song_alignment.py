@@ -114,11 +114,33 @@ def retryable_alignment_error(exc):
             or isinstance(exc, APIStatusError) and exc.status_code in (408, 429, 500, 502, 503, 504))
 
 
-async def resolve_song_start(story, audio, lyrics, audio_url, workdir, checkpoint):
-    """Two persisted attempts per audio/text pair, including interrupted legacy requests."""
+def apply_fixed_start(story, lyrics, audio_url, fixed_start):
+    """No inference/API call. Keep a deliberate manual mark for this exact audio/text."""
+    from mother_song_timing import FIXED_INTRO_METHOD
+    if (isinstance(fixed_start, bool) or not isinstance(fixed_start, (int, float))
+            or not math.isfinite(fixed_start) or not 0 <= fixed_start <= 29):
+        raise SongAlignmentError('Некорректное фиксированное начало песни.')
+    source = alignment_source(audio_url, lyrics)
+    saved = story.get('audio_start')
+    if (story.get('alignment_source') == source and story.get('alignment_method') == 'admin'
+            and isinstance(saved, (int, float)) and not isinstance(saved, bool)
+            and math.isfinite(saved) and 0 <= saved <= 29):
+        story.update(alignment_submitting=None, alignment_error=None)
+        return float(saved)
+    story.update(alignment_source=source, audio_start=float(fixed_start), alignment_method=FIXED_INTRO_METHOD,
+                 alignment_submitting=None, alignment_error=None)
+    return float(fixed_start)
+
+
+async def resolve_song_start(story, audio, lyrics, audio_url, workdir, checkpoint, *, fixed_start=None):
+    """Explicit editing offset skips ASR; other flows keep the two-attempt durable budget."""
     import asyncio
     import logging
     source = alignment_source(audio_url, lyrics)
+    if fixed_start is not None:
+        start = apply_fixed_start(story, lyrics, audio_url, fixed_start)
+        await asyncio.shield(checkpoint())
+        return start
     if story.get('alignment_source') == source:
         start = story.get('audio_start')
         if isinstance(start, (int, float)) and not isinstance(start, bool) and math.isfinite(start) and 0 <= start <= 29:

@@ -73,6 +73,9 @@ def restore_start_selection(data):
 
 
 def can_recover_start(data):
+    from mother_song_timing import recoverable_fixed_intro
+    if recoverable_fixed_intro(data):
+        return True
     if alignment_only(data):
         return True
     story = data.get('cartoon_kling_story') or {}
@@ -100,7 +103,7 @@ def manual_start(data, seconds, *, variant=None):
     if (not isinstance(seconds, (int, float)) or isinstance(seconds, bool)
             or not math.isfinite(seconds) or not 0 <= seconds <= 29):
         raise ValueError('Укажите секунду начала слов от 0 до 29, например /mother_song_start 3.5')
-    revising = (data.get('cartoon_theme') in MOTHER_THEMES and story.get('alignment_method') == 'admin'
+    revising = (data.get('cartoon_theme') in MOTHER_THEMES and story.get('alignment_method') in ('admin', 'mother-fixed-intro-v1')
         and story.get('alignment_source') == alignment_source(audio, lyrics) and not story.get('result_url')
         and not any((shot.get('image_submitting') and not shot.get('image_url'))
                     or (shot.get('video_submitting') and not shot.get('task_id')) for shot in story.get('shots', [])))
@@ -138,8 +141,15 @@ async def recover_order(order, state, *, start=None, variant=None):
         return False
     if start is not None:
         manual_start(data, start, variant=variant)
-    elif not can_recover_start(data):
-        return False
+    else:
+        from mother_song_timing import recoverable_fixed_intro, fixed_intro_for
+        if recoverable_fixed_intro(data):
+            from song_alignment import apply_fixed_start
+            _, audio = urls(data)
+            lyrics = data.get('song_review_lyrics') or data.get('video_song_lyrics') or ''
+            apply_fixed_start(data['cartoon_kling_story'], lyrics, audio, fixed_intro_for(data))
+        if not can_recover_start(data):
+            return False
     data['cartoon_video_failed'] = False
     async with aiosqlite.connect(database.DATABASE_PATH, timeout=30) as db:
         cursor = await db.execute("UPDATE cartoon_orders SET status='paid',fsm_data=?,fsm_state=? "

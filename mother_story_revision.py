@@ -11,7 +11,8 @@ import time
 
 from mother_recovery import urls
 from mother_storyboard import SHOT_SECONDS, storyboard
-from song_alignment import alignment_source
+from song_alignment import alignment_source, apply_fixed_start
+from mother_song_timing import fixed_intro_for
 
 
 VISUAL_FIELDS = ('cartoon_kling_story','cartoon_kling_source','cartoon_kling_task_id',
@@ -43,6 +44,8 @@ def prepare_revision(data):
     result['cartoon_kling_story']={'source':[policy,image],'shot_seconds':SHOT_SECONDS,
         'shots':[{} for _ in shots],'alignment_source':alignment_source(audio,lyrics),
         'audio_start':float(start),'alignment_method':old.get('alignment_method','admin')}
+    # The plan and actual render must report the same owner-selected timing rule.
+    apply_fixed_start(result['cartoon_kling_story'], lyrics, audio, fixed_intro_for(result))
     result['cartoon_video_failed']=False
     return result
 

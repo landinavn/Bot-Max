@@ -13,6 +13,8 @@ const htmlFor = (r) =>
     r.path === "/" ? "dist/index.html" : `dist${r.path}/index.html`,
     "utf8",
   );
+const sourceLines = text => text.trim().split(/\r?\n/).slice(1);
+
 test("19 routes prerender real content and unique public SEO without JavaScript", () => {
   assert.equal(routes.length, 19);
   const publicRoutes = routes.filter((r) => r.kind !== "private");
@@ -254,7 +256,7 @@ test('Frontend 1.3 homepage preserves the agreed narrative and actual animation 
 test('every archive original has approved private provenance and complete responsive derivatives',async()=>{
  const {media}=await import('../src/config.ts');
  const registry=JSON.parse(fs.readFileSync('media/manifest.json','utf8'));
- const lines=fs.readFileSync('media/frontend-1.3-sources.tsv','utf8').trim().split('\n').slice(1);
+ const lines=sourceLines(fs.readFileSync('media/frontend-1.3-sources.tsv','utf8'));
  assert.equal(lines.length,16);
  for(const line of lines){
   const [source,original,hash]=line.split('\t');
@@ -282,4 +284,29 @@ test('new images use srcset and lazy galleries; only the hero work has high prio
  assert.ok(!/<(?:video|audio)[^>]+src=/.test(html));
  for(const r of routes)assert.ok(!htmlFor(r).includes('sources.tsv'));
  assert.ok(fs.readFileSync('src/storefront13.css','utf8').includes('prefers-reduced-motion'));
+});
+
+test('source TSV accepts LF and CRLF without relaxing SHA-256 equality', () => {
+ const sourceText=fs.readFileSync('media/frontend-1.3-sources.tsv','utf8');
+ const registry=JSON.parse(fs.readFileSync('media/manifest.json','utf8'));
+ const expectedHashes=new Map(registry.map(item=>[item.source,item.sourceSha256]));
+ const verify=text=>{
+  const rows=sourceLines(text).map(line=>line.split('\t'));
+  assert.equal(rows.length,16);
+  for(const [source,,hash] of rows){
+   assert.match(hash,/^[a-f0-9]{64}$/);
+   assert.equal(hash,expectedHashes.get(source),source+' SHA-256');
+  }
+  return rows;
+ };
+ const lf=sourceText.replace(/\r\n/g,'\n');
+ const expected=verify(lf);
+ const crlf=lf.replace(/\n/g,'\r\n');
+ assert.deepEqual(verify(crlf),expected);
+ const hash=expected[0][2];
+ const corrupted=(hash[0]==='0'?'1':'0')+hash.slice(1);
+ for(const text of [lf,crlf]){
+  assert.throws(()=>verify(text.replace(hash,corrupted)));
+  assert.throws(()=>verify(text.replace(hash,hash+' ')));
+ }
 });

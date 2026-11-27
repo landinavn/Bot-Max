@@ -1,39 +1,56 @@
-# Private media provenance — Frontend 1.2
+# Private media provenance — Frontend 1.3
 
-Owner explicitly approved publication of the nine named files on 26 November 2026, including identifiable adults and children. The additional two postcard banners and `ded_moroz_kids.mp4` were supplied in this same design task for public use. This is the owner's authorization; it is not an independently verified music or likeness licence.
+Этот каталог не публикуется. `manifest.json` содержит одну запись на каждый из 65 публичных файлов: источник, SHA-256 исходника и производного файла, размер, преобразование и разрешение. `frontend-1.3-sources.tsv` — точный общий реестр из первого архива, SHA-256 `843c31b99c1e12c296fa93554ac2874f4080b9cdd3b646c135d233bdf0c4bbfa`.
 
-Only the allowlisted source files were processed. `media/manifest.json` (outside public) records the exact source, SHA-256, public output, byte count, transformation and authorization. Metadata is removed by re-encoding; private URLs, order IDs, DB records and credentials are never copied. Audio/video are opt-in, without autoplay, with `preload="none"`.
+Владелец отдельно подтвердил публичное использование **всех 14 изображений и двух видео**, включая узнаваемых взрослых и детей, 26 ноября 2026: «Да, разрешаю все 16 файлов». Это разрешение владельца, а не независимая юридическая экспертиза авторских/музыкальных прав. Разрешения ранее согласованных логотипа, пары карты желаний и старых видео сохранены в реестре.
 
-| Source | Actual content / use |
-| --- | --- |
-| before.jpg + after.jpg | Woman on embankment → personalized vision collage. Only verified matching standalone pair; interactive comparison. |
-| photo_fam_1.webp | New Year family photo collage; hero/catalog/season. |
-| photo_fam_2.webp, photo_fam_3.webp | Additional family photosession collages; gallery. PNG names in brief are absent; these WEBP counterparts exist. |
-| photo_main_1.webp | Byte-identical to photo_fam_1.webp; deduplicated, not copied again. |
-| cartoon_example.mp4 | Birthday cartoon with girl; video + poster, public use explicitly approved. |
-| musical-card.mp4 | Christmas/New Year musical postcard; video + poster. Static frame is explicitly labeled as such. |
-| den_mama.mp4 | One-minute film about mother; video + poster + same soundtrack as an audio excerpt (not a full-length song sample). Found in owner's earlier upload, not in examples. |
-| ded_moroz_kids.mp4 | Owner's new upload; family greeting; poster at 8s shows actual Santa. |
-| c60aa946-daf8-4616-8945-19c0136ef7d8.png | Birthday postcard promotional before/after banner, kept intact. |
-| 035c843a-5992-42b4-8c4b-8dfe63cd409c.png | Mother's Day postcard promotional before/after banner, kept intact. |
+## Предоставленные материалы
 
-Banners contain an embedded Telegram symbol. That is part of the original artwork, not an active link. All site creation buttons use the verified MAX URL. Banner halves are not invented as separate source files.
+| Источник | Содержимое и использование |
+|---|---|
+| photoshoot-mother-daughter-elegant.png | Коллекция кадров мамы и дочки; фотогалерея и страница фотосессий |
+| photoshoot-family-light.png | Семейная коллекция; hero и галереи. Заменяет визуально повторяющийся старый family-2.webp |
+| photoshoot-family-cozy.png | Семейная коллекция; сезон и галереи. Заменяет старый family-3.webp |
+| photoshoot-mother-daughter-red.png | Мама и дочка; каталог и галереи |
+| photoshoot-child-candy.webp | Отдельный детский портрет; галереи |
+| photoshoot-woman-red.png | Индивидуальная женская фотосессия, коллекция кадров; hero и галереи |
+| postcard-new-year-child/family/mother/couple-before-after.png | Четыре предоставленных рекламных коллажа. Показаны целиком; пары не вырезаются и не выдаются за отдельные оригиналы |
+| postcard-birthday-friends-before-after.png | Предоставленный рекламный коллаж открытки для подруги, показан целиком |
+| postcard-new-year-granddaughter.webp | Самостоятельная готовая открытка, не рекламная пара; hero и отдельная работа |
+| vision-board-financial-dream.webp | Пример финансовой мечты; каталог и раздел карт желаний, без обещания исполнения |
+| vision-board-seaside-home.webp | Пример дома у моря; hero/сезон/раздел карт желаний |
+| animation-family-portrait-vertical.mp4 | Оживлённый семейный портрет, 784×1176, 5.041667 s |
+| animation-family-portrait-horizontal.mp4 | Оживлённый семейный портрет, 1072×856, 5.041667 s; оригинальный формат не заменён на 16:9 |
 
-Missing: `animated_photo.mp4`, `cartoon_example1.mp4`, `mark_ded_moroz.mp4`, `NY_card.png`. No matching before/after pairs for photosessions/cartoons/animation have been supplied; their comparison tabs show actual finished work or an explicit unavailable state. No random image is substituted for the input.
+Видео оживления используются на главной, `/animation` и `/gallery`. Постеры взяты на **1-й секунде этих же исходных видео**; их source SHA совпадает с source SHA соответствующего ролика. Постер никогда не называется исходной фотографией. Отдельные оригиналы для сравнения не предоставлены; новой пары до/после для оживления нет.
 
-Original square logo received in 412b5728-b2e3-4df7-b50d-3e2e1a52a2be.zip; PNG 1254×1254. Resized without cropping or stretching to 512px WebP, ICO (16–64), 32px PNG and 180px Apple icon. Used alongside the official title, not as a horizontal replacement.
+Все коллажи и изображения сохраняют полную композицию, без AI-перерисовки, ретуши людей и обрезки встроенных текстов. Существующая интерактивная пара `vision-before.webp` / `vision-after.webp` — единственная подтверждённая отдельная пара; сохранена.
 
-Other files in owner examples (including rabbit, mother/daughter and unlisted postcard images) have not been copied: explicit publication approval for those file names has not been recorded.
+## Производные файлы
 
-## Reproduce
+- 14 изображений × 3 ширины (исходная, максимум 1400; 900; 480), без увеличения исходников.
+- 2 MP4 H.264/yuv420p, CRF22 slow, faststart, исходные размеры/длительность/пропорции; 2 постера × 2 размера.
+- Всего новых производных файлов: 48; 8 929 620 Б.
+- Vertical MP4: 5 310 942 → 803 447 Б; horizontal: 3 229 158 → 655 339 Б.
+- Средний покадровый SSIM оригинал/оптимизированное видео: 0.9882 и 0.9864; минимальный кадр 0.9854 / 0.9841. Сопоставлены лица, композиция и движение. Метрика дополняет визуальную проверку, не заменяет её.
+- Нативные WebP сохраняются побайтово для максимального размера, когда повторное lossy-кодирование не нужно. Метаданные новых PNG/MP4 удаляются при перекодировании.
 
-Requires Pillow and ffmpeg, no network/generative API:
+`src/responsive-media.ts` содержит только публичные пути и размеры/srcset, без реестра согласий и оригинальных имён. Только основная фотография hero имеет high fetch priority; остальные работы lazy. MP4/MP3 отсутствуют в src проигрывателя до явного нажатия. Нажатие на кнопку воспроизведения начинает загрузку и запрашивает play; autoplay-атрибута, фонового запуска и prefetch видео нет.
+
+## Ранее согласованные материалы
+
+Сохранены оригинальный квадратный логотип (без перерисовки), общая семейная коллекция `family-1`, подтверждённая пара карты желаний, `cartoon_example.mp4` (birthday-cartoon), `musical-card.mp4`, `den_mama.mp4` (mother-cartoon и его минутная аудиодорожка), `ded_moroz_kids.mp4` (santa-family). Их происхождение и разрешения остаются в `manifest.json`.
+
+Старые производные рекламные `postcard-birthday.webp` / `postcard-mother.webp` со знаком Telegram исключены из public и заменены предоставленными владельцем новыми композициями. Оригинальные файлы не ретушировались и не переписывались. Старые family-2/3 исключены как визуальные дубли новых исходников большей чёткости. Новые публичные файлы соответствуют allowlist; TSV, README, скрипты и разрешения в dist не попадают.
+
+## Воспроизведение обработки
+
+Три архива распаковываются в одну приватную директорию с защитой от path traversal/symlinks и проверкой одинаковых повторных файлов. Все 16 SHA-256 сверяются с точным `sources.tsv`.
 
 ```sh
-python scripts/prepare-media.py --examples /path/to/examples --mother-video /path/to/den_mama.mp4 --santa-video /path/to/ded_moroz_kids.mp4 --banners /path/to/unpacked-approved-banners --logo /path/to/original-logo.png
+python scripts/prepare-frontend13.py --input /path/to/combined-originals --output /path/to/private-derived
 ```
 
-Unused SVG demo assets from Frontend 1.0 have been removed from public and the static release. The existing text-only OG cover is retained; it makes no claim to be a customer result. Do not run the legacy demo generation script to fill missing media.
+Нужны Pillow, ffmpeg и ffprobe; сеть/API не используются. Скрипт привязан к SHA реестра и отклоняет его изменение. Из output в public копируются **только** перечисленные `assets[].filename`; JSON, скрипты, журналы и контактные листы остаются приватными. Для следующего набора материалов нужно отдельное разрешение и обновление allowlist/хешей.
 
-
-Frontend 1.2: two duplicate postcard records and the accidental logo README entry were removed. Every public media file has one provenance record and an output SHA-256. The public folder contains no README or registry. Both advertising banners still include the original Telegram mark: owner-approved replacement artwork is required before public launch; the originals were not retouched. The preview requires server-side Basic Auth, not merely noindex.
+`prepare-media.py` сохранён для исторического воспроизведения старого этапа. Его старые banner/family outputs не следует возвращать в актуальный public. Демо-иллюстрации не подменяют реальные примеры.

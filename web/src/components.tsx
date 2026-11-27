@@ -3,6 +3,7 @@ import { products } from "./catalog.ts";
 import type { Product } from "./catalog.ts";
 import { categoryLabels, media, site, exampleFor } from "./config.ts";
 import type { Category, MediaItem } from "./config.ts";
+import { responsiveMedia } from "./responsive-media.ts";
 import { trackEvent } from "./analytics.ts";
 
 export function Picture({
@@ -12,6 +13,7 @@ export function Picture({
   avif,
   webp,
   className = "",
+  sizes = "(max-width: 767px) 92vw, 42vw",
 }: {
   src: string;
   alt: string;
@@ -19,6 +21,7 @@ export function Picture({
   avif?: string;
   webp?: string;
   className?: string;
+  sizes?: string;
 }) {
   return (
     <picture className={className}>
@@ -30,8 +33,10 @@ export function Picture({
         loading={eager ? "eager" : "lazy"}
         fetchPriority={eager ? "high" : "auto"}
         decoding="async"
-        width="600"
-        height="720"
+        width={responsiveMedia[src]?.width ?? 600}
+        height={responsiveMedia[src]?.height ?? 720}
+        srcSet={responsiveMedia[src]?.srcSet}
+        sizes={responsiveMedia[src]?.srcSet ? sizes : undefined}
       />
     </picture>
   );
@@ -210,7 +215,7 @@ export function ProductVisual({ productId, eager = false, playable = false }: { 
     <p>{productId === "animation" ? "Видеопример готовится" : "Индивидуальный результат — после обсуждения"}</p>
   </div>;
   if (playable) return <MediaPlayer item={item} />;
-  return <Picture src={item.poster} alt={item.title} eager={eager} />;
+  return <Picture src={item.poster} alt={item.title} eager={eager} sizes="(max-width: 767px) 78vw, 28vw" />;
 }
 export function ProductCard({ product }: { product: Product }) {
   return <article className={"product-card " + product.color}>
@@ -250,156 +255,70 @@ export function FAQ({ items }: { items: [string, string][] }) {
 }
 export function MediaPlayer({ item }: { item: MediaItem }) {
   const [loaded, setLoaded] = useState(false);
-  if (item.kind === "image")
-    return (
-      <Picture
-        src={item.poster}
-        alt={item.title}
-        avif={item.avif}
-        webp={item.webp}
-      />
-    );
-  if (!item.src)
-    return (
-      <div className="media-pending">
-        <Picture src={item.poster} alt={item.title} />
-        <p>
-          Пример {item.kind === "video" ? "видео" : "песни"} появится после
-          добавления материала владельцем.
-        </p>
-      </div>
-    );
-  return (
-    <div className="media-player">
-      {item.kind === "video" ? (
-        loaded ? (
-          <video
-            controls
-            playsInline
-            preload="none"
-            poster={item.poster}
-            src={item.src}
-            aria-label={item.title}
-          />
-        ) : (
-          <>
-            <Picture src={item.poster} alt={item.title} />
-            <button className="button" onClick={() => setLoaded(true)}>
-              Загрузить видео
-            </button>
-          </>
-        )
-      ) : loaded ? (
-        <audio controls preload="none" src={item.src} aria-label={item.title} />
-      ) : (
-        <>
-          <Picture src={item.poster} alt={item.title} />
-          <button className="button" onClick={() => setLoaded(true)}>
-            Загрузить аудио
-          </button>
-        </>
-      )}
-    </div>
-  );
+  const [needsPlay, setNeedsPlay] = useState(false);
+  const player = useRef<HTMLMediaElement | null>(null);
+  useEffect(() => {
+    // Only this explicit user action mounts a src. There is no autoplay attribute.
+    if (loaded && player.current) void player.current.play().catch(() => setNeedsPlay(true));
+  }, [loaded]);
+  if (item.kind === "image") return <Picture src={item.poster} alt={item.title} />;
+  if (!item.src) return <Picture src={item.poster} alt={item.title} />;
+  return <div className={"media-player player-" + item.kind} data-media-id={item.id}>
+    {loaded ? item.kind === "video" ? <video ref={node => {player.current=node;}} controls playsInline preload="none" poster={item.poster} src={item.src} aria-label={item.title}
+      width={responsiveMedia[item.poster]?.width} height={responsiveMedia[item.poster]?.height} />
+      : <audio ref={node => {player.current=node;}} controls preload="none" src={item.src} aria-label={item.title} />
+    : <button className="media-start" onClick={() => setLoaded(true)} aria-label={(item.kind === "video" ? "Смотреть видео: " : "Слушать песню: ") + item.title}>
+      <Picture src={item.poster} alt={item.title} />
+      <span className="play-badge"><span className="play-circle" aria-hidden="true"/><span>{item.kind === "video" ? "Смотреть видео" : "Слушать песню"}</span></span>
+    </button>}
+    {needsPlay && <p className="small-note" role="status">Нажмите кнопку воспроизведения в проигрывателе.</p>}
+    <noscript><p><a className="text-link" href={item.src}>Открыть {item.kind === "video" ? "видеопример" : "аудиопример"}</a></p></noscript>
+  </div>;
 }
-export function Gallery({ compact = false }: { compact?: boolean }) {
+export function WorkCaption({ item }: { item: MediaItem }) {
+  return <>{item.title}{item.presentation === "video-frame" && <small>Постер — кадр видео. Исходное фото для сравнения не предоставлено.</small>}</>;
+}
+export function Gallery({ compact = false, items = media, photoFilters = false, showCategories = true, layout = "" }: {
+  compact?: boolean; items?: MediaItem[]; photoFilters?: boolean; showCategories?: boolean; layout?: string;
+}) {
   const [category, setCategory] = useState<Category>("all");
+  const [group, setGroup] = useState("all");
   const [chosen, setChosen] = useState<MediaItem | null>(null);
   const dialog = useRef<HTMLDialogElement>(null);
+  const rail = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement | null>(null);
-  const filtered = media.filter(
-    (item) => category === "all" || item.category === category,
-  );
+  const filtered = items.filter(item => (category === "all" || item.category === category) && (group === "all" || item.photoGroup === group));
   const shown = compact ? filtered.slice(0, 4) : filtered;
-  function close() {
-    dialog.current?.close();
-    setChosen(null);
-    trigger.current?.focus();
-  }
-  function open(item: MediaItem, event: React.MouseEvent<HTMLButtonElement>) {
-    trigger.current = event.currentTarget;
-    setChosen(item);
-    dialog.current?.showModal();
-    trackEvent("gallery_view", { category: item.category });
-  }
-  return (
-    <>
-      <div
-        className="gallery-filters"
-        role="group"
-        aria-label="Категории галереи"
-      >
-        {(Object.keys(categoryLabels) as Category[]).map((key) => (
-          <button
-            key={key}
-            aria-pressed={category === key}
-            className={category === key ? "active" : ""}
-            onClick={() => setCategory(key)}
-          >
-            {categoryLabels[key]}
-          </button>
-        ))}
-      </div>
-      <p className="demo-notice">
-        Реальные примеры сервиса. Видео и песни загружаются только по вашему нажатию.
-      </p>
-      <div className="gallery-grid" aria-live="polite">
-        {shown.length === 0 && <p className="empty-gallery">Пример для этой категории готовится. Посмотрите другие работы или узнайте о продукте в каталоге.</p>}
-        {shown.map((item) => (
-          <figure key={item.id}>
-            <button
-              className="gallery-open"
-              onClick={(e) => open(item, e)}
-              aria-label={"Рассмотреть: " + item.title}
-            >
-              <Picture src={item.poster} alt={item.title} />
-              <span className="media-kind">
-                {item.kind === "image"
-                  ? "Рассмотреть"
-                  : item.kind === "video"
-                    ? item.src
-                      ? "Смотреть видео"
-                      : "Видео — скоро"
-                    : item.src
-                      ? "Слушать"
-                      : "Аудио — скоро"}
-              </span>
-            </button>
-            <figcaption>{item.title}</figcaption>
-          </figure>
-        ))}
-      </div>
-      <dialog
-        ref={dialog}
-        className="lightbox"
-        aria-labelledby="lightbox-title"
-        onCancel={() => {
-          setChosen(null);
-          trigger.current?.focus();
-        }}
-        onClick={(e) => {
-          if (e.target === e.currentTarget) close();
-        }}
-      >
-        <button
-          className="close-dialog"
-          onClick={close}
-          aria-label="Закрыть просмотр"
-        >
-          ×
+  const groups = [["all", "Все"], ["family", "Семейные"], ["women", "Индивидуальные"], ["children", "Детские"], ["mother-daughter", "Мама и дочка"], ["couple", "Для пары"]].filter(([key]) => key === "all" || items.some(i=>i.photoGroup===key));
+  function close() { dialog.current?.close(); setChosen(null); trigger.current?.focus(); }
+  return <>
+    {showCategories && <div className="gallery-filters" role="group" aria-label="Категории галереи">
+      {(Object.keys(categoryLabels) as Category[]).map(key=><button key={key} aria-pressed={category===key} className={category===key?"active":""} onClick={()=>setCategory(key)}>{categoryLabels[key]}</button>)}
+    </div>}
+    {photoFilters && <div className="gallery-filters" role="group" aria-label="Виды фотосессий">
+      {groups.map(([key,label])=><button key={key} aria-pressed={group===key} className={group===key?"active":""} onClick={()=>{setGroup(key);rail.current?.scrollTo({left:0});}}>{label}</button>)}
+    </div>}
+    <div ref={rail} className={"gallery-grid " + layout} aria-live="polite" tabIndex={layout.includes("photo-rail") ? 0 : undefined} aria-label={layout.includes("photo-rail") ? "Примеры фотосессий, прокручивайте горизонтально" : undefined}>
+      {shown.length===0 && <p className="empty-gallery">Примеры этой категории готовятся.</p>}
+      {shown.map(item=><figure key={item.id} className={"work-"+item.id}>
+        <button className="gallery-open" aria-label={"Рассмотреть: "+item.title} onClick={e=>{trigger.current=e.currentTarget;setChosen(item);dialog.current?.showModal();trackEvent("gallery_view",{category:item.category});}}>
+          <Picture src={item.poster} alt={item.title} sizes={layout.includes("postcard") ? "(max-width: 767px) 92vw, 46vw" : item.id === "mother-daughter" ? "(max-width: 767px) 78vw, 60vw" : "(max-width: 767px) 78vw, 30vw"}/>
+          <span className="media-kind">{item.kind==="image"?"Рассмотреть":item.kind==="video"?"▶ Смотреть видео":"♫ Слушать"}</span>
         </button>
-        {chosen && (
-          <div>
-            <h2 id="lightbox-title">{chosen.title}</h2>
-            <MediaPlayer key={chosen.id} item={chosen} />
-            <p className="demo-notice">
-              {chosen.demo ? "Демонстрационный макет." : "Пример результата сервиса. Ваш подарок будет создан по вашим фото и словам."}
-            </p>
-          </div>
-        )}
-      </dialog>
-    </>
-  );
+        <figcaption><WorkCaption item={item}/></figcaption>
+      </figure>)}
+    </div>
+    {layout.includes("photo-rail") && <div className="rail-controls" aria-label="Прокрутка примеров">
+      <button onClick={()=>rail.current?.scrollBy({left:-rail.current.clientWidth*.85,behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth'})}>Назад</button>
+      <span>Выберите настроение. Нажмите на фото, чтобы рассмотреть.</span>
+      <button onClick={()=>rail.current?.scrollBy({left:rail.current.clientWidth*.85,behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth'})}>Далее</button>
+    </div>}
+    <dialog ref={dialog} className="lightbox" aria-labelledby="lightbox-title" onCancel={()=>{setChosen(null);trigger.current?.focus();}} onClick={e=>{if(e.target===e.currentTarget)close();}}>
+      <button className="close-dialog" onClick={close} aria-label="Закрыть просмотр">×</button>
+      {chosen && <div><h2 id="lightbox-title">{chosen.title}</h2><MediaPlayer key={chosen.id} item={chosen}/>
+        <p className="demo-notice">{chosen.presentation === "collage" ? "Рекламная композиция показана целиком. Исходник и результат обозначены внутри предоставленного коллажа." : chosen.presentation === "video-frame" ? "Постер взят из этого видеопримера. Отдельное исходное фото не предоставлено; сравнение до и после не показываем." : "Реальный пример сервиса. Ваш подарок будет создан по вашим фото и словам."}</p></div>}
+    </dialog>
+  </>;
 }
 export function Comparison() {
   const [position, setPosition] = useState(50);
@@ -421,8 +340,8 @@ export function Comparison() {
         <div className="compare-divider" aria-hidden="true"><span>↔</span></div>
         <input type="range" min="0" max="100" value={position} aria-label="Сравнить исходник и результат" aria-valuetext={`${position}% исходника`} onChange={e=>setPosition(Number(e.target.value))}/>
       </div> : <div className="comparison-alternative">
-        {kind !== "animation" && <MediaPlayer key={kind} item={media.find(item => item.id === ({ card:"card", photo:"family", cartoon:"mom" }[kind]))!} />}
-        <p className="small-note">{kind === "animation" ? "Видео и соответствующий ему исходник ещё не добавлены." : "Готовая работа. Соответствующий исходник ещё не добавлен — сравнение появится вместе с ним."}</p>
+        <MediaPlayer key={kind} item={media.find(item => item.id === ({ card:"card", photo:"family", cartoon:"mom", animation:"animation-horizontal" }[kind]))!} />
+        <p className="small-note">{kind === "animation" ? "Постер — кадр видеопримера. Отдельное исходное фото не предоставлено; сравнение до и после не показываем." : "Готовая работа. Соответствующий исходник ещё не добавлен — сравнение появится вместе с ним."}</p>
         {kind === "animation" && <a className="button button-outline" href="/animation">Об оживлении фото</a>}
       </div>}
     </div>

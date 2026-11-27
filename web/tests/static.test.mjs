@@ -169,9 +169,9 @@ test('public media use explicit approvals; no SVG placeholder is presented as a 
       assert.equal(fs.statSync('public'+asset).size,provenance.bytes);
     }
   }
-  assert.equal(exampleFor('animation'),undefined,'Never invent matching animation');
+  assert.equal(exampleFor('animation').id,'animation-horizontal','Use a frame from a real provided animation');
   assert.equal(exampleFor('custom-order'),undefined,'Custom order is not a fixed result');
-  assert.equal(media.filter(m=>m.kind==='video').length,4);
+  assert.equal(media.filter(m=>m.kind==='video').length,6);
   assert.equal(media.filter(m=>m.kind==='audio').length,1);
   for(const r of routes)assert.ok(!/<(?:img|source)[^>]+(?:src|srcset)="[^"]+\.svg/.test(htmlFor(r)));
 });
@@ -179,7 +179,7 @@ test('public media use explicit approvals; no SVG placeholder is presented as a 
 test('release keeps provenance private, unique and bound to every public file', async () => {
   const {checkPublic,checkDist,readRegistry}=await import('../scripts/release-safety.mjs');
   const registry=readRegistry(process.cwd());
-  assert.equal(registry.length,21);
+  assert.equal(registry.length,65);
   assert.equal(new Set(registry.map(x=>x.file)).size,registry.length);
   const os=await import('node:os');
   const temporary=fs.mkdtempSync(path.join(os.tmpdir(),'wish-registry-test-'));
@@ -188,10 +188,10 @@ test('release keeps provenance private, unique and bound to every public file', 
     fs.writeFileSync(path.join(temporary,'media/manifest.json'),JSON.stringify([...registry,registry[0]]));
     assert.throws(()=>readRegistry(temporary),/Duplicate provenance/);
   }finally{fs.rmSync(temporary,{recursive:true,force:true});}
-  assert.equal(checkPublic(process.cwd()).length,21);
+  assert.equal(checkPublic(process.cwd()).length,65);
   const result=checkDist(process.cwd());
   assert.equal(result.html,20);
-  assert.equal(result.files.length,45);
+  assert.equal(result.files.length,89);
   for(const name of ['media/works/manifest.json','media/README.md','media/logo/README.md','.vite/manifest.json'])
     assert.ok(!result.files.includes(name),name+' must not be public');
 });
@@ -203,7 +203,7 @@ test('release rejects leaked service/source files and symlinks', async () => {
   const temporary=mkdtempSync(path.join(os.tmpdir(),'wish-release-test-'));
   try{
     const dist=path.join(temporary,'dist');cpSync('dist',dist,{recursive:true});
-    for(const name of ['.env','.git/config','database.sqlite3','worker.py','README.md','media/manifest.json','private.json','node_modules/index.js','assets/source.ts','assets/script.js.map']){
+    for(const name of ['.env','.git/config','database.sqlite3','worker.py','README.md','media/manifest.json','media/frontend-1.3-sources.tsv','private.json','node_modules/index.js','assets/source.ts','assets/script.js.map']){
       const file=path.join(dist,name);mkdirSync(path.dirname(file),{recursive:true});writeFileSync(file,'synthetic sensitive file');
       assert.throws(()=>checkDist(process.cwd(),dist),undefined,name);
       unlinkSync(file);
@@ -232,4 +232,54 @@ test('release rejects modified media and detectable credentials', async () => {
     for(const value of ['-----BEGIN PRIVATE KEY-----','https://name:password@example.test/file','postgresql://user:password@db.test/main'])
       assert.ok(secretPatterns.some(p=>p.test(value)));
   }finally{fs.rmSync(temporary,{recursive:true,force:true});}
+});
+
+test('Frontend 1.3 homepage preserves the agreed narrative and actual animation examples',async()=>{
+ const {media,exampleFor}=await import('../src/config.ts');
+ const html=htmlFor(routeFor('/'));
+ const order=['new-year','catalog','photosession-gallery','postcard-stories','santa-story','vision-stories','animation-stories','musical-gifts','how','home-pricing','home-faq'];
+ let previous=-1;
+ for(const id of order){const position=html.indexOf(`id="${id}"`);assert.ok(position>previous,id);previous=position;}
+ for(const text of ['Фотосессия мечты — без фотостудии','Обычная фотография. Необыкновенный подарок','Каким будет ваш 2027 год?','Оживите самые дорогие воспоминания','Превратите старые семейные фотографии в трогательные живые истории','Оживить свою фотографию'])assert.ok(html.includes(text),text);
+ const animation=media.filter(m=>m.category==='animation');assert.equal(animation.length,2);
+ assert.equal(exampleFor('animation').poster,animation[1].poster);
+ for(const item of animation){
+  assert.equal(item.presentation,'video-frame');
+  for(const url of ['/', '/animation','/gallery'])assert.ok(htmlFor(routeFor(url)).includes(item.poster),url+' '+item.id);
+ }
+ assert.ok(!/autoplay\s*=/i.test(html));
+ assert.ok(!/таймер|осталось \d+|скидка \d+%/i.test(html));
+});
+
+test('every archive original has approved private provenance and complete responsive derivatives',async()=>{
+ const {media}=await import('../src/config.ts');
+ const registry=JSON.parse(fs.readFileSync('media/manifest.json','utf8'));
+ const lines=fs.readFileSync('media/frontend-1.3-sources.tsv','utf8').trim().split('\n').slice(1);
+ assert.equal(lines.length,16);
+ for(const line of lines){
+  const [source,original,hash]=line.split('\t');
+  const derivatives=registry.filter(r=>r.source===source);
+  assert.ok(derivatives.length>=3,source);
+  for(const r of derivatives){assert.equal(r.sourceSha256,hash);assert.match(r.approval,/all 16 files/);assert.ok(r.width>0&&r.height>0);}
+  assert.ok(media.some(item=>item.poster===derivatives.find(r=>r.file.endsWith(source.replace(/\.(png|webp|mp4)$/,'.webp'))).file),source);
+ }
+ for(const item of media.filter(m=>m.category==='animation')){
+  const poster=registry.find(r=>r.file===item.poster),video=registry.find(r=>r.file===item.src);
+  assert.equal(poster.sourceSha256,video.sourceSha256);assert.equal(poster.frameTimeSeconds,1);
+  assert.equal(poster.width*video.height,poster.height*video.width);
+  assert.ok(Math.abs(video.durationSeconds-5)<.1);
+ }
+ for(const retired of ['postcard-birthday.webp','postcard-mother.webp','family-2.webp','family-3.webp'])assert.ok(!registry.some(r=>r.file.endsWith('/'+retired)));
+});
+
+test('new images use srcset and lazy galleries; only the hero work has high priority',()=>{
+ const html=htmlFor(routeFor('/'));
+ assert.ok((html.match(/srcSet=/gi)||[]).length>=20);
+ const images=[...html.matchAll(/<img\b[^>]*>/g)].map(m=>m[0]);
+ const high=images.filter(img=>/fetchPriority="high"/i.test(img));
+ assert.equal(high.length,1);assert.ok(high[0].includes('photoshoot-family-light'));
+ for(const img of images.filter(i=>/\/media\/works\//.test(i)&&!i.includes('fetchPriority="high"')))assert.ok(img.includes('loading="lazy"'),img);
+ assert.ok(!/<(?:video|audio)[^>]+src=/.test(html));
+ for(const r of routes)assert.ok(!htmlFor(r).includes('sources.tsv'));
+ assert.ok(fs.readFileSync('src/storefront13.css','utf8').includes('prefers-reduced-motion'));
 });

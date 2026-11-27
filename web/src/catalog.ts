@@ -232,7 +232,7 @@ export const products: Product[] = [
     summary: "Бережный творческий взгляд на любимый снимок.",
     intro:
       "Превратите фотографию в короткий видеоролик с движением. Подойдёт для личного архива или необычного подарка близким.",
-    image: "",
+    image: "/media/works/animation-family-portrait-horizontal.webp",
     color: "sage",
     label: "Вернуться к мгновению",
     mode: "max_redirect",

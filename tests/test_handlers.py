@@ -637,7 +637,18 @@ async def test_admin_can_generate_repeatedly_without_balance_or_deduction(
     assert after["total_purchases"] == 0
     assert await context.get_state() is None
     assert (await context.get_data())["package_offer_pending"] is False
-    assert len(assert_event(caplog,'handlers',stage='generate_with_credits'))>=3
+    # Preserve the original exact count for the admin credit-skip log site;
+    # the same function also emits unrelated delivery diagnostics.
+    import ast
+    tree = ast.parse(Path(handlers.__file__).read_text())
+    skip_line = next(n.lineno for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+        and isinstance(n.func.value, ast.Name) and n.func.value.id == 'logger'
+        and n.func.attr == 'info' and n.args and isinstance(n.args[0], ast.Constant)
+        and isinstance(n.args[0].value, str)
+        and n.args[0].value.startswith('Пропущено списание кредитов для администратора'))
+    rows = assert_event(caplog,'handlers',stage='generate_with_credits')
+    assert sum(row.get('line') == skip_line for row in rows) == 3
     assert 'администратора 456' not in caplog.text
     for event in events:
         assert not any(

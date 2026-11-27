@@ -759,9 +759,9 @@ async def test_max_error_logs_body_and_retry_uses_paid_image(
     with caplog.at_level(logging.ERROR, logger=handlers.__name__):
         await call_handler(router, "collect_sphere", event, context)
 
-    assert "Детали ошибки MAX:" in caplog.text
-    assert "Ответ сервера MAX (код 400):" in caplog.text
-    assert "MAX rejected media" in caplog.text
+    assert "MAX request failed" in caplog.text
+    assert "Ответ сервера MAX" not in caplog.text
+    assert "MAX rejected media" not in caplog.text
     if stage == "upload":
         event.bot.send_message.assert_not_awaited()
     assert (await context.get_data())["sent_count"] == 0

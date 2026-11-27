@@ -1,5 +1,10 @@
 """Запуск бота: python bot.py. Long polling используется для разработки."""
 
+# Before imports, config loading, SDK logging and any worker/network startup.
+if __name__ == "__main__":
+    from fallback_logging import install_process_guard
+    install_process_guard()
+
 import asyncio
 import logging
 
@@ -88,6 +93,9 @@ async def main() -> None:
             animation_task = asyncio.create_task(PaidAnimationWorker(bot,admin_user_id=config.admin_user_id).run())
             payment_incident_task = asyncio.create_task(PaymentIncidentWorker(bot, admin_user_id=config.admin_user_id).run())
             logger.info("Запуск получения обновлений MAX.")
+            if __name__ == "__main__":
+                from fallback_logging import process_event
+                process_event('polling')
             await dispatcher.start_polling(bot)
         finally:
             try:
@@ -159,4 +167,9 @@ if __name__ == "__main__":
         pass
     except Exception as exc:
         logger.error("Бот остановлен из-за ошибки: %s", exc, exc_info=True)
+        from fallback_logging import process_event
+        process_event('fatal')
         raise SystemExit(1) from None
+    else:
+        from fallback_logging import process_event
+        process_event('stopped')

@@ -136,7 +136,10 @@ async def test_upload_photo_returns_media_token(config, max_bot):
     assert factory.call_args.kwargs["token"] == config.token
     assert factory.call_args.kwargs["auto_requests"] is False
     connector = factory.call_args.kwargs["default_connection"].kwargs["connector"]
-    assert connector._ssl is False
+    import ssl
+    assert isinstance(connector._ssl, ssl.SSLContext)
+    assert connector._ssl.verify_mode == ssl.CERT_REQUIRED
+    assert connector._ssl.check_hostname is True
     assert connector.closed
     bot.upload_media.assert_awaited_once()
     media = bot.upload_media.call_args.args[0]

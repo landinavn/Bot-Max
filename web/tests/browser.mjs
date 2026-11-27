@@ -48,12 +48,16 @@ try{
  assert.ok(await page.locator('.mobile-bottom-nav').isVisible());
  assert.equal(await page.locator('.mobile-bottom-nav a').count(),5);
  await page.setViewportSize({width:1440,height:900});await page.goto(base);
+ const sectionOrder=['new-year','santa-story','catalog','photosession-gallery','postcard-stories','vision-stories','animation-stories','musical-gifts','how','home-pricing','home-faq'];
+ assert.deepEqual(await page.locator('main section[id]').evaluateAll(nodes=>nodes.map(n=>n.id).filter(id=>['new-year','santa-story','catalog','photosession-gallery','postcard-stories','vision-stories','animation-stories','musical-gifts','how','home-pricing','home-faq'].includes(id))),sectionOrder);
+ assert.equal(await page.locator('#santa-story h2').textContent(),'А что, если Дед Мороз знает имя вашего ребёнка?');
+ assert.equal(await page.locator('#santa-story').getByRole('link',{name:'Заказать персональное поздравление',exact:true}).count(),1);
  assert.equal(await page.locator('.season-grid .season-card').count(),4);assert.equal(await page.locator('#catalog .product-card').count(),9);
  assert.equal(await page.locator('.comparison-tabs button').count(),5);
  const range=page.getByRole('slider');await range.focus();await page.keyboard.press('ArrowRight');assert.equal(await range.inputValue(),'51');
  const box=await range.boundingBox();await page.mouse.click(box.x+box.width*.75,box.y+box.height/2);assert.ok(Number(await range.inputValue())>65);
  await page.getByRole('button',{name:'Мультфильм',exact:true}).click();assert.equal(await page.locator('.comparison-alternative .media-player').count(),1);assert.equal(await page.locator('video,audio').count(),0);
- await page.getByRole('button',{name:'Оживление фотографии',exact:true}).click();assert.equal(await page.locator('.comparison-alternative img').count(),1);assert.ok((await page.locator('.comparison-alternative').textContent()).includes('Отдельное исходное фото'));assert.equal(await page.locator('.comparison-alternative video').count(),0);
+ await page.getByRole('button',{name:'Оживление фотографии',exact:true}).click();assert.equal(await page.locator('.comparison-alternative img').count(),1);assert.ok((await page.locator('.comparison-alternative').textContent()).includes('пример оживления семейной фотографии'));assert.equal(await page.locator('.comparison-alternative video').count(),0);
  await page.locator('.faq-list summary').first().click();assert.notEqual(await page.locator('.faq-list details').first().getAttribute('open'),null);
  await page.goto(base+'/gallery');await page.getByRole('button',{name:'Открытки',exact:true}).click();assert.equal(await page.locator('.gallery-grid figure').count(),6);
  const trigger=page.locator('.gallery-open').first();await trigger.click();assert.ok(await page.locator('dialog').evaluate(d=>d.open));await page.keyboard.press('Escape');assert.ok(await trigger.evaluate(e=>e===document.activeElement));
@@ -65,6 +69,10 @@ try{
   const player=page.locator('dialog '+kind);assert.equal(await player.getAttribute('autoplay'),null);assert.equal(await player.getAttribute('preload'),'none');await page.waitForFunction(()=>{const e=document.querySelector('dialog video,dialog audio');return e&&!e.paused;});
   const playback=await player.evaluate(async e=>{await e.play();await new Promise(r=>setTimeout(r,200));const result={duration:e.duration,width:e.videoWidth??null,currentTime:e.currentTime,error:e.error?.code??null};e.pause();return result;});
   assert.equal(playback.error,null);assert.ok(playback.duration>(category==='Оживление'?4.9:10));assert.ok(playback.currentTime>0);
+  if(kind==='audio') {
+   assert.equal(await page.locator('dialog .player-audio > picture img').count(),1,'Cover stays visible during audio playback');
+   assert.equal(await page.locator('dialog .sound-wave[aria-hidden="true"]').count(),1);
+  }
   if(category==='Оживление'){const expected=index===0?784/1176:1072/856;assert.ok(await player.evaluate((e,ratio)=>Math.abs(e.videoWidth/e.videoHeight-ratio)<.001,expected));}assert.ok(mediaRequests.length>before);report.media.push({category,...playback});await page.getByRole('button',{name:'Закрыть просмотр'}).click();
  }
  console.log('PASS: 7 real media players play on demand; no autoplay or media fetches before opt-in.');
@@ -107,7 +115,7 @@ try{
   await p.evaluate(async()=>{for(let y=0;y<document.body.scrollHeight;y+=550){scrollTo(0,y);await new Promise(r=>setTimeout(r,35));}scrollTo(0,0);});await p.waitForLoadState('networkidle');
   await p.screenshot({path:`${out}/homepage-full-${width}.png`,fullPage:true});report.screenshots.push(`homepage-full-${width}.png`);
   for(const id of ['photosession-gallery','postcard-stories','santa-story','vision-stories','animation-stories','musical-gifts']){
-   const name=`${id}-${width}.png`;await p.locator('#'+id).screenshot({path:out+'/'+name,style:'.header,.mobile-bottom-nav{visibility:hidden!important;}'});report.screenshots.push(name);
+   const name=`${id}-${width}.png`;await p.locator('#'+id).screenshot({path:out+'/'+name,style:'.header,.mobile-bottom-nav,.skip-link{visibility:hidden!important;}'});report.screenshots.push(name);
   }
   await fresh.close();
  }

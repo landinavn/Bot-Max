@@ -13,7 +13,12 @@ const htmlFor = (r) =>
     r.path === "/" ? "dist/index.html" : `dist${r.path}/index.html`,
     "utf8",
   );
-const sourceLines = text => text.trim().split(/\r?\n/).slice(1);
+const sourceLines = text => {
+ const lines = text.split(/\r?\n/);
+ // Remove only the optional final line terminator, never whitespace in a field.
+ if (lines.at(-1) === '') lines.pop();
+ return lines.slice(1);
+};
 
 test("19 routes prerender real content and unique public SEO without JavaScript", () => {
   assert.equal(routes.length, 19);
@@ -239,10 +244,16 @@ test('release rejects modified media and detectable credentials', async () => {
 test('Frontend 1.3 homepage preserves the agreed narrative and actual animation examples',async()=>{
  const {media,exampleFor}=await import('../src/config.ts');
  const html=htmlFor(routeFor('/'));
- const order=['new-year','catalog','photosession-gallery','postcard-stories','santa-story','vision-stories','animation-stories','musical-gifts','how','home-pricing','home-faq'];
+ const order=['new-year','santa-story','catalog','photosession-gallery','postcard-stories','vision-stories','animation-stories','musical-gifts','how','home-pricing','home-faq'];
  let previous=-1;
  for(const id of order){const position=html.indexOf(`id="${id}"`);assert.ok(position>previous,id);previous=position;}
  for(const text of ['Фотосессия мечты — без фотостудии','Обычная фотография. Необыкновенный подарок','Каким будет ваш 2027 год?','Оживите самые дорогие воспоминания','Превратите старые семейные фотографии в трогательные живые истории','Оживить свою фотографию'])assert.ok(html.includes(text),text);
+ for(const phrase of ['А что, если Дед Мороз знает','имя вашего ребёнка?','Заказать персональное поздравление','Поздравить нескольких детей'])assert.ok(html.includes(phrase),phrase);
+ for(const url of ['/', '/animation', '/gallery']) {
+  const visible=htmlFor(routeFor(url));
+  assert.doesNotMatch(visible,/Рекламный коллаж|Постер — кадр видео|Исходное фото для сравнения не предоставлено|вертикальное видео|горизонтальное видео/i);
+ }
+ assert.ok(html.includes('sound-wave'));
  const animation=media.filter(m=>m.category==='animation');assert.equal(animation.length,2);
  assert.equal(exampleFor('animation').poster,animation[1].poster);
  for(const item of animation){
@@ -308,5 +319,16 @@ test('source TSV accepts LF and CRLF without relaxing SHA-256 equality', () => {
  for(const text of [lf,crlf]){
   assert.throws(()=>verify(text.replace(hash,corrupted)));
   assert.throws(()=>verify(text.replace(hash,hash+' ')));
+  const lastHash=expected.at(-1)[2];
+  const newline=text.includes('\r\n')?'\r\n':'\n';
+  const withoutFinalNewline=text.endsWith(newline)?text.slice(0,-newline.length):text;
+  assert.deepEqual(verify(withoutFinalNewline),expected);
+  // A last-field space must fail both with and without a final line terminator.
+  assert.ok(withoutFinalNewline.endsWith(lastHash));
+  for(const ending of ['',newline]) {
+   assert.throws(()=>verify(withoutFinalNewline+' '+ending));
+   const changed=(lastHash[0]==='0'?'1':'0')+lastHash.slice(1);
+   assert.throws(()=>verify(withoutFinalNewline.slice(0,-64)+changed+ending));
+  }
  }
 });

@@ -52,7 +52,7 @@ export interface MediaItem {
 export const media: MediaItem[] = [
   {
     "id": "card",
-    "title": "Открытка подруге · рекламный коллаж с исходником и результатом",
+    "title": "Пример поздравительной открытки для подруги",
     "category": "postcards",
     "kind": "image",
     "presentation": "collage",
@@ -61,7 +61,7 @@ export const media: MediaItem[] = [
   },
   {
     "id": "ny-card",
-    "title": "Новогодняя открытка для семьи · рекламный коллаж",
+    "title": "Пример новогодней открытки для семьи",
     "category": "postcards",
     "kind": "image",
     "presentation": "collage",
@@ -70,7 +70,7 @@ export const media: MediaItem[] = [
   },
   {
     "id": "mother-card",
-    "title": "Новогодняя открытка для мамы · рекламный коллаж",
+    "title": "Пример новогодней открытки для мамы",
     "category": "postcards",
     "kind": "image",
     "presentation": "collage",
@@ -79,7 +79,7 @@ export const media: MediaItem[] = [
   },
   {
     "id": "ny-child",
-    "title": "Новогодняя открытка для ребёнка · рекламный коллаж",
+    "title": "Пример новогодней открытки для ребёнка",
     "category": "postcards",
     "kind": "image",
     "presentation": "collage",
@@ -88,7 +88,7 @@ export const media: MediaItem[] = [
   },
   {
     "id": "ny-couple",
-    "title": "Новогодняя открытка для пары · рекламный коллаж",
+    "title": "Пример новогодней открытки для пары",
     "category": "postcards",
     "kind": "image",
     "presentation": "collage",
@@ -238,7 +238,7 @@ export const media: MediaItem[] = [
   },
   {
     "id": "animation-vertical",
-    "title": "Семейный портрет · вертикальное видео, 5 секунд",
+    "title": "Семейный портрет — пример оживления фотографии, 5 секунд",
     "category": "animation",
     "kind": "video",
     "presentation": "video-frame",
@@ -248,7 +248,7 @@ export const media: MediaItem[] = [
   },
   {
     "id": "animation-horizontal",
-    "title": "Семейный портрет · горизонтальное видео, 5 секунд",
+    "title": "Семейные мгновения — пример оживления фотографии, 5 секунд",
     "category": "animation",
     "kind": "video",
     "presentation": "video-frame",

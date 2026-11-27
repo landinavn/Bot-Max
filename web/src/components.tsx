@@ -264,6 +264,7 @@ export function MediaPlayer({ item }: { item: MediaItem }) {
   if (item.kind === "image") return <Picture src={item.poster} alt={item.title} />;
   if (!item.src) return <Picture src={item.poster} alt={item.title} />;
   return <div className={"media-player player-" + item.kind} data-media-id={item.id}>
+    {item.kind === "audio" && loaded && <Picture src={item.poster} alt={item.title} />}
     {loaded ? item.kind === "video" ? <video ref={node => {player.current=node;}} controls playsInline preload="none" poster={item.poster} src={item.src} aria-label={item.title}
       width={responsiveMedia[item.poster]?.width} height={responsiveMedia[item.poster]?.height} />
       : <audio ref={node => {player.current=node;}} controls preload="none" src={item.src} aria-label={item.title} />
@@ -271,12 +272,13 @@ export function MediaPlayer({ item }: { item: MediaItem }) {
       <Picture src={item.poster} alt={item.title} />
       <span className="play-badge"><span className="play-circle" aria-hidden="true"/><span>{item.kind === "video" ? "Смотреть видео" : "Слушать песню"}</span></span>
     </button>}
+    {item.kind === "audio" && <div className="sound-wave" aria-hidden="true">{[12,22,34,18,42,28,50,32,20,38,54,26,44,30,18,40,24,48,34,16,28,42,22,12].map((height,i)=><span key={i} style={{height}}/>)}</div>}
     {needsPlay && <p className="small-note" role="status">Нажмите кнопку воспроизведения в проигрывателе.</p>}
     <noscript><p><a className="text-link" href={item.src}>Открыть {item.kind === "video" ? "видеопример" : "аудиопример"}</a></p></noscript>
   </div>;
 }
 export function WorkCaption({ item }: { item: MediaItem }) {
-  return <>{item.title}{item.presentation === "video-frame" && <small>Постер — кадр видео. Исходное фото для сравнения не предоставлено.</small>}</>;
+  return <>{item.title}</>;
 }
 export function Gallery({ compact = false, items = media, photoFilters = false, showCategories = true, layout = "" }: {
   compact?: boolean; items?: MediaItem[]; photoFilters?: boolean; showCategories?: boolean; layout?: string;
@@ -316,7 +318,7 @@ export function Gallery({ compact = false, items = media, photoFilters = false, 
     <dialog ref={dialog} className="lightbox" aria-labelledby="lightbox-title" onCancel={()=>{setChosen(null);trigger.current?.focus();}} onClick={e=>{if(e.target===e.currentTarget)close();}}>
       <button className="close-dialog" onClick={close} aria-label="Закрыть просмотр">×</button>
       {chosen && <div><h2 id="lightbox-title">{chosen.title}</h2><MediaPlayer key={chosen.id} item={chosen}/>
-        <p className="demo-notice">{chosen.presentation === "collage" ? "Рекламная композиция показана целиком. Исходник и результат обозначены внутри предоставленного коллажа." : chosen.presentation === "video-frame" ? "Постер взят из этого видеопримера. Отдельное исходное фото не предоставлено; сравнение до и после не показываем." : "Реальный пример сервиса. Ваш подарок будет создан по вашим фото и словам."}</p></div>}
+        <p className="demo-notice">{chosen.presentation === "collage" ? "Персональная открытка — знакомое лицо и ваши тёплые слова." : chosen.presentation === "video-frame" ? "Посмотрите, как оживает семейный портрет." : "Реальный пример сервиса. Ваш подарок будет создан по вашим фото и словам."}</p></div>}
     </dialog>
   </>;
 }
@@ -330,7 +332,7 @@ export function Comparison() {
       <div className="comparison-tabs" role="group" aria-label="Варианты сравнения">
         {choices.map(([key,label]) => <button key={key} aria-pressed={kind === key} onClick={() => setKind(key)}>{label}</button>)}
       </div>
-      <p className="small-note">Показываем только связанные исходник и результат. Для остальных форматов пока доступен просмотр готовых работ.</p>
+      <p className="small-note">Сравните преображение на карте желаний или посмотрите примеры других подарков.</p>
     </div>
     <div className="comparison-result">
       {kind === "dream" ? <div className="comparison" style={{ "--position": position + "%" } as React.CSSProperties}>
@@ -341,7 +343,7 @@ export function Comparison() {
         <input type="range" min="0" max="100" value={position} aria-label="Сравнить исходник и результат" aria-valuetext={`${position}% исходника`} onChange={e=>setPosition(Number(e.target.value))}/>
       </div> : <div className="comparison-alternative">
         <MediaPlayer key={kind} item={media.find(item => item.id === ({ card:"card", photo:"family", cartoon:"mom", animation:"animation-horizontal" }[kind]))!} />
-        <p className="small-note">{kind === "animation" ? "Постер — кадр видеопримера. Отдельное исходное фото не предоставлено; сравнение до и после не показываем." : "Готовая работа. Соответствующий исходник ещё не добавлен — сравнение появится вместе с ним."}</p>
+        <p className="small-note">{kind === "animation" ? "Посмотрите пример оживления семейной фотографии." : "Посмотрите готовую работу — ваш подарок создадим по вашим фотографиям и словам."}</p>
         {kind === "animation" && <a className="button button-outline" href="/animation">Об оживлении фото</a>}
       </div>}
     </div>

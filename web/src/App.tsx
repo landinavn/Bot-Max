@@ -54,7 +54,7 @@ function ProductPage({ route }: { route: Route }) {
         </div>
         <figure className={"product-main-visual visual-" + p.id}>
           <ProductVisual productId={p.id} eager playable />
-          <figcaption>{p.id === "animation" ? "Постер — кадр реального видеопримера оживления" : p.id === "custom-order" ? "" : "Реальный пример · ваш результат создаётся по вашим фото и словам"}</figcaption>
+          <figcaption>{p.id === "animation" ? "Пример оживления семейной фотографии" : p.id === "custom-order" ? "" : "Реальный пример · ваш результат создаётся по вашим фото и словам"}</figcaption>
         </figure>
       </section>
       {p.id === "ded-moroz" && (

@@ -202,3 +202,35 @@ figcaption small { display:block; font:14px/1.5 Arial,sans-serif; color:var(--mu
   .hero-mosaic { width:min(530px,100%); justify-self:center; }
 }
 .play-circle::before { content:""; width:0; height:0; border-block:8px solid transparent; border-left:12px solid var(--plum); }
+/* Frontend 1.3.1: complete artwork, with no fixed-height beige letterboxing. */
+.season-v13 .season-grid { align-items:start; }
+.season-v13 .season-card { display:block; }
+.season-v13 .season-card picture { display:block; background:transparent; }
+.season-v13 .season-card img { display:block; width:100%; height:auto; max-height:none; }
+#catalog .product-grid { align-items:start; }
+#catalog .product-image picture { display:block; padding:0; }
+#catalog .product-image img { display:block; width:100%; height:auto; aspect-ratio:auto; border-radius:0; object-fit:contain; }
+#catalog .visual-songs picture { padding:24px; }
+#catalog .visual-songs img { width:100%; height:auto; border-radius:12px; object-fit:contain; }
+.music-examples { align-items:stretch; }
+.music-examples article { display:flex; flex-direction:column; }
+.music-examples article > .button { margin-top:auto; align-self:start; }
+.music-examples .media-player { background:var(--plum); border-radius:14px; overflow:hidden; }
+.music-examples .media-start img,.music-examples .media-player video { height:340px; max-height:none; object-fit:contain; background:var(--plum); }
+.music-examples .player-audio .media-start img,.music-examples .player-audio > picture img { display:block; height:260px; width:100%; max-height:none; object-fit:contain; background:var(--plum); }
+.player-audio { background:var(--plum); border-radius:14px; overflow:hidden; }
+.player-audio > picture img { max-height:360px; width:100%; object-fit:contain; }
+.sound-wave { height:80px; display:flex; align-items:center; justify-content:center; gap:5px; padding:12px 20px; background:linear-gradient(135deg,var(--plum),#703d59); }
+.sound-wave span { display:block; flex:1; max-width:5px; border-radius:5px; background:linear-gradient(#f3d8ad,#d990a4); }
+.player-audio audio { display:block; width:calc(100% - 24px); margin:12px; }
+@media(max-width:767px) {
+ .season-v13 .season-card { display:block; }
+ .music-examples article > .button { align-self:stretch; }
+}
+@media(min-width:768px) {
+ #catalog .product-grid { display:block; columns:3; column-gap:24px; }
+ #catalog .product-card { break-inside:avoid; margin-bottom:24px; }
+}
+@media(min-width:768px) and (max-width:1000px) {
+ #catalog .product-grid { columns:2; }
+}

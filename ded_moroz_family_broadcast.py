@@ -1,4 +1,5 @@
 """Admin-reviewed launch campaign, durable recipients, no automatic broadcast."""
+from safe_logging import get_logger
 import asyncio
 import logging
 from datetime import datetime
@@ -12,7 +13,7 @@ import database
 import ded_moroz_sales as sales
 
 CAMPAIGN='ded_moroz_family_launch_20261119'
-logger=logging.getLogger(__name__)
+logger=get_logger(__name__)
 def campaign_open():
     today=datetime.fromtimestamp(database._now_ts(),ZoneInfo('Europe/Moscow')).date()
     return sales.enabled() and datetime(2026,11,19).date()<=today<=datetime(2026,11,22).date()

@@ -1,3 +1,4 @@
+from security_log_checks import assert_event
 import json
 import logging
 from dataclasses import replace
@@ -43,7 +44,7 @@ async def test_speechkit_v1_exact_form_auth_binary_and_safe_log(caplog,voice,emo
     with caplog.at_level(logging.INFO,logger='multstudio.adapters'):
         result=await YandexTTSAdapter('private-yandex-key','folder-id',httpx.MockTransport(request)).synthesize(text,voice,emotion)
     assert result==MP3 and len(seen)==1
-    assert f'Yandex TTS: озвучено {len(text)} символов, голос {voice}' in caplog.text
+    assert_event(caplog,'multstudio.adapters',stage='synthesize')
     assert text not in caplog.text and 'private-yandex-key' not in caplog.text
 
 
@@ -98,7 +99,8 @@ async def test_provider_errors_never_retry_paid_post_or_expose_secrets(status,ca
     assert len(calls)==1
     assert str(status) in str(error.value)
     assert 'private' not in str(error.value)
-    assert f'HTTP {status}' in caplog.text and 'private' not in caplog.text
+    assert_event(caplog,'multstudio.adapters',event='api_error',http_status=status)
+    assert 'private' not in caplog.text
 
 
 async def test_timeout_is_not_automatically_resubmitted():
@@ -167,7 +169,8 @@ async def test_full_yandex_error_body_is_logged_and_request_contract_remains_cor
     with pytest.raises(ProviderFailed):
         await YandexTTSAdapter('test-key','test-folder',httpx.MockTransport(reply)).synthesize('Привет, мир!','alena')
     assert len(calls)==1
-    assert f'HTTP {status}; ответ Yandex: {body}' in caplog.text
+    assert_event(caplog,'multstudio.adapters',event='api_error',http_status=status)
+    assert body not in caplog.text
 
 
 async def test_error_response_is_not_truncated(caplog):
@@ -175,7 +178,8 @@ async def test_error_response_is_not_truncated(caplog):
     transport=httpx.MockTransport(lambda request:httpx.Response(401,text=body))
     with pytest.raises(ProviderFailed):
         await YandexTTSAdapter('secret-key','folder',transport).synthesize('Русская реплика','alena')
-    assert body in caplog.text
+    assert_event(caplog,'multstudio.adapters',event='api_error',http_status=401)
+    assert body not in caplog.text and 'END_OF_YANDEX_RESPONSE' not in caplog.text
 
 
 @pytest.mark.parametrize('encoded',[False,True])
@@ -186,11 +190,11 @@ async def test_error_response_masks_echoed_key_and_dialogue_including_json_escap
                          'text':text,'details':{'reason':'api key is invalid'}},ensure_ascii=not encoded)
     with pytest.raises(ProviderFailed) as error:
         await YandexTTSAdapter(key,'folder',httpx.MockTransport(lambda req:httpx.Response(401,text=response))).synthesize(text,'alena')
-    assert 'Unknown api key' in caplog.text and 'api key is invalid' in caplog.text
-    assert '[REDACTED]' in caplog.text
+    assert_event(caplog,'multstudio.adapters',event='api_error',http_status=401)
+    assert 'Unknown api key' not in caplog.text and 'api key is invalid' not in caplog.text
     assert key not in caplog.text and text not in caplog.text
     assert json.dumps(text,ensure_ascii=True)[1:-1] not in caplog.text
-    assert 'Unknown api key' not in str(error.value)  # Body belongs in the server log only.
+    assert 'Unknown api key' not in str(error.value)  # Raw bodies must not enter client errors or server logs.
 
 
 @pytest.mark.parametrize('old,expected',[('nova',('alena','neutral')),('onyx',('filipp','neutral')),('coral',('alena','good'))])

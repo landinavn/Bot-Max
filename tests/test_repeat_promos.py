@@ -1,3 +1,4 @@
+from security_log_checks import assert_event
 import asyncio
 import logging
 from types import SimpleNamespace
@@ -54,7 +55,8 @@ async def test_promo_lifecycle_persists_expiration_and_clear(credit_db,monkeypat
     monkeypatch.setattr(credit_db,'_now_ts',lambda:now)
     with caplog.at_level(logging.INFO):
         assert await credit_db.set_promo(101,category)==now+86400
-    assert f'Промо 20% выдано: user=101, category={category}, expires={now+86400}' in caplog.text
+    assert_event(caplog,'database',stage='set_promo')
+    assert 'user=101' not in caplog.text
     await credit_db.init_db()
     assert await credit_db.get_active_promo(101,category)==now+86400
     now+=86400
@@ -76,7 +78,8 @@ async def test_discount_invoices_and_webhooks_are_atomic_and_keep_regular_sales(
     assert order['amount_kopecks']==discounted
     assert order['promo_base_amount_kopecks']==base
     assert order['product_name'].endswith('(скидка 20%)')
-    assert f'Применена скидка 20%: user=101, category={category}, amount={discounted//100}' in caplog.text
+    assert_event(caplog,'database',stage='_create_repeat_order')
+    assert 'user=101' not in caplog.text
     link=await invoice(sales_payments,order)
     fields=parse_form_fields(parse_qsl(urlsplit(link).query))
     assert fields['products']==[{'name':order['product_name'],'price':f'{discounted//100}.00','quantity':'1'}]

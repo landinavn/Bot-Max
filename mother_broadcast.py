@@ -1,4 +1,5 @@
 """Mother's Day reminder: shared example, admin preview, resumable explicit broadcast."""
+from safe_logging import get_logger
 import asyncio
 import logging
 import time
@@ -17,7 +18,7 @@ TEXT=('🔔 Напоминание: День матери в этом году �
     'В этот день хочется сказать маме самые важные слова — выразить ей благодарность и любовь. '
     'Сделать это за вас может мультфильм с ее участием и поздравительной песней!\n\n'
     'Нажимай старт и попробуй уже сейчас!')
-logger=logging.getLogger(__name__)
+logger=get_logger(__name__)
 _example_cache={}
 SCHEMA='''CREATE TABLE IF NOT EXISTS mother_broadcast_recipients (
     campaign TEXT NOT NULL,user_id INTEGER NOT NULL,next_message INTEGER NOT NULL DEFAULT 0,

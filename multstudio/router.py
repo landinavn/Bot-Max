@@ -1,4 +1,5 @@
 """An isolated administrative router. No customer keyboards, tariffs or billing hooks."""
+from safe_logging import get_logger
 import asyncio
 import json
 import logging
@@ -25,7 +26,7 @@ class StudioStates(StatesGroup):
     input = State()
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 DESCRIPTION_PROMPT = 'Пожалуйста, введите описание обычным текстом (без кавычек и фигурных скобок)'
 
 

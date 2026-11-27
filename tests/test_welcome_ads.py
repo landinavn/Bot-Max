@@ -1,4 +1,5 @@
 """New welcome, ad attribution, and campaign navigation without external requests."""
+from security_log_checks import assert_event
 from unittest.mock import AsyncMock
 import asyncio
 
@@ -69,7 +70,7 @@ async def test_welcome_failure_keeps_menu_and_credit(credit_db,welcome_image,fai
     greetings=[c for c in e.message.answer.await_args_list if c.kwargs.get('text')==handlers.WELCOME_TEXT]
     assert len(greetings)==1 and len(greetings[0].kwargs['attachments'])==1
     assert (await credit_db.get_user(456))['balance']==1
-    assert 'NY_card.png' in caplog.text
+    assert_event(caplog,'handlers',stage='send_welcome_message')
 
 
 async def test_promo_click_count_and_legacy_navigation_do_not_duplicate_trial(credit_db,welcome_image):

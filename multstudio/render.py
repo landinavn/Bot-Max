@@ -1,4 +1,5 @@
 """Offline FFmpeg editing. Source files and intermediate renders are retained."""
+from safe_logging import get_logger
 import asyncio
 import hashlib
 import json
@@ -14,7 +15,7 @@ from PIL import Image, ImageDraw, ImageFont
 from . import repository as repo
 from . import rules
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 FPS = 30
 SUBTITLE_FONT_SIZE = 14
 ENDCARD_FONT_SIZE = 94  # Comparable to 14 ASS points at libass's default 288-line canvas.

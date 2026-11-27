@@ -1,4 +1,5 @@
 """Paid family greetings; deterministic tagged text, no extra model calls."""
+from safe_logging import get_logger
 import json
 import re
 import logging
@@ -11,7 +12,7 @@ from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
 VARIANT='family'
 STUB='🎅 Поздравление Деда Мороза для нескольких детей уже в разработке! Скоро можно будет заказать одно персональное видео для всей семьи.'
-logger=logging.getLogger(__name__)
+logger=get_logger(__name__)
 EXAMPLE=BASE_DIR/'examples/ded_moroz_kids.mp4'
 MAX_CHILDREN=6
 MAX_WORDS=130

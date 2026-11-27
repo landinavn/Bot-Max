@@ -1,4 +1,5 @@
 """Приглашение поделиться ботом после успешной выдачи готового видео."""
+from safe_logging import get_logger
 import asyncio
 import logging
 
@@ -7,7 +8,7 @@ from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
 from config import DEFAULT_BOT_LINK, validate_bot_link
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 VIDEO_SHARE_TEXT = (
     '👇 Понравился результат? Поделитесь ботом с друзьями, '
     'чтобы они тоже могли создать волшебный подарок!'

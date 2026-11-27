@@ -1,3 +1,4 @@
+from security_log_checks import assert_event
 import csv
 import io
 from pathlib import Path
@@ -66,7 +67,8 @@ async def test_missing_settings_make_no_request(monkeypatch, caplog, counter, to
     with aioresponses() as http:
         await service.send_offline_conversion(456)
     assert not http.requests
-    assert 'не заданы YANDEX_METRIKA_COUNTER_ID' in caplog.text
+    assert_event(caplog,'metrika_service',stage='send_offline_conversion')
+    assert 'invalid upload' not in caplog.text
 
 
 @pytest.mark.parametrize('status', [400, 401, 429, 500])
@@ -74,8 +76,10 @@ async def test_api_error_logged_without_raising_or_leaking_token(credit_db, metr
     with aioresponses() as http:
         http.post(URL, status=status, body='invalid upload test-oauth-secret')
         await service.send_offline_conversion(456)
-    assert f'Ошибка Метрики: HTTP {status}' in caplog.text
-    assert 'invalid upload' in caplog.text
+    assert_event(caplog,'metrika_service',event='api_error',http_status=status)
+    assert 'invalid upload' not in caplog.text
+    assert_event(caplog,'metrika_service',stage='send_offline_conversion')
+    assert 'invalid upload' not in caplog.text
     assert 'test-oauth-secret' not in caplog.text
     assert len(next(iter(http.requests.values()))) == 1
 
@@ -85,7 +89,8 @@ async def test_timeout_or_network_failure_is_nonfatal(credit_db, metrika_config,
     with aioresponses() as http:
         http.post(URL, exception=error)
         await service.send_offline_conversion(456)
-    assert 'Ошибка Метрики:' in caplog.text
+    assert_event(caplog,'metrika_service',event='request_failed')
+    assert 'invalid upload' not in caplog.text
 
 
 async def test_database_failure_is_nonfatal(metrika_config, monkeypatch, caplog):
@@ -93,4 +98,5 @@ async def test_database_failure_is_nonfatal(metrika_config, monkeypatch, caplog)
     with aioresponses() as http:
         await service.send_offline_conversion(456)
     assert not http.requests
-    assert 'Ошибка Метрики:' in caplog.text
+    assert_event(caplog,'metrika_service',event='request_failed')
+    assert 'invalid upload' not in caplog.text

@@ -1,4 +1,5 @@
 """Офлайн-конверсии Метрики: необязательная загрузка без влияния на выдачу картинки."""
+from safe_logging import get_logger
 
 import csv
 import io
@@ -13,7 +14,7 @@ import aiohttp
 from config import Config
 from database import get_user
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 BASE_URL = 'https://api-metrika.yandex.net'
 
 
@@ -80,10 +81,8 @@ async def send_offline_conversion(user_id: int, goal_id: str = 'bot_generation')
             async with session.post(f'{BASE_URL}/management/v1/counter/{counter}/offline_conversions/upload',
                                     headers={'Authorization': f'OAuth {token}'}, data=form, allow_redirects=False) as response:
                 if not 200 <= response.status < 300:
-                    details = (await response.text()).replace(token, '[redacted]')[:2000]
-                    logger.error('Ошибка Метрики: HTTP %s: %s', response.status, details)
+                    logger.event('api_error', level=logging.ERROR, product='analytics', http_status=response.status)
                     return
         logger.info('Метрика: конверсия %s загружена.', goal_id)
     except Exception as exc:
-        message = str(exc).replace(token, '[redacted]') if token else str(exc)
-        logger.error('Ошибка Метрики: %s: %s', type(exc).__name__, message)
+        logger.event('request_failed', level=logging.ERROR, product='analytics', error=exc)

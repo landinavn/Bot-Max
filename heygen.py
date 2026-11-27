@@ -1,4 +1,5 @@
 """HeyGen v3: one explicit mutation; durable IDs are owned by ded_moroz."""
+from safe_logging import get_logger
 import logging
 import re
 from urllib.parse import quote
@@ -8,7 +9,7 @@ import httpx
 from multstudio.assets import https_url
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class HeyGenError(RuntimeError):
@@ -34,7 +35,7 @@ class HeyGenAdapter:
             response = await client.request(method, self.BASE+path, headers=headers, json=payload)
         if response.status_code not in (200,201,202):
             if method.upper() == 'POST' and path == '/v3/models/audio/tts' and response.status_code == 400:
-                logger.error("HeyGen TTS Error 400: %s",response.text.replace(self.key,"[redacted]"))
+                logger.event('api_error', level=logging.ERROR, product='ded_moroz', http_status=response.status_code)
             # Keep the exception generic; provider diagnostics stay in the server log.
             raise HeyGenError(f'HeyGen HTTP {response.status_code}. Проверьте задание перед новым платным запросом.',status_code=response.status_code)
         result=response.json()

@@ -1,3 +1,4 @@
+from security_log_checks import assert_event
 import asyncio
 import json
 from types import SimpleNamespace
@@ -376,8 +377,8 @@ async def test_worker_startup_failure_logs_traceback_and_retries(monkeypatch, ca
         await worker.run()
     assert reset.await_count == 2
     pending.assert_awaited_once()
-    record = next(r for r in caplog.records if 'Критическая ошибка очереди' in r.message)
-    assert record.exc_info and 'startup database failure' in caplog.text
+    assert_event(caplog,'audio_orders',stage='run')
+    assert 'startup database failure' not in caplog.text
 
 
 @pytest.mark.parametrize('error', [RuntimeError('loading failed'), TimeoutError('loading failed')])
@@ -389,7 +390,7 @@ async def test_claimed_order_is_released_if_loading_it_fails(credit_db, monkeypa
     with pytest.raises(type(error), match='loading failed'):
         await PaidAudioWorker(SimpleNamespace(send_message=AsyncMock())).process(name)
     assert (await credit_db.get_audio_order(name))['running'] == 0
-    assert any(r.exc_info for r in caplog.records)
+    assert all(r.exc_info is None for r in caplog.records)
 
 
 @pytest.mark.parametrize('missing', ['tags', 'title'])
@@ -405,7 +406,7 @@ async def test_missing_song_argument_notifies_without_post_or_uncertain_submit(c
     saved = await credit_db.get_audio_order('bad-arguments')
     assert saved['failed'] == 1 and saved['submit_started'] == saved['running'] == 0
     assert ('Стиль музыки' if missing == 'tags' else 'Название песни') in bot.send_message.await_args.kwargs['text']
-    assert any(r.exc_info for r in caplog.records)
+    assert all(r.exc_info is None for r in caplog.records)
 
 
 async def test_lyrics_failure_is_visible_before_ttapi_and_user_is_not_left_without_error(credit_db, caplog):
@@ -417,9 +418,11 @@ async def test_lyrics_failure_is_visible_before_ttapi_and_user_is_not_left_witho
     with caplog.at_level('INFO', logger='audio_orders'):
         await PaidAudioWorker(bot, generator=submit, lyric_writer=writer).process(name)
     submit.assert_not_awaited()
-    assert 'Начинаю подготовку текста песни для пользователя 123' in caplog.text
-    assert 'lyrics model failed' in caplog.text
-    assert any(r.exc_info for r in caplog.records)
+    assert_event(caplog,'audio_orders',stage='process')
+    assert 'lyrics model failed' not in caplog.text
+    assert_event(caplog,'audio_orders',stage='process')
+    assert 'lyrics model failed' not in caplog.text
+    assert all(r.exc_info is None for r in caplog.records)
     assert bot.send_message.await_args.kwargs['text']
     assert (await credit_db.get_audio_order(name))['running'] == 0
 

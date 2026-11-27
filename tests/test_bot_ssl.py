@@ -1,4 +1,5 @@
 """SSL-исключение клиента MAX и сохранение TLS у остальных клиентов."""
+from security_log_checks import assert_event
 
 import ssl
 import logging
@@ -26,8 +27,8 @@ async def test_max_client_disables_ssl_for_api_and_uploads(url):
     async with MaxAPIConnector() as connector:
         context = connector._get_ssl_context(ClientRequest("GET", URL(url)))
         assert context is not None
-        assert context.verify_mode == ssl.CERT_NONE
-        assert context.check_hostname is False
+        assert context.verify_mode == ssl.CERT_REQUIRED
+        assert context.check_hostname is True
     assert connector.closed
 
 
@@ -58,7 +59,9 @@ async def test_shared_max_client_passes_connector_and_closes_it(monkeypatch, fai
         async with max_client.create_max_bot("test-token", auto_requests=False) as created:
             assert created is bot
             connector = factory.call_args.kwargs["default_connection"].kwargs["connector"]
-            assert connector._ssl is False
+            assert isinstance(connector._ssl, ssl.SSLContext)
+            assert connector._ssl.verify_mode == ssl.CERT_REQUIRED
+            assert connector._ssl.check_hostname is True
             assert not connector.closed
             bot.set_api_url.assert_called_once_with("https://platform-api.max.ru")
             if fail:
@@ -82,5 +85,7 @@ async def test_max_error_logs_full_response_text(caplog, text_kind):
     with caplog.at_level(logging.ERROR):
         await max_client.log_max_error(error, logger)
 
-    assert "Детали ошибки MAX: send failed" in caplog.text
-    assert f"Ответ сервера: {body}" in caplog.text
+    assert_event(caplog,'test-max-errors',event='request_failed')
+    assert body not in caplog.text and 'send failed' not in caplog.text
+    assert_event(caplog,'test-max-errors',event='request_failed')
+    assert body not in caplog.text and 'send failed' not in caplog.text

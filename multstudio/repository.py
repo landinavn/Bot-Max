@@ -1,4 +1,5 @@
 """Only cartoon_* tables. Immutable revisions and explicitly confirmed generation jobs."""
+from safe_logging import get_logger
 import hashlib
 import json
 import logging
@@ -9,7 +10,7 @@ from uuid import uuid4
 import aiosqlite
 import database
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 RESTORE_NOT_FOUND = 'Не удалось найти сохраненные файлы для этой сцены в архиве заданий'
 
 

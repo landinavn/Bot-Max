@@ -3,6 +3,7 @@
 No raw webhook, email, phone, signature or secret is persisted. An incident is
 not permission to credit a user: validation stays strict and the owner reviews it.
 """
+from safe_logging import get_logger
 import asyncio
 import hashlib
 import json
@@ -14,7 +15,7 @@ import aiosqlite
 
 import database
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 REASONS = {
     'Нет номера заказа или платежа.': 'missing_identifiers',

@@ -1,4 +1,5 @@
 """Загрузка в MAX и создание плакатов через OpenAI Images API."""
+from safe_logging import get_logger
 
 import asyncio
 import base64
@@ -35,7 +36,7 @@ from max_client import create_max_bot, log_max_error
 MAX_PHOTO_BYTES = 50 * 1024 * 1024
 MAX_UPLOAD_BYTES = 1_000_000
 OPENAI_BASE_URL = "https://api.openai.com/v1"
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 FONT_PATH = Path(__file__).resolve().parent / "font.ttf"
 MAX_THEME_INFO_LENGTH = 500
@@ -326,9 +327,9 @@ class GenerationLimitError(ImageGenerationError):
 
 
 def _raise_api_error(response: httpx.Response) -> None:
-    """Записать полный ответ OpenAI в лог и классифицировать ошибку API."""
+    """Classify the response in memory; log only an allowed HTTP status."""
     body = response.text
-    logger.error("OpenAI Images API error: HTTP %s; response body: %s", response.status_code, body)
+    logger.event('api_error', level=logging.ERROR, product='image', http_status=response.status_code)
     code = ""
     try:
         payload = response.json()
@@ -384,12 +385,12 @@ async def fix_text_with_ai(text: str) -> str:
                     ],
                 )
     except APIStatusError as exc:
-        logger.error("Коррекция текста OpenAI: HTTP %s; ответ: %s", exc.status_code, exc.response.text)
+        logger.event('api_error', level=logging.ERROR, product='image', http_status=exc.status_code, error=exc)
         _raise_api_error(exc.response)
     except APITimeoutError as exc:
         raise GenerationTimeoutError("OpenAI не успел исправить текст.") from exc
     except APIConnectionError as exc:
-        logger.error("Ошибка соединения OpenAI при коррекции текста: %s", exc)
+        logger.event('request_failed', level=logging.ERROR, product='image', error=exc)
         raise ImageGenerationError("Не удалось подключиться к OpenAI для коррекции текста.") from exc
     if not result.choices or result.choices[0].finish_reason != "stop":
         raise ImageGenerationError("OpenAI не вернул полное исправленное поздравление.")
@@ -591,24 +592,21 @@ async def _generate_image_bytes(
             try:
                 payload = response.json()
             except ValueError as exc:
-                logger.error(
-                    "OpenAI Images API invalid JSON: HTTP %s; response body: %s",
-                    response.status_code, response.text,
-                )
+                logger.event('invalid_response', level=logging.ERROR, product='image', http_status=response.status_code)
                 raise ImageGenerationError("OpenAI вернул некорректный JSON.") from exc
     except APIStatusError as exc:
         _raise_api_error(exc.response)
     except (asyncio.TimeoutError, APITimeoutError) as exc:
-        logger.error("Подробная ошибка OpenAI: %r; причина: %r", exc, exc.__cause__)
+        logger.event('request_failed', level=logging.ERROR, product='image', error=exc)
         raise GenerationTimeoutError("Превышено время ожидания ответа API.") from exc
     except (aiohttp.ClientError, APIConnectionError) as exc:
-        logger.error("Подробная ошибка OpenAI: %r; причина: %r", exc, exc.__cause__)
+        logger.event('request_failed', level=logging.ERROR, product='image', error=exc)
         raise ImageGenerationError(f"Ошибка API: {exc}") from exc
     except ImageGenerationError:
         # HTTP-ответ уже записан в _raise_api_error; сохранить тип ошибки.
         raise
     except Exception as exc:
-        logger.error("Подробная ошибка OpenAI: %r", exc)
+        logger.event('request_failed', level=logging.ERROR, product='image', error=exc)
         raise ImageGenerationError(f"Ошибка API: {exc}") from exc
 
     try:

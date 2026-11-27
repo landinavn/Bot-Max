@@ -1,4 +1,5 @@
 """Explicit admin broadcast with durable delivery status and campaign expiry."""
+from safe_logging import get_logger
 import asyncio
 import logging
 
@@ -9,7 +10,7 @@ from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 import database
 import black_friday as friday
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 TEXT = ('🖤 Чёрная пятница уже началась — скидка 20% на всё!\n\n'
         'Самое время подготовить подарки близким или порадовать себя ✨\n\n'
         '💌 Открытки с вашим фото\n'

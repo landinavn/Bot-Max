@@ -1,4 +1,5 @@
 """Real MAX callback models: keyboard message belongs to bot, actor is callback.user."""
+from security_log_checks import assert_event
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -51,7 +52,8 @@ async def test_real_project_button_from_bot_message_acks_logs_and_opens_card(stu
     assert [(b.text,b.payload) for b in buttons]==[
         ('👥 Персонажи','studio:characters:'+project),
         ('🎬 Сцены','studio:scenes:'+project),('⬅️ Назад','studio:home')]
-    assert 'Открываю проект '+project in caplog.text
+    assert_event(caplog,'multstudio.router',stage='show')
+    assert project not in caplog.text
 
 
 async def test_existing_short_project_callback_still_opens_card(studio):
@@ -105,7 +107,8 @@ async def test_missing_project_acknowledged_logged_and_reported(studio,caplog):
         await dispatch_callback(create_router(456,settings,assets),pressed,await ready_context())
     pressed.bot.send_callback.assert_awaited_once()
     assert 'Запись не найдена' in pressed.bot.send_message.await_args.kwargs['text']
-    assert 'Открываю проект '+'f'*32 in caplog.text
+    assert_event(caplog,'multstudio.router',stage='show')
+    assert 'f'*32 not in caplog.text
 
 
 async def test_project_of_other_admin_is_not_exposed(studio):

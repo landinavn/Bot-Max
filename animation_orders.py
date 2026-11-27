@@ -1,4 +1,5 @@
 """Durable prepaid photo-animation jobs. A saved Kling task is never recreated on retry."""
+from safe_logging import get_logger
 import asyncio
 import logging
 import time
@@ -14,7 +15,7 @@ from media_service import upload_video_for_max
 from video_service import (generate_video_from_avatar, PHOTO_ANIMATION_PROMPT,
                            VideoTaskFailed, _is_https_url, poll_video_task)
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class PaidAnimationWorker:

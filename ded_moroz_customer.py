@@ -1,4 +1,5 @@
 """Result actions, customer reviews and an optional compact iPhone-friendly MP4."""
+from safe_logging import get_logger
 import asyncio
 import logging
 from uuid import uuid4
@@ -13,7 +14,7 @@ import database
 import ded_moroz_sales as sales
 from media_service import audio_duration,run_media_process
 
-logger=logging.getLogger(__name__)
+logger=get_logger(__name__)
 
 
 def result_keyboard(row,bot_link):

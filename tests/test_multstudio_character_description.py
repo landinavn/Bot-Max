@@ -1,4 +1,5 @@
 """Plain-text character editing must never parse input as JSON or replace other fields."""
+from security_log_checks import assert_event
 import json
 import logging
 from types import SimpleNamespace
@@ -50,7 +51,8 @@ async def test_plain_description_is_saved_and_logged_without_touching_other_fiel
     updated=await repo.get('character',char['id'])
     assert updated['spec']==dict(before,description=text)
     assert updated['revision']==char['revision']+1
-    assert 'Обновлено описание персонажа '+char['id']+': '+text in caplog.text
+    assert_event(caplog,'multstudio.router',stage='studio_input')
+    assert text not in caplog.text and char['id'] not in caplog.text
     assert 'сохранено' in submitted.message.answer.await_args.args[0]
     assert await context.get_state()!=StudioStates.input
     assert await repo.claim() is None

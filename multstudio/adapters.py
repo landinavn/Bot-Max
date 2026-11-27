@@ -1,4 +1,5 @@
 """One paid POST per confirmed job; polling is a separate, retryable operation."""
+from safe_logging import get_logger
 import base64
 import json
 import logging
@@ -13,21 +14,7 @@ from .repository import encoded
 from .prompts import scene_image_prompt, validate_scene_image_references, CLOSED_MOUTH_KEYFRAME
 from .tts import normalize_speed, validate_speech_snapshot, speech_settings, VOICES, EMOTIONS
 
-logger = logging.getLogger(__name__)
-
-
-def _tts_error_text(response, api_key, text):
-    """Keep the full provider explanation, masking only known echoed secrets."""
-    body = response.text
-    variants = set()
-    for value in (api_key, text):
-        if value:
-            variants.update((value, json.dumps(value, ensure_ascii=True)[1:-1],
-                             json.dumps(value, ensure_ascii=False)[1:-1],
-                             quote(value, safe=''), quote_plus(value, safe='')))
-    for value in sorted(variants, key=len, reverse=True):
-        body = body.replace(value, '[REDACTED]')
-    return body
+logger = get_logger(__name__)
 
 
 class TemporaryPollError(Exception):
@@ -70,9 +57,7 @@ class YandexTTSAdapter:
             logger.warning('Yandex TTS: ошибка соединения (%s)',type(exc).__name__)
             raise ProviderFailed('Ошибка соединения со SpeechKit. Новый платный запрос автоматически не отправляется.') from None
         if result.status_code != 200:
-            # Do not truncate provider details; mask credentials/dialogue if echoed.
-            logger.warning('Yandex TTS: запрос отклонён, HTTP %s; ответ Yandex: %s',
-                           result.status_code,_tts_error_text(result,self.key,text))
+            logger.event('api_error', level=logging.WARNING, product='studio', http_status=result.status_code)
             raise ProviderFailed(f'SpeechKit отклонил запрос: HTTP {result.status_code}.')
         data = result.content
         if not (data.startswith(b'ID3') or (len(data)>1 and data[0]==255 and data[1]&224==224)):
@@ -105,8 +90,7 @@ class YandexTTSV3Adapter(YandexTTSAdapter):
             logger.warning('Yandex TTS v3: ошибка соединения (%s)',type(exc).__name__)
             raise ProviderFailed('Ошибка соединения со SpeechKit v3. Новый платный запрос автоматически не отправляется.') from None
         if response.status_code!=200:
-            logger.warning('Yandex TTS v3: запрос отклонён, HTTP %s; ответ Yandex: %s',
-                           response.status_code,_tts_error_text(response,self.key,text))
+            logger.event('api_error', level=logging.WARNING, product='studio', http_status=response.status_code)
             raise ProviderFailed(f'SpeechKit v3 отклонил запрос: HTTP {response.status_code}.')
         try:
             # REST streaming is NDJSON with a result envelope per chunk; single objects
@@ -130,7 +114,7 @@ class YandexTTSV3Adapter(YandexTTSAdapter):
             if not (data.startswith(b'ID3') or (len(data)>1 and data[0]==255 and data[1]&224==224)):
                 raise ValueError('no MP3')
         except (ValueError,TypeError,AttributeError):
-            logger.warning('Yandex TTS v3: некорректный ответ; ответ Yandex: %s',_tts_error_text(response,self.key,text))
+            logger.event('invalid_response', level=logging.WARNING, product='studio', http_status=response.status_code)
             raise ProviderFailed('SpeechKit v3 не вернул корректное MP3-аудио. Автоматического повтора нет.') from None
         logger.info('Yandex TTS v3: озвучено %s символов, голос %s, role=%s, speed=%s, pitch_shift=%s',
                     len(text),voice,profile['emotion'],profile['speed'],profile['pitch_shift'])

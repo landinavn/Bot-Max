@@ -1,4 +1,5 @@
 """Durable admin-only worker. GET retries are safe; unknown paid POSTs are manual."""
+from safe_logging import get_logger
 import asyncio
 import json
 import logging
@@ -12,7 +13,7 @@ from .prompts import validate_scene_image_references
 from .tts import validate_speech_snapshot
 from . import rules
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class Worker:

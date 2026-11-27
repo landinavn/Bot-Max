@@ -1,4 +1,5 @@
 """Notify users and the admin about durable, paid photoshoots awaiting fulfillment."""
+from safe_logging import get_logger
 import asyncio
 import logging
 import time
@@ -14,7 +15,7 @@ from promo_service import send_repeat_offer
 from image_service import upload_image_for_max, NY_PHOTOSESSION_PROMPTS_BY_TARIFF
 from studio_photosessions import is_studio_birthday_order
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class PaidPhotoWorker:

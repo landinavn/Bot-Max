@@ -1,4 +1,5 @@
 """Administrative Ded Moroz workflow. SQLite survives restart; paid POSTs never auto-repeat."""
+from safe_logging import get_logger
 import asyncio
 import json
 import logging
@@ -23,7 +24,7 @@ from ded_moroz_media import child_png as png_bytes
 import ded_moroz_sales as sales
 import ded_moroz_family as family
 
-logger=logging.getLogger(__name__)
+logger=get_logger(__name__)
 STUB='🎅 Поздравление от Деда Мороза уже в разработке! Скоро здесь можно будет заказать персональное видео с вашим ребёнком.'
 TEMPLATE=('[deep voice] Охо-хо-хо! '
     '[raspy] Здравствуй, [drawls] {name}! '

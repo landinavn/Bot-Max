@@ -1,4 +1,5 @@
 """Асинхронная генерация музыки TTAPI/Suno; без автоматического повторения POST."""
+from safe_logging import get_logger
 
 import asyncio
 import json
@@ -18,7 +19,7 @@ from config import Config
 from mothers_day import TITLE as MOTHER_TITLE, BIRTHDAY_TITLE, MOTHER_LABELS, PERSONALIZATION_INSTRUCTION, render_approved_song
 from media_service import audio_duration
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 BASE_URL = "https://api.ttapi.io"
 LONG_WAIT_MESSAGE = "⏳ Трек все еще создается, это занимает больше времени, чем обычно. Пожалуйста, подождите, я пришлю его, как только он будет готов."

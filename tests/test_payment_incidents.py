@@ -1,3 +1,4 @@
+from security_log_checks import assert_event
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -40,7 +41,8 @@ async def test_unknown_shared_receipt_is_durable_and_alerted_once(credit_db, sal
     assert rows[0]['merchant_order_id'] == '17-01032-83290'
     assert not any('private@example.test' in str(r) or '+79999999999' in str(r) for r in rows)
     assert 'private@example.test' not in caplog.text and sales_payments.secret not in caplog.text
-    assert 'payment_id=verified-legacy-payment' in caplog.text
+    assert_event(caplog,'webhook',event='payment_incident')
+    assert 'verified-legacy-payment' not in caplog.text
     bot = SimpleNamespace(send_message=AsyncMock(return_value=object()))
     worker = PaymentIncidentWorker(bot, admin_user_id=999)
     await worker.process()

@@ -1,3 +1,4 @@
+from security_log_checks import assert_event
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -22,4 +23,4 @@ async def test_share_failure_is_logged_and_does_not_fail_delivery(failure,caplog
     if isinstance(failure,Exception):
         bot.send_message.side_effect=failure
     assert await send_video_share(bot,456) is False
-    assert 'Не удалось отправить приглашение' in caplog.text
+    assert_event(caplog,'video_delivery',stage='send_video_share')

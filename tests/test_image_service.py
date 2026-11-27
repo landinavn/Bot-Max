@@ -1,4 +1,5 @@
 """Проверки MAX/OpenAI с моками HTTP и хранилища, без реальных ключей."""
+from security_log_checks import assert_event
 
 import asyncio
 import base64
@@ -136,7 +137,8 @@ async def test_upload_photo_returns_media_token(config, max_bot):
     assert factory.call_args.kwargs["token"] == config.token
     assert factory.call_args.kwargs["auto_requests"] is False
     connector = factory.call_args.kwargs["default_connection"].kwargs["connector"]
-    assert connector._ssl is False
+    assert connector._ssl.verify_mode == __import__("ssl").CERT_REQUIRED
+    assert connector._ssl.check_hostname is True
     assert connector.closed
     bot.upload_media.assert_awaited_once()
     media = bot.upload_media.call_args.args[0]
@@ -477,14 +479,9 @@ async def test_generation_sends_configured_quality(config, api, caplog, quality)
     assert fields["model"].get_content() == "configured-image-model"
     assert fields["quality"].get_content() == quality
     assert set(fields) == {"model", "image", "prompt", "size", "quality"}
-    assert (
-        service.__name__, logging.INFO,
-        f"Отправляю запрос с моделью: configured-image-model, качество: {quality}",
-    ) in caplog.record_tuples
-    assert (
-        service.__name__, logging.INFO,
-        f"Эндпоинт API: {IMAGE_EDIT_URL}, quality: {quality}",
-    ) in caplog.record_tuples
+    assert_event(caplog,service.__name__,stage='_generate_image_bytes')
+    assert PHOTO_URL not in caplog.text
+
 
 
 async def test_generation_rejects_invalid_json(config, storage, api, caplog):
@@ -492,10 +489,8 @@ async def test_generation_rejects_invalid_json(config, storage, api, caplog):
     api.post(IMAGE_EDIT_URL, body="{", content_type="application/json")
     with pytest.raises(service.ImageGenerationError, match="некорректный JSON"):
         await service.generate_vision_board(PHOTO_URL, "Карьера")
-    assert (
-        service.__name__, logging.ERROR,
-        "OpenAI Images API invalid JSON: HTTP 200; response body: {",
-    ) in caplog.record_tuples
+    assert_event(caplog,service.__name__,event='invalid_response',http_status=200)
+    assert 'response body' not in caplog.text
     storage.put_object.assert_not_called()
 
 
@@ -541,10 +536,9 @@ async def test_generation_logs_full_api_error(config, storage, api, caplog, stat
     with caplog.at_level(logging.ERROR, logger=service.__name__):
         with pytest.raises(error):
             await service.generate_vision_board(PHOTO_URL, "Карьера")
-    assert (
-        service.__name__, logging.ERROR,
-        f"OpenAI Images API error: HTTP {status}; response body: {body}",
-    ) in caplog.record_tuples
+    assert_event(caplog,service.__name__,event='api_error',http_status=status)
+    assert body not in caplog.text
+    assert len(post_requests(api)) == 1
     storage.put_object.assert_not_called()
 
 
@@ -561,8 +555,10 @@ async def test_generation_logs_exception_details(config, storage, api, caplog, f
         await service.generate_vision_board(PHOTO_URL, "Карьера")
 
     assert caught.value.__cause__.__cause__ is failure
-    assert "Подробная ошибка OpenAI:" in caplog.text
-    assert repr(failure) in caplog.text
+    assert_event(caplog,service.__name__,event='request_failed')
+    assert repr(failure) not in caplog.text
+    assert str(failure) not in caplog.text
+    assert 'Traceback' not in caplog.text
     storage.put_object.assert_not_called()
     storage.close.assert_called_once()
 
@@ -827,7 +823,8 @@ async def test_correction_logs_api_response_and_does_not_retry(config, api, capl
              payload={"error": {"message": "model not available", "code": "unsupported_model"}})
     with pytest.raises(service.ImageGenerationError), caplog.at_level(logging.ERROR):
         await service.fix_text_with_ai("Счастя, Аня!")
-    assert "HTTP 400" in caplog.text and "model not available" in caplog.text
+    assert_event(caplog,service.__name__,event='api_error',http_status=400)
+    assert 'model not available' not in caplog.text
     assert len(post_requests(api)) == 1
 
 
@@ -902,7 +899,7 @@ def test_emoji_drawing_error_retries_from_clean_original(monkeypatch, caplog):
     assert len(captured) == 2 and "❤" in captured[0]
     assert captured[1].split() == ["Счастья,", "Аня!", "2027"]
     assert result.getpixel((5, 5)) == source.getpixel((5, 5))
-    assert "без эмодзи" in caplog.text
+    assert_event(caplog,service.__name__,stage='add_text_to_image')
 
 
 def test_missing_emoji_glyph_is_removed_instead_of_drawing_a_box(monkeypatch):

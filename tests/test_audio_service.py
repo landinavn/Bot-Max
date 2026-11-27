@@ -1,3 +1,4 @@
+from security_log_checks import assert_event
 import asyncio
 import json
 import re
@@ -179,8 +180,10 @@ async def test_poll_default_timeout_is_100_seconds_and_logs_each_attempt(monkeyp
     with caplog.at_level('INFO', logger='audio_service'):
         await service.wait_for_song('long-job')
     timeout.assert_called_once_with(100)
-    assert 'Попытка 1: статус PENDING (job_id=long-job)' in caplog.text
-    assert 'Попытка 2: статус SUCCESS (job_id=long-job)' in caplog.text
+    assert_event(caplog,'audio_service',stage='wait_for_song_result')
+    assert 'failed-job' not in caplog.text and 'long-job' not in caplog.text
+    assert_event(caplog,'audio_service',stage='wait_for_song_result')
+    assert 'failed-job' not in caplog.text and 'long-job' not in caplog.text
 
 
 @pytest.mark.parametrize('status', ['FAILED', 'ERROR'])
@@ -190,8 +193,10 @@ async def test_poll_failure_logs_complete_response(monkeypatch, caplog, status):
     monkeypatch.setattr(service, 'fetch_song', AsyncMock(return_value=response))
     with pytest.raises(service.SongFailed):
         await service.wait_for_song('failed-job')
-    assert json.dumps(response, ensure_ascii=False) in caplog.text
-    assert 'failed-job' in caplog.text
+    assert_event(caplog,'audio_service',stage='wait_for_song_result')
+    assert 'failed-job' not in caplog.text and 'long-job' not in caplog.text
+    assert_event(caplog,'audio_service',stage='wait_for_song_result')
+    assert 'failed-job' not in caplog.text and 'long-job' not in caplog.text
 
 
 async def test_progress_delayed_once_and_result_preserved():
@@ -282,7 +287,8 @@ async def test_twenty_pending_attempts_raise_clear_timeout_without_resubmission(
         await service.wait_for_song('job')
     assert fetch.await_count == 20
     assert service.asyncio.sleep.await_args_list == [__import__('unittest.mock', fromlist=['call']).call(5)]*20
-    assert 'Попытка 20: статус PROCESSING' in caplog.text
+    assert_event(caplog,'audio_service',stage='wait_for_song_result')
+    assert 'failed-job' not in caplog.text and 'long-job' not in caplog.text
 
 
 async def test_session_timeout_30_and_missing_job_response_body(monkeypatch):

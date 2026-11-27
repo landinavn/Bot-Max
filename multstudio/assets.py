@@ -1,4 +1,5 @@
 """Retained originals, immutable outputs and content hashes; no temporary-only results."""
+from safe_logging import get_logger
 import asyncio
 import hashlib
 import ipaddress
@@ -14,7 +15,7 @@ from uuid import uuid4
 import httpx
 
 from . import repository as repo
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def https_url(value):

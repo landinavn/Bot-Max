@@ -1,4 +1,5 @@
 """Admin-reviewed launch campaign, durable recipients, no automatic broadcast."""
+from safe_logging import get_logger
 import asyncio
 import logging
 from datetime import datetime
@@ -13,7 +14,7 @@ import database
 import ded_moroz_sales as sales
 
 CAMPAIGN='ded_moroz_launch_20261116'
-logger=logging.getLogger(__name__)
+logger=get_logger(__name__)
 TEXT=('🎅 Дедушка Мороз готовит персональное поздравление вашему ребёнку!\n\n'
       'Укажите имя и несколько фактов: что ребёнок любит, чему научился и чем вас радует. '
       'Дед Мороз скажет об этом в видео! Фотография ребёнка появится в красивой новогодней рамке.\n\n'

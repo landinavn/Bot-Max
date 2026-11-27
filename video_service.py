@@ -1,4 +1,5 @@
 """Генерация видео PiAPI/Kling: повторы внутренних ошибок и ограниченное ожидание."""
+from safe_logging import get_logger
 
 import asyncio
 import json
@@ -12,7 +13,7 @@ import httpx
 from config import Config
 from image_service import count_people_in_photo
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 TASK_URL = "https://api.piapi.ai/api/v1/task"
 POLL_INTERVAL = 15
 REQUEST_TIMEOUT = 30

@@ -1,4 +1,5 @@
 """Free scene-image import; no OpenAI or Kling calls."""
+from safe_logging import get_logger
 import asyncio
 import io
 import logging
@@ -7,7 +8,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 from . import repository as repo
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def png_bytes(path, *, job_id=None, scene_id=None):

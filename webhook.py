@@ -1,4 +1,5 @@
 """Асинхронный endpoint Prodamus; подтверждение только после коммита SQLite."""
+from safe_logging import get_logger
 
 import asyncio
 import json
@@ -13,7 +14,7 @@ from database import mark_animation_paid
 from prodamus import ProdamusPayments, parse_form_fields, verify_signature
 from payment_incidents import record_payment_incident, resolve_payment_incident
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def _unique_object(pairs):
@@ -113,8 +114,7 @@ def create_webhook_app(payments: ProdamusPayments, *, audio_worker=None, musical
                 except sqlite3.Error:
                     logger.error('Prodamus: не удалось сохранить проблему оплаты; требуется повтор уведомления.')
                     return web.Response(status=503, text='Please retry')
-                logger.error('Prodamus: отклонено успешное уведомление; payment_id=%s order_id=%s reason=%s',
-                             incident['provider_payment_id'], incident['merchant_order_id'], incident['reason_code'])
+                logger.event('payment_incident', level=logging.ERROR, product='payment')
             else:
                 logger.error("Prodamus: уведомление не соответствует сохранённому заказу или формату.")
             return web.Response(status=400, text="Invalid payment data")

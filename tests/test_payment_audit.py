@@ -1,4 +1,5 @@
 """Audit every new invoice and dispatch by saved order, never by a shared price."""
+from security_log_checks import assert_event
 import json
 import logging
 import re
@@ -54,7 +55,8 @@ async def test_current_invoice_price_description_logging_and_dispatch(credit_db,
                 await service.create_payment_link(101,order_id=order['order_id'],amount=amount,description=name)
         fields=parse_form_fields(parse_qsl(next(iter(api.requests))[1].query_string))
     assert fields['products']==[{'name':name,'price':f'{amount}.00','quantity':'1'}]
-    assert f"Создан счет: {name}, сумма: {amount} ₽, order_id: {fields['order_id']}" in caplog.text
+    assert_event(caplog,'prodamus',stage='_request_payment_link')
+    assert fields['order_id'] not in caplog.text
     assert service.secret not in caplog.text and 'sign=' not in caplog.text
     getters={'credit':credit_db.get_payment_order,'credit_promo':credit_db.get_payment_order,
              'photo':credit_db.get_photo_order,'audio':credit_db.get_audio_order,

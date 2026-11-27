@@ -1,3 +1,4 @@
+from security_log_checks import assert_event
 import asyncio
 import json
 import logging
@@ -38,7 +39,8 @@ async def test_create_exact_kling_task_and_log(caplog):
         'config': {'service_mode': 'public'},
     }
     assert route.call_count == 1
-    assert 'task-123' in caplog.text and 'создаю' in caplog.text
+    assert_event(caplog,'video_service',stage='create_video_task')
+    assert 'task-123' not in caplog.text and 'https://' not in caplog.text
     assert 'test-piapi-secret' not in caplog.text
 
 
@@ -57,9 +59,12 @@ async def test_poll_processing_then_completed(fast_poll, caplog, monkeypatch):
     assert [call.args for call in fast_poll.await_args_list] == [(15,), (15,)]
     budget.assert_called_once_with(1200)
     assert all(call.request.headers['X-API-Key'] == 'test-piapi-secret' for call in route.calls)
-    assert 'processing' in caplog.text and 'completed' in caplog.text and 'видео готово' in caplog.text
-    assert 'прошло 315 сек, осталось 885 сек' in caplog.text
-    assert 'прошло 900 сек, осталось 300 сек' in caplog.text
+    assert_event(caplog,'video_service',stage='poll_video_task')
+    assert 'task-123' not in caplog.text and 'https://' not in caplog.text
+    assert_event(caplog,'video_service',stage='poll_video_task')
+    assert 'task-123' not in caplog.text and 'https://' not in caplog.text
+    assert_event(caplog,'video_service',stage='poll_video_task')
+    assert 'task-123' not in caplog.text and 'https://' not in caplog.text
 
 
 @respx.mock
@@ -187,7 +192,8 @@ async def test_style_specific_prompt_reaches_piapi_and_is_logged(mode, addition,
     payload = json.loads(post.calls[0].request.content)
     assert payload['input']['prompt'] == base + addition
     assert payload['input']['mode'] == 'std' and payload['input']['enable_audio'] is False
-    assert f'Промпт для Kling ({mode}): {base + addition}' in caplog.text
+    assert_event(caplog,'video_service',stage='generate_video_from_avatar')
+    assert 'task-123' not in caplog.text and 'https://' not in caplog.text
     assert post.call_count == 1
 
 
@@ -208,7 +214,8 @@ async def test_crowd_threshold_controls_real_piapi_prompt_and_logs_count(count, 
         assert 'Snow' not in prompt and 'smiling' not in prompt
     else:
         assert 'The character is smiling, blinking naturally, and slightly moving their head from side to side.' in prompt and 'Snow is gently falling' in prompt
-    assert f'На фото найдено {count} человек. Промпт для Kling: {prompt}' in caplog.text
+    assert_event(caplog,'video_service',stage='generate_video_from_avatar')
+    assert 'task-123' not in caplog.text and 'https://' not in caplog.text
 
 
 @respx.mock
@@ -255,8 +262,10 @@ async def test_internal_creation_error_retries_then_polls_only_accepted_task(res
     assert result == 'https://video.example/done.mp4'
     assert post.call_count == 3 and get.call_count == 1
     assert [call.args for call in fast_poll.await_args_list] == [(15,), (15,), (15,)]
-    assert 'Попытка 1 провалилась (Internal error). Повтор через 15 секунд...' in caplog.text
-    assert 'Попытка 2 провалилась (Internal error). Повтор через 15 секунд...' in caplog.text
+    assert_event(caplog,'video_service',stage='create_video_task_with_retry')
+    assert 'task-123' not in caplog.text and 'https://' not in caplog.text
+    assert_event(caplog,'video_service',stage='create_video_task_with_retry')
+    assert 'task-123' not in caplog.text and 'https://' not in caplog.text
     assert 'test-piapi-secret' not in caplog.text
     for call in post.calls:
         payload = json.loads(call.request.content)

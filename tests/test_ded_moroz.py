@@ -1,4 +1,5 @@
 """Admin-only FSM, immutable versions, HeyGen contracts and restart-safe billing."""
+from security_log_checks import assert_event
 import asyncio
 import io
 import json
@@ -585,8 +586,8 @@ async def test_admin_can_edit_and_regenerate_repeatedly_via_real_buttons(credit_
         saved=await dm.get(key)
         assert saved['regeneration_attempts']==version+1
         assert saved['status']=='audio_queued' and saved['edit_used']==1
-    assert [r.getMessage() for r in caplog.records if r.name==dm.__name__]==[
-        f'Перегенерация аудио для 456. Попытка: {n}' for n in (1,2,3)]
+    assert len(assert_event(caplog,dm.__name__,stage='finish_regeneration'))==3
+    assert 'Перегенерация аудио для' not in caplog.text
     worker.heygen.create_video.assert_not_awaited()
 
 
@@ -613,8 +614,8 @@ async def test_future_regular_user_has_one_shared_retry_across_restart(credit_db
     assert not await dm.request_edit(key,789,1,admin=admin)
     assert not await dm.regenerate(key,456,1,admin=456)  # Admin cannot mutate another owner's order.
     assert (await dm.get(key))['regeneration_attempts']==1
-    assert [r.getMessage() for r in caplog.records if r.name==dm.__name__]==[
-        'Перегенерация аудио для 789. Попытка: 1']
+    assert len(assert_event(caplog,dm.__name__,stage='finish_regeneration'))==1
+    assert 'Перегенерация аудио для' not in caplog.text
 
 
 async def test_retry_migration_preserves_prior_attempts_and_admin_exemption(credit_db):

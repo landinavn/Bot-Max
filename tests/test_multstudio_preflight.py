@@ -1,4 +1,5 @@
 """Preflight diagnostics and exact USD → micro-USD parsing; no paid requests."""
+from security_log_checks import assert_event
 import base64
 import json
 import logging
@@ -59,10 +60,10 @@ async def test_preflight_value_error_has_complete_stack_and_cause_before_any_pai
     worker=Worker(SimpleNamespace(),456,settings,providers,assets)
     with caplog.at_level(logging.ERROR,logger='multstudio.worker'):
         await worker.execute(await repo.claim())
-    assert 'Preflight failed:' in caplog.text and item['id'] in caplog.text
-    assert 'Traceback (most recent call last)' in caplog.text
-    assert 'multstudio/adapters.py' in caplog.text and 'in preflight' in caplog.text
-    assert 'ValueError: Задайте STORAGE_PUBLIC_BASE_URL' in caplog.text
+    assert_event(caplog,'multstudio.worker',event='preflight_failed')
+    assert item['id'] not in caplog.text
+    assert 'Traceback' not in caplog.text
+    assert 'Задайте STORAGE_PUBLIC_BASE_URL' not in caplog.text
     assert (await repo.job(item['id']))['status']=='preflight_failed'
     assert (await repo.budget(project))['committed']==0
     providers.image.assert_not_awaited()
@@ -81,8 +82,9 @@ async def test_traceback_redacts_configured_keys_including_chained_exception(stu
     providers=SimpleNamespace(preflight=fail,config=config,image=AsyncMock())
     with caplog.at_level(logging.ERROR,logger='multstudio.worker'):
         await Worker(SimpleNamespace(),456,settings,providers,assets).execute(await repo.claim())
-    assert 'Traceback' in caplog.text and 'ValueError' in caplog.text and 'RuntimeError' in caplog.text
-    assert '[REDACTED]' in caplog.text
+    assert_event(caplog,'multstudio.worker',event='preflight_failed')
+    assert 'Traceback' not in caplog.text
+    assert item['id'] not in caplog.text
     for key in ('private-storage-key','private-piapi-key','private-tts-key','private-openai-key'):
         assert key not in caplog.text
     assert (await repo.job(item['id']))['status']=='preflight_failed'

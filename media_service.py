@@ -1,4 +1,5 @@
 """Локальная обработка медиа через ffmpeg и публикация результата в Object Storage."""
+from safe_logging import get_logger
 
 import asyncio
 import json
@@ -15,7 +16,7 @@ import httpx
 from config import Config
 from image_service import _storage_client
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 VIDEO_MERGE_POLICY = 'h264-aac-full-song-v2'
 MUSICAL_VIDEO_POLICY = 'static-image-h264-aac-full-song-v2'
 MUSICAL_VIDEO_WAIT_MESSAGE = (

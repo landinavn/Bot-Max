@@ -1,4 +1,5 @@
 """Постоянная очередь создания и отправки оплаченных музыкальных открыток."""
+from safe_logging import get_logger
 from mothers_day import mother_suffix
 import asyncio
 import json
@@ -19,7 +20,7 @@ from promo_service import send_repeat_offer
 
 from audio_service import generate_song, wait_for_song, song_audio_url, validate_song_arguments
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class SongSubmissionUnknown(RuntimeError):

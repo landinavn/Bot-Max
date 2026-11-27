@@ -1,4 +1,5 @@
 """Доставка запроса фото после подтверждённой оплаты мульт-заказа."""
+from safe_logging import get_logger
 import asyncio
 import logging
 import time
@@ -8,7 +9,7 @@ from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
 from database import pending_cartoon_notifications, update_cartoon_order
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 CARTOON_PAID_PHOTO_PROMPT = (
     '✅ Оплата получена! 📸 Отправьте четкое фото (анфас, хорошее освещение). '
     'Мы нарисуем вашего персонажа!\n\n'

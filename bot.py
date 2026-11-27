@@ -1,4 +1,5 @@
 """Запуск бота: python bot.py. Long polling используется для разработки."""
+from safe_logging import get_logger
 
 import asyncio
 import logging
@@ -22,15 +23,18 @@ from animation_orders import PaidAnimationWorker
 from payment_incidents import PaymentIncidentWorker
 from multstudio.bootstrap import configure as configure_studio
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def configure_logging() -> None:
+    from safe_logging import install_safe_logging
+    install_safe_logging()
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    install_safe_logging()
 
 
 async def main() -> None:

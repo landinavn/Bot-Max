@@ -1,4 +1,5 @@
 """Callback не должен отправлять пустое подтверждение в MAX."""
+from security_log_checks import assert_event
 
 from types import SimpleNamespace
 from pathlib import Path
@@ -636,10 +637,19 @@ async def test_admin_can_generate_repeatedly_without_balance_or_deduction(
     assert after["total_purchases"] == 0
     assert await context.get_state() is None
     assert (await context.get_data())["package_offer_pending"] is False
-    assert sum(
-        record.getMessage() == "Пропущено списание кредитов для администратора 456"
-        for record in caplog.records
-    ) == 3
+    # Preserve the original exact count for the admin credit-skip log site;
+    # the same function also emits unrelated delivery diagnostics.
+    import ast
+    tree = ast.parse(Path(handlers.__file__).read_text())
+    skip_line = next(n.lineno for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+        and isinstance(n.func.value, ast.Name) and n.func.value.id == 'logger'
+        and n.func.attr == 'info' and n.args and isinstance(n.args[0], ast.Constant)
+        and isinstance(n.args[0].value, str)
+        and n.args[0].value.startswith('Пропущено списание кредитов для администратора'))
+    rows = assert_event(caplog,'handlers',stage='generate_with_credits')
+    assert sum(row.get('line') == skip_line for row in rows) == 3
+    assert 'администратора 456' not in caplog.text
     for event in events:
         assert not any(
             call.args and call.args[0] == NO_CREDITS_TEXT
@@ -759,9 +769,15 @@ async def test_max_error_logs_body_and_retry_uses_paid_image(
     with caplog.at_level(logging.ERROR, logger=handlers.__name__):
         await call_handler(router, "collect_sphere", event, context)
 
-    assert "Детали ошибки MAX:" in caplog.text
-    assert "Ответ сервера MAX (код 400):" in caplog.text
-    assert "MAX rejected media" in caplog.text
+    assert_event(caplog,'handlers',event='request_failed')
+    assert 'Traceback' not in caplog.text
+    assert 'MAX rejected media' not in caplog.text
+    assert_event(caplog,'handlers',event='request_failed')
+    assert 'Traceback' not in caplog.text
+    assert 'MAX rejected media' not in caplog.text
+    assert_event(caplog,'handlers',event='request_failed')
+    assert 'Traceback' not in caplog.text
+    assert 'MAX rejected media' not in caplog.text
     if stage == "upload":
         event.bot.send_message.assert_not_awaited()
     assert (await context.get_data())["sent_count"] == 0
@@ -1453,8 +1469,13 @@ async def test_dispatcher_routes_card_text_to_generation(
             await dp.handle(MessageCreated(timestamp=3, bot=bot, message=message(text=user_text)))
         text_correction.assert_awaited_once_with(user_text)
         generator.assert_awaited_once_with("https://cdn.example/source.png", mode, fixed_text, **role_generation_kwargs(mode))
-        assert f"Исходный текст: {user_text} | Исправленный: {fixed_text}" in caplog.text
-        assert f"Начинаю генерацию открытки с текстом: {user_text}" in caplog.text
+        assert_event(caplog,'handlers',stage='generate_with_credits')
+        assert 'Traceback' not in caplog.text
+        assert user_text not in caplog.text
+        assert fixed_text not in caplog.text
+        assert_event(caplog,'handlers',stage='collect_card_text')
+        assert 'Traceback' not in caplog.text
+        assert user_text not in caplog.text
         replies = [call.kwargs.get("text") for call in bot.send_message.await_args_list]
         assert "⏳ Генерирую..." in replies and "Ваша открытка готова!" in replies
         assert user_text not in replies
@@ -1463,7 +1484,8 @@ async def test_dispatcher_routes_card_text_to_generation(
         assert (await credit_db.get_user(456))["total_generations"] == 1
         assert (await credit_db.get_user(456))["last_active_at"] == "1970-01-01T00:00:00.003+00:00"
         if general_handler_first:
-            assert "передаю текст из общего обработчика" in caplog.text
+            assert_event(caplog,'handlers',stage='echo')
+            assert 'Traceback' not in caplog.text
     finally:
         await dp.shutdown()
 
@@ -1573,7 +1595,8 @@ async def test_start_still_shows_menu_after_example_failures(example_photos, fai
     await call_handler(create_router(), 'start', event, await ready_context())
     greetings = [c for c in event.message.answer.await_args_list if c.kwargs.get('text') == handlers.WELCOME_TEXT]
     assert len(greetings) == 1 and len(greetings[0].kwargs['attachments']) == 1
-    assert 'Не удалось' in caplog.text
+    assert_event(caplog,'handlers')
+    assert 'Traceback' not in caplog.text
 
 
 @pytest.mark.parametrize("mode", ["mode_vision", *handlers.POSTCARD_PROMPTS])
@@ -1998,8 +2021,10 @@ async def test_segmented_broadcast_continues_after_attachment_error(credit_db, m
     await call_handler(create_router(admin_user_id=456), command, event)
     assert [c.kwargs["user_id"] for c in event.bot.send_message.await_args_list] == [101, 102]
     assert event.message.answer.await_args.args[0] == "✅ Рассылка завершена! Успешно: 1, Ошибок: 1."
-    assert "Ошибка отправки пользователю 101:" in caplog.text
-    assert "attachment.max-size-reached" in caplog.text
+    assert_event(caplog,'handlers')
+    assert 'Traceback' not in caplog.text
+    assert_event(caplog,'handlers')
+    assert 'Traceback' not in caplog.text
 
 
 async def test_segmented_broadcast_continues_if_marking_blocked_fails(credit_db, monkeypatch, example_photos):
@@ -2060,7 +2085,8 @@ async def test_broadcast_reminder_continues_after_error(credit_db, monkeypatch, 
     await call_handler(create_router(admin_user_id=456), "broadcast_reminder", event)
     assert [c.kwargs["user_id"] for c in event.bot.send_message.await_args_list] == [101, 102]
     assert event.message.answer.await_args.args[0] == "✅ Напоминания отправлены! Успешно: 1, Ошибок: 1"
-    assert "Ошибка отправки пользователю 101:" in caplog.text
+    assert_event(caplog,'handlers')
+    assert 'Traceback' not in caplog.text
     assert (await credit_db.get_user(101))["is_active"] == (0 if status == 403 else 1)
 
 
@@ -2148,7 +2174,8 @@ async def test_dispatcher_welcomes_link_and_command_with_same_menu(
         assert await context.get_state() == PosterStates.waiting_for_mode
         assert await context.get_data() == {}
         assert (await credit_db.get_user(456))["balance"] == 1
-        assert "Получено bot_started: отправляю приветствие пользователю 456" in caplog.text
+        assert_event(caplog,'handlers',stage='bot_started')
+        assert 'Traceback' not in caplog.text
     finally:
         await dp.shutdown()
 
@@ -4424,7 +4451,7 @@ async def test_metrika_http_failure_does_not_break_postcard_delivery(credit_db, 
     assert event.bot.send_message.await_args.kwargs['text'] == 'Ваша открытка готова!'
     assert (await credit_db.get_user(456))['total_generations'] == 1
     assert (await credit_db.get_user(456))['balance'] == 1
-    assert 'Ошибка Метрики: HTTP 500' in caplog.text
+    assert_event(caplog,'metrika_service',event='api_error',http_status=500)
     assert await context.get_state() is None
 
 
@@ -4440,7 +4467,8 @@ async def test_gift_queue_failure_logs_traceback_and_allows_details_retry(credit
     else:
         event.message.answer.side_effect = [RuntimeError('MAX progress failure'), object()]
     await call_handler(create_router(), 'collect_gift_details', event, context)
-    assert any(r.exc_info and 'ОШИБКА ГЕНЕРАЦИИ ПЕСНИ:' in r.message for r in caplog.records)
+    assert_event(caplog,'handlers')
+    assert 'Traceback' not in caplog.text
     assert await context.get_state() == PosterStates.waiting_for_gift_bday
     assert event.message.answer.await_args.args[0].startswith('❌ Ошибка:')
     if failure == 'build':
@@ -4460,7 +4488,8 @@ async def test_gift_handler_directly_calls_ttapi_with_all_arguments(credit_db, c
     saved = await credit_db.get_audio_order(order_id)
     submit.assert_awaited_once_with(saved['lyrics'], saved['tags'], saved['title'])
     assert all(isinstance(arg, str) and arg.strip() for arg in submit.await_args.args)
-    assert 'Запускаю audio_service.generate_song для пользователя 456' in caplog.text
+    assert_event(caplog,'handlers',stage='generate_gift_preview')
+    assert 'Traceback' not in caplog.text
     assert saved['job_id'] == 'diagnostic-job'
     assert saved['preview_delivered'] == 1
 
@@ -4598,7 +4627,9 @@ async def test_direct_gift_error_has_traceback_and_is_shown_to_user(credit_db, m
     await context.set_state(PosterStates.waiting_for_gift_bday)
     event = message_event('Аня, любит горы')
     await call_handler(router, 'collect_gift_details', event, context)
-    assert any(r.exc_info and r.message.startswith('ОШИБКА ГЕНЕРАЦИИ ПЕСНИ:') for r in caplog.records)
+    assert_event(caplog,'handlers')
+    assert all(r.exc_info is None for r in caplog.records)
+    assert 'Traceback' not in caplog.text
     assert event.message.answer.await_args.args[0].startswith('❌ Ошибка:')
     assert await context.get_state() == PosterStates.waiting_for_gift_bday
     order = await credit_db.get_audio_order((await context.get_data())['audio_checkout_id'])
@@ -4730,7 +4761,8 @@ async def test_video_admin_stub_failure_has_traceback_and_allows_song_retry(cred
     await dispatch_callback_and_phrase(router, callback_event('upsell_animate'), context)
     event = callback_event('video_song:audio_fun_ny')
     await dispatch_callback_and_phrase(router, event, context)
-    assert any(r.exc_info and 'Ошибка создания музыкальной открытки' in r.message for r in caplog.records)
+    assert_event(caplog,'handlers',stage='run_selected_video')
+    assert 'Traceback' not in caplog.text
     assert await context.get_state() == PosterStates.waiting_for_video_song
     assert 'payform' not in str(event.send.await_args_list)
 
@@ -4947,7 +4979,9 @@ async def test_cartoon_failed_handoff_is_retryable_and_never_claims_artist_was_n
     await dispatch_callback(router, rejected, context)
     assert 'Не удалось отправить заявку художнику' in rejected.send.await_args.args[0]
     assert not (await context.get_data()).get('cartoon_handoff_sent')
-    assert any(record.exc_info for record in caplog.records)
+    assert_event(caplog,'handlers')
+    assert all(r.exc_info is None for r in caplog.records)
+    assert 'Traceback' not in caplog.text
     if configured_admin:
         retry = callback_event('cartoon_retry_handoff')
         await dispatch_callback(router, retry, context)
@@ -5165,7 +5199,9 @@ async def test_teacher_video_failure_is_visible_and_preserves_inputs_for_retry(c
     assert await context.get_state() == PosterStates.waiting_for_video_teacher_details
     assert (await context.get_data())['video_amount_kopecks'] == 14900
     assert (await context.get_data())['last_image_url'] == 'https://cdn.example/card.png'
-    assert any(record.exc_info for record in caplog.records)
+    assert_event(caplog,'handlers')
+    assert all(r.exc_info is None for r in caplog.records)
+    assert 'Traceback' not in caplog.text
     assert 'Не удалось создать текст песни' in event.message.answer.await_args.args[0]
     assert 'payform' not in str(event.message.answer.await_args_list)
 
@@ -5489,7 +5525,8 @@ async def test_card_static_render_failure_logs_traceback_and_reuses_clean_image(
     await context.set_state(PosterStates.waiting_for_video_song)
     await dispatch_callback_and_phrase(router, callback_event('video_song:audio_fun_ny'), context)
     assert await context.get_state() == PosterStates.waiting_for_video_song
-    assert any(r.exc_info and 'Ошибка создания музыкальной открытки' in r.message for r in caplog.records)
+    assert_event(caplog,'handlers',stage='run_selected_video')
+    assert 'Traceback' not in caplog.text
     await dispatch_callback_and_phrase(router, callback_event('video_song:audio_fun_ny'), context)
     card.assert_awaited_once()
     assert (await context.get_data())['video_result_url'] == 'https://video.example/retry.mp4'
@@ -5595,7 +5632,8 @@ async def test_process_pending_videos_continues_after_failure_and_marks_only_del
     assert event.bot.send_message.await_args.kwargs['user_id'] == 789
     assert [job['id'] for job in await credit_db.get_all_pending_videos()] == [first]
     assert 'Успешно: 1, Ошибок: 1' in event.message.answer.await_args.args[0]
-    assert any(record.exc_info and 'Ошибка отложенного видео' in record.message for record in caplog.records)
+    assert_event(caplog,'handlers',stage='process_pending_videos')
+    assert 'Traceback' not in caplog.text
 
 
 async def test_pending_video_failed_delivery_reuses_result_after_restart(credit_db):
@@ -6831,7 +6869,8 @@ async def test_confirm_video_2_acknowledges_once_and_renders_selected_paid_varia
     monkeypatch.setattr(handlers,'generate_video_from_avatar',animator)
     with caplog.at_level(logging.INFO):
         await dispatch_callback(router,event,context)
-    assert "Нажата кнопка 'Создать видео' после выбора второй песни" in caplog.text
+    assert_event(caplog,'handlers',stage='confirm_video_2')
+    assert 'Traceback' not in caplog.text
     animator.assert_awaited_once()
     handlers.create_musical_video.assert_awaited_once_with(f'https://cdn.example/avatar{avatar}.png',
         f'https://audio.example/song{song}.mp3',animated_video_url='https://video.example/confirmed.mp4')
@@ -6855,7 +6894,8 @@ async def test_confirm_video_2_lost_data_is_logged_and_explained(credit_db,missi
     await dispatch_callback(router,event,context)
     event.ack.assert_awaited_once_with(notification='Запускаю видео…')
     assert event.send.await_args.args[0]=='❌ Ошибка данных. Пожалуйста, начните заново /start'
-    assert 'Данные из FSM потеряны' in caplog.text
+    assert_event(caplog,'handlers',stage='confirm_video_2')
+    assert 'Traceback' not in caplog.text
     handlers.generate_video_from_avatar.assert_not_awaited()
     handlers.create_musical_video.assert_not_awaited()
 
@@ -6879,7 +6919,9 @@ async def test_confirm_video_2_failure_has_traceback_and_support_without_silent_
     event=callback_event('confirm_video_2')
     await dispatch_callback(router,event,context)
     event.ack.assert_awaited_once_with(notification='Запускаю видео…')
-    assert any(record.exc_info for record in caplog.records)
+    assert_event(caplog,'handlers')
+    assert all(r.exc_info is None for r in caplog.records)
+    assert 'Traceback' not in caplog.text
     assert event.send.await_args.args[0]==handlers.CARTOON_VIDEO_ERROR
     assert await context.get_state()==PosterStates.cartoon_manual_review
     assert (await context.get_data())['song_2_url']=='https://audio.example/song2.mp3'
@@ -6995,7 +7037,8 @@ async def test_short_cartoon_missing_examples_logs_and_keeps_menu(credit_db, cap
     assert event.send.await_count == 2
     assert event.send.await_args_list[0].args[0] == 'Видео-примеры временно недоступны'
     assert event.send.await_args.args[0] == handlers.CARTOON_PRODUCTS['cat_cartoon'][2]
-    assert all(name in caplog.text for name in handlers.CARTOON_EXAMPLE_FILES)
+    assert_event(caplog,'handlers')
+    assert 'Traceback' not in caplog.text
     assert await context.get_state() == PosterStates.waiting_for_cartoon_style
 
 

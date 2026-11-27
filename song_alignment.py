@@ -1,4 +1,5 @@
 """Locate the first approved sung words; instrumental music is NOT treated as silence."""
+from safe_logging import get_logger
 import math
 import re
 from pathlib import Path
@@ -182,7 +183,7 @@ async def resolve_song_start(story, audio, lyrics, audio_url, workdir, checkpoin
         except Exception as exc:
             story['alignment_submitting'] = None
             story['alignment_error'] = {'source': source, 'type': type(exc).__name__}
-            logging.getLogger(__name__).warning(
+            get_logger(__name__).warning(
                 'Song alignment failed: attempt=%s error_type=%s status=%s',
                 story['alignment_attempts'], type(exc).__name__, getattr(exc, 'status_code', None))
             await asyncio.shield(checkpoint())

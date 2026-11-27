@@ -1,3 +1,4 @@
+from security_log_checks import assert_event
 import io
 import logging
 from types import SimpleNamespace
@@ -38,9 +39,12 @@ def test_original_jpg_941_by_1672_is_accepted_and_logged(tmp_path,caplog):
     assert path.stat().st_size<1024*1024
     with caplog.at_level(logging.INFO,logger='multstudio.uploads'):
         png_bytes(path,job_id='test-job',scene_id='test-scene')
-    assert "'format': 'JPEG'" in caplog.text
-    assert "'pixels': 1573352" in caplog.text
-    assert 'test-job' in caplog.text and 'test-scene' in caplog.text
+    assert_event(caplog,'multstudio.uploads',stage='png_bytes')
+    assert 'test-job' not in caplog.text and 'test-scene' not in caplog.text
+    assert_event(caplog,'multstudio.uploads',stage='png_bytes')
+    assert 'test-job' not in caplog.text and 'test-scene' not in caplog.text
+    assert_event(caplog,'multstudio.uploads',stage='png_bytes')
+    assert 'test-job' not in caplog.text and 'test-scene' not in caplog.text
 
 
 @pytest.mark.parametrize('fmt',['WEBP','GIF','BMP'])
@@ -49,9 +53,11 @@ def test_other_real_formats_remain_rejected_even_named_jpg(tmp_path,caplog,fmt):
     path.write_bytes(image_bytes(fmt))
     with caplog.at_level(logging.WARNING,logger='multstudio.uploads'),pytest.raises(ValueError,match=fmt):
         png_bytes(path)
-    assert 'reason=unsupported_format' in caplog.text
+    assert_event(caplog,'multstudio.uploads',stage='png_bytes')
+    assert 'test-job' not in caplog.text and 'test-scene' not in caplog.text
     assert 'reason=pixel_limit' not in caplog.text
-    assert "'pixels': 1573352" in caplog.text
+    assert_event(caplog,'multstudio.uploads',stage='png_bytes')
+    assert 'test-job' not in caplog.text and 'test-scene' not in caplog.text
 
 
 def test_pixel_limit_accepts_exactly_40_million_and_rejects_excess(tmp_path,caplog):
@@ -62,7 +68,8 @@ def test_pixel_limit_accepts_exactly_40_million_and_rejects_excess(tmp_path,capl
     Image.new('L',(8000,5001)).save(path)
     with caplog.at_level(logging.WARNING,logger='multstudio.uploads'),pytest.raises(ValueError,match='40008000'):
         png_bytes(path)
-    assert 'reason=pixel_limit' in caplog.text and 'limit=40000000' in caplog.text
+    assert_event(caplog,'multstudio.uploads',stage='png_bytes')
+    assert 'test-job' not in caplog.text and 'test-scene' not in caplog.text
 
 
 @pytest.mark.parametrize('data',[b'<html>not an image</html>',b'\xff\xd8\xff\xe0invalid',image_bytes()[:100]])
@@ -71,7 +78,8 @@ def test_invalid_or_truncated_content_is_rejected_and_logged(tmp_path,caplog,dat
     path.write_bytes(data)
     with caplog.at_level(logging.WARNING,logger='multstudio.uploads'),pytest.raises(ValueError):
         png_bytes(path)
-    assert 'reason=decode_failed' in caplog.text
+    assert_event(caplog,'multstudio.uploads',stage='png_bytes')
+    assert 'test-job' not in caplog.text and 'test-scene' not in caplog.text
 
 
 @pytest.mark.parametrize('fmt,mime',[('JPEG','application/octet-stream'),('PNG','image/jpeg')])
@@ -124,7 +132,8 @@ async def test_webp_disguised_as_jpeg_from_max_is_not_converted_or_selected(stud
             content=image_bytes('WEBP'),headers={'Content-Type':'image/jpeg'}))
         with pytest.raises(ValueError,match='WEBP'):
             await upload_scene_image(assets,scene['id'],456,'https://cdn.example/photo.jpg')
-    assert 'reason=unsupported_format' in caplog.text
+    assert_event(caplog,'multstudio.uploads',stage='png_bytes')
+    assert 'test-job' not in caplog.text and 'test-scene' not in caplog.text
     publish.assert_not_awaited()
     assert (await repo.snapshot('scene',scene['id']))['assets']['image']['id']==old
 

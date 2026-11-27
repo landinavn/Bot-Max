@@ -1,4 +1,5 @@
 """Постоянный баланс пользователей. Все изменения фиксируются в SQLite."""
+from safe_logging import get_logger
 
 import logging
 import json
@@ -14,7 +15,7 @@ import black_friday as friday
 
 DATABASE_PATH = Path(__file__).resolve().parent / "database.sqlite3"
 PROMO_SECONDS = 24 * 60 * 60
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class PromoUnavailableError(ValueError):

@@ -1,4 +1,5 @@
 """Post-delivery repeat-gift offers with durable, idempotent notification retries."""
+from safe_logging import get_logger
 import asyncio
 import logging
 
@@ -6,7 +7,7 @@ from maxapi.types import CallbackButton
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 from database import (grant_repeat_offer,pending_repeat_offers,mark_repeat_offer_sent,repeat_offers_due,claim_repeat_offer,release_repeat_offer)
 
-logger=logging.getLogger(__name__)
+logger=get_logger(__name__)
 REPEAT_TEXTS={
     'music_card':'🎵 Понравилась музыкальная открытка? Сделайте ещё одну для другого праздника со скидкой 20%! Цена 239 ₽ вместо 299 ₽. Скидка действует 24 часа.',
     'cartoon':'🎬 Понравилась мульт-открытка? Создайте ещё одну со скидкой 20%! Скидка действует 24 часа. Цена 312 ₽ вместо 390 ₽.',

@@ -1,3 +1,4 @@
+from security_log_checks import assert_event
 import base64
 import json
 from dataclasses import replace
@@ -65,7 +66,9 @@ async def test_v3_http_errors_mask_secret_and_dialogue_without_retry(status,capl
         return httpx.Response(status,text='Unknown api key private-key; dialogue: частная реплика')
     with pytest.raises(ProviderFailed,match=str(status)):
         await YandexTTSV3Adapter('private-key',transport=httpx.MockTransport(send)).synthesize('частная реплика',**MASHA_PROFILE)
-    assert len(calls)==1 and 'Unknown api key' in caplog.text
+    assert len(calls)==1
+    assert_event(caplog,'multstudio.adapters',event='api_error',http_status=status)
+    assert 'Unknown api key' not in caplog.text
     assert 'private-key' not in caplog.text and 'частная реплика' not in caplog.text
 
 

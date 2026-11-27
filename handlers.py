@@ -1,4 +1,5 @@
 """Меню и FSM: режим → фото → мечта или готовый праздничный шаблон."""
+from safe_logging import get_logger, correlation_scope
 
 import asyncio
 import logging
@@ -104,7 +105,7 @@ from image_service import (
     upload_image_for_max,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class UserActivityMiddleware(BaseMiddleware):
@@ -118,7 +119,8 @@ class UserActivityMiddleware(BaseMiddleware):
             actor = event_object.message.sender
         if actor is not None and not actor.is_bot:
             await update_user_activity(actor.user_id, timestamp_ms=event_object.timestamp)
-        return await handler(event_object, data)
+        with correlation_scope():
+            return await handler(event_object, data)
 
 
 async def notify_payment_recovery(event, recovery):

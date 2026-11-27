@@ -1,4 +1,5 @@
 """The user's ACTIVE Instant clone, durable speech URLs and approved MP3 delivery."""
+from security_log_checks import assert_event
 import json
 import subprocess
 from types import SimpleNamespace
@@ -158,7 +159,8 @@ async def test_full_tts_400_diagnostic_redacts_key(caplog):
     adapter=HeyGenAdapter('actual-key',httpx.MockTransport(lambda r:httpx.Response(400,text='error actual-key details')),
                          voice_id=DEFAULT_VOICE_ID)
     with pytest.raises(HeyGenError):await adapter.generate_speech('Привет')
-    assert 'HeyGen TTS Error 400: error [redacted] details' in caplog.text
+    assert_event(caplog,'heygen',event='api_error',http_status=400)
+    assert 'error'+' secret details' not in caplog.text
     assert 'actual-key' not in caplog.text
 
 

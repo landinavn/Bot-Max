@@ -3,6 +3,7 @@
 Протокол: https://github.com/PRODAMUS/integration-expert/tree/main/
 prodamus-integration-expert/references (payform-protocol.md, hmac.md).
 """
+from safe_logging import get_logger
 
 import hashlib
 import hmac
@@ -28,7 +29,7 @@ PACKAGES = {
     5: (29900, "5 генераций"),
     15: (79900, "15 генераций"),
 }
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 SIGN_FIELDS = {"signature", "sign", "_payform_sign"}
 

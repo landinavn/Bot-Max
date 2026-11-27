@@ -1,4 +1,5 @@
 """Доставка оплаченных аудиозаказов из постоянной очереди SQLite."""
+from safe_logging import get_logger
 from mothers_day import mother_suffix
 
 import asyncio
@@ -14,7 +15,7 @@ from audio_service import generate_song, wait_for_song_result, wait_for_song_wit
 from database import (get_audio_order, update_audio_order, pending_audio_orders,
                       claim_audio_order, reset_audio_workers, song_checkout_order)
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 SUPPORT_URL = 'https://max.ru/u/f9LHodD0cOL0i7XGM4uyyUo-bFy4nt4Hqc-XMNmvGygT83X2wUkr6O7DRXo'
 
 

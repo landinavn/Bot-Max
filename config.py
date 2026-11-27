@@ -47,6 +47,11 @@ class Config:
     yandex_metrika_counter_id: str | None = None
     yandex_metrika_oauth_token: str | None = field(default=None, repr=False)
     piapi_key: str | None = field(default=None, repr=False)
+    private_media_enabled: bool = False
+    private_media_bucket: str | None = None
+    private_media_registry: Path = BASE_DIR / 'private_media.sqlite3'
+    private_media_access_key_id: str | None = field(default=None, repr=False)
+    private_media_secret_access_key: str | None = field(default=None, repr=False)
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -67,6 +72,9 @@ class Config:
             raise ValueError("ADMIN_USER_ID должен быть положительным числовым user_id или пустым.") from None
         if admin_user_id is not None and admin_user_id <= 0:
             raise ValueError("ADMIN_USER_ID должен быть положительным числовым user_id или пустым.")
+        private_flag = os.environ.get('PRIVATE_MEDIA_ENABLED', 'false').strip().lower()
+        if private_flag not in ('true', 'false'):
+            raise ValueError('PRIVATE_MEDIA_ENABLED должен быть true или false.')
         return cls(
             token=token,
             photo_path=photo_path,
@@ -94,4 +102,9 @@ class Config:
             prodamus_webhook_url=os.environ.get("PRODAMUS_WEBHOOK_URL", "").strip() or None,
             webhook_host=os.environ.get("WEBHOOK_HOST", "0.0.0.0").strip(),
             webhook_port=int(os.environ.get("WEBHOOK_PORT", "8080")),
+            private_media_enabled=private_flag == 'true',
+            private_media_bucket=os.environ.get('PRIVATE_MEDIA_BUCKET', '').strip() or None,
+            private_media_registry=Path(os.environ.get('PRIVATE_MEDIA_REGISTRY', str(BASE_DIR / 'private_media.sqlite3'))),
+            private_media_access_key_id=os.environ.get('PRIVATE_MEDIA_ACCESS_KEY_ID', '').strip() or None,
+            private_media_secret_access_key=os.environ.get('PRIVATE_MEDIA_SECRET_ACCESS_KEY', '').strip() or None,
         )

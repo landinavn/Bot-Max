@@ -55,6 +55,8 @@ async def main() -> None:
             use_create_task=True,
             event_isolation=SimpleEventIsolation(),
         )
+        from private_media import MediaScopeMiddleware
+        dispatcher.register_outer_middleware(MediaScopeMiddleware())
         studio_worker = None
         try:
             studio_worker = await configure_studio(bot, dispatcher, config)

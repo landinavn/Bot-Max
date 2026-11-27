@@ -75,12 +75,15 @@ class Assets:
     async def write(self, data, suffix, *, job_id=None, name=None):
         relative = self.filename(suffix,job_id,name)
         path = self.path(relative)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700 if getattr(self.config,'private_media_enabled',False) else 0o777)
         temporary=path.with_name('.part-'+uuid4().hex)
         checksum=hashlib.sha256(data).hexdigest()
         def save():
             try:
-                temporary.write_bytes(data)
+                if getattr(self.config,'private_media_enabled',False):
+                    fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+                    with os.fdopen(fd,'wb') as output: output.write(data)
+                else: temporary.write_bytes(data)
                 self.commit_file(temporary,path,checksum)
             finally:
                 temporary.unlink(missing_ok=True)
@@ -88,11 +91,15 @@ class Assets:
         return relative,checksum
 
     async def download(self, url, suffix, limit=200*1024*1024, *, job_id=None, name=None, accept=None):
+        from private_media import is_private, read_bytes
+        if is_private(url):
+            data, _ = await read_bytes(url, limit=limit)
+            return await self.write(data, suffix, job_id=job_id, name=name)
         await public_url(url)
-        self.root.mkdir(parents=True, exist_ok=True)
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700 if getattr(self.config,'private_media_enabled',False) else 0o777)
         relative = self.filename(suffix,job_id,name)
         path = self.path(relative)
-        path.parent.mkdir(parents=True,exist_ok=True)
+        path.parent.mkdir(parents=True,exist_ok=True,mode=0o700 if getattr(self.config,'private_media_enabled',False) else 0o777)
         temporary=path.with_name('.download-'+uuid4().hex)
         total, checksum = 0, hashlib.sha256()
         try:
@@ -104,6 +111,7 @@ class Assets:
                                     job_id,response.status_code,response.headers.get('content-type','')[:100],
                                     response.headers.get('content-length','')[:40])
                     with temporary.open('xb') as output:
+                        if getattr(self.config,'private_media_enabled',False): os.fchmod(output.fileno(),0o600)
                         async for chunk in response.aiter_bytes():
                             total += len(chunk)
                             if total > limit:
@@ -126,6 +134,12 @@ class Assets:
         import mimetypes
         path = self.path(relative)
         config = self.config
+        from private_media import generation_policy
+        generation_policy(config)
+        if getattr(config, 'private_media_enabled', False):
+            from private_media import store_bytes
+            mime = mimetypes.guess_type(path.name)[0] or 'application/octet-stream'
+            return await asyncio.to_thread(store_bytes, config, path.read_bytes(), mime, purpose='studio-output')
         if not config.storage_bucket or not config.storage_public_base_url:
             raise ValueError('Настройте существующее Object Storage для файлов студии.')
         key = self.object_key(relative)
@@ -158,6 +172,8 @@ class Assets:
         return 'https://storage.yandexcloud.net/'+quote(bucket,safe='')+'/'+quote(key,safe='/')
 
     def public_image_url(self, url):
+        from private_media import is_private
+        if is_private(url): return True  # Read still requires owner/order authorization.
         if not isinstance(url,str): return False
         parsed=urlsplit(url)
         prefix=self.canonical_image_url('')
@@ -271,15 +287,20 @@ class Assets:
             asset=await self.recover_image(asset)
         metadata=json.loads(asset.get('metadata') or '{}')
         key=self.object_key(asset['path'])
-        verified=not image or (metadata.get('published_key')==key and metadata.get('published_sha256')==asset['sha256']
+        from private_media import is_private
+        private = is_private(asset.get('public_url'))
+        verified=private or not image or (metadata.get('published_key')==key and metadata.get('published_sha256')==asset['sha256']
                               and asset.get('public_url')==self.canonical_image_url(key))
         if not force and asset.get('public_url') and verified:
             return asset['public_url']
         url = await self.publish(asset['path'])
-        if image and url!=self.canonical_image_url(key):
+        if image and not is_private(url) and url!=self.canonical_image_url(key):
             raise ValueError('Публикация не вернула публичную ссылку Yandex Cloud на изображение.')
         async with repo.connect() as db:
-            metadata['published_key']=key
+            if is_private(url):
+                metadata['storage_mode']='private'
+                metadata['private_reference']=url
+            else: metadata['published_key']=key
             metadata['published_sha256']=asset['sha256']
             await db.execute('UPDATE cartoon_assets SET public_url=?,metadata=? WHERE id=?', (url,repo.encoded(metadata),asset['id']))
             await db.commit()

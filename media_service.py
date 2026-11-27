@@ -61,6 +61,11 @@ async def audio_duration(source: Path) -> float:
 
 
 async def _download(http, url: str, path: Path, limit: int):
+    from private_media import is_private, read_bytes
+    if is_private(url):
+        data, _ = await read_bytes(url, limit=limit)
+        await asyncio.to_thread(path.write_bytes, data)
+        return
     parsed = urlsplit(url)
     if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password:
         raise MediaServiceError('Для склейки нужны HTTPS-ссылки видео и аудио.')
@@ -78,6 +83,11 @@ async def _download(http, url: str, path: Path, limit: int):
 
 
 def _upload_video(client, settings, path: Path) -> str:
+    from private_media import generation_policy
+    generation_policy(settings)
+    if getattr(settings, 'private_media_enabled', False):
+        from private_media import store_bytes
+        return store_bytes(settings, path.read_bytes(), 'video/mp4', purpose='video-output')
     key = f'videos/{uuid4().hex}.mp4'
     with path.open('rb') as stream:
         client.put_object(Bucket=settings.storage_bucket, Key=key, Body=stream, ContentType='video/mp4',

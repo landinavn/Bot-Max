@@ -1,5 +1,7 @@
 """Durable admin-only worker. GET retries are safe; unknown paid POSTs are manual."""
 from safe_logging import get_logger
+from private_media import download_button
+from private_media import job_scope
 import asyncio
 import json
 import logging
@@ -40,6 +42,7 @@ class Worker:
         await repo.update_job(job['id'],status='publishing')
         await self.publish_result(job)
 
+    @job_scope('studio')
     async def publish_result(self, job):
         _,result_url=await self.assets.result_for_job(job)
         current = await repo.job(job['id'])
@@ -48,6 +51,7 @@ class Worker:
         logger.info('Результат сохранён: %s',result_url)
         await self.notices()
 
+    @job_scope('studio')
     async def execute(self, item):
         key, kind = item['id'], item['kind']
         snap = json.loads(item['snapshot'])
@@ -251,6 +255,7 @@ class Worker:
                 logger.warning('Мультстудия: не доставлено уведомление job=%s kind=%s error=%s; повторится только доставка.',
                                item['id'],item['kind'],type(exc).__name__)
 
+    @job_scope('studio')
     async def send_result_to_admin(self, job_id, kind, public_url):
         """Send a retained result only; never enter generation or billing paths."""
         from maxapi.types import CallbackButton, LinkButton
@@ -300,7 +305,7 @@ class Worker:
             text='🎧 Озвучка готова'
         else:
             text='🎉 Мультфильм собран! Скачайте или отправьте в соцсети.'
-            keyboard.row(LinkButton(text='📥 Скачать MP4',url=public_url))
+            keyboard.row(download_button(text='📥 Скачать MP4',url=public_url))
         attachments.append(result_keyboard(keyboard))
         return await self.bot.send_message(user_id=self.admin_id,text=text,attachments=attachments)
 

@@ -16,6 +16,8 @@ SCHEMA='''CREATE TABLE IF NOT EXISTS cartoon_avatar_archive (
 
 
 def valid_url(value):
+    from private_media import is_private
+    if is_private(value): return True
     if not isinstance(value,str) or len(value)>2000:return False
     p=urlsplit(value)
     return p.scheme=='https' and bool(p.hostname) and not p.username and not p.password
@@ -23,6 +25,8 @@ def valid_url(value):
 
 async def save(user_id,image_url,theme,*,preview_url=None,reference_url=None):
     if not valid_url(image_url):raise ValueError('Нет HTTPS-ссылки на оригинал.')
+    from private_media import check_for_user
+    await check_for_user(image_url,user_id,kind='image')
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
         await db.execute(SCHEMA)
         await db.execute('''INSERT INTO cartoon_avatar_archive(user_id,image_url,preview_url,theme,reference_url)

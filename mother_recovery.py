@@ -13,6 +13,8 @@ def urls(data):
     image = data.get('original_image_url') or data.get('chosen_avatar')
     audio = data.get(f'song_{selected}_url') or data.get('video_song_url') or data.get('chosen_song_url')
     def valid(url):
+        from private_media import is_private
+        if is_private(url): return url
         try:
             p = urlsplit(url) if isinstance(url, str) else None
             return url if p and p.scheme == 'https' and p.hostname and not p.username and not p.password else None

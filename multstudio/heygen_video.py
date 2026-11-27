@@ -13,6 +13,9 @@ class StudioHeyGen(HeyGenAdapter):
 
     async def scene_video(self, image_url, audio_url, key):
         """Avatar IV Talking Photo; no avatar, voice creation or TTS request."""
+        from private_media import provider_input
+        provider_input(image_url, 'heygen-scene')
+        provider_input(audio_url, 'heygen-scene')
         self.ready(); https_url(image_url); https_url(audio_url)
         data=await self.request('POST','/v3/videos',payload={
             'type':'image','image':{'type':'url','url':image_url},'audio_url':audio_url,
@@ -21,6 +24,8 @@ class StudioHeyGen(HeyGenAdapter):
 
     async def avatar_video(self, avatar_id, audio_url, key):
         """Finish only an old job whose Photo Avatar was already created and paid."""
+        from private_media import provider_input
+        provider_input(audio_url, 'heygen-scene')
         self.ready(); https_url(audio_url)
         data=await self.request('POST','/v3/videos',payload={
             'type':'avatar','avatar_id':self.identifier(avatar_id),'audio_url':audio_url,
@@ -30,6 +35,8 @@ class StudioHeyGen(HeyGenAdapter):
 
     async def silent_video(self, image_url, spec, key):
         """Whole-scene animation, not a speaking avatar; output is muted locally."""
+        from private_media import provider_input
+        provider_input(image_url, 'heygen-silent')
         self.ready(); https_url(image_url)
         if spec.get('dialogue') or spec.get('speaker_id') is not None:
             raise ValueError('Для немой анимации не должно быть реплик или говорящего.')

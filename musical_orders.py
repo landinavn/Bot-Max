@@ -1,5 +1,7 @@
 """Постоянная очередь создания и отправки оплаченных музыкальных открыток."""
 from safe_logging import get_logger
+from private_media import download_button
+from private_media import order_scope
 from mothers_day import mother_suffix
 import asyncio
 import json
@@ -80,6 +82,7 @@ class PaidMusicalWorker:
             await asyncio.shield(checkpoint())
         await set_musical_inputs(order['order_id'], order['user_id'], order['image_url'], draft['audio_url'])
 
+    @order_scope('get_musical_order')
     async def process(self, order_id):
         waiting=await get_musical_order(order_id)
         if waiting and waiting['status']=='paid' and waiting['prepaid'] and waiting['tariff'] != 'upsell' and not waiting['input_ready']:
@@ -120,11 +123,12 @@ class PaidMusicalWorker:
                     except Exception:
                         logger.warning('Не удалось отправить уведомление о сборке заказа %s.', order_id)
                 result = await self.renderer(order['image_url'], order['audio_url'])
-                if not isinstance(result, str) or not result.startswith('https://'):
+                from private_media import is_private
+                if not isinstance(result, str) or not (result.startswith('https://') or is_private(result)):
                     raise ValueError('Не получена HTTPS-ссылка на музыкальную открытку.')
                 await asyncio.shield(update_musical_order(order_id, result_url=result))
             video = await self.uploader(self.bot, result)
-            keyboard = completed_keyboard(InlineKeyboardBuilder().row(LinkButton(text='⬇️ Скачать MP4', url=result)))
+            keyboard = completed_keyboard(InlineKeyboardBuilder().row(download_button(text='⬇️ Скачать MP4', url=result)))
             sent = await self.bot.send_message(user_id=order['user_id'],
                 text='🎵 Ваша музыкальная открытка готова!', attachments=[video, keyboard])
             if sent is None:

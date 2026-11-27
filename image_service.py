@@ -1,5 +1,6 @@
 """Загрузка в MAX и создание плакатов через OpenAI Images API."""
 from safe_logging import get_logger
+from private_media import is_private
 
 import asyncio
 import base64
@@ -403,6 +404,9 @@ async def fix_text_with_ai(text: str) -> str:
 
 
 async def _download_photo(session: aiohttp.ClientSession, photo_url: str) -> bytes:
+    if is_private(photo_url):
+        from private_media import read_bytes
+        return (await read_bytes(photo_url, limit=MAX_PHOTO_BYTES))[0]
     logger.info("HTTP GET: загрузка изображения.")
     async with session.get(photo_url, timeout=aiohttp.ClientTimeout(total=60)) as response:
         if response.status != 200:
@@ -431,7 +435,7 @@ def _validate_inputs(photo_url: str, sphere: str) -> None:
     if not isinstance(photo_url, str):
         raise TypeError("photo_url должен быть строкой.")
     parsed = urlsplit(photo_url)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+    if not is_private(photo_url) and (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password):
         raise ValueError("photo_url должен быть HTTPS URL без учётных данных.")
     if not isinstance(sphere, str) or not 1 <= len(sphere.strip()) <= 200:
         raise ValueError("Описание мечты должно содержать от 1 до 200 символов.")
@@ -442,6 +446,8 @@ async def count_people_in_photo(image_url: str) -> int:
     try:
         _validate_inputs(image_url, 'Подсчёт людей')
         config = Config.from_env()
+        from private_media import generation_policy
+        generation_policy(config,image_url)
         if not config.image_api_key:
             logger.warning('Подсчёт людей недоступен: не задан IMAGE_API_KEY. Возвращаю 0.')
             return 0
@@ -450,10 +456,15 @@ async def count_people_in_photo(image_url: str) -> int:
         ) as http_client:
             async with AsyncOpenAI(api_key=config.image_api_key, base_url=OPENAI_BASE_URL,
                                    http_client=http_client, max_retries=0) as client:
+                vision_input = image_url
+                if is_private(image_url):
+                    from private_media import read_bytes
+                    raw, mime = await read_bytes(image_url, limit=MAX_PHOTO_BYTES)
+                    vision_input = 'data:'+mime+';base64,'+base64.b64encode(raw).decode('ascii')
                 result = await client.chat.completions.create(model='gpt-4o-mini', temperature=0, max_tokens=10,
                     messages=[{'role': 'user', 'content': [
                         {'type': 'text', 'text': "Count the number of people in this image. Return ONLY the number, nothing else. If you can't count, return 0."},
-                        {'type': 'image_url', 'image_url': {'url': image_url, 'detail': 'auto'}},
+                        {'type': 'image_url', 'image_url': {'url': vision_input, 'detail': 'auto'}},
                     ]}])
         if result.choices and result.choices[0].finish_reason == 'stop':
             text = result.choices[0].message.content
@@ -501,6 +512,8 @@ async def _generate_image_bytes(
     style_reference_url: str | None = None, style_reference_urls: tuple[str, ...] | None = None,
     image_size: str = '1024x1536'
 ) -> list[bytes]:
+    from private_media import generation_policy
+    generation_policy(config,photo_url,style_reference_url,*(style_reference_urls or ()))
     if image_size not in ('1024x1536', '1536x1024'):
         raise ValueError('Неподдерживаемый формат кадра.')
     if not config.image_api_key or not config.image_model:
@@ -647,6 +660,14 @@ async def _generate_image_bytes(
 
 def _storage_client(config: Config):
     """Подготовка хранилища до платного запроса генерации."""
+    from private_media import generation_policy
+    generation_policy(config)
+    if getattr(config, 'private_media_enabled', False):
+        from private_media import current_access, PrivateMedia
+        current_access()
+        private=PrivateMedia(config)
+        try: private.preflight()
+        finally: private.close()
     if not config.storage_bucket:
         raise GenerationNotConfigured("Задайте STORAGE_BUCKET.")
     if not config.storage_access_key_id or not config.storage_secret_access_key:
@@ -672,6 +693,11 @@ def _storage_client(config: Config):
 
 
 def _store_image(client, config: Config, image_path: Path) -> str:
+    from private_media import generation_policy
+    generation_policy(config)
+    if getattr(config, 'private_media_enabled', False):
+        from private_media import store_bytes
+        return store_bytes(config, image_path.read_bytes(), 'image/png', purpose='image-output')
     key = f"vision-boards/{uuid4().hex}.png"
     logger.info("Запрос Yandex Object Storage: сохранение изображения (%d байт).", image_path.stat().st_size)
     with image_path.open("rb") as image_file:
@@ -723,12 +749,19 @@ async def _generate_and_store(
                 image_path = Path(directory) / "generated.png"
                 await asyncio.to_thread(image_path.write_bytes, image_bytes)
                 result_url = await asyncio.to_thread(_store_image, client, config, image_path)
-            if urlsplit(result_url).scheme != "https":
+            if not is_private(result_url) and urlsplit(result_url).scheme != "https":
                 raise ImageGenerationError("Хранилище вернуло ссылку без HTTPS.")
             result_urls.append(result_url)
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
                 for result_url in result_urls:
+                    if is_private(result_url):
+                        from private_media import PrivateMedia, current_access
+                        access = current_access()
+                        service = PrivateMedia(config)
+                        try: await asyncio.to_thread(service.stat, result_url, access)
+                        finally: await asyncio.to_thread(service.close)
+                        continue
                     logger.info("HTTP HEAD: проверка публичной ссылки изображения.")
                     async with session.head(result_url) as response:
                         if response.status != 200:
@@ -1531,7 +1564,7 @@ async def create_cartoon_avatar_preview(original_image_url: str) -> str:
             path = Path(directory)/'preview.png'
             await asyncio.to_thread(path.write_bytes, marked)
             url = await asyncio.to_thread(_store_image, client, config, path)
-        if urlsplit(url).scheme != 'https':
+        if not is_private(url) and urlsplit(url).scheme != 'https':
             raise ImageGenerationError('Превью аватара не получило HTTPS-ссылку.')
         return url
     finally:

@@ -1,5 +1,6 @@
 """Постоянный баланс пользователей. Все изменения фиксируются в SQLite."""
 from safe_logging import get_logger
+from private_media import is_private, check_for_user
 
 import logging
 import json
@@ -335,7 +336,7 @@ async def save_pending_video(user_id: int, avatar_url: str, song_url: str, *, mo
     """Сохранить данные до ответа клиенту; повторное нажатие не дублирует pending-заказ."""
     if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
         raise ValueError('Некорректный user_id видео.')
-    if not isinstance(avatar_url, str) or not avatar_url.startswith('https://'):
+    if not isinstance(avatar_url, str) or not (avatar_url.startswith('https://') or is_private(avatar_url)):
         raise ValueError('Не задана HTTPS-ссылка на аватар.')
     if not isinstance(song_url, str):
         raise ValueError('Некорректная ссылка на песню.')
@@ -343,6 +344,8 @@ async def save_pending_video(user_id: int, avatar_url: str, song_url: str, *, mo
         raise ValueError('Некорректный стиль видео.')
     if render_kind not in {'kling', 'musical'}:
         raise ValueError('Некорректный способ создания видео.')
+    await check_for_user(avatar_url,user_id,kind='image')
+    await check_for_user(song_url,user_id,kind='audio')
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         await db.execute('BEGIN IMMEDIATE')
         async with db.execute(
@@ -897,6 +900,9 @@ async def get_stats_by_source(source_name: str, admin_id: int | None = None) -> 
 
 async def register_shared_image(image_url: str) -> str:
     """Сохранить короткую ссылку на уже созданное изображение, независимо от FSM."""
+    from private_media import is_private, is_signed_url, MediaAccessDenied
+    if is_private(image_url) or is_signed_url(image_url):
+        raise MediaAccessDenied('Private media requires explicit recipient permission')
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         await db.execute(
             "INSERT INTO shared_images (token, image_url) VALUES (?, ?) ON CONFLICT(image_url) DO NOTHING",
@@ -918,7 +924,10 @@ async def get_shared_image(key: str) -> str | None:
             "SELECT image_url FROM shared_images WHERE token = ? OR image_url = ?", (key, key)
         ) as cursor:
             row = await cursor.fetchone()
-            return row[0] if row else None
+            if row:
+                from private_media import is_private
+                return None if is_private(row[0]) else row[0]
+            return None
 
 
 SONG_PROMO_PRODUCT = 'Песня в подарок (Скидка 20%)'
@@ -1149,8 +1158,10 @@ async def create_musical_order(order_id: str, user_id: int, image_url: str, audi
         raise ValueError('Некорректный покупатель или музыкальный тариф.')
     for url in (image_url,audio_url):
         parsed=urlsplit(url)
-        if parsed.scheme!='https' or not parsed.hostname or parsed.username or parsed.password:
+        if not is_private(url) and (parsed.scheme!='https' or not parsed.hostname or parsed.username or parsed.password):
             raise ValueError('Музыкальному заказу нужны HTTPS-ссылки на картинку и полную песню.')
+    await check_for_user(image_url,user_id,kind='image')
+    await check_for_user(audio_url,user_id,kind='audio')
     async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
         await db.execute('BEGIN IMMEDIATE')
         result=await _create_repeat_order(db,'musical_orders',order_id,
@@ -1192,10 +1203,11 @@ async def create_prepaid_musical_upsell(order_id: str, user_id: int, image_url: 
     parsed = urlsplit(image_url)
     if (not isinstance(order_id, str) or not order_id.startswith('music_') or len(order_id) > 200
             or isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0
-            or parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password):
+            or (not is_private(image_url) and (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password))):
         raise ValueError('Некорректный предварительный апгрейд открытки.')
     validate_song_arguments(draft.get('lyrics'), draft.get('tags'), draft.get('title'))
     saved = {key: draft[key] for key in ('lyrics', 'tags', 'title')}
+    await check_for_user(image_url,user_id,kind='image')
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         await db.execute('BEGIN IMMEDIATE')
         result = await _create_repeat_order(db, 'musical_orders', order_id,
@@ -1219,8 +1231,10 @@ async def save_musical_draft(order_id: str, user_id: int, data: dict, stage: str
 async def set_musical_inputs(order_id: str, user_id: int, image_url: str, audio_url: str):
     for url in (image_url,audio_url):
         parsed=urlsplit(url)
-        if parsed.scheme!='https' or not parsed.hostname or parsed.username or parsed.password:
+        if not is_private(url) and (parsed.scheme!='https' or not parsed.hostname or parsed.username or parsed.password):
             raise ValueError('Нужны HTTPS-ссылки на готовые материалы.')
+    await check_for_user(image_url,user_id,kind='image')
+    await check_for_user(audio_url,user_id,kind='audio')
     async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
         await db.execute('BEGIN IMMEDIATE')
         db.row_factory=aiosqlite.Row
@@ -1881,8 +1895,12 @@ async def save_photo_result(order_id,slot,image_url):
     if isinstance(slot,bool) or not isinstance(slot,int) or not isinstance(image_url,str):
         raise ValueError('Некорректный кадр фотосессии.')
     parsed=urlsplit(image_url)
-    if parsed.scheme!='https' or not parsed.hostname or parsed.username or parsed.password:
+    if not is_private(image_url) and (parsed.scheme!='https' or not parsed.hostname or parsed.username or parsed.password):
         raise ValueError('Кадру фотосессии нужна HTTPS-ссылка.')
+    if is_private(image_url):
+        media_order=await get_photo_order(order_id)
+        if media_order is None:raise ValueError('Photo order not found')
+        await check_for_user(image_url,media_order['user_id'],kind='image')
     async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
         await db.execute('BEGIN IMMEDIATE')
         async with db.execute("SELECT tariff FROM photo_orders WHERE order_id=? AND status='paid'",(order_id,)) as cursor:
@@ -2044,8 +2062,9 @@ async def animation_orders_for_user(user_id):
 
 async def queue_animation_photo(user_id,order_id,image_url,message_id):
     url=urlsplit(image_url)
-    if url.scheme!='https' or not url.hostname or url.username or url.password or not message_id:
+    if (not is_private(image_url) and (url.scheme!='https' or not url.hostname or url.username or url.password)) or not message_id:
         raise ValueError('Нужна HTTPS-ссылка на фото.')
+    await check_for_user(image_url,user_id,kind='image')
     async with aiosqlite.connect(DATABASE_PATH,timeout=30) as db:
         await db.execute('BEGIN IMMEDIATE');db.row_factory=aiosqlite.Row
         async with db.execute('SELECT * FROM animation_orders WHERE order_id=? AND user_id=? AND status=\'paid\'',(order_id,user_id)) as cursor:

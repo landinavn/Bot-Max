@@ -1,5 +1,8 @@
 """Меню и FSM: режим → фото → мечта или готовый праздничный шаблон."""
 from safe_logging import get_logger, correlation_scope
+from private_media import download_button
+from private_media import retain_image_url, retain_photo_payload
+from private_media import song_context
 
 import asyncio
 import logging
@@ -238,6 +241,8 @@ def single_keyboard_attachments(attachments):
 
 
 async def _reply(event: MessageCreated | MessageCallback | BotStarted, text=None, **kwargs):
+    from private_media import client_text
+    text = client_text(text)
     if event.bot is None:
         raise RuntimeError("Бот не привязан к событию.")
     if 'attachments' in kwargs:
@@ -1007,8 +1012,13 @@ def is_bot_message(event: MessageCreated) -> bool:
 
 
 def result_keyboard(url: str):
+    from private_media import is_private, PREFIX
+    if is_private(url):
+        return completed_keyboard(InlineKeyboardBuilder().row(
+            CallbackButton(text='Получить файл', payload='private_media_download:'+url[len(PREFIX):]),
+            CallbackButton(text='Ещё', payload='more')))
     return completed_keyboard(InlineKeyboardBuilder().row(
-        LinkButton(text="Скачать", url=url),
+        download_button(text="Скачать", url=url),
         CallbackButton(text="Ещё", payload="more"),
     ))
 
@@ -1091,6 +1101,7 @@ def create_router(
             saved.update(video_cache(data))
             if order:await save_musical_draft(order['order_id'],order['user_id'],saved,'phrase')
 
+    @song_context
     async def prepare_video_song(data, scenario, *, checkpoint=None):
         custom_song = data.get('video_flow') and data.get('video_product') == 'direct'
         details = (data.get('song_custom_text') if custom_song else
@@ -1669,7 +1680,8 @@ def create_router(
                 ).as_markup()
                 await _reply(event, CHANNEL_TEXT, attachments=[keyboard])
                 await context.update_data(channel_invite_sent=True)
-            if not data.get("share_prompt_sent"):
+            from private_media import is_private
+            if not data.get("share_prompt_sent") and not is_private(urls[0]):
                 token = await register_shared_image(urls[0])
                 share_url = bot_link + "?" + urlencode({"start": "share_" + token})
                 keyboard = InlineKeyboardBuilder().row(LinkButton(text="🔗 Поделиться", url=share_url)).as_markup()
@@ -1781,7 +1793,7 @@ def create_router(
                         if is_video_placeholder(result) or not isinstance(result, str) or not result.startswith('https://'):
                             raise ValueError('Видеосервис пока не вернул готовое видео.')
                         await save_pending_video_result(job['id'], result)
-                    attachments = [InlineKeyboardBuilder().row(LinkButton(text='⬇️ Скачать видео', url=result)).as_markup()]
+                    attachments = [InlineKeyboardBuilder().row(download_button(text='⬇️ Скачать видео', url=result)).as_markup()]
                     attachments.append(await upload_video_for_max(event.bot, result))
                     sent = await event.bot.send_message(user_id=job['user_id'], text='🎬 Ваше видео готово: ' + result,
                         attachments=attachments)
@@ -3196,8 +3208,13 @@ def create_router(
                 materials = data['custom_materials']
                 # Не повторяем уже доставленные части при сбое следующей отправки.
                 for index in range(data.get('custom_delivery_index', 0), (len(materials) + 2) // 3):
-                    images = [AttachmentUpload(type=UploadType.IMAGE, payload={'token': item['token']})
-                              for item in materials[index * 3:(index + 1) * 3]]
+                    images = []
+                    from private_media import is_private, Access, upload_for_max
+                    for item in materials[index * 3:(index + 1) * 3]:
+                        if is_private(item.get('url')):
+                            image = await upload_for_max(event.bot,item['url'],Access(None,'admin',admin_id=admin_user_id,reason='support'),kind='image')
+                        else: image = AttachmentUpload(type=UploadType.IMAGE, payload={'token':item['token']})
+                        images.append(image)
                     sent = await event.bot.send_message(user_id=admin_user_id,
                         text=text if index == 0 else f'Материалы к заявке клиента {user_id}',
                         attachments=images)
@@ -3318,7 +3335,7 @@ def create_router(
             if len(photos) != 1:
                 await _reply(event, photo_request('Нужно одно фото, отправленное как изображение.'))
                 return
-            photo_url = photos[0].payload.url
+            photo_url = await retain_image_url(photos[0].payload.url)
             if data.get('cartoon_theme') in MOTHER_THEMES and await count_people_in_photo(photo_url)!=1:
                 await _reply(event,'Для этого мультфильма нужно фото только одной мамы. Пришлите её отдельный портрет.');return
             await context.update_data(avatar_reference_url=photo_url)
@@ -3793,7 +3810,7 @@ def create_router(
             if (await context.get_data()).get('cartoon_session_id') != session:
                 return
             sent = await _reply(event, '🎬 Ваша мульт-открытка готова! ' + data['video_merged_url'], attachments=[video,
-                InlineKeyboardBuilder().row(LinkButton(text='⬇️ Скачать MP4', url=data['video_merged_url'])).row(
+                InlineKeyboardBuilder().row(download_button(text='⬇️ Скачать MP4', url=data['video_merged_url'])).row(
                     home_button()).as_markup()])
             if sent is None:
                 raise RuntimeError('MAX не подтвердил отправку мульт-открытки.')
@@ -4356,7 +4373,7 @@ def create_router(
                 if (await context.get_data()).get('video_generation_id') != generation_id:
                     return
                 sent = await _reply(event, '🎵 Ваша музыкальная открытка готова: ' + result, attachments=[
-                    InlineKeyboardBuilder().row(LinkButton(text='⬇️ Скачать видео', url=result)).row(
+                    InlineKeyboardBuilder().row(download_button(text='⬇️ Скачать видео', url=result)).row(
                         home_button()).as_markup(), video_attachment])
                 if sent is None:
                     raise RuntimeError('MAX не подтвердил отправку музыкальной открытки.')
@@ -4462,7 +4479,7 @@ def create_router(
             if order and order['status'] == 'paid':
                 keyboard = InlineKeyboardBuilder().row(CallbackButton(text='⬅️ Главное меню', payload='back_to_main'))
                 if order['result_url']:
-                    keyboard.row(LinkButton(text='⬇️ Скачать MP4', url=order['result_url']))
+                    keyboard.row(download_button(text='⬇️ Скачать MP4', url=order['result_url']))
                 await _reply(event, 'Этот заказ уже оплачен. Музыкальная открытка будет отправлена автоматически.', attachments=[keyboard.as_markup()])
                 return
             if not order:
@@ -4938,7 +4955,7 @@ def create_router(
         await increment_counter('audio_download_mp3', user_id=order['user_id'])
         await event.ack(notification='Ссылка на MP3 готова.')
         url = tracks[index]['audioUrl']
-        keyboard = InlineKeyboardBuilder().row(LinkButton(text='Скачать MP3', url=url))
+        keyboard = InlineKeyboardBuilder().row(download_button(text='Скачать MP3', url=url))
         PaidAudioWorker.result_actions(keyboard, order)
         await _reply(event, url, attachments=[keyboard.as_markup()])
 
@@ -5056,7 +5073,7 @@ def create_router(
             order = await get_audio_order(data.get('audio_checkout_id',''))
             if order and order['user_id'] == user_id and order['preview_url']:
                 await event.ack(notification='Превью готово.')
-                await _reply(event, order['preview_url'], attachments=[InlineKeyboardBuilder().row(LinkButton(text='▶️ Послушать превью', url=order['preview_url'])).as_markup()])
+                await _reply(event, order['preview_url'], attachments=[InlineKeyboardBuilder().row(download_button(text='▶️ Послушать превью', url=order['preview_url'])).as_markup()])
                 return
         tracks = data.get("audio_tracks", [])
         index = {"audio_download_fun_1": ("fun", 0), "audio_download_fun_2": ("fun", 1),
@@ -5065,7 +5082,7 @@ def create_router(
         if index and data.get("audio_format") == index[0] and len(tracks) > index[1]:
             url = tracks[index[1]]["audioUrl"]
             await event.ack(notification="Ссылка на MP3 готова.")
-            keyboard = InlineKeyboardBuilder().row(LinkButton(text='Скачать MP3', url=url))
+            keyboard = InlineKeyboardBuilder().row(download_button(text='Скачать MP3', url=url))
             if not data.get('audio_regeneration_used'):
                 keyboard.row(CallbackButton(text='🔄 Не то, ещё раз (бесплатно)', payload='audio_regenerate'))
             keyboard.row(LinkButton(text='🆘 Написать в поддержку', url=SUPPORT_URL))
@@ -5707,7 +5724,7 @@ def create_router(
                 "Нужно одно общее фото семьи из 3 и более человек, отправленное как изображение."
             ))
             return
-        await context.update_data(photo=photos[0].payload.model_dump())
+        await context.update_data(photo=await retain_photo_payload(photos[0].payload))
         await run_family_photosession(event, context)
 
     @router.message_created(PosterStates.waiting_for_photo)
@@ -5733,7 +5750,7 @@ def create_router(
             await _reply(event, photo_request("Нужно одно фото, отправленное как изображение. /cancel — отмена."))
             return
         data = await context.get_data()
-        await context.update_data(photo=photos[0].payload.model_dump(), variants=[], sent_count=0,
+        await context.update_data(photo=await retain_photo_payload(photos[0].payload), variants=[], sent_count=0,
                                   batch_id=None, new_batch_requested=False)
         if data.get("mode") in POSTCARD_PROMPTS:
             await context.update_data(sphere=data["mode"], card_text=None)
@@ -6219,14 +6236,15 @@ def create_router(
             await _reply(event, str(exc)); return
         buttons = InlineKeyboardBuilder()
         text = 'Сохранённые материалы: '+str(label)
+        from private_media import is_private, upload_for_max, Access
         if image:
             text += '\n🖼 Оригинал картинки: '+image
-            buttons.row(LinkButton(text='⬇️ Картинка', url=image))
+            if not is_private(image):buttons.row(download_button(text='⬇️ Картинка', url=image))
         else:
             text += '\nКартинка пока не сохранена.'
         if audio:
             text += '\n🎵 Полная песня: '+audio
-            buttons.row(LinkButton(text='⬇️ Песня', url=audio))
+            if not is_private(audio):buttons.row(download_button(text='⬇️ Песня', url=audio))
         else:
             text += '\nПесня пока не сохранена.'
         await _reply(event, text, attachments=[buttons.as_markup()] if image or audio else [])
@@ -6235,7 +6253,12 @@ def create_router(
                                        (audio, upload_audio_for_max, '🎵 Сохранённая песня')):
             if url:
                 try:
-                    attachment = await uploader(event.bot, url)
+                    if is_private(url):
+                        access=Access(None,'admin',admin_id=admin_user_id,reason='export')
+                        attachment=await upload_for_max(event.bot,url,access,kind='image' if url==image else 'audio')
+                        await event.bot.send_message(user_id=admin_user_id,text=caption,attachments=[attachment])
+                        continue
+                    else: attachment = await uploader(event.bot, url)
                     await _reply(event, caption, attachments=[attachment])
                 except Exception:
                     logger.warning('Не удалось приложить сохранённый файл мульт-открытки; ссылка отправлена.')
@@ -6581,7 +6604,7 @@ def create_router(
             await _reply(event, 'Отправьте одну фотографию как изображение. На фото должно быть не более 5 человек. Для пакета отправляйте фото по одному.')
             return
         try:
-            await queue_animation_photo(order['user_id'], order['order_id'], photos[0].payload.url,
+            await queue_animation_photo(order['user_id'], order['order_id'], await retain_image_url(photos[0].payload.url),
                 getattr(body, 'mid', None) or uuid4().hex)
         except ValueError as exc:
             await _reply(event, str(exc), attachments=[navigation_keyboard((('✨ Оживление фотографий', 'cat_animation'),))])
@@ -6612,7 +6635,7 @@ def create_router(
         _, field, limit, question = CUSTOM_FORM_STEPS[step_index]
         body = event.message.body
         if field == 'materials':
-            photos = [item.payload.model_dump() for item in (getattr(body, 'attachments', None) or [])
+            photos = [await retain_photo_payload(item.payload) for item in (getattr(body, 'attachments', None) or [])
                       if item.type == 'image' and isinstance(item.payload, PhotoAttachmentPayload)
                       and item.payload.token and item.payload.url]
             if not photos:
@@ -6695,5 +6718,26 @@ def create_router(
         body = event.message.body
         if body is not None and body.text is not None and body.text != "":
             await _reply(event, text=body.text)
+
+    @router.message_callback(F.callback.payload.startswith('private_media_download:'))
+    async def private_media_download(event: MessageCallback, context: MemoryContext):
+        from private_media import PREFIX, PrivateMedia, MediaError, upload_for_max, user_access
+        user_id = event.get_ids()[1]
+        await event.ack(notification='Проверяю доступ к файлу')
+        if user_id is None: return
+        reference = PREFIX + event.callback.payload.removeprefix('private_media_download:')
+        access = await user_access(user_id)
+        service = None
+        try:
+            service = PrivateMedia(Config.from_env())
+            metadata = await asyncio.to_thread(service.stat, reference, access)
+            family = metadata['content_type'].split('/')[0]
+            kind = family if family in ('image','audio','video') else 'file'
+            attachment = await upload_for_max(event.bot, reference, access, kind=kind)
+            await event.bot.send_message(user_id=user_id, text='Ваш файл', attachments=[attachment])
+        except MediaError:
+            await _reply(event, 'Файл недоступен. Обратитесь в поддержку.')
+        finally:
+            if service is not None: await asyncio.to_thread(service.close)
 
     return router

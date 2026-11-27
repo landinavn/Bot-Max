@@ -46,6 +46,8 @@ async def upload_scene_image(assets, scene_id, actor, url):
     job_id, snap = await repo.begin_scene_upload(scene_id, actor)
     stage = 'download'
     try:
+        from private_media import retain_image_url
+        url=await retain_image_url(url)
         logger.info('Мультстудия: скачивание исходника scene=%s job=%s limit_bytes=20971520',scene_id,job_id)
         source, checksum = await assets.download(url, 'bin', limit=20*1024*1024,
                                                  accept='image/jpeg, image/png',

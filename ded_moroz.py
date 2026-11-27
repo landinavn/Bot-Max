@@ -1,5 +1,6 @@
 """Administrative Ded Moroz workflow. SQLite survives restart; paid POSTs never auto-repeat."""
 from safe_logging import get_logger
+from private_media import job_scope
 import asyncio
 import json
 import logging
@@ -533,11 +534,18 @@ async def collect(event,context,admin,config=None,settings=None):
         if len(images)!=1:raise ValueError('Отправьте одну фотографию ребёнка — как фото или файл JPG/PNG.')
         assets=Assets(settings.root,config)
         attempt=uuid4().hex
-        source,_=await assets.download(images[0].payload.url,'bin',job_id=row['id'],name='child-source-'+attempt+'.bin',limit=20*1024*1024,accept='image/jpeg, image/png, image/webp')
+        from private_media import retain_image_url
+        source_url=await retain_image_url(images[0].payload.url)
+        source,_=await assets.download(source_url,'bin',job_id=row['id'],name='child-source-'+attempt+'.bin',limit=20*1024*1024,accept='image/jpeg, image/png, image/webp')
         png=await asyncio.to_thread(png_bytes,assets.path(source))
         path,_=await assets.write(png,'png',job_id=row['id'],name='child-photo-'+attempt+'.png')
-        alias=assets.path(f'ded_moroz_{user}/child_photo.png');alias.parent.mkdir(parents=True,exist_ok=True)
-        tmp=alias.with_name('.child-'+uuid4().hex+'.png');await asyncio.to_thread(tmp.write_bytes,png);await asyncio.to_thread(os.replace,tmp,alias)
+        alias=assets.path(f'ded_moroz_{user}/child_photo.png');alias.parent.mkdir(parents=True,exist_ok=True,mode=0o700 if getattr(assets.config,'private_media_enabled',False) else 0o777)
+        tmp=alias.with_name('.child-'+uuid4().hex+'.png')
+        if getattr(assets.config,'private_media_enabled',False):
+            fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+            with os.fdopen(fd,'wb') as output:output.write(png)
+        else:await asyncio.to_thread(tmp.write_bytes,png)
+        await asyncio.to_thread(os.replace,tmp,alias)
         url=await assets.publish(path)
         text=tagged_text(json.loads(row['details']))
         if family.is_family(row['details']):
@@ -680,6 +688,7 @@ class Worker:
             await db.execute("UPDATE ded_moroz_orders SET speech_provider_url=NULL,audio_path=?,status='audio_publish',error=NULL,next_attempt=0 WHERE id=?",(path,key))
             await db.commit()
 
+    @job_scope('ded_moroz')
     async def process(self,row):
         key=row['id'];state=row['status']
         if not await sales.allowed(row,self.admin):return

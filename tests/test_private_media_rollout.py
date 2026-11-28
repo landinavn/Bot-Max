@@ -197,6 +197,21 @@ def test_unpaid_song_cannot_be_laundered_through_other_order_or_grant(private_en
     assert s.heads==before
 
 
+def test_historical_recipient_grant_cannot_unlock_restricted_song(private_env):
+    c,s,a,store=private_env
+    origin=pm.Access(a.owner,'service','audio-origin')
+    ref=store.put(b'synthetic song','audio/mpeg',origin,operation_id='old-grant-song',owner_access='order')
+    # Security 1.1 registries may already contain grants: deny on read as well.
+    with store._db(write=True) as db:
+        db.execute('INSERT INTO media_grants VALUES(?,?,?,?,?)',
+                   (ref.removeprefix(pm.PREFIX),'max','2',int(s.now)+30,int(s.now)))
+    recipient=pm.Access(pm.Owner('max','2'),entitlements=frozenset({'audio-origin'}))
+    before=s.heads
+    for read in (store.read,store.stat,store.presign):
+        with pytest.raises(pm.MediaAccessDenied):read(ref,recipient)
+    assert s.heads==before
+
+
 @pytest.mark.parametrize('problem',['missing','corrupt','future-version','insecure-db','insecure-journal','incompatible'])
 def test_registry_damage_is_fail_closed_before_s3(private_env,problem):
     c,s,a,store=private_env

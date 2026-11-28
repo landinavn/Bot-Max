@@ -382,6 +382,8 @@ class PrivateMedia:
             if owner_only: raise MediaAccessDenied('Owner confirmation required')
             return
         owned = access.owner == Owner(row['owner_namespace'], row['owner_id'])
+        if row['owner_access']=='order' and access.role=='user' and not owned:
+            raise MediaAccessDenied('Restricted media cannot use recipient grants')
         if owned and access.role == 'user' and row['owner_access'] == 'order' and row['order_id'] not in access.entitlements:
             raise MediaAccessDenied('Paid media entitlement required')
         if (row['owner_access']=='order' and access.role=='service' and row['order_id']!=access.order_id

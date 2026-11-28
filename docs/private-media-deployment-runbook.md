@@ -170,4 +170,14 @@ PRIVATE_MEDIA_READ_ONLY=true
 
 Финальные full comparison запускаются на **окончательном SHA** и публикуются в PR без последующего изменения исходников. Окружения: Python 3.12.14/maxapi 1.2.3 + aiohttp 3.13.5 либо 3.14.5; production requirements не изменяются. Runner убирает inherited credentials, использует synthetic token, сохраняет публичные CA settings и запрещает внешний network. Рабочая БД не подключается.
 
-Текущая среда запрещает даже localhost sockets: webhook/local-TLS cases могут завершиться PermissionError на базовом и новом коде. Такие результаты классифицируются как environmental blockers, не как доказательство работоспособности TLS/webhook. aioresponses 0.7.9/ClientResponse stream_writer несовместимость в 3.14.5 также учитывается отдельно. Полный suite не объявлять зелёным; без owner live smoke и локальных TLS/webhook проверок production допуск отсутствует.
+Предыдущий запуск среды запрещал даже localhost sockets; его PermissionError не доказывают работоспособность TLS/webhook и не входят в окончательное сравнение. После восстановления сети localhost доступен: baseline и окончательный код проверяются заново одним изолированным runner, внешние API остаются запрещены. aioresponses 0.7.9/ClientResponse stream_writer несовместимость в 3.14.5 учитывается отдельно и сверяется с исходным кодом без изменения зависимостей. Полный suite не объявлять зелёным при наличии падений; owner live smoke остаётся отдельным условием допуска.
+
+
+Воспроизводимый состав проверки (два существующих venv, без установки пакетов):
+
+* Private: `tests/test_private_media.py tests/test_private_media_integration.py tests/test_private_media_migration.py tests/test_private_media_rollout.py` — все исходные 73 случая плюс новые проверки.
+* Регрессии: payment audit, repeat promos, HeyGen/ElevenLabs TTS, MAX TLS и безопасное логирование.
+* Полный `pytest -q --tb=short` на production baseline 57744a0 и окончательном SHA в обоих venv; каждый test ID сравнивается по JUnit, включая setup errors, failures и отсутствующие случаи.
+* Для 14 payment audit `stream_writer` failures дополнительно повторяется тот же файл на опубликованном e6ef3dc. Не исправлять production dependencies ради зелёного отчёта.
+* Финальные значения passed/failed/errors, точные SHA, версии и причины расхождений публикуются в PR. Сырые логи/JUnit с синтетическими данными остаются вне репозитория.
+* `git diff --check`, Python syntax, неизменность financial SQL literals и production dependency/TLS/logging файлов, отсутствие DB/media/env артефактов в commit.

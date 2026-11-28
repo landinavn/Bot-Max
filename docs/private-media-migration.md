@@ -58,3 +58,6 @@ python private_media_migration.py --database /secure/test-copy.sqlite3 --plan /s
 Не восстанавливать старую бизнес-БД при rollback кода: будут потеряны новые оплаты и заказы. Если metadata утрачены, остановить затронутые операции, восстановить проверенную согласованную копию/точечное mapping после отдельного решения и выполнить reconciliation.
 
 Emergency mode сохраняет авторизованные чтение/доставку, запрещая новые private mutations. Старые SHA 57744a0/196d577 не являются допустимым откатом после private refs. Не делать private объекты публичными ради совместимости. [Runbook](private-media-deployment-runbook.md).
+
+
+Security 1.1.2: для Yandex empty ACL нужен [профиль yandex-v1](private-media-yandex-smoke.md), проверенные controls и точные четыре правила. Пустой ACL не подтверждает privacy исторических объектов или отсутствие унаследованного IAM/object ACL. Эта доработка не копирует/не переключает объекты. При rollback Yandex reader должен содержать 1.1.2; старый f5dd8de не принимает фактический empty ACL. Формат refs/schema 111 не изменены.

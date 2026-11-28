@@ -313,6 +313,12 @@ class PrivateMedia:
         import json
         from botocore.exceptions import ClientError
         try:
+            profile=getattr(self.config,'private_media_profile','strict')
+            if profile=='yandex-v1':
+                from yandex_media_profile import check_bucket
+                check_bucket(self.config,self.client)
+                return
+            if profile!='strict':raise MediaUnavailable('Unknown private storage profile')
             allowed=getattr(self.config,'private_media_principals',frozenset())
             if not allowed:raise MediaUnavailable('An explicit approved principal allowlist is required')
             acl=self.client.get_bucket_acl(Bucket=self.config.private_media_bucket)

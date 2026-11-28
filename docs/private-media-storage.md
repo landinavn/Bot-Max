@@ -1,4 +1,4 @@
-# Security 1.1.1 — private media, provider compatibility и staged rollout
+# Security 1.1.2 — private media, Yandex compatibility и staged rollout
 
 Дата проверки документации: **28 ноября 2026, Москва**. Продолжение PR №266, ветка `security/private-media-storage`, исходный SHA `e6ef3dce87e0f67e2c7fb280f5e9901fabaccd4b`. Установленная база Security 1.0: `57744a0b600a9736cbaf1d00a2ccb6660869c903`. Точный проверенный итоговый SHA и результаты полного сравнения публикуются в описании [PR №266](https://github.com/landinavn/Bot-Max/pull/266).
 
@@ -8,7 +8,7 @@
 
 * Десять продуктов выбираются независимо; решение `private/legacy` сохраняется в media registry, а указатель операции и режим — в FSM. Изменение флагов не переписывает начатые операции.
 * Проверки доступности добавлены до новых счетов, списания кредитов/бонусов и прав повторной генерации. Уже оплаченные legacy-заказы сохраняют legacy, а не переоцениваются по новым флагам.
-* Runtime principal должен точно совпадать с утверждённым allowlist. Неизвестные principal/Allow rules, wildcard, AWS principal вместо Yandex CanonicalUser и неподтверждённые условия отвергаются.
+* Runtime principal должен точно совпадать с утверждённым allowlist. Yandex требует отдельного opt-in профиля, описанного ниже. Неизвестные principal/Allow rules, wildcard, AWS principal вместо Yandex CanonicalUser и неподтверждённые условия отвергаются.
 * Ограниченная песня требует права исходного заказа. Ссылка из другого оплаченного заказа сама по себе не даёт это право. Recipient grants для таких песен запрещены.
 * S3 HEAD/GET/PUT вынесены из SQLite write transactions. PUT имеет атомарный claim и сохраняет неопределённый исход без слепого повтора.
 * Поток S3 читается по 64 KiB. Крупная доставка использует временный файл 0600 и file-based путь MAX SDK; одновременно одна доставка. Размеры ограничены по типу.
@@ -114,3 +114,10 @@ Recipient grant — только явное действие владельца 
 Live Yandex ACL/IAM/CDN/public flags, реальная media delivery через MAX, общий RSS VPS, договорные retention/страны обработки сторонних сервисов, queue/refetch upper bounds HeyGen/Kling, privacy implications provider assets и максимальные сроки output URLs не подтверждены по исходникам. Не давать этим параметрам выдуманные значения. Юридические согласия, retention/deletion и закрытие исторических URL — отдельные этапы.
 
 Дальше: [миграция](private-media-migration.md), [точный Yandex setup, smoke и rollback runbook](private-media-deployment-runbook.md).
+
+
+## Security 1.1.2 — Yandex Object Storage
+
+Исходный SHA: f5dd8de787cd1b407df16f3072a2f792598ccd6a. [Ограниченный профиль и owner smoke](private-media-yandex-smoke.md) заменяют предположение «непустой Owner.ID = субъект доступа» для Yandex. Default остаётся strict; в yandex-v1 пустой ACL допустим только при всех четырёх точных правилах и отдельном административном подтверждении public flags/identity/IAM. Owner.ID сверяется с folder ID, а allowlist — с CanonicalUser subjects. Case-normalized TLS keys не допускают дублей; оба обязательных Deny проверяются, включая Action "*" и отсутствие/null Condition legacy deny. Дополнительные Allow/ACL grants не допускаются.
+
+Это не аудит живого bucket: реальный ответ предоставлен владельцем; реализация проверялась только synthetic fixtures. Runtime IAM не расширен, schema/финансовые операции/зависимости не изменены. Provider readiness таблица выше сохраняется. Для реального Yandex нельзя использовать старый f5dd8de как reader fallback: нужен проверенный 1.1.2 с сохранёнными profile/controls при выключенных writes. Итоговый SHA и полное сравнение с f5dd8de — в PR №266.

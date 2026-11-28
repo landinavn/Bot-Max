@@ -1,10 +1,10 @@
-# Security 1.1.1 — staged deployment, Yandex setup, smoke и reader rollback
+# Security 1.1.2 — staged deployment, Yandex setup, smoke и reader rollback
 
 **Подготовка, не выполнение. Не запускать эти действия на VPS без отдельного согласования.** Production остаётся на `57744a0b600a9736cbaf1d00a2ccb6660869c903`. Разработка продолжается от `e6ef3dce87e0f67e2c7fb280f5e9901fabaccd4b` в Draft [PR №266](https://github.com/landinavn/Bot-Max/pull/266). Точный итоговый SHA, полный список файлов и результаты сравнительных запусков — в описании PR, привязанные к immutable commit. Merge/deployment не выполнялись.
 
 ## 1. Допуск и критерии остановки
 
-До пилота нужны: новый private bucket; проверенные Yandex owner/service principals; минимальные IAM и policy; успешный synthetic owner smoke; ограничение одним тестовым admin owner; готовый emergency reader и backup. Private animation/cartoon/ded_moroz/multstudio остаются **BLOCKED**. Их legacy при private off не отключается. Таблица всех десяти продуктов и официальные API — [архитектура](private-media-storage.md).
+До пилота нужны: новый private bucket; отдельно проверенные Yandex folder/runtime/metadata identities; минимальные IAM и policy; успешный synthetic owner smoke; ограничение одним тестовым admin owner; готовый emergency reader и backup. Private animation/cartoon/ded_moroz/multstudio остаются **BLOCKED**. Их legacy при private off не отключается. Таблица всех десяти продуктов и официальные API — [архитектура](private-media-storage.md).
 
 Остановить пилот при anonymous read, чужом owner доступе, неизвестном principal/правиле, registry error, private→legacy попытке, утечке URL/PII/секрета в журнал, новом paid POST вместо recovery, пропуске/дублировании оплаты или неприемлемом RSS/latency. Не снимать TLS/проверки ACL ради продолжения. Не повышать роль до storage.admin или folder editor.
 
@@ -33,7 +33,7 @@ git diff --exit-code 57744a0b600a9736cbaf1d00a2ccb6660869c903 <release-sha> -- s
 4. В bucket IAM access добавить runtime service account: **storage.uploader + storage.configViewer на этот bucket**. Первая роль не удаляет объекты/не настраивает bucket; вторая нужна для просмотра policy. Не назначать эти роли на весь folder вместо bucket.
 5. Применить bucket policy ниже с точными идентификаторами и bucket name. Это template для нового bucket, не команда изменения старого. Не добавлять wildcard console access rule: приложение намеренно отклоняет неоднозначный Allow principal даже с условием.
 6. Создать static access key этого runtime account. Секрет не помещать в чат, git или shell history; использовать защищённый environment-файл service user. Legacy ключи оставить отдельно для legacy readers.
-7. Получить owner/service canonical IDs из доверенного IAM/console и сверить с authenticated GetBucketAcl/GetBucketPolicy. В PRIVATE_MEDIA_PRINCIPALS записать **заранее утверждённые** owner/service IDs. Не считать любой ID из ответа автоматически доверенным.
+7. Для Yandex отдельно подтвердить folder ID и runtime/metadata subject IDs через административный контур. Owner.ID GetBucketAcl может быть пустым либо относиться к каталогу; не добавлять его автоматически в principal allowlist. Применять новый профиль yandex-v1 и административную процедуру из [Security 1.1.2](private-media-yandex-smoke.md).
 8. Проверить доступность bucket/prefix и отрицательные случаи из раздела smoke. Если GetBucketPolicy/HEAD/PUT не проходит — остановиться; не выдавать admin и не отключать preflight.
 
 Официальные источники (проверка 28.11.2026): [создание bucket](https://yandex.cloud/en/docs/storage/operations/buckets/create), [bucket IAM bindings](https://yandex.cloud/en/docs/storage/operations/buckets/iam-access), [IAM/ACL/policy взаимодействие](https://yandex.cloud/en/docs/storage/security/overview), [policy principal/resource](https://yandex.cloud/en/docs/storage/concepts/policy), [просмотр policy — minimum storage.configViewer](https://yandex.cloud/en/docs/storage/operations/buckets/policy), [S3 actions](https://yandex.cloud/en/docs/storage/s3/api-ref/policy/actions).
@@ -42,7 +42,7 @@ IAM роли назначаются на bucket, **не prefix**. Prefix для 
 
 ## 4. Минимальный policy template
 
-Заменить все `<...>` до использования. Runtime создаёт только media/v1; объектные данные вне prefix и Delete/PutAcl/PutBucketPolicy не разрешены этим policy. CanonicalUser — формат Yandex, а не AWS ARN. Owner ACL также обязан совпасть с allowlist приложения.
+Заменить все `<...>` до использования. Runtime создаёт только media/v1; объектные данные вне prefix и Delete/PutAcl/PutBucketPolicy не разрешены этим policy. CanonicalUser — формат Yandex, а не AWS ARN. Owner.ID проверяется отдельно от allowlist субъектов: Yandex возвращает folder ID либо пустую строку. Этот template предназначен для yandex-v1, который требует четыре правила, а не для прежнего strict.
 
 ```json
 {
@@ -54,39 +54,48 @@ IAM роли назначаются на bucket, **не prefix**. Prefix для 
       "Principal": {"CanonicalUser": "<runtime-service-account-id>"},
       "Action": ["s3:GetObject", "s3:PutObject"],
       "Resource": "arn:aws:s3:::<new-private-bucket>/media/v1/*",
-      "Condition": {"Bool": {"aws:SecureTransport": "true"}}
+      "Condition": {"Bool": {"aws:securetransport": "true"}}
     },
     {
       "Sid": "ReadBucketMetadata",
       "Effect": "Allow",
-      "Principal": {"CanonicalUser": ["<runtime-service-account-id>", "<approved-owner-canonical-id>"]},
+      "Principal": {"CanonicalUser": ["<runtime-service-account-id>", "<approved-metadata-subject-id>"]},
       "Action": ["s3:GetBucketAcl", "s3:ListBucket"],
       "Resource": "arn:aws:s3:::<new-private-bucket>",
-      "Condition": {"Bool": {"aws:SecureTransport": "true"}}
+      "Condition": {"Bool": {"aws:securetransport": "true"}}
     },
     {
       "Sid": "DenyInsecureTransport",
       "Effect": "Deny",
       "Principal": "*",
-      "Action": "s3:*",
+      "Action": "*",
       "Resource": ["arn:aws:s3:::<new-private-bucket>", "arn:aws:s3:::<new-private-bucket>/*"],
-      "Condition": {"Bool": {"aws:SecureTransport": "false"}}
+      "Condition": {"Bool": {"aws:securetransport": "false"}}
+    },
+    {
+      "Sid": "DenyLegacyStorageAccess",
+      "Effect": "Deny",
+      "Principal": {"CanonicalUser": ["<legacy-account-a>", "<legacy-account-b>"]},
+      "Action": "*",
+      "Resource": ["arn:aws:s3:::<new-private-bucket>", "arn:aws:s3:::<new-private-bucket>/*"]
     }
   ]
 }
 ```
 
-ListBucket на выделенном bucket нужен для проверки отсутствующего ключа/отличения 404 от запрета HEAD в S3-совместимом поведении. Код bucket listing не выполняет. Он раскрывает service account имена ключей этого выделенного бакета; данные всё равно ограничены media/v1. Если требуется дополнительно ограничить list по s3:prefix, допустимая форма preflight — StringLike s3:prefix=media/v1/*. Сначала проверить HEAD отсутствующего key: он может стать 403. В таком случае **не включать продукт** и согласовать отдельную IAM/HEAD схему; не отправлять PUT вслепую. Не выдавать полный доступ ради устранения 403.
+ListBucket на выделенном bucket нужен для проверки отсутствующего ключа/отличения 404 от запрета HEAD в S3-совместимом поведении. Код bucket listing не выполняет. Он раскрывает service account имена ключей этого выделенного бакета; данные всё равно ограничены media/v1. Профиль yandex-v1 намеренно не принимает дополнительные StringLike условия: отдельная list/prefix схема требует нового review. Проверить HEAD отсутствующего key и отрицательный synthetic PUT вне prefix; неожиданный 403/разрешённый PUT — STOP. Не отправлять PUT вслепую. Не выдавать полный доступ ради устранения 403.
 
 Этот template — проверяемая минимальная исходная конфигурация, не утверждение об уже проверенном реальном IAM. KMS, VPC, CDN, account-level IAM и новые особенности облака здесь не настраивались. Если есть KMS, отдельно согласовать необходимые key permissions и повторить smoke.
 
 ## 5. Реальный synthetic smoke для владельца
 
+Для Yandex сначала выполнить [owner-only S3 smoke 1.1.2](private-media-yandex-smoke.md), сохраняя private feature flags off. Он заменяет первичную проверку S3 из старой процедуры ниже; последующая проверка MAX/reader выполняется отдельно в изолированном административном контуре.
+
 Проводить вне production потока, с отдельным тестовым MAX admin аккаунтом и **только искусственными** PNG/JPEG, коротким сгенерированным локально WAV/MP3, MP4 тестовой сеткой и TXT. Ни фотографий людей/детей, ни платёжных данных. Эта задача smoke не выполняла.
 
 ### A. S3 и авторизация — без платных AI API
 
-1. На проверенном release SHA в изолированном окружении владельца передать dedicated credentials безопасным способом. Проверить SDK preflight: owner, каждый CanonicalUser и весь Allow rule входят в согласованный шаблон/allowlist. Непонятное правило = остановка.
+1. На проверенном release SHA в изолированном окружении владельца передать dedicated credentials безопасным способом. Проверить SDK preflight: Owner.ID пустой либо равен подтверждённому folder ID, CanonicalUser входят в отдельный allowlist, а все четыре правила точно соответствуют yandex-v1. Непонятное правило = остановка.
 2. Через PrivateMedia выполнить PUT под synthetic owner и стабильной operation ID. Сохранить только технический результат/SHA в закрытом журнале; не публиковать credentials, URL и owner mapping.
 3. SDK HEAD/GET проверяют bytes/hash. Тот же operation ID повторно возвращает ref без нового PUT. Искусственно оборванный/неизвестный PUT не должен создать второй PUT без подтверждённого HEAD.
 4. Anonymous GET и HEAD без подписи должны отказать. Проверить также все CDN/website endpoints, если они когда-либо настроены: SDK ACL check сам по себе их не доказывает.
@@ -125,7 +134,7 @@ PRIVATE_MEDIA_STORAGE_VERIFIED=false
 PRIVATE_MEDIA_READ_ONLY=false
 PRIVATE_MEDIA_BUCKET=<new-private-bucket>
 PRIVATE_MEDIA_REGISTRY=/secure/botmax/private_media.sqlite3
-PRIVATE_MEDIA_PRINCIPALS=<approved-owner-canonical-id>,<runtime-service-account-id>
+PRIVATE_MEDIA_PRINCIPALS=<approved-metadata-subject-id>,<runtime-service-account-id>
 PRIVATE_MEDIA_ACCESS_KEY_ID=<separate-static-key-id>
 PRIVATE_MEDIA_SECRET_ACCESS_KEY=<separate-secret>
 ```
@@ -181,3 +190,14 @@ PRIVATE_MEDIA_READ_ONLY=true
 * Для 14 payment audit `stream_writer` failures дополнительно повторяется тот же файл на опубликованном e6ef3dc. Не исправлять production dependencies ради зелёного отчёта.
 * Финальные значения passed/failed/errors, точные SHA, версии и причины расхождений публикуются в PR. Сырые логи/JUnit с синтетическими данными остаются вне репозитория.
 * `git diff --check`, Python syntax, неизменность financial SQL literals и production dependency/TLS/logging файлов, отсутствие DB/media/env артефактов в commit.
+
+
+## 10. Дополнение Security 1.1.2
+
+Перед использованием Yandex выполнить [отдельную инструкцию](private-media-yandex-smoke.md): operator-only flags/folder/IAM review → yandex-v1 read-only preflight → explicit synthetic PUT/HEAD/GET, anonymous GET/HEAD, expiry и negative IAM probes. Скрипт подготовлен, **здесь не запускался против облака**. Не менять runtime роли и не включать features для запуска smoke. Новые controls/profile поля не являются общей production готовностью.
+
+В yandex-v1 required: точно два approved subject IDs (включая runtime), два других legacy subject IDs, отдельно folder ID и подтверждённый административный review. По умолчанию profile=strict, controls=false, все private flags off. Старые synthetic strict fixtures остаются без ослабления.
+
+Для reader rollback Yandex сохранить текущий проверенный 1.1.2 SHA и все profile/controls/identity настройки при READ_ONLY=true и отключённых writes. f5dd8de/57744a0/196d577 не являются совместимым Yandex reader fallback. Business DB не откатывать.
+
+Полный сравнительный прогон 1.1.2 выполняется относительно f5dd8de в обоих существующих venv; точные SHA/счётчики/классификация в PR. Предыдущие 136 private-media test ID сохраняются и сверяются отдельно; новые tests проверяют фактическую форму пустого ACL, четыре Deny/Allow контракта, TLS aliases/duplicates, operator gates и owner smoke без cloud/API calls. Dependencies и тарифы не изменяются.

@@ -57,6 +57,11 @@ class Config:
     private_media_read_only: bool = False
     private_media_storage_verified: bool = False
     private_media_principals: frozenset[str] = field(default_factory=frozenset,repr=False)
+    private_media_profile: str = 'strict'
+    private_media_yandex_folder_id: str | None = field(default=None,repr=False)
+    private_media_runtime_principal: str | None = field(default=None,repr=False)
+    private_media_legacy_principals: frozenset[str] = field(default_factory=frozenset,repr=False)
+    private_media_yandex_controls_verified: bool = False
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -92,6 +97,15 @@ class Config:
         if verified not in ('true','false'):raise ValueError('PRIVATE_MEDIA_STORAGE_VERIFIED must be true or false.')
         principals=frozenset(filter(None,(v.strip() for v in os.environ.get('PRIVATE_MEDIA_PRINCIPALS','').split(','))))
         if any(not re.fullmatch(r'[A-Za-z0-9_-]{1,128}',v) for v in principals):raise ValueError('Invalid private media principal allowlist.')
+        profile=os.environ.get('PRIVATE_MEDIA_PROFILE','strict').strip()
+        if profile not in ('strict','yandex-v1'):raise ValueError('Invalid private media profile.')
+        folder=os.environ.get('PRIVATE_MEDIA_YANDEX_FOLDER_ID','').strip() or None
+        runtime=os.environ.get('PRIVATE_MEDIA_RUNTIME_PRINCIPAL','').strip() or None
+        legacy=frozenset(filter(None,(v.strip() for v in os.environ.get('PRIVATE_MEDIA_LEGACY_PRINCIPALS','').split(','))))
+        if any(not re.fullmatch(r'[A-Za-z0-9_-]{1,128}',v) for v in (*legacy,*(v for v in (folder,runtime) if v))):
+            raise ValueError('Invalid private media identity.')
+        controls=os.environ.get('PRIVATE_MEDIA_YANDEX_CONTROLS_VERIFIED','false').strip().lower()
+        if controls not in ('true','false'):raise ValueError('Invalid Yandex controls confirmation.')
         return cls(
             token=token,
             photo_path=photo_path,
@@ -129,4 +143,9 @@ class Config:
             private_media_read_only=read_only=='true',
             private_media_storage_verified=verified=='true',
             private_media_principals=principals,
+            private_media_profile=profile,
+            private_media_yandex_folder_id=folder,
+            private_media_runtime_principal=runtime,
+            private_media_legacy_principals=legacy,
+            private_media_yandex_controls_verified=controls=='true',
         )

@@ -222,7 +222,7 @@ async def guard_invoice_order(key,user_id=None):
     from ded_moroz_sales import payment
     routes=((('audio-',),'song',database.get_audio_order),
             (('music_','promo_music_card_'),'musical_card',database.get_musical_order),
-            (('cartoon_',),'cartoon',database.get_cartoon_order),
+            (('cartoon_','promo_cartoon_'),'cartoon',database.get_cartoon_order),
             (('photo_','promo_photo_'),'photosession',database.get_photo_order),
             (('animate_',),'animation',database.get_animation_order),
             (('dm_',),'ded_moroz',payment),

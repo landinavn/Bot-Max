@@ -101,10 +101,11 @@ async def test_paid_legacy_order_keeps_working_when_its_product_flag_is_enabled(
     assert s.puts==0
 
 
-async def test_invoice_api_guard_precedes_http_and_existing_cached_links(private_env,credit_db,monkeypatch):
+@pytest.mark.parametrize("prefix",["cartoon_","promo_cartoon_"])
+async def test_invoice_api_guard_precedes_http_and_existing_cached_links(private_env,credit_db,monkeypatch,prefix):
     import prodamus
     c,s,a,store=rollout(private_env,monkeypatch,set())
-    key=await credit_db.create_cartoon_order('cartoon_invoice_synthetic',1,'theme_ny','short')
+    key=await credit_db.create_cartoon_order(prefix+'invoice_synthetic',1,'theme_ny','short')
     row=await credit_db.get_cartoon_order(key)
     policy.PolicyStore(c).bind(policy.Policy('cartoon','private','max','1',row['order_id']))
     sender=prodamus.ProdamusPayments.__new__(prodamus.ProdamusPayments)

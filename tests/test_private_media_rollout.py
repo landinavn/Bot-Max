@@ -105,7 +105,13 @@ async def test_paid_legacy_order_keeps_working_when_its_product_flag_is_enabled(
 async def test_invoice_api_guard_precedes_http_and_existing_cached_links(private_env,credit_db,monkeypatch,prefix):
     import prodamus
     c,s,a,store=rollout(private_env,monkeypatch,set())
-    key=await credit_db.create_cartoon_order(prefix+'invoice_synthetic',1,'theme_ny','short')
+    key=await credit_db.create_cartoon_order('cartoon_invoice_synthetic',1,'theme_ny','short')
+    if prefix!='cartoon_':
+        # Isolate the invoice guard from unrelated live promotion/clock rules.
+        renamed=prefix+'invoice_synthetic'
+        with sqlite3.connect(credit_db.DATABASE_PATH) as db:
+            db.execute('UPDATE cartoon_orders SET order_id=? WHERE order_id=?',(renamed,key))
+        key=renamed
     row=await credit_db.get_cartoon_order(key)
     policy.PolicyStore(c).bind(policy.Policy('cartoon','private','max','1',row['order_id']))
     sender=prodamus.ProdamusPayments.__new__(prodamus.ProdamusPayments)

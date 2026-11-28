@@ -21,7 +21,10 @@ def denied(call):
     try:
         response=call()
     except ClientError as error:
-        if error.response.get('ResponseMetadata',{}).get('HTTPStatusCode')==403:return
+        if (error.response.get('ResponseMetadata',{}).get('HTTPStatusCode')==403
+                and error.response.get('Error',{}).get('Code') in ('AccessDenied','Forbidden','403')):return
+        if error.response.get('Error',{}).get('Code') in ('SignatureDoesNotMatch','InvalidAccessKeyId','InvalidAccessKeyID','ExpiredToken','InvalidToken'):
+            raise SmokeFailure('authentication_unverified') from None
         raise SmokeFailure('access_not_denied') from None
     if isinstance(response,dict) and response.get('Body') is not None:response['Body'].close()
     raise SmokeFailure('access_not_denied')
@@ -56,7 +59,7 @@ CODES=frozenset({'metadata_missing','metadata_invalid','metadata_duplicate_sha25
     'size_mismatch','sha256_mismatch','content_size_mismatch','content_sha256_mismatch',
     'preflight_failed','sdk_access_denied','network_timeout','probe_failed','access_not_denied',
     'signed_access_failed','expiry_not_established','fresh_access_failed','unexpected_endpoint',
-    'legacy_probe_failed','invalid_record','invalid_configuration','record_write_failed','interrupted'})
+    'legacy_probe_failed','invalid_record','invalid_configuration','record_write_failed','interrupted','authentication_unverified'})
 
 
 class SmokeFailure(RuntimeError):

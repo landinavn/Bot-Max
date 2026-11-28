@@ -243,3 +243,11 @@ def test_resume_rejects_execute_flag_before_sdk(yandex_env,tmp_path,monkeypatch)
     assert smoke.main(['--execute','--confirm-bucket',c.private_media_bucket,'--record',str(tmp_path/'out'),
         '--resume-record',str(tmp_path/'input')])==1
     factory.assert_not_called()
+
+
+@pytest.mark.parametrize('code',['SignatureDoesNotMatch','InvalidAccessKeyId','InvalidAccessKeyID','ExpiredToken','InvalidToken'])
+def test_invalid_credentials_are_not_reported_as_legacy_access_denial(code):
+    from botocore.exceptions import ClientError
+    call=Mock(side_effect=ClientError({'Error':{'Code':code},'ResponseMetadata':{'HTTPStatusCode':403}},'Synthetic'))
+    with pytest.raises(smoke.SmokeFailure) as error:smoke.denied(call)
+    assert error.value.code=='authentication_unverified'

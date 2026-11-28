@@ -1,5 +1,6 @@
 """Notify users and the admin about durable, paid photoshoots awaiting fulfillment."""
 from safe_logging import get_logger
+from private_media import order_scope
 import asyncio
 import logging
 import time
@@ -69,6 +70,7 @@ class PaidPhotoWorker:
             await asyncio.sleep(self.poll_interval)
 
 
+@order_scope('get_photo_order')
 async def deliver_photo_result(bot,order_id,slot,image_url,*,admin_user_id=None,uploader=None):
     """A slot is charged once on generation; promo waits for every slot's delivery."""
     order=await get_photo_order(order_id)

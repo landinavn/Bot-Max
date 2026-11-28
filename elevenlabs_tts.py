@@ -43,6 +43,8 @@ class ElevenLabsAdapter:
 
         Keeping synthesis and publication separate makes S3 retries free of TTS calls.
         """
+        from private_media import mutation_policy
+        mutation_policy()
         text=clean_speech_text(text)
         if not text or len(text)>10000:
             raise ValueError('Введите текст озвучки от 1 до 10000 символов после очистки тегов.')

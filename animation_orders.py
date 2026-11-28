@@ -1,5 +1,7 @@
 """Durable prepaid photo-animation jobs. A saved Kling task is never recreated on retry."""
 from safe_logging import get_logger
+from private_media import download_button
+from private_media import order_scope
 import asyncio
 import logging
 import time
@@ -37,6 +39,7 @@ class PaidAnimationWorker:
         if sent is None: raise RuntimeError('MAX не подтвердил запрос фото.')
         await update_animation_order(order_id,notified=1)
 
+    @order_scope('get_animation_job')
     async def process(self,job_id):
         if not await claim_animation_job(job_id): return
         job=await get_animation_job(job_id)
@@ -59,7 +62,7 @@ class PaidAnimationWorker:
                     raise ValueError('Kling не вернул HTTPS-ссылку на видео.')
                 await asyncio.shield(update_animation_job(job_id,video_url=result,status='ready'))
             video=await self.uploader(self.bot,result)
-            keyboard=completed_keyboard(InlineKeyboardBuilder().row(LinkButton(text='⬇️ Скачать видео',url=result)).row(
+            keyboard=completed_keyboard(InlineKeyboardBuilder().row(download_button(text='⬇️ Скачать видео',url=result)).row(
                 CallbackButton(text='📷 Ещё фотография',payload='animation_resume:'+job['order_id'])))
             sent=await self.bot.send_message(user_id=job['user_id'],text='✨ Ваша оживлённая фотография готова! Видео — 5 секунд.',
                                              attachments=[video,keyboard])

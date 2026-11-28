@@ -47,6 +47,21 @@ class Config:
     yandex_metrika_counter_id: str | None = None
     yandex_metrika_oauth_token: str | None = field(default=None, repr=False)
     piapi_key: str | None = field(default=None, repr=False)
+    private_media_enabled: bool = False
+    private_media_bucket: str | None = None
+    private_media_registry: Path = BASE_DIR / 'private_media.sqlite3'
+    private_media_access_key_id: str | None = field(default=None, repr=False)
+    private_media_secret_access_key: str | None = field(default=None, repr=False)
+    private_media_products: frozenset[str] = frozenset()
+    private_media_pilot_user_id: int | None = field(default=None,repr=False)
+    private_media_read_only: bool = False
+    private_media_storage_verified: bool = False
+    private_media_principals: frozenset[str] = field(default_factory=frozenset,repr=False)
+    private_media_profile: str = 'strict'
+    private_media_yandex_folder_id: str | None = field(default=None,repr=False)
+    private_media_runtime_principal: str | None = field(default=None,repr=False)
+    private_media_legacy_principals: frozenset[str] = field(default_factory=frozenset,repr=False)
+    private_media_yandex_controls_verified: bool = False
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -67,6 +82,30 @@ class Config:
             raise ValueError("ADMIN_USER_ID должен быть положительным числовым user_id или пустым.") from None
         if admin_user_id is not None and admin_user_id <= 0:
             raise ValueError("ADMIN_USER_ID должен быть положительным числовым user_id или пустым.")
+        private_flag = os.environ.get('PRIVATE_MEDIA_ENABLED', 'false').strip().lower()
+        if private_flag not in ('true', 'false'):
+            raise ValueError('PRIVATE_MEDIA_ENABLED должен быть true или false.')
+        from media_policy import PRODUCTS
+        products=frozenset(filter(None,(v.strip() for v in os.environ.get('PRIVATE_MEDIA_PRODUCTS','').split(','))))
+        if products-PRODUCTS:raise ValueError('Неизвестный PRIVATE_MEDIA_PRODUCTS.')
+        pilot=os.environ.get('PRIVATE_MEDIA_PILOT_USER_ID','').strip()
+        if pilot and (not pilot.isascii() or not pilot.isdecimal() or int(pilot)<=0 or int(pilot)!=admin_user_id):
+            raise ValueError('Private media pilot must be the configured administrative account.')
+        read_only=os.environ.get('PRIVATE_MEDIA_READ_ONLY','false').strip().lower()
+        if read_only not in ('true','false'):raise ValueError('PRIVATE_MEDIA_READ_ONLY must be true or false.')
+        verified=os.environ.get('PRIVATE_MEDIA_STORAGE_VERIFIED','false').strip().lower()
+        if verified not in ('true','false'):raise ValueError('PRIVATE_MEDIA_STORAGE_VERIFIED must be true or false.')
+        principals=frozenset(filter(None,(v.strip() for v in os.environ.get('PRIVATE_MEDIA_PRINCIPALS','').split(','))))
+        if any(not re.fullmatch(r'[A-Za-z0-9_-]{1,128}',v) for v in principals):raise ValueError('Invalid private media principal allowlist.')
+        profile=os.environ.get('PRIVATE_MEDIA_PROFILE','strict').strip()
+        if profile not in ('strict','yandex-v1'):raise ValueError('Invalid private media profile.')
+        folder=os.environ.get('PRIVATE_MEDIA_YANDEX_FOLDER_ID','').strip() or None
+        runtime=os.environ.get('PRIVATE_MEDIA_RUNTIME_PRINCIPAL','').strip() or None
+        legacy=frozenset(filter(None,(v.strip() for v in os.environ.get('PRIVATE_MEDIA_LEGACY_PRINCIPALS','').split(','))))
+        if any(not re.fullmatch(r'[A-Za-z0-9_-]{1,128}',v) for v in (*legacy,*(v for v in (folder,runtime) if v))):
+            raise ValueError('Invalid private media identity.')
+        controls=os.environ.get('PRIVATE_MEDIA_YANDEX_CONTROLS_VERIFIED','false').strip().lower()
+        if controls not in ('true','false'):raise ValueError('Invalid Yandex controls confirmation.')
         return cls(
             token=token,
             photo_path=photo_path,
@@ -94,4 +133,19 @@ class Config:
             prodamus_webhook_url=os.environ.get("PRODAMUS_WEBHOOK_URL", "").strip() or None,
             webhook_host=os.environ.get("WEBHOOK_HOST", "0.0.0.0").strip(),
             webhook_port=int(os.environ.get("WEBHOOK_PORT", "8080")),
+            private_media_enabled=private_flag == 'true',
+            private_media_bucket=os.environ.get('PRIVATE_MEDIA_BUCKET', '').strip() or None,
+            private_media_registry=Path(os.environ.get('PRIVATE_MEDIA_REGISTRY', str(BASE_DIR / 'private_media.sqlite3'))),
+            private_media_access_key_id=os.environ.get('PRIVATE_MEDIA_ACCESS_KEY_ID', '').strip() or None,
+            private_media_secret_access_key=os.environ.get('PRIVATE_MEDIA_SECRET_ACCESS_KEY', '').strip() or None,
+            private_media_products=products,
+            private_media_pilot_user_id=int(pilot) if pilot else None,
+            private_media_read_only=read_only=='true',
+            private_media_storage_verified=verified=='true',
+            private_media_principals=principals,
+            private_media_profile=profile,
+            private_media_yandex_folder_id=folder,
+            private_media_runtime_principal=runtime,
+            private_media_legacy_principals=legacy,
+            private_media_yandex_controls_verified=controls=='true',
         )

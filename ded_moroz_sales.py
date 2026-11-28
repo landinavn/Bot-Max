@@ -1,4 +1,5 @@
 """Paid Ded Moroz entitlements; Moscow prices, signed-receipt grants and public offer."""
+from media_policy import checkout_policy
 import json
 import os
 import asyncio
@@ -116,6 +117,7 @@ def validate_order(row):
         raise ValueError('Некорректный тариф поздравления Деда Мороза.')
 
 
+@checkout_policy('ded_moroz')
 async def checkout(user_id,*,variant='single',children_count=None):
     if isinstance(user_id,bool) or not isinstance(user_id,int) or user_id<=0:
         raise ValueError('Некорректный пользователь.')

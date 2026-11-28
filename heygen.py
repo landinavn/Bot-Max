@@ -59,6 +59,8 @@ class HeyGenAdapter:
                 'output_format':{'encoding':'mp3','sample_rate_hertz':44100,'bitrate_bps':192000}}
 
     async def generate_speech(self, text: str) -> str:
+        from private_media import mutation_policy
+        mutation_policy()
         """One synchronous speech POST; Instant voices use tags, not speed/pitch controls."""
         data=await self.request('POST','/v3/models/audio/tts',payload=self.speech_payload(text),timeout=180)
         url = data.get('audio_url')
@@ -68,6 +70,8 @@ class HeyGenAdapter:
         return url
 
     async def create_avatar(self, url, key):
+        from private_media import provider_input
+        provider_input(url, 'heygen-avatar')
         https_url(url)
         data=await self.request('POST','/v3/avatars',payload={
             'type':'photo','name':'Ded Moroz','file':{'type':'url','url':url}},idempotency=key)
@@ -81,6 +85,8 @@ class HeyGenAdapter:
         return data.get('avatar_item',data)
 
     async def create_video(self, avatar_id, audio_url, key):
+        from private_media import provider_input
+        provider_input(audio_url, 'heygen-video')
         https_url(audio_url)
         data=await self.request('POST','/v3/videos',payload={
             'type':'avatar','avatar_id':self.identifier(avatar_id),'audio_url':audio_url,

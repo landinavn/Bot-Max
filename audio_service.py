@@ -1,7 +1,9 @@
 """Асинхронная генерация музыки TTAPI/Suno; без автоматического повторения POST."""
+from media_policy import private_enabled
 from safe_logging import get_logger
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -141,6 +143,8 @@ VIDEO_GREETING_LYRICS_PROMPT = LYRICS_STRUCTURE_PROMPT + (
 
 async def write_song_lyrics(notes: str, tags: str, title: str, *, preserve_chorus: bool = True) -> str:
     settings = Config.from_env()
+    from private_media import generation_policy
+    generation_policy(settings)
     if not settings.image_api_key:
         raise AudioNotConfigured('Не настроена текстовая модель для стихов.')
     from personal_song import parse_request, SYSTEM_PROMPT, FULL_FORMAT, SHORT_FORMAT, validate_lyrics
@@ -242,9 +246,23 @@ async def create_audio_preview(audio_url: str, duration: int = 15) -> str:
     return await _create_audio_preview(audio_url, duration, protected=False)
 
 
+async def _download_legacy_preview(audio_url, source):
+    async with httpx.AsyncClient(timeout=60, trust_env=False, follow_redirects=False) as http:
+        async with http.stream('GET', audio_url) as response:
+            response.raise_for_status()
+            total = 0
+            with source.open('wb') as file:
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    if total > 32 * 1024 * 1024:
+                        raise AudioServiceError('Слишком большой аудиофайл.')
+                    file.write(chunk)
+
+
 async def _create_audio_preview(audio_url: str, clip_duration: int, *, protected: bool) -> str:
+    from private_media import is_private
     parsed = urlsplit(audio_url)
-    if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password:
+    if not is_private(audio_url) and (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password):
         raise AudioServiceError('Некорректный URL аудио.')
     binary = shutil.which('ffmpeg')
     if not binary:
@@ -255,16 +273,11 @@ async def _create_audio_preview(audio_url: str, clip_duration: int, *, protected
     try:
         with tempfile.TemporaryDirectory(prefix='song-preview-') as directory:
             source, target = Path(directory)/'source.mp3', Path(directory)/'preview.mp3'
-            async with httpx.AsyncClient(timeout=60, trust_env=False, follow_redirects=False) as http:
-                async with http.stream('GET', audio_url) as response:
-                    response.raise_for_status()
-                    total = 0
-                    with source.open('wb') as file:
-                        async for chunk in response.aiter_bytes():
-                            total += len(chunk)
-                            if total > 32 * 1024 * 1024:
-                                raise AudioServiceError('Слишком большой аудиофайл.')
-                            file.write(chunk)
+            if is_private(audio_url):
+                from private_media import read_bytes
+                source.write_bytes((await read_bytes(audio_url, limit=32*1024*1024))[0])
+            else:
+                await _download_legacy_preview(audio_url, source)
             full_duration = await audio_duration(source)
             start = '00:00:20' if full_duration >= 35 else ('00:00:05' if full_duration > 5 else '00:00:00')
             logger.info('Превью песни: длительность %.2f с, начало %s, фрагмент %s с.', full_duration, start, clip_duration)
@@ -289,6 +302,11 @@ async def _create_audio_preview(audio_url: str, clip_duration: int, *, protected
                 raise
             if process.returncode != 0 or not target.is_file() or not target.stat().st_size:
                 raise AudioServiceError('Не удалось создать фрагмент песни.')
+            from private_media import generation_policy
+            generation_policy(settings,audio_url)
+            if private_enabled(settings):
+                from private_media import store_path,transfer_slot
+                async with transfer_slot():return await asyncio.to_thread(store_path,settings,target,'audio/mpeg',purpose='audio-preview')
             key = f'audio-previews/{uuid4().hex}.mp3'
             await asyncio.to_thread(client.put_object, Bucket=settings.storage_bucket, Key=key,
                                     Body=target.read_bytes(), ContentType='audio/mpeg')
@@ -333,6 +351,16 @@ async def _request(method: str, path: str, **kwargs) -> dict:
 
 
 async def generate_song(prompt: str, tags: str, title: str) -> str:
+    import os
+    from private_media import generation_policy
+    generation_policy(Config.from_env())
+    if private_enabled(Config.from_env()):
+        from private_media import PrivateMedia, require_song_scope
+        config=Config.from_env()
+        require_song_scope(config)
+        private=PrivateMedia(config)
+        try: await asyncio.to_thread(private.preflight)
+        finally: await asyncio.to_thread(private.close)
     validate_song_arguments(prompt, tags, title)
     suffix = ', vocals at 0.0 seconds, first lyric immediately, zero instrumental intro, no wordless humming'
     tags = tags if tags.endswith(suffix) else tags + suffix
@@ -357,6 +385,39 @@ async def fetch_song(job_id: str) -> dict:
     return await _request('GET', '/suno/v2/fetch', params={'jobId': job_id})
 
 
+async def _retain_private_tracks(result, job_id):
+    import os
+    if not private_enabled(Config.from_env()): return result
+    config = Config.from_env()
+    if not private_enabled(config): return result
+    import copy
+    from private_media import PrivateMedia, require_song_scope, is_private
+    from media_service import _download
+    access = require_song_scope(config)
+    retained = copy.deepcopy(result)
+    content = retained.get('data')
+    musics = content if isinstance(content, list) else content.get('musics', [])
+    service = PrivateMedia(config)
+    try:
+        with tempfile.TemporaryDirectory(prefix='private-song-') as directory:
+            async with httpx.AsyncClient(timeout=90, trust_env=False, follow_redirects=False) as http:
+                for index, track in enumerate(musics):
+                    url = track.get('audioUrl') or track.get('audio_url')
+                    if not url or is_private(url): continue
+                    path = Path(directory)/'song.mp3'
+                    try:await _download(http, url, path, 16*1024*1024)
+                    except httpx.HTTPError:
+                        from private_media import MediaUnavailable
+                        raise MediaUnavailable('Retained song download unavailable; keep the existing job ID') from None
+                    ref = await asyncio.to_thread(service.put, path.read_bytes(), 'audio/mpeg', access,
+                        operation_id='ttapi:'+hashlib.sha256(job_id.encode()).hexdigest()+':'+str(index),
+                        owner_access='order' if access.role=='service' else 'owner')
+                    for name in ('audioUrl','audio_url'):
+                        if name in track: track[name] = ref
+    finally: await asyncio.to_thread(service.close)
+    return retained
+
+
 async def wait_for_song_result(job_id: str, timeout: int = 100) -> dict:
     """Полный ответ нужен оплаченному формату с двумя вариантами песни."""
     if timeout <= 0:
@@ -371,7 +432,7 @@ async def wait_for_song_result(job_id: str, timeout: int = 100) -> dict:
                 logger.info('Попытка %s: статус %s (job_id=%s)', attempt + 1, status, job_id)
                 if status == 'SUCCESS':
                     song_tracks(data)  # Пустой SUCCESS тоже должен дать понятную ошибку.
-                    return data
+                    return await _retain_private_tracks(data, job_id)
                 if status in {'FAILED', 'ERROR'}:
                     logger.error('TTAPI вернул %s (job_id=%s): %s', status, job_id, _safe_response(data))
                     raise SongFailed(f'TTAPI вернул {status}: {_safe_response(data)}')
@@ -420,7 +481,8 @@ def song_tracks(result: dict | str) -> list[dict[str, str]]:
         url = music.get("audioUrl") or music.get("audio_url")
         try:
             parsed = urlsplit(url) if isinstance(url, str) else None
-            valid = parsed and parsed.scheme == "https" and parsed.hostname and not parsed.username and not parsed.password
+            from private_media import is_private
+            valid = is_private(url) or (parsed and parsed.scheme == "https" and parsed.hostname and not parsed.username and not parsed.password)
         except ValueError:
             valid = False
         if valid and not any(track["audioUrl"] == url for track in tracks):

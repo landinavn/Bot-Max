@@ -1,5 +1,7 @@
 """Доставка оплаченных аудиозаказов из постоянной очереди SQLite."""
 from safe_logging import get_logger
+from private_media import download_button
+from private_media import order_scope
 from mothers_day import mother_suffix
 
 import asyncio
@@ -30,7 +32,7 @@ class PaidAudioWorker:
 
     async def deliver_preview(self, order):
         order = await song_checkout_order(order['order_id'])
-        keyboard = InlineKeyboardBuilder().row(LinkButton(text='▶️ Послушать превью', url=order['preview_url']))
+        keyboard = InlineKeyboardBuilder().row(download_button(text='▶️ Послушать превью', url=order['preview_url']))
         unlocked = order['status'] == 'paid' or order['free_access']
         if unlocked:
             keyboard.row(CallbackButton(text='Скачать полный MP3', payload='audio_paid_download:' + order['order_id'] + ':0'))
@@ -84,8 +86,11 @@ class PaidAudioWorker:
             await asyncio.sleep(self.poll_interval)
 
     async def notify(self, user_id, text, **kwargs):
+        from private_media import client_text
+        text = client_text(text)
         await self.bot.send_message(user_id=user_id, text=text, **kwargs)
 
+    @order_scope('get_audio_order')
     async def process(self, order_id):
         claimed = False
         order = None
@@ -137,6 +142,12 @@ class PaidAudioWorker:
             text = '🎧 Ваша песня готова!' if len(tracks) == 1 else '🎧 Ваши треки готовы!'
             keyboard = InlineKeyboardBuilder()
             for index, track in enumerate(tracks):
+                from private_media import is_private
+                if is_private(track['audioUrl']):
+                    from media_service import upload_audio_for_max
+                    media = await upload_audio_for_max(self.bot, track['audioUrl'])
+                    sent = await self.bot.send_message(user_id=order['user_id'], text=f"🎵 Вариант {index + 1}: {track['title']}", attachments=[media])
+                    if sent is None: raise RuntimeError('MAX did not confirm private audio delivery')
                 text += f"\n\nВариант {index + 1}: {track['title']}\n{track['audioUrl']}"
                 keyboard.row(CallbackButton(text=f'Скачать вариант {index + 1}', payload=f'audio_paid_download:{order_id}:{index}'))
             self.result_actions(keyboard, order)

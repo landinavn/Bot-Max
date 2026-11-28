@@ -79,6 +79,8 @@ def transcript_words(items):
 
 
 async def detect_song_start(audio:Path,lyrics:str,workdir:Path, *, on_transcribed=None):
+    from private_media import mutation_policy
+    mutation_policy()
     from media_service import run_media_process
     import shutil
     line,expected=first_lyric(lyrics)

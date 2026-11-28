@@ -129,6 +129,8 @@ async def _request(client, method: str, url: str, key: str, **kwargs) -> dict:
 
 
 async def create_video_task(image_url: str, prompt: str) -> str:
+    from private_media import provider_input
+    provider_input(image_url, 'piapi-kling')
     """Создать платную задачу Kling; POST автоматически не повторяется."""
     if not _is_https_url(image_url):
         raise ValueError("Для PiAPI нужна HTTPS-ссылка на изображение.")

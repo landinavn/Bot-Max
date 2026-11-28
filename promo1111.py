@@ -1,4 +1,5 @@
 """11.11 campaign: Moscow deadline, recipient eligibility and durable entitlements."""
+from media_policy import checkout_policy
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from uuid import uuid4
@@ -130,6 +131,12 @@ async def save_link(order_id,link):
 
 async def claim_animation(user_id):
     """Reserve a bonus as a durable one-photo order; repeated clicks reuse it."""
+    from media_policy import configured,bind_operation
+    if configured():
+        async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as lookup:
+            lookup.row_factory=aiosqlite.Row
+            existing=await (await lookup.execute("SELECT o.* FROM animation_orders o WHERE user_id=? AND promo_bonus=1 AND status='paid' AND NOT EXISTS(SELECT 1 FROM animation_jobs j WHERE j.order_id=o.order_id) ORDER BY rowid LIMIT 1",(user_id,))).fetchone()
+        await bind_operation('animation',user_id,existing['order_id'] if existing else 'animation-bonus:'+uuid4().hex,existing=existing is not None)
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
         await db.execute('BEGIN IMMEDIATE'); db.row_factory=aiosqlite.Row
         async with db.execute('''SELECT o.* FROM animation_orders o WHERE user_id=? AND promo_bonus=1

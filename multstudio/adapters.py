@@ -41,6 +41,8 @@ class YandexTTSAdapter:
             raise ValueError('Задайте YANDEX_TTS_API_KEY для мультстудии.')
 
     async def synthesize(self, text: str, voice: str, emotion: str = 'neutral', speed: float = 1.0) -> bytes:
+        from private_media import mutation_policy
+        mutation_policy()
         self.ready()
         if not isinstance(text, str) or not text.strip() or len(text) > 5000:
             raise ValueError('Реплика SpeechKit должна содержать от 1 до 5000 символов.')
@@ -71,6 +73,8 @@ class YandexTTSV3Adapter(YandexTTSAdapter):
     ENDPOINT = 'https://tts.api.cloud.yandex.net/tts/v3/utteranceSynthesis'
 
     async def synthesize(self, text, voice, emotion='good', speed=1.0, *, pitch_shift=0):
+        from private_media import mutation_policy
+        mutation_policy()
         self.ready()
         if not isinstance(text,str) or not text.strip() or len(text)>5000:
             raise ValueError('Реплика SpeechKit должна содержать от 1 до 5000 символов.')
@@ -141,6 +145,8 @@ class KlingAdapter:
             raise ValueError('Задайте STUDIO_KLING_API_KEY или PIAPI_KEY.')
 
     async def submit(self, image_url, prompt, duration):
+        from private_media import provider_input
+        provider_input(image_url, 'piapi-kling')
         self.ready()
         async with httpx.AsyncClient(timeout=60, trust_env=False, transport=self.transport) as client:
             response = await client.post(self.ENDPOINT, headers={'X-API-Key': self.key}, json={
@@ -159,6 +165,9 @@ class KlingAdapter:
 
     async def avatar(self, image_url, audio_url, prompt):
         """Kling Avatar: image plus the exact approved MP3, no separate avatar creation."""
+        from private_media import provider_input
+        provider_input(image_url, 'piapi-kling-avatar')
+        provider_input(audio_url, 'piapi-kling-avatar')
         self.ready()
         from .assets import https_url
         https_url(image_url);https_url(audio_url)

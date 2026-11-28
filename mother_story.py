@@ -16,6 +16,8 @@ import mother_storyboard_legacy_v2 as previous_board
 
 
 async def submit_animation(adapter,image_url,prompt,key,*,duration=SHOT_SECONDS):
+    from private_media import provider_input
+    provider_input(image_url, 'heygen-animation')
     from heygen import https_url
     https_url(image_url)
     # Same image-to-video API contract used by the existing silent studio scenes.

@@ -52,6 +52,11 @@ class Config:
     private_media_registry: Path = BASE_DIR / 'private_media.sqlite3'
     private_media_access_key_id: str | None = field(default=None, repr=False)
     private_media_secret_access_key: str | None = field(default=None, repr=False)
+    private_media_products: frozenset[str] = frozenset()
+    private_media_pilot_user_id: int | None = field(default=None,repr=False)
+    private_media_read_only: bool = False
+    private_media_storage_verified: bool = False
+    private_media_principals: frozenset[str] = field(default_factory=frozenset,repr=False)
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -75,6 +80,18 @@ class Config:
         private_flag = os.environ.get('PRIVATE_MEDIA_ENABLED', 'false').strip().lower()
         if private_flag not in ('true', 'false'):
             raise ValueError('PRIVATE_MEDIA_ENABLED должен быть true или false.')
+        from media_policy import PRODUCTS
+        products=frozenset(filter(None,(v.strip() for v in os.environ.get('PRIVATE_MEDIA_PRODUCTS','').split(','))))
+        if products-PRODUCTS:raise ValueError('Неизвестный PRIVATE_MEDIA_PRODUCTS.')
+        pilot=os.environ.get('PRIVATE_MEDIA_PILOT_USER_ID','').strip()
+        if pilot and (not pilot.isascii() or not pilot.isdecimal() or int(pilot)<=0 or int(pilot)!=admin_user_id):
+            raise ValueError('Private media pilot must be the configured administrative account.')
+        read_only=os.environ.get('PRIVATE_MEDIA_READ_ONLY','false').strip().lower()
+        if read_only not in ('true','false'):raise ValueError('PRIVATE_MEDIA_READ_ONLY must be true or false.')
+        verified=os.environ.get('PRIVATE_MEDIA_STORAGE_VERIFIED','false').strip().lower()
+        if verified not in ('true','false'):raise ValueError('PRIVATE_MEDIA_STORAGE_VERIFIED must be true or false.')
+        principals=frozenset(filter(None,(v.strip() for v in os.environ.get('PRIVATE_MEDIA_PRINCIPALS','').split(','))))
+        if any(not re.fullmatch(r'[A-Za-z0-9_-]{1,128}',v) for v in principals):raise ValueError('Invalid private media principal allowlist.')
         return cls(
             token=token,
             photo_path=photo_path,
@@ -107,4 +124,9 @@ class Config:
             private_media_registry=Path(os.environ.get('PRIVATE_MEDIA_REGISTRY', str(BASE_DIR / 'private_media.sqlite3'))),
             private_media_access_key_id=os.environ.get('PRIVATE_MEDIA_ACCESS_KEY_ID', '').strip() or None,
             private_media_secret_access_key=os.environ.get('PRIVATE_MEDIA_SECRET_ACCESS_KEY', '').strip() or None,
+            private_media_products=products,
+            private_media_pilot_user_id=int(pilot) if pilot else None,
+            private_media_read_only=read_only=='true',
+            private_media_storage_verified=verified=='true',
+            private_media_principals=principals,
         )

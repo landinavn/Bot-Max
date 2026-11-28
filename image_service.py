@@ -1,4 +1,5 @@
 """Загрузка в MAX и создание плакатов через OpenAI Images API."""
+from media_policy import private_enabled,generation_scope
 from safe_logging import get_logger
 from private_media import is_private
 
@@ -662,7 +663,7 @@ def _storage_client(config: Config):
     """Подготовка хранилища до платного запроса генерации."""
     from private_media import generation_policy
     generation_policy(config)
-    if getattr(config, 'private_media_enabled', False):
+    if private_enabled(config):
         from private_media import current_access, PrivateMedia
         current_access()
         private=PrivateMedia(config)
@@ -695,9 +696,9 @@ def _storage_client(config: Config):
 def _store_image(client, config: Config, image_path: Path) -> str:
     from private_media import generation_policy
     generation_policy(config)
-    if getattr(config, 'private_media_enabled', False):
-        from private_media import store_bytes
-        return store_bytes(config, image_path.read_bytes(), 'image/png', purpose='image-output')
+    if private_enabled(config):
+        from private_media import store_path
+        return store_path(config,image_path,'image/png',purpose='image-output')
     key = f"vision-boards/{uuid4().hex}.png"
     logger.info("Запрос Yandex Object Storage: сохранение изображения (%d байт).", image_path.stat().st_size)
     with image_path.open("rb") as image_file:
@@ -783,6 +784,7 @@ async def _generate_and_store(
             await asyncio.to_thread(client.close)
 
 
+@generation_scope('vision_board')
 async def generate_vision_board(photo_url: str, sphere: str) -> str:
     """Создать плакат через OpenAI и вернуть постоянный публичный HTTPS URL.
 
@@ -796,11 +798,13 @@ async def generate_vision_board(photo_url: str, sphere: str) -> str:
     return (await _generate_and_store(photo_url, sphere))[0]
 
 
+@generation_scope('vision_board')
 async def generate_vision_boards(photo_url: str, sphere: str) -> list[str]:
     """Получить одно изображение (n=1), сохранив интерфейс списка URL."""
     return await _generate_and_store(photo_url, sphere, count=1)
 
 
+@generation_scope('postcards')
 async def generate_postcards(photo_url: str, mode: str, card_text: str, *, theme_info: str | None = None, preview: bool = False) -> list[str]:
     """Создать открытку по режиму, наложить поздравление и сохранить в S3."""
     if mode not in POSTCARD_PROMPTS:
@@ -1413,6 +1417,7 @@ CARTOON_AVATAR_THEMES = {
 }
 
 
+@generation_scope('cartoon')
 async def generate_cartoon_avatar(photo_url: str, mode: str) -> str:
     if mode not in CARTOON_AVATAR_THEMES and mode not in CARTOON_IMAGE_PROMPTS:
         raise ValueError('Неизвестный стиль мульт-аватара.')
@@ -1424,6 +1429,7 @@ async def generate_cartoon_avatar(photo_url: str, mode: str) -> str:
     return urls[0]
 
 
+@generation_scope('photosession')
 async def generate_photosession_frame(photo_url: str, prompt: str, *, style_reference_url: str | None = None,
                                       style_reference_urls: tuple[str, ...] | None = None,
                                       style_reference_scope: str = 'all',
@@ -1509,6 +1515,8 @@ def _prepare_max_image(data: bytes) -> tuple[bytes, str]:
 
 
 async def upload_image_for_max(bot: Bot, image_url: str) -> AttachmentUpload:
+    from private_media import is_private,upload_for_max,current_access
+    if is_private(image_url):return await upload_for_max(bot,image_url,current_access(),kind='image')
     """Скачать результат из S3 и загрузить байты в MAX, получив media token."""
     _validate_inputs(image_url, "poster")
     try:

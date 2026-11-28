@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from safe_logging import get_logger
+from media_policy import private_enabled,current_policy,policy_scope
 
 logger = get_logger(__name__)
 PREFIX = 'private-media:v1:'
@@ -25,10 +26,28 @@ _REF = re.compile(r'^private-media:v1:([0-9a-f]{32})$')
 _ID = re.compile(r'^[A-Za-z0-9_.:@-]{1,200}$')
 _SCOPE = ContextVar('private_media_access', default=None)
 _PRIVATE_DEPENDENCY = ContextVar('private_media_dependency', default=False)
+_GROUP_EVENT = ContextVar('private_media_group',default=False)
 CONTENT_TYPES = {'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp',
                  'audio/mpeg': 'mp3', 'audio/wav': 'wav', 'video/mp4': 'mp4',
                  'text/plain': 'txt', 'application/pdf': 'pdf',
                  'application/octet-stream': 'bin'}
+
+
+def media_limit(mime):
+    return {'image':8,'audio':16,'video':32}.get(mime.split('/')[0],8)*1024*1024
+
+
+from contextlib import asynccontextmanager
+import weakref
+_TRANSFER_LOCKS=weakref.WeakKeyDictionary()
+
+
+@asynccontextmanager
+async def transfer_slot():
+    import asyncio
+    loop=asyncio.get_running_loop()
+    lock=_TRANSFER_LOCKS.setdefault(loop,asyncio.Semaphore(1))
+    async with lock:yield
 
 
 class MediaError(RuntimeError): pass
@@ -112,9 +131,14 @@ def require_song_scope(config):
 def generation_policy(config,*sources):
     """Readonly rollback must never turn private input/derivatives public."""
     private = _PRIVATE_DEPENDENCY.get() or any(is_private(s) for s in sources)
-    if not getattr(config,'private_media_enabled',False) and private:
+    if (not private_enabled(config) or getattr(config,'private_media_read_only',False)) and private:
         raise MediaError('Private media processing is paused; retained files remain readable')
-    if getattr(config,'private_media_enabled',False):
+    if private_enabled(config):
+        from media_policy import SUPPORTED
+        policy=current_policy()
+        if getattr(config,'private_media_read_only',False) or (policy and policy.product not in SUPPORTED):
+            raise MediaProviderBlocked('Создание временно недоступно. Оплата не требуется; сохранённый заказ доступен поддержке.')
+        if not getattr(config,'private_media_storage_verified',False):raise MediaUnavailable('Private media storage has not passed the owner smoke test')
         actor=current_access()
         if actor.role=='service':
             service=PrivateMedia(config)
@@ -125,7 +149,7 @@ def generation_policy(config,*sources):
 def mutation_policy():
     """Guard direct text/ASR POSTs without changing the legacy configuration path."""
     import os
-    if _PRIVATE_DEPENDENCY.get() or os.environ.get('PRIVATE_MEDIA_ENABLED','false').strip().lower()=='true':
+    if _PRIVATE_DEPENDENCY.get() or current_policy() is not None or os.environ.get('PRIVATE_MEDIA_ENABLED','false').strip().lower()=='true':
         from config import Config
         generation_policy(Config.from_env())
 
@@ -143,7 +167,8 @@ def song_context(function):
             if isinstance(value,list):return any(contains_private(v,depth+1) for v in value)
             return False
         if contains_private(data):_PRIVATE_DEPENDENCY.set(True)
-        if os.environ.get('PRIVATE_MEDIA_ENABLED','false').strip().lower()!='true':
+        from config import Config
+        if not private_enabled(Config.from_env()):
             actor=_SCOPE.get()
             from config import Config, BASE_DIR
             registry=Path(os.environ.get('PRIVATE_MEDIA_REGISTRY',str(BASE_DIR/'private_media.sqlite3')))
@@ -176,7 +201,7 @@ def song_context(function):
                 elif isinstance(value,list):
                     for v in value:collect(v,depth+1)
             collect(data)
-            with media_scope(Access(actor.owner,'service',order['order_id'],references=frozenset(refs))):
+            with media_scope(Access(actor.owner,'service',order['order_id'],references=frozenset(refs),entitlements=actor.entitlements)):
                 return await function(data,*args,**kwargs)
         raise MediaAccessDenied('Restore the saved order before private song processing')
     return wrapped
@@ -226,6 +251,10 @@ CREATE TABLE IF NOT EXISTS media_grants (
 CREATE TABLE IF NOT EXISTS media_orders (
  owner_namespace TEXT NOT NULL, owner_id TEXT NOT NULL, order_id TEXT NOT NULL,
  created_at INTEGER NOT NULL, PRIMARY KEY(owner_namespace,owner_id,order_id));
+CREATE TABLE IF NOT EXISTS media_policies (
+ owner_namespace TEXT NOT NULL, owner_id TEXT NOT NULL, operation_id TEXT NOT NULL,
+ product TEXT NOT NULL, mode TEXT NOT NULL CHECK(mode IN ('legacy','private')), created_at INTEGER NOT NULL,
+ PRIMARY KEY(owner_namespace,owner_id,operation_id));
 '''
 
 
@@ -235,6 +264,7 @@ class PrivateMedia:
         self.client = client  # Inject only trusted SDK / synthetic test client.
         self._policy_checked = False
         self.clock = clock or time.time
+        if Path(config.private_media_registry).expanduser().is_symlink():raise MediaUnavailable('Registry symlink refused')
         self.path = Path(config.private_media_registry).expanduser().resolve()
         from config import BASE_DIR
         if self.path == (BASE_DIR/'database.sqlite3').resolve():
@@ -248,23 +278,8 @@ class PrivateMedia:
 
     @contextmanager
     def _db(self, write=False):
-        if write:
-            # Exclusive creation with private permissions, not a chmod window.
-            import os
-            fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
-            os.close(fd)
-        try:
-            db = sqlite3.connect(self.path.as_uri() + ('?mode=rw' if write else '?mode=ro'), uri=True, timeout=30)
-            db.row_factory = sqlite3.Row
-            db.execute('PRAGMA foreign_keys=ON')
-            if write: db.executescript(SCHEMA)
-        except sqlite3.Error:
-            raise MediaUnavailable('Media registry unavailable') from None
-        try:
-            with db: yield db
-        except sqlite3.Error:
-            raise MediaUnavailable('Media registry operation failed') from None
-        finally: db.close()
+        from media_registry import registry_connection
+        with registry_connection(self.path,write=write) as db:yield db
 
     def _sdk(self):
         if self.client is None: self.client = storage_client(self.config)
@@ -278,7 +293,7 @@ class PrivateMedia:
         self._sdk()
 
     def mark_private_order(self,access):
-        if not self.config.private_media_enabled or access.role!='service':raise MediaAccessDenied('Scoped private write required')
+        if not private_enabled(self.config) or access.role!='service':raise MediaAccessDenied('Scoped private write required')
         with self._db(write=True) as db:
             db.execute('INSERT OR IGNORE INTO media_orders VALUES(?,?,?,?)',
                        (access.owner.namespace,access.owner.identifier,access.order_id,int(self.clock())))
@@ -298,11 +313,13 @@ class PrivateMedia:
         import json
         from botocore.exceptions import ClientError
         try:
+            allowed=getattr(self.config,'private_media_principals',frozenset())
+            if not allowed:raise MediaUnavailable('An explicit approved principal allowlist is required')
             acl=self.client.get_bucket_acl(Bucket=self.config.private_media_bucket)
-            if not acl.get('Owner',{}).get('ID') or not isinstance(acl.get('Grants'),list) or not acl['Grants']:
+            if acl.get('Owner',{}).get('ID') not in allowed or not isinstance(acl.get('Grants'),list) or not acl['Grants']:
                 raise MediaUnavailable('Private bucket ACL could not be verified')
             for grant in acl.get('Grants',[]):
-                if grant.get('Grantee',{}).get('Type')!='CanonicalUser' or not grant.get('Grantee',{}).get('ID'):
+                if grant.get('Grantee',{}).get('Type')!='CanonicalUser' or grant.get('Grantee',{}).get('ID') not in allowed:
                     raise MediaUnavailable('Private bucket ACL is not approved')
             try:
                 raw=self.client.get_bucket_policy(Bucket=self.config.private_media_bucket)
@@ -324,12 +341,28 @@ class PrivateMedia:
                 if statement.get('Effect')=='Deny':continue
                 if statement.get('Effect')!='Allow':raise MediaUnavailable('Unknown private bucket policy rule')
                 principal=statement.get('Principal')
-                if not isinstance(principal,dict) or set(principal)-{'AWS','CanonicalUser'} or not principal:
+                if (set(statement)-{'Sid','Effect','Principal','Action','Resource','Condition'}
+                        or not isinstance(principal,dict) or set(principal)!={'CanonicalUser'}):
                     raise MediaUnavailable('Private bucket policy is not approved')
                 for values in principal.values():
                     values=values if isinstance(values,list) else [values]
-                    if not values or any(not isinstance(v,str) or not v or '*' in v for v in values):
+                    if not values or any(not isinstance(v,str) or v not in allowed for v in values):
                         raise MediaUnavailable('Private bucket policy is not approved')
+                actions=statement.get('Action',[])
+                actions=actions if isinstance(actions,list) else [actions]
+                resources=statement.get('Resource',[])
+                resources=resources if isinstance(resources,list) else [resources]
+                bucket='arn:aws:s3:::'+self.config.private_media_bucket
+                if (not actions or set(actions)-{'s3:GetObject','s3:PutObject','s3:GetBucketAcl','s3:ListBucket'}
+                        or not resources or any(r not in (bucket,bucket+'/media/v1/*') for r in resources)):
+                    raise MediaUnavailable('Unknown private bucket access rule')
+                condition=statement.get('Condition',{})
+                if not isinstance(condition,dict) or set(condition)-{'Bool','StringLike'}:
+                    raise MediaUnavailable('Unknown private bucket condition')
+                if 'Bool' in condition and condition['Bool']!={'aws:SecureTransport':'true'}:
+                    raise MediaUnavailable('Unknown transport condition')
+                if 'StringLike' in condition and condition['StringLike'] not in ({'s3:prefix':'media/v1/*'},{'s3:prefix':['media/v1/*']}):
+                    raise MediaUnavailable('Unknown prefix condition')
         except MediaError:raise
         except Exception:raise MediaUnavailable('Private bucket policy could not be verified') from None
 
@@ -351,6 +384,9 @@ class PrivateMedia:
         owned = access.owner == Owner(row['owner_namespace'], row['owner_id'])
         if owned and access.role == 'user' and row['owner_access'] == 'order' and row['order_id'] not in access.entitlements:
             raise MediaAccessDenied('Paid media entitlement required')
+        if (row['owner_access']=='order' and access.role=='service' and row['order_id']!=access.order_id
+                and row['order_id'] not in access.entitlements):
+            raise MediaAccessDenied('Restricted song cannot cross order scopes')
         if owned and (access.role != 'service' or row['order_id'] == access.order_id or PREFIX+row['id'] in access.references): return
         if not owner_only and access.role == 'user':
             grant = db.execute('SELECT expires_at FROM media_grants WHERE asset_id=? AND recipient_namespace=? AND recipient_id=?',
@@ -382,101 +418,120 @@ class PrivateMedia:
                 or head.get('Metadata', {}).get('sha256') != row['sha256']):
             raise MediaUnavailable('Media integrity check failed')
 
-    def put(self, data, content_type, access, *, operation_id, owner_access='owner'):
-        if not self.config.private_media_enabled: raise MediaError('Private writes disabled')
-        if not isinstance(access, Access) or access.owner is None or access.role == 'admin':
-            raise MediaAccessDenied('Explicit media owner required for writes')
+    def put(self, data, content_type, access, *, operation_id, owner_access='owner',mark_order=True):
+        if not private_enabled(self.config) or getattr(self.config,'private_media_read_only',False):raise MediaError('Private writes disabled')
+        if not isinstance(access,Access) or access.owner is None or access.role=='admin':raise MediaAccessDenied('Explicit media owner required')
         content_type={'audio/x-wav':'audio/wav','audio/mp3':'audio/mpeg','image/jpg':'image/jpeg'}.get(content_type,content_type)
-        if content_type not in CONTENT_TYPES or not isinstance(data, bytes) or not 0 < len(data) <= 200*1024*1024:
-            raise MediaError('Invalid media content')
-        if not isinstance(operation_id, str) or not _ID.fullmatch(operation_id): raise MediaError('Media operation ID required')
-        if owner_access not in ('owner','order') or (owner_access == 'order' and not access.order_id):
-            raise MediaError('Restricted media requires an order')
-        if access.role=='service':self.mark_private_order(access)
-        digest = hashlib.sha256(data).hexdigest()
+        if not isinstance(data,bytes) or content_type not in CONTENT_TYPES or not 0<len(data)<=media_limit(content_type):raise MediaError('Media type or size refused')
+        if not isinstance(operation_id,str) or not _ID.fullmatch(operation_id):raise MediaError('Media operation ID required')
+        if owner_access not in ('owner','order') or (owner_access=='order' and not access.order_id):raise MediaError('Restricted media requires an order')
+        if access.role=='service' and mark_order:self.mark_private_order(access)
+        digest=hashlib.sha256(data).hexdigest()
+        # Only metadata operations inside write transactions. No S3 call here.
         with self._db(write=True) as db:
             db.execute('BEGIN IMMEDIATE')
-            row = db.execute('SELECT * FROM media_objects WHERE owner_namespace=? AND owner_id=? AND operation_id=?',
-                (access.owner.namespace, access.owner.identifier, operation_id)).fetchone()
+            row=db.execute('SELECT * FROM media_objects WHERE owner_namespace=? AND owner_id=? AND operation_id=?',
+                (access.owner.namespace,access.owner.identifier,operation_id)).fetchone()
             if row is None:
-                identifier = uuid4().hex
-                key = f'media/v1/{identifier}.{CONTENT_TYPES[content_type]}'
+                identifier=uuid4().hex
                 db.execute('INSERT INTO media_objects VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                    (identifier, self.config.private_media_bucket, key, access.owner.namespace,
-                     access.owner.identifier, access.order_id, operation_id, digest, len(data),
-                     content_type, 'prepared', int(self.clock()), owner_access))
-                row = db.execute('SELECT * FROM media_objects WHERE id=?', (identifier,)).fetchone()
-            if row['sha256'] != digest or row['content_type'] != content_type or row['order_id'] != access.order_id or row['owner_access'] != owner_access:
+                    (identifier,self.config.private_media_bucket,f'media/v1/{identifier}.{CONTENT_TYPES[content_type]}',
+                     access.owner.namespace,access.owner.identifier,access.order_id,operation_id,digest,len(data),content_type,'prepared',int(self.clock()),owner_access))
+                row=db.execute('SELECT * FROM media_objects WHERE id=?',(identifier,)).fetchone()
+            row=dict(row)
+            if (row['sha256'],row['content_type'],row['order_id'],row['owner_access'])!=(digest,content_type,access.order_id,owner_access):
                 raise MediaError('Media operation already has different content or order')
-            reference = PREFIX + row['id']
-            head = self._head(row)
-            if head:
-                self._verify_head(row, head)
-                db.execute("UPDATE media_objects SET state='ready' WHERE id=?", (row['id'],))
-                return reference
-            if row['state'] != 'prepared':
-                raise MediaWriteUncertain('Previous storage submission requires verification')
-            db.execute("UPDATE media_objects SET state='submitting' WHERE id=?", (row['id'],))
-            db.commit()  # Persist uncertainty before any mutation; never repeat an unknown PUT.
-            try:
-                self._sdk().put_object(Bucket=row['bucket'], Key=row['object_key'], Body=data,
-                    ContentType=content_type, Metadata={'sha256': digest},
-                    CacheControl='private, no-store',
-                    ContentDisposition='attachment; filename="media.'+CONTENT_TYPES[content_type]+'"')
-            except Exception:
-                raise MediaWriteUncertain('Storage submission requires verification') from None
-            self._verify_head(row, self._head(row))
-            db.execute("UPDATE media_objects SET state='ready' WHERE id=?", (row['id'],))
+        reference=PREFIX+row['id']
+        head=self._head(row)
+        if head:
+            self._verify_head(row,head)
+            self._ready(row['id'])
             return reference
+        if row['state']!='prepared':raise MediaWriteUncertain('Previous storage submission requires verification')
+        with self._db(write=True) as db:
+            claim=db.execute("UPDATE media_objects SET state='submitting' WHERE id=? AND state='prepared'",(row['id'],))
+            if claim.rowcount!=1:raise MediaWriteUncertain('Storage operation is already claimed')
+        try:
+            self._sdk().put_object(Bucket=row['bucket'],Key=row['object_key'],Body=data,ContentType=content_type,
+                Metadata={'sha256':digest},CacheControl='private, no-store',ContentDisposition='attachment; filename="media.'+CONTENT_TYPES[content_type]+'"')
+        except Exception:raise MediaWriteUncertain('Storage submission requires verification') from None
+        self._verify_head(row,self._head(row))
+        self._ready(row['id'])
+        return reference
 
-    def read(self, reference, access, *, limit=200*1024*1024):
-        with self._db() as db:
-            row = self._row(db, reference, access)
-            if row['state'] != 'ready' or row['size'] > limit: raise MediaUnavailable('Media not ready or exceeds size limit')
-            self._verify_head(row, self._head(row))
-            try:
-                response = self._sdk().get_object(Bucket=row['bucket'], Key=row['object_key'])
-                body = response['Body']
-                try: data = body.read(limit + 1)
-                finally: body.close()
-            except Exception:
-                raise MediaUnavailable('Authorized media read failed') from None
-            if len(data) != row['size'] or hashlib.sha256(data).hexdigest() != row['sha256']:
-                raise MediaUnavailable('Media integrity check failed')
-            return data, row['content_type']
+    def _ready(self,identifier):
+        with self._db(write=True) as db:db.execute("UPDATE media_objects SET state='ready' WHERE id=?",(identifier,))
 
-    def stat(self, reference, access):
+    def _readable(self,reference,access,limit):
         with self._db() as db:
-            row = self._row(db, reference, access)
-            if row['state'] != 'ready': raise MediaUnavailable('Media not ready')
-            self._verify_head(row, self._head(row))
-            return {'size':row['size'], 'content_type':row['content_type']}
+            row=dict(self._row(db,reference,access))
+        if row['content_type'] not in CONTENT_TYPES or row['state']!='ready' or not 0<row['size']<=min(limit,media_limit(row['content_type'])):raise MediaUnavailable('Media not ready or exceeds type limit')
+        self._verify_head(row,self._head(row))
+        with self._db() as db:self._authorize(db,row,access)
+        return row
 
-    def presign(self, reference, access, *, ttl=300):
-        # 5 min default / 15 min cap is an access proposal, NOT a retention policy.
-        if type(ttl) is not int or not 1 <= ttl <= 900: raise MediaError('Invalid signed GET lifetime')
+    def download_file(self,reference,access,path,*,limit=32*1024*1024):
+        """Bounded 64 KiB read, no network within a SQLite transaction."""
+        import os
+        row=self._readable(reference,access,limit)
+        target=Path(path);body=None;created=False
+        try:
+            fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+            created=True
+            with os.fdopen(fd,'wb') as output:
+                body=self._sdk().get_object(Bucket=row['bucket'],Key=row['object_key'])['Body']
+                total=0;digest=hashlib.sha256()
+                while True:
+                    chunk=body.read(min(65536,row['size']-total+1))
+                    if not chunk:break
+                    total+=len(chunk)
+                    if total>row['size']:raise MediaUnavailable('Media exceeds declared size')
+                    output.write(chunk);digest.update(chunk)
+                if total!=row['size'] or digest.hexdigest()!=row['sha256']:raise MediaUnavailable('Media integrity check failed')
+            return row['content_type']
+        except MediaError:
+            if created:target.unlink(missing_ok=True)
+            raise
+        except Exception:
+            if created:target.unlink(missing_ok=True)
+            raise MediaUnavailable('Authorized media stream failed') from None
+        finally:
+            if body is not None:
+                try:body.close()
+                except Exception:logger.warning('Private media stream cleanup failed')
+
+    def read(self,reference,access,*,limit=32*1024*1024):
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix='private-read-') as directory:
+            path=Path(directory)/'media'
+            mime=self.download_file(reference,access,path,limit=limit)
+            return path.read_bytes(),mime
+
+    def stat(self,reference,access):
+        row=self._readable(reference,access,32*1024*1024)
+        return {'size':row['size'],'content_type':row['content_type']}
+
+    def presign(self,reference,access,*,ttl=300):
+        if type(ttl) is not int or not 1<=ttl<=900:raise MediaError('Invalid signed GET lifetime')
+        row=self._readable(reference,access,32*1024*1024)
         with self._db() as db:
-            row = self._row(db, reference, access)
-            if row['state'] != 'ready': raise MediaUnavailable('Media not ready')
-            self._verify_head(row, self._head(row))
             self._authorize(db,row,access)
-            if access.role == 'user' and access.owner != Owner(row['owner_namespace'],row['owner_id']):
-                grant = db.execute('SELECT expires_at FROM media_grants WHERE asset_id=? AND recipient_namespace=? AND recipient_id=?',
+            if access.role=='user' and access.owner!=Owner(row['owner_namespace'],row['owner_id']):
+                grant=db.execute('SELECT expires_at FROM media_grants WHERE asset_id=? AND recipient_namespace=? AND recipient_id=?',
                     (row['id'],access.owner.namespace,access.owner.identifier)).fetchone()
-                ttl = min(ttl, grant[0] - int(self.clock()))
-                if ttl < 1: raise MediaAccessDenied('Media grant expired')
-            try:
-                url = self._sdk().generate_presigned_url('get_object', Params={'Bucket':row['bucket'], 'Key':row['object_key']},
-                    ExpiresIn=ttl, HttpMethod='GET')
-            except Exception: raise MediaUnavailable('Media signing unavailable') from None
-            if urlsplit(url).scheme != 'https': raise MediaUnavailable('HTTPS signing required')
-            return SignedGet(url, int(self.clock()) + ttl)
+                ttl=min(ttl,grant[0]-int(self.clock()))
+                if ttl<1:raise MediaAccessDenied('Media grant expired')
+        try:url=self._sdk().generate_presigned_url('get_object',Params={'Bucket':row['bucket'],'Key':row['object_key']},ExpiresIn=ttl,HttpMethod='GET')
+        except Exception:raise MediaUnavailable('Media signing unavailable') from None
+        if urlsplit(url).scheme!='https':raise MediaUnavailable('HTTPS signing required')
+        return SignedGet(url,int(self.clock())+ttl)
 
     def grant(self, reference, access, recipient, *, expires_at):
         if not isinstance(recipient, Owner) or type(expires_at) is not int or not int(self.clock()) < expires_at <= int(self.clock())+86400:
             raise MediaError('Explicit recipient and bounded access period required')
         with self._db(write=True) as db:
             row = self._row(db, reference, access, owner_only=True)
+            if row['owner_access']=='order':raise MediaAccessDenied('Restricted songs cannot use recipient grants')
             if access.role != 'user': raise MediaAccessDenied('Owner confirmation required')
             db.execute('INSERT INTO media_grants VALUES(?,?,?,?,?) ON CONFLICT(asset_id,recipient_namespace,recipient_id) DO UPDATE SET expires_at=excluded.expires_at',
                 (row['id'], recipient.namespace, recipient.identifier, expires_at, int(self.clock())))
@@ -491,7 +546,8 @@ class PrivateMedia:
 def provider_input(reference, provider):
     """URL-only vendor fetch/expiry contracts are not proven by this repository."""
     import os
-    if _PRIVATE_DEPENDENCY.get() or is_private(reference) or os.environ.get('PRIVATE_MEDIA_ENABLED','false').strip().lower() == 'true':
+    policy=current_policy()
+    if _PRIVATE_DEPENDENCY.get() or is_private(reference) or (policy.mode=='private' if policy else os.environ.get('PRIVATE_MEDIA_ENABLED','false').strip().lower() == 'true'):
         raise MediaProviderBlocked('Private URL input is not approved for this provider')
     return reference
 
@@ -518,14 +574,30 @@ def store_bytes(config, data, content_type, *, purpose):
     finally: service.close()
 
 
-async def read_bytes(reference, *, limit=200*1024*1024):
+def store_path(config,path,content_type,*,purpose):
+    if not 0<Path(path).stat().st_size<=media_limit(content_type):raise MediaError('Media file size refused')
+    return store_bytes(config,Path(path).read_bytes(),content_type,purpose=purpose)
+
+
+async def read_bytes(reference, *, limit=32*1024*1024):
     import asyncio
     from config import Config
     access = current_access()
     _PRIVATE_DEPENDENCY.set(True)
     service = PrivateMedia(Config.from_env())
-    try: return await asyncio.to_thread(service.read, reference, access, limit=limit)
+    try:
+        async with transfer_slot():return await asyncio.to_thread(service.read, reference, access, limit=limit)
     finally: await asyncio.to_thread(service.close)
+
+
+async def stream_to_path(reference,path,*,limit=32*1024*1024):
+    import asyncio
+    from config import Config
+    _PRIVATE_DEPENDENCY.set(True)
+    service=PrivateMedia(Config.from_env());access=current_access()
+    try:
+        async with transfer_slot():return await asyncio.to_thread(service.download_file,reference,access,path,limit=limit)
+    finally:await asyncio.to_thread(service.close)
 
 
 async def retain_image_url(url):
@@ -535,7 +607,10 @@ async def retain_image_url(url):
     an owned reference, not the platform's transient URL/token.
     """
     import os
-    if os.environ.get('PRIVATE_MEDIA_ENABLED','false').strip().lower() != 'true': return url
+    from config import Config
+    if not private_enabled(Config.from_env()):
+        if is_private(url):return url
+        return url
     import asyncio
     import httpx
     import tempfile
@@ -549,13 +624,14 @@ async def retain_image_url(url):
         finally:await asyncio.to_thread(service.close)
         return url
     config=Config.from_env()
+    generation_policy(config)
     # Validate ownership scope/config before downloading any customer content.
     service=PrivateMedia(config)
     try:
         with tempfile.TemporaryDirectory(prefix='private-source-') as directory:
             path=Path(directory)/'source'
             async with httpx.AsyncClient(timeout=60,trust_env=False,follow_redirects=False) as http:
-                try:await _download(http,url,path,50*1024*1024-1)
+                try:await _download(http,url,path,media_limit('image/png'))
                 except httpx.HTTPError:raise MediaUnavailable('Source photo download failed') from None
             data=path.read_bytes()
             _,mime=_photo_format(data)
@@ -566,7 +642,8 @@ async def retain_image_url(url):
 
 async def retain_photo_payload(payload):
     import os
-    if os.environ.get('PRIVATE_MEDIA_ENABLED','false').strip().lower() != 'true':
+    from config import Config
+    if not private_enabled(Config.from_env()):
         return payload.model_dump()
     return {'url':await retain_image_url(payload.url)}
 
@@ -580,13 +657,30 @@ class MediaScopeMiddleware:
         message=getattr(event_object,'message',None)
         recipient=getattr(message,'recipient',None)
         chat_type=getattr(recipient,'chat_type',None)
-        if (os.environ.get('PRIVATE_MEDIA_ENABLED','false').strip().lower()=='true'
-                and chat_type in ('chat','channel')):
+        from media_policy import configured,session_policy
+        group=chat_type in ('chat','channel')
+        if (os.environ.get('PRIVATE_MEDIA_ENABLED','false').strip().lower()=='true' and group):
             await event_object.bot.send_message(user_id=user_id,text='Для работы с личными материалами откройте личный диалог с ботом.')
             return
         access = await user_access(user_id)
-        with media_scope(access):
-            return await handler(event_object, data)
+        token=_GROUP_EVENT.set(group)
+        try:
+            with media_scope(access):
+                context=data.get('_memory_context')
+                payload=getattr(getattr(event_object,'callback',None),'payload','') or ''
+                retained_download=payload.startswith('private_media_download:')
+                policy=await session_policy(context,user_id,payload) if configured() and context and not retained_download else None
+                if group and policy and policy.mode=='private':
+                    await event_object.bot.send_message(user_id=user_id,text='Для личных материалов откройте личный диалог с ботом.')
+                    return
+                with policy_scope(policy):return await handler(event_object,data)
+        except MediaError:
+            from audio_orders import SUPPORT_URL
+            from maxapi.types import LinkButton
+            from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
+            keyboard=InlineKeyboardBuilder().row(LinkButton(text='Поддержка',url=SUPPORT_URL)).as_markup()
+            await event_object.bot.send_message(user_id=user_id,text='Создание временно недоступно. Если заказ уже оплачен, оплата и материалы сохранены. Для продолжения обратитесь в поддержку.',attachments=[keyboard])
+        finally:_GROUP_EVENT.reset(token)
 
 
 async def user_access(user_id):
@@ -657,11 +751,10 @@ def order_scope(getter_name):
             import os
             from config import BASE_DIR
             registry = Path(os.environ.get('PRIVATE_MEDIA_REGISTRY', str(BASE_DIR/'private_media.sqlite3')))
-            if os.environ.get('PRIVATE_MEDIA_ENABLED','false').strip().lower() != 'true' and not registry.exists():
+            from media_policy import configured,restore_operation
+            if not configured():
                 return await function(*args, **kwargs)
             config = Config.from_env()
-            if not config.private_media_enabled and not Path(config.private_media_registry).exists():
-                return await function(*args, **kwargs)
             # Worker process(self, order_id) / deliver_photo_result(bot, order_id,...).
             identifier = args[1] if len(args) > 1 else kwargs.get('order_id', kwargs.get('job_id'))
             row = await getattr(database, getter_name)(identifier)
@@ -681,11 +774,11 @@ def order_scope(getter_name):
                 # Results are separate rows, not part of photo_orders' snapshot.
                 collect(await database.get_photo_results(identifier))
             order = row.get('order_id') or str(identifier)
-            service=PrivateMedia(config)
-            required=service.private_order(Owner('max',str(row['user_id'])),order)
-            access=Access(Owner('max',str(row['user_id'])), 'service', order,references=frozenset(refs),private_required=required)
-            if config.private_media_enabled:service.mark_private_order(access)
-            with media_scope(access):
+            product={'get_audio_order':'song','get_musical_order':'musical_card','get_photo_order':'photosession','get_animation_job':'animation'}[getter_name]
+            policy=await restore_operation(product,row['user_id'],order,refs,parent=row.get('order_id'))
+            assertions=await user_access(row['user_id'])
+            access=Access(Owner('max',str(row['user_id'])), 'service', order,references=frozenset(refs),private_required=policy.mode=='private',entitlements=assertions.entitlements)
+            with policy_scope(policy),media_scope(access):
                 return await function(*args, **kwargs)
         return wrapped
     return decorate
@@ -701,7 +794,8 @@ def job_scope(kind):
         async def wrapped(*args, **kwargs):
             from config import Config, BASE_DIR
             registry = Path(os.environ.get('PRIVATE_MEDIA_REGISTRY', str(BASE_DIR/'private_media.sqlite3')))
-            if os.environ.get('PRIVATE_MEDIA_ENABLED','false').strip().lower() != 'true' and not registry.exists():
+            from media_policy import configured,restore_operation
+            if not configured():
                 return await function(*args, **kwargs)
             value = args[1]
             identifier = value['id'] if isinstance(value,dict) else value
@@ -727,34 +821,47 @@ def job_scope(kind):
                     try: collect(json.loads(v))
                     except (ValueError,TypeError): pass
             collect(dict(row))
-            service=PrivateMedia(Config.from_env())
-            required=service.private_order(Owner('max',str(owner)),kind+':'+str(identifier))
-            access=Access(Owner('max',str(owner)), 'service', kind+':'+str(identifier), references=frozenset(refs),private_required=required)
-            if service.config.private_media_enabled:service.mark_private_order(access)
-            with media_scope(access):
+            operation=kind+':'+str(identifier)
+            policy=await restore_operation('multstudio' if kind=='studio' else 'ded_moroz',owner,operation,refs,parent=row.get('payment_order_id'))
+            assertions=await user_access(owner)
+            access=Access(Owner('max',str(owner)), 'service', operation, references=frozenset(refs),private_required=policy.mode=='private',entitlements=assertions.entitlements)
+            with policy_scope(policy),media_scope(access):
                 return await function(*args, **kwargs)
         return wrapped
     return decorate
 
 
-async def upload_for_max(bot, reference, access, *, kind):
+async def upload_for_max(bot,reference,access,*,kind,destination_user=None):
     import asyncio
+    import tempfile
     from config import Config
-    from maxapi.types import InputMediaBuffer
+    from maxapi.types import InputMediaBuffer,InputMedia
     from maxapi.enums.upload_type import UploadType
-    kinds = {'image': UploadType.IMAGE, 'audio': UploadType.AUDIO, 'video': UploadType.VIDEO, 'file': UploadType.FILE}
-    if kind not in kinds: raise MediaError('Unsupported MAX media type')
-    service = PrivateMedia(Config.from_env())
+    kinds={'image':UploadType.IMAGE,'audio':UploadType.AUDIO,'video':UploadType.VIDEO,'file':UploadType.FILE}
+    if kind not in kinds:raise MediaError('Unsupported MAX media type')
+    if _GROUP_EVENT.get():
+        permitted=(access.owner is not None and access.owner.namespace=='max' and str(destination_user)==access.owner.identifier)
+        if access.role=='admin':permitted=destination_user==access.admin_id
+        if destination_user is None or not permitted:raise MediaAccessDenied('Private attachments require a personal destination')
+    service=PrivateMedia(Config.from_env())
     try:
-        data, mime = await asyncio.to_thread(service.read, reference, access)
-    finally: await asyncio.to_thread(service.close)
-    if kind != 'file' and mime.split('/')[0] != kind:
-        raise MediaError('MAX attachment type mismatch')
-    filename = 'media.' + CONTENT_TYPES[mime]
-    if kind == 'image':
-        from image_service import _prepare_max_image
-        data, filename = await asyncio.to_thread(_prepare_max_image, data)
-    attachment = await bot.upload_media(InputMediaBuffer(buffer=data, filename=filename, type=kinds[kind]))
-    if not isinstance(attachment.payload.token, str) or not attachment.payload.token.strip():
-        raise MediaUnavailable('MAX did not confirm media upload')
-    return attachment
+        async with transfer_slot():
+            with tempfile.TemporaryDirectory(prefix='private-max-') as directory:
+                path=Path(directory)/'media'
+                mime=await asyncio.to_thread(service.download_file,reference,access,path)
+                if kind!='file' and mime.split('/')[0]!=kind:raise MediaError('MAX attachment type mismatch')
+                filename='media.'+CONTENT_TYPES[mime]
+                # Small buffers retain SDK compatibility; large transfers use its file path.
+                if kind=='image' or path.stat().st_size<=1024*1024:
+                    data=await asyncio.to_thread(path.read_bytes)
+                    if kind=='image':
+                        from image_service import _prepare_max_image
+                        data,filename=await asyncio.to_thread(_prepare_max_image,data)
+                    upload=InputMediaBuffer(buffer=data,filename=filename,type=kinds[kind])
+                else:
+                    renamed=path.with_name(filename);path.rename(renamed)
+                    upload=InputMedia(path=str(renamed),type=kinds[kind])
+                attachment=await bot.upload_media(upload)
+                if not isinstance(attachment.payload.token,str) or not attachment.payload.token.strip():raise MediaUnavailable('MAX did not confirm media upload')
+                return attachment
+    finally:await asyncio.to_thread(service.close)

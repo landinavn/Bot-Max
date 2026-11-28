@@ -4,6 +4,7 @@
 prodamus-integration-expert/references (payform-protocol.md, hmac.md).
 """
 from safe_logging import get_logger
+from media_policy import invoice_guard,guard_invoice_order
 
 import hashlib
 import hmac
@@ -187,6 +188,7 @@ class ProdamusPayments:
         self.bot_link = config.bot_link
         self.config = config
 
+    @invoice_guard
     async def create_payment_link(self, user_id: int, credits: int | None = None, *, promo: bool = False,
                                   order_id: str | None = None, amount: int | None = None,
                                   description: str | None = None) -> str:
@@ -255,6 +257,7 @@ class ProdamusPayments:
         return link
 
     async def _request_payment_link(self, data: dict) -> str:
+        await guard_invoice_order(data.get('order_id'),int(data['_param_user_id']) if data.get('_param_user_id') else None)
         query = urlencode(flatten_fields(data), quote_via=quote)
         # Не повторяем запрос автоматически: Prodamus мог создать ссылку до таймаута.
         async with aiohttp.ClientSession(
@@ -279,6 +282,7 @@ class ProdamusPayments:
         logger.info(f"Создан счет: {description}, сумма: {amount} ₽, order_id: {order_id}")
         return link
 
+    @invoice_guard
     async def create_audio_payment_link(
         self, user_id: int, audio_format: str, scenario: str, details: str, style: str | None,
         prompt: str, tags: str, title: str, *, order_id: str,
@@ -383,6 +387,7 @@ class ProdamusPayments:
         await update_cartoon_order(order_id, payment_link=link)
         return link
 
+    @invoice_guard
     async def create_musical_payment_link(self, *, order_id: str, amount: int, description: str) -> str:
         order = await get_musical_order(order_id)
         if isinstance(amount,bool) or not isinstance(amount,int) or not order or order['status'] != 'pending' or order['amount_kopecks'] != amount * 100 or order['product_name'] != description:

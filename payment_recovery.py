@@ -34,6 +34,10 @@ async def claim_photo_recovery(user_id, order_number, email):
         raise ValueError('Некорректный пользователь.')
     if order_number != RECOVERY_NUMBER or not email_matches(email):
         return None
+    from media_policy import configured,bind_operation
+    if configured():
+        # Verified historical payment keeps its legacy mode; no new bill or debit.
+        await bind_operation('photosession',user_id,PHOTO_ORDER_ID,existing=True,ready=False)
     async with aiosqlite.connect(database.DATABASE_PATH, timeout=30) as db:
         db.row_factory = aiosqlite.Row
         await db.execute('BEGIN IMMEDIATE')

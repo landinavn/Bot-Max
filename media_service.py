@@ -1,4 +1,5 @@
 """Локальная обработка медиа через ffmpeg и публикация результата в Object Storage."""
+from media_policy import private_enabled
 from safe_logging import get_logger
 
 import asyncio
@@ -63,8 +64,8 @@ async def audio_duration(source: Path) -> float:
 async def _download(http, url: str, path: Path, limit: int):
     from private_media import is_private, read_bytes
     if is_private(url):
-        data, _ = await read_bytes(url, limit=limit)
-        await asyncio.to_thread(path.write_bytes, data)
+        from private_media import stream_to_path
+        await stream_to_path(url,path,limit=limit)
         return
     parsed = urlsplit(url)
     if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password:
@@ -85,9 +86,9 @@ async def _download(http, url: str, path: Path, limit: int):
 def _upload_video(client, settings, path: Path) -> str:
     from private_media import generation_policy
     generation_policy(settings)
-    if getattr(settings, 'private_media_enabled', False):
-        from private_media import store_bytes
-        return store_bytes(settings, path.read_bytes(), 'video/mp4', purpose='video-output')
+    if private_enabled(settings):
+        from private_media import store_path
+        return store_path(settings,path,'video/mp4',purpose='video-output')
     key = f'videos/{uuid4().hex}.mp4'
     with path.open('rb') as stream:
         client.put_object(Bucket=settings.storage_bucket, Key=key, Body=stream, ContentType='video/mp4',
@@ -161,6 +162,8 @@ async def create_musical_video(image_url: str, audio_url: str, *, animated_video
 
 
 async def upload_video_for_max(bot, video_url: str):
+    from private_media import is_private,upload_for_max,current_access
+    if is_private(video_url):return await upload_for_max(bot,video_url,current_access(),kind='video')
     """Загрузить MP4 в MAX, чтобы отправить сам видеофайл вместе со ссылкой."""
     from maxapi.types import InputMedia
     from maxapi.enums.upload_type import UploadType
@@ -178,6 +181,8 @@ async def upload_video_for_max(bot, video_url: str):
 
 
 async def upload_audio_for_max(bot, audio_url: str):
+    from private_media import is_private,upload_for_max,current_access
+    if is_private(audio_url):return await upload_for_max(bot,audio_url,current_access(),kind='audio')
     """Отправить короткое превью аудиовложением, без полного трека или картинки."""
     from maxapi.types import InputMedia
     from maxapi.enums.upload_type import UploadType

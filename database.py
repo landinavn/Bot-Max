@@ -1,4 +1,5 @@
 """Постоянный баланс пользователей. Все изменения фиксируются в SQLite."""
+from media_policy import checkout_policy
 from safe_logging import get_logger
 from private_media import is_private, check_for_user
 
@@ -568,6 +569,7 @@ async def add_credits(
         return True
 
 
+@checkout_policy(None, getter='get_payment_order')
 async def create_payment_order(
     order_id: str, user_id: int, credits: int, amount_kopecks: int, product_name: str,
     *, promo: bool = False,
@@ -622,6 +624,7 @@ async def get_payment_order(order_id: str) -> aiosqlite.Row | None:
             return await cursor.fetchone()
 
 
+@checkout_policy(None)
 async def deduct_credit(
     user_id: int, *, count_generation: bool = False, generation_event: str | None = None,
     allow_promo_images: bool = False,
@@ -1006,6 +1009,7 @@ async def song_checkout_order(order_id: str) -> dict:
     return await get_audio_order(target_id)
 
 
+@checkout_policy('song', getter='get_audio_order')
 async def create_audio_order(order_id: str, user_id: int, audio_format: str, scenario: str,
                              details: str, style: str | None, prompt: str, tags: str, title: str,
                              *, song_discount: bool = False) -> str:
@@ -1133,6 +1137,7 @@ async def grant_audio_admin_access(order_id: str, user_id: int) -> bool:
         return cursor.rowcount == 1
 
 
+@checkout_policy('song',getter='get_audio_order')
 async def request_audio_regeneration(order_id: str, user_id: int) -> bool:
     async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
         cursor = await db.execute("""UPDATE audio_orders SET regeneration_used=1,
@@ -1150,6 +1155,7 @@ MUSICAL_TARIFFS = {
 }
 
 
+@checkout_policy('musical_card', getter='get_musical_order')
 async def create_musical_order(order_id: str, user_id: int, image_url: str, audio_url: str, tariff: str):
     from urllib.parse import urlsplit
     if not isinstance(order_id,str) or not order_id.startswith(('music_','promo_music_card_')) or len(order_id)>200:
@@ -1183,6 +1189,7 @@ async def get_musical_order(order_id: str):
     return order
 
 
+@checkout_policy('musical_card', getter='get_musical_order')
 async def create_prepaid_musical_order(order_id: str, user_id: int, mode: str):
     if (not isinstance(order_id,str) or not order_id.startswith('music_') or len(order_id)>200
             or isinstance(user_id,bool) or not isinstance(user_id,int) or user_id<=0
@@ -1197,6 +1204,7 @@ async def create_prepaid_musical_order(order_id: str, user_id: int, mode: str):
         return result
 
 
+@checkout_policy('musical_card', getter='get_musical_order')
 async def create_prepaid_musical_upsell(order_id: str, user_id: int, image_url: str, draft: dict):
     """Freeze the existing card and reviewed song before requesting payment."""
     from audio_service import validate_song_arguments
@@ -1321,6 +1329,7 @@ CARTOON_ORDER_THEMES = frozenset({
 })
 
 
+@checkout_policy('cartoon', getter='get_cartoon_order')
 async def create_cartoon_order(order_id: str, user_id: int, theme: str, tariff: str):
     if (not isinstance(order_id,str) or not order_id.startswith(('cartoon_','promo_cartoon_')) or len(order_id)>200
             or isinstance(user_id,bool) or not isinstance(user_id,int) or user_id<=0
@@ -1498,6 +1507,7 @@ async def _backfill_sale_counters(db, *, force=False) -> None:
     await db.execute("INSERT INTO stats_migrations(name) VALUES ('sales_v2') ON CONFLICT(name) DO NOTHING")
 
 
+@checkout_policy('photosession', getter='get_photo_order')
 async def create_photo_order(order_id: str, user_id: int, tariff: int = 590):
     if (not isinstance(order_id,str) or not order_id.startswith(('photo_','promo_photo_')) or len(order_id)>200
             or isinstance(user_id,bool) or not isinstance(user_id,int) or user_id<=0
@@ -1990,6 +2000,7 @@ async def animation_first_price(user_id):
             return 249 if await cursor.fetchone() else 199
 
 
+@checkout_policy('animation')
 async def create_animation_order(user_id,package,*,admin=False):
     if isinstance(user_id,bool) or not isinstance(user_id,int) or user_id<=0 or package not in ('one','three','five'):
         raise ValueError('Неверный пакет оживления фото.')
@@ -2060,6 +2071,7 @@ async def animation_orders_for_user(user_id):
             return [dict(row) for row in await cursor.fetchall()]
 
 
+@checkout_policy('animation',getter='get_animation_order')
 async def queue_animation_photo(user_id,order_id,image_url,message_id):
     url=urlsplit(image_url)
     if (not is_private(image_url) and (url.scheme!='https' or not url.hostname or url.username or url.password)) or not message_id:

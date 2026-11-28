@@ -1,4 +1,5 @@
 """Retain a user-supplied MP3 for offline episode assembly; no paid music API."""
+from media_policy import private_enabled
 import math
 from uuid import uuid4
 
@@ -26,7 +27,7 @@ async def upload_music(assets, snapshot, url):
             raise ValueError('Отправьте MP3 длительностью до 10 минут и размером до 20 МБ. Имя файла не заменяет проверку формата.')
         # Decode the whole track before replacing the selected music. Normalize for the existing mixer.
         output = assets.path(uuid4().hex + '.mp3')
-        if getattr(assets.config,'private_media_enabled',False):
+        if private_enabled(assets.config):
             import os
             fd=os.open(output,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
             os.close(fd)
@@ -34,7 +35,7 @@ async def upload_music(assets, snapshot, url):
                       '-map', '0:a:0', '-vn', '-map_metadata', '-1', '-ar', '48000', '-ac', '2',
                       '-c:a', 'libmp3lame', '-b:a', '192k', output, timeout=90)
         fields={}
-        if getattr(assets.config,'private_media_enabled',False):
+        if private_enabled(assets.config):
             from private_media import is_private, MediaError
             reference=await assets.publish(output.name)
             if not is_private(reference):raise MediaError('Private audio publication refused a public URL')

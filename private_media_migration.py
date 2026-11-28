@@ -119,20 +119,26 @@ def _review_current(source,config,item):
 def copy_one(source,config,item,legacy_sdk,private_store):
     """Only a new private copy; existing refs, ACL, objects and orders untouched."""
     _review_current(source,config,item)
+    from private_media import media_limit
     try:
         meta=legacy_sdk.head_object(Bucket=config.storage_bucket,Key=item.object_key)
-        if not 0<meta['ContentLength']<=200*1024*1024: raise MediaError('Migration source size rejected')
+        mime=meta.get('ContentType','application/octet-stream').split(';')[0].strip()
+        limit=media_limit(mime)
+        if not 0<meta['ContentLength']<=limit: raise MediaError('Migration source size rejected')
         response=legacy_sdk.get_object(Bucket=config.storage_bucket,Key=item.object_key)
         body=response['Body']
-        try:data=body.read(200*1024*1024+1)
+        try:data=body.read(limit+1)
         finally:body.close()
         if len(data)!=meta['ContentLength']:raise MediaError('Migration source incomplete')
-        mime=meta.get('ContentType','application/octet-stream').split(';')[0].strip()
     except MediaError:raise
     except Exception:raise MediaError('Authorized legacy media read failed') from None
     operation='migration:'+hashlib.sha256(json.dumps([config.storage_bucket,item.object_key,item.owner_id,item.order_id]).encode()).hexdigest()
     access=Access(Owner('max',item.owner_id),'service',item.order_id or 'migration:'+item.value_hash)
-    return private_store.put(data,mime,access,operation_id=operation)
+    from media_policy import Policy,policy_scope
+    product={'photo_results':'photosession','cartoon_orders':'cartoon','musical_orders':'musical_card','audio_orders':'song','cartoon_assets':'multstudio'}[item.table]
+    # A copy is not a cutover and must not pin/change the business order's mode.
+    with policy_scope(Policy(product,'private','max',item.owner_id,operation)):
+        return private_store.put(data,mime,access,operation_id=operation,mark_order=False)
 
 
 def activity(source):
@@ -174,6 +180,10 @@ def cutover_completed_photo(source,config,item,reference,private_store,*,service
     _review_current(source,config,item)
     if activity(source):raise MediaError('Unresolved active or pending jobs block cutover')
     access=Access(Owner('max',item.owner_id),'service',item.order_id)
+    from media_policy import PolicyStore
+    selected=PolicyStore(config).load(access.owner,item.order_id)
+    if selected is not None and selected.mode=='legacy':
+        raise MediaError('Pinned legacy order needs a separately reviewed reader/policy cutover')
     private_store.stat(reference,access)
     # Verify private copy is the exact original, not another owned image.
     with private_store._db() as registry:

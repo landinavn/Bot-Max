@@ -1,4 +1,5 @@
 """Only cartoon_* tables. Immutable revisions and explicitly confirmed generation jobs."""
+from media_policy import configured,bind_operation,restore_operation,studio_action
 from safe_logging import get_logger
 import hashlib
 import json
@@ -691,6 +692,15 @@ async def quote(target, key, kind, settings):
                 from .rules import validate_video_asset
                 validate_video_asset(scene)
     fingerprint = digest(snap)
+    job_id=uuid4().hex
+    if configured():
+        async with connect() as db:
+            existing=await one(db,"SELECT j.*,p.owner_id FROM cartoon_jobs j JOIN cartoon_projects p ON p.id=j.project_id WHERE j.target=? AND j.target_id=? AND j.kind=? AND j.fingerprint=? AND j.status IN ('quoted','queued','preparing','submitting','polling','avatar_polling','video_preparing') AND j.expires>? ORDER BY j.rowid DESC LIMIT 1",(target,key,kind,fingerprint,int(time.time())))
+            owner=await one(db,'SELECT owner_id FROM cartoon_projects WHERE id=?',(snap['project_id'],))
+        if existing:
+            await restore_operation('multstudio',existing['owner_id'],'studio:'+existing['id'])
+            return existing
+        await bind_operation('multstudio',owner['owner_id'],'studio:'+job_id)
     async with connect() as db:
         await db.execute('BEGIN IMMEDIATE')
         prior = await one(db, '''SELECT * FROM cartoon_jobs WHERE target=? AND target_id=? AND kind=? AND fingerprint=?
@@ -698,12 +708,16 @@ async def quote(target, key, kind, settings):
                           (target, key, kind, fingerprint, int(time.time())))
         if prior:
             return prior
-        job_id = uuid4().hex
         await db.execute('''INSERT INTO cartoon_jobs(id,project_id,target,target_id,kind,snapshot,fingerprint,estimate,expires)
           VALUES (?,?,?,?,?,?,?,?,?)''', (job_id, snap['project_id'], target, key, kind, encoded(snap), fingerprint,
                                         cost['estimate'], int(time.time()) + 1800))
         await db.commit()
     return await job(job_id)
+
+
+async def media_job_owner(key):
+    async with connect() as db:
+        return await one(db,'SELECT j.*,p.owner_id FROM cartoon_jobs j JOIN cartoon_projects p ON p.id=j.project_id WHERE j.id=?',(key,))
 
 
 async def job(key):
@@ -806,6 +820,7 @@ async def approve_character_result(key, actor):
         return asset['id']
 
 
+@studio_action
 async def confirm(key, actor):
     async with connect() as db:
         await db.execute('BEGIN IMMEDIATE')

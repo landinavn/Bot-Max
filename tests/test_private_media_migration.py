@@ -87,3 +87,15 @@ def test_reviewed_cutover_is_narrow_idempotent_and_preserves_finances(legacy):
 def test_unsafe_or_signed_legacy_location_is_never_guessed(private_env,suffix):
     c,s,a,store=private_env
     assert migration.legacy_key(c,'https://storage.yandexcloud.net/synthetic-legacy/'+suffix) is None
+
+
+def test_copy_does_not_change_legacy_order_policy_or_private_intent(legacy):
+    from media_policy import Policy,PolicyStore
+    c,s,a,store,db,url=legacy
+    PolicyStore(c).bind(Policy('photosession','legacy','max','1','order-1'))
+    item=migration.inventory(db,c)[0]
+    reference=migration.copy_one(db,c,item,s,store)
+    assert not store.private_order(a.owner,'order-1')
+    assert PolicyStore(c).load(a.owner,'order-1').mode=='legacy'
+    with pytest.raises(MediaError):migration.cutover_completed_photo(db,c,item,reference,store,service_stopped=True,providers_checked=True,memory_drained=True)
+    with sqlite3.connect(db) as d:assert d.execute('SELECT image_url FROM photo_results').fetchone()[0]==url

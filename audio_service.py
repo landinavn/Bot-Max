@@ -1,4 +1,5 @@
 """Асинхронная генерация музыки TTAPI/Suno; без автоматического повторения POST."""
+from media_policy import private_enabled
 from safe_logging import get_logger
 
 import asyncio
@@ -303,9 +304,9 @@ async def _create_audio_preview(audio_url: str, clip_duration: int, *, protected
                 raise AudioServiceError('Не удалось создать фрагмент песни.')
             from private_media import generation_policy
             generation_policy(settings,audio_url)
-            if settings.private_media_enabled:
-                from private_media import store_bytes
-                return await asyncio.to_thread(store_bytes, settings, target.read_bytes(), 'audio/mpeg', purpose='audio-preview')
+            if private_enabled(settings):
+                from private_media import store_path,transfer_slot
+                async with transfer_slot():return await asyncio.to_thread(store_path,settings,target,'audio/mpeg',purpose='audio-preview')
             key = f'audio-previews/{uuid4().hex}.mp3'
             await asyncio.to_thread(client.put_object, Bucket=settings.storage_bucket, Key=key,
                                     Body=target.read_bytes(), ContentType='audio/mpeg')
@@ -353,7 +354,7 @@ async def generate_song(prompt: str, tags: str, title: str) -> str:
     import os
     from private_media import generation_policy
     generation_policy(Config.from_env())
-    if os.environ.get('PRIVATE_MEDIA_ENABLED','false').strip().lower() == 'true':
+    if private_enabled(Config.from_env()):
         from private_media import PrivateMedia, require_song_scope
         config=Config.from_env()
         require_song_scope(config)
@@ -386,9 +387,9 @@ async def fetch_song(job_id: str) -> dict:
 
 async def _retain_private_tracks(result, job_id):
     import os
-    if os.environ.get('PRIVATE_MEDIA_ENABLED','false').strip().lower() != 'true': return result
+    if not private_enabled(Config.from_env()): return result
     config = Config.from_env()
-    if not config.private_media_enabled: return result
+    if not private_enabled(config): return result
     import copy
     from private_media import PrivateMedia, require_song_scope, is_private
     from media_service import _download
@@ -404,7 +405,7 @@ async def _retain_private_tracks(result, job_id):
                     url = track.get('audioUrl') or track.get('audio_url')
                     if not url or is_private(url): continue
                     path = Path(directory)/'song.mp3'
-                    try:await _download(http, url, path, 32*1024*1024)
+                    try:await _download(http, url, path, 16*1024*1024)
                     except httpx.HTTPError:
                         from private_media import MediaUnavailable
                         raise MediaUnavailable('Retained song download unavailable; keep the existing job ID') from None

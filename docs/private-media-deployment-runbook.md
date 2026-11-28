@@ -1,147 +1,173 @@
-# Security 1.1 — deployment и безопасный откат
+# Security 1.1.1 — staged deployment, Yandex setup, smoke и reader rollback
 
-**Этот документ — инструкция для будущего согласованного окна. Сейчас ничего не применять.** PR остаётся draft. Production, VPS, рабочая БД, бакеты, MAX, Nginx, Small Talk и frontend не изменялись.
+**Подготовка, не выполнение. Не запускать эти действия на VPS без отдельного согласования.** Production остаётся на `57744a0b600a9736cbaf1d00a2ccb6660869c903`. Разработка продолжается от `e6ef3dce87e0f67e2c7fb280f5e9901fabaccd4b` в Draft [PR №266](https://github.com/landinavn/Bot-Max/pull/266). Точный итоговый SHA, полный список файлов и результаты сравнительных запусков — в описании PR, привязанные к immutable commit. Merge/deployment не выполнялись.
 
-## 1. Проверенные исходные точки
+## 1. Допуск и критерии остановки
 
-* Установленный Security 1.0: `57744a0b600a9736cbaf1d00a2ccb6660869c903`.
-* Ранее подготовленный secure fallback: `196d577693da6257d86debb80c64620edf8e0f9f`.
-* Новая ветка `security/private-media-storage` создана непосредственно от первого SHA. Полный итоговый SHA фиксируется в draft PR и сообщении владельцу; перед любыми действиями pin именно этот immutable SHA.
-* `main` не является базой Security 1.1: на момент подготовки удалённый main всё ещё указывает на `48d4c5918013069483a2292c5e46e626798f24cb`. Поэтому PR направляется в `security/max-tls-safe-logging`, чтобы diff содержал только 1.1. Это не разрешает merge ни одной ветки.
-* `safe_logging.py`, `max_client.py`, production requirements и lockfiles не изменены. Не выполнять pip upgrade/install при будущем обновлении.
+До пилота нужны: новый private bucket; проверенные Yandex owner/service principals; минимальные IAM и policy; успешный synthetic owner smoke; ограничение одним тестовым admin owner; готовый emergency reader и backup. Private animation/cartoon/ded_moroz/multstudio остаются **BLOCKED**. Их legacy при private off не отключается. Таблица всех десяти продуктов и официальные API — [архитектура](private-media-storage.md).
 
-## 2. Препятствия включению
+Остановить пилот при anonymous read, чужом owner доступе, неизвестном principal/правиле, registry error, private→legacy попытке, утечке URL/PII/секрета в журнал, новом paid POST вместо recovery, пропуске/дублировании оплаты или неприемлемом RSS/latency. Не снимать TLS/проверки ACL ради продолжения. Не повышать роль до storage.admin или folder editor.
 
-Нельзя включать `PRIVATE_MEDIA_ENABLED=true` всем клиентам до выполнения всех пунктов:
+## 2. Точные исходники и зависимости
 
-1. Создан и независимо проверен новый private bucket; нет публичного ACL/policy, website/CDN/anonymous endpoint.
-2. Доказан live synthetic S3→MAX upload для image, MP3, MP4, TXT на установленном VPS SDK. Здесь проверена только модель/SDK mocks.
-3. По каждому URL-only AI продукту подтверждены fetch/refetch/expiry либо отдельным решением закрыта его продажа и новые запуски. Сейчас HeyGen/PiAPI/Kling private POST блокируются, но счета бизнес-код по-прежнему может выставлять. Без этого нельзя включать режим клиентам.
-4. Проверено восстановление IDs и scoped refs из всех реально используемых orders/FSM; неизвестные submitting-state jobs разобраны без повторного paid POST.
-5. Согласованы доступы к registry, local studio_files и резервным копиям. Приватный S3 не исправляет раздачу локального пути веб-сервером.
-
-Наличие draft PR и проходящих новых unit tests не снимает эти препятствия. Не проводить real smoke и не использовать реальные ключи из этой среды.
-
-## 3. Действия владельца в облачной консоли
-
-Отдельно от запуска кода, после разрешения владельца:
-
-1. Создать **другой** bucket. Не менять существующие `STORAGE_BUCKET`, его policy или ACL.
-2. Отключить все публичные способы доступа нового bucket в конкретном облаке: anonymous read/list, website, публичный CDN/origin. Не предполагать, что отсутствие object ACL гарантирует отсутствие bucket public policy.
-3. Проверить bucket ACL, policy и IAM; Allow только явно перечисленным нужным principal, без `*` и групп. Preflight намеренно отвергает неизвестные формы principal; не обходить отказ выдачей публичных прав.
-4. Создать отдельную service identity и отдельные static credentials. Не давать её права `DeleteObject`, `PutObjectAcl`, `PutBucketAcl`, `PutBucketPolicy`, `ListAllMyBuckets`. Не использовать owner/root key.
-5. Нужные S3 действия: `GetObject`, `PutObject` только `media/v1/*`; `GetBucketAcl`, `GetBucketPolicy` для read-only preflight. Для различения отсутствующего объекта и отказа HEAD может потребоваться ограниченный `ListBucket` на согласованный prefix: точную IAM модель проверить в используемом облаке. Код листинг объектов не выполняет. Если требует KMS — отдельно проверить нужные действия/ключи, не расширять до admin.
-6. На **синтетическом** объекте проверить: авторизованный PUT/HEAD/GET работает; anonymous GET и HEAD без подписи запрещены; signed GET действует до TTL и отказывает после; чужой владелец отказывает до SDK request. Не помещать тестовые URL/credentials в журнал/PR.
-7. Зафиксировать результат без secret values и URL. Облачный preflight только читает ACL/policy и не доказывает CDN/public flags/IAM всей организации. Проверка владельца обязательна.
-
-## 4. Проверка релиза вне production
-
-В отдельном checkout проверить SHA, clean diff и отсутствие посторонних коммитов. Для проверенного `<release-sha>`:
+Перед будущим окном проверить:
 
 ```bash
+git rev-parse HEAD
 git merge-base 57744a0b600a9736cbaf1d00a2ccb6660869c903 <release-sha>
-git diff --stat 57744a0b600a9736cbaf1d00a2ccb6660869c903 <release-sha>
-git diff --name-only 57744a0b600a9736cbaf1d00a2ccb6660869c903 <release-sha>
+git diff --name-status 57744a0b600a9736cbaf1d00a2ccb6660869c903 <release-sha>
 git diff --exit-code 57744a0b600a9736cbaf1d00a2ccb6660869c903 <release-sha> -- safe_logging.py max_client.py requirements.txt
 ```
 
-Merge-base должен быть точным Security 1.0 SHA; не cherry-pick из financial/frontend веток. Сверить все зависимости с установленными, не менять venv. В production не копировать test harness, junit, mock credentials, synthetic DB и планы инвентаризации из разработки.
+Никаких financial/frontend веток, установки Node, backend migrations или pip upgrades. `safe_logging.py`, `max_client.py` и production requirements не менялись. Заявленные владельцем версии VPS: Python 3.12.3, maxapi 1.2.3, aiohttp 3.14.5. В Cloud проверяется Python 3.12.14 и два существующих venv (aiohttp 3.13.5/3.14.5); patch-version VPS здесь не запускалась.
 
-Сначала оставить `PRIVATE_MEDIA_ENABLED=false`. Для будущего private режима добавить отдельные значения `PRIVATE_MEDIA_BUCKET`, `PRIVATE_MEDIA_REGISTRY`, `PRIVATE_MEDIA_ACCESS_KEY_ID`, `PRIVATE_MEDIA_SECRET_ACCESS_KEY` через существующий защищённый механизм environment. Не вставлять secrets в shell history, чат, git или service stdout. Старые storage настройки сохранить для legacy readers.
+Новые слои: media_policy.py, media_registry.py, private_media_emergency.py, private_media.py; технические guards в database/prodamus/promo1111/Ded Moroz/мультстудии; потоковые readers и проверки output refs в существующих service/handler путях. Бизнес SQL, цены и HMAC webhook не переписаны. Новые metadata tables находятся только в отдельном media registry.
 
-Registry разместить вне web root, в каталоге существующего service user с минимальным доступом; первый файл создаётся 0600. У service user должен быть доступ к этому пути и только необходимым материалам. Не задавать registry равным `database.sqlite3`. Не хранить registry на временном диске или в публичной директории.
+## 3. Создание отдельного закрытого бакета Yandex
 
-## 5. До окна остановки
+Все пункты выполняет владелец **позже**, только для нового бакета; действующий STORAGE_BUCKET не менять.
 
-* Подтвердить текущий VPS SHA, Python и версии **без установки пакетов**. Заявленные владельцем версии: Python 3.12.3, maxapi 1.2.3, aiohttp 3.14.5.
-* Проверить pending/queued/running/polling/manual jobs, paid orders, delivery backlog, provider IDs, leases и submitting markers. Только read-only запросы к провайдерам. Не переносить в публичный отчёт IDs/фото/тексты реальных клиентов.
-* Обнаружить незавершённые RAM FSM: `MemoryContext` не является долговременным хранилищем всех состояний. Дождаться завершения либо отдельно сохранить согласованные контрольные точки и способ восстановления. Backup SQLite сам по себе не сохраняет RAM. Не считать отсутствие worker task гарантией отсутствия пользовательской сессии.
-* Снять read-only baseline количества оплат, недоставленных результатов, активных provider jobs и health polling/webhook, без логирования PII.
-* Согласовать короткое окно недоступности и порядок платежей, пришедших в это время. Не менять Nginx/домен/webhook route для эксперимента.
+1. В Yandex Cloud Console выбрать нужные cloud/folder → Object Storage → создать bucket с новым уникальным техническим именем. Не включать имена клиентов в bucket/key. Выбрать согласованные storage class/region, соответствующие будущей конфигурации SDK.
+2. Оставить чтение объектов, листинг объектов и просмотр конфигурации **непубличными**. Не включать website, CDN/origin, anonymous read или allAuthenticatedUsers. Не публиковать test objects через веб-сайт.
+3. Создать отдельный service account для runtime, без cloud/folder широких storage ролей. Отдельно оставить owner/operator identity для создания/настройки: её административные права не переносить боту.
+4. В bucket IAM access добавить runtime service account: **storage.uploader + storage.configViewer на этот bucket**. Первая роль не удаляет объекты/не настраивает bucket; вторая нужна для просмотра policy. Не назначать эти роли на весь folder вместо bucket.
+5. Применить bucket policy ниже с точными идентификаторами и bucket name. Это template для нового bucket, не команда изменения старого. Не добавлять wildcard console access rule: приложение намеренно отклоняет неоднозначный Allow principal даже с условием.
+6. Создать static access key этого runtime account. Секрет не помещать в чат, git или shell history; использовать защищённый environment-файл service user. Legacy ключи оставить отдельно для legacy readers.
+7. Получить owner/service canonical IDs из доверенного IAM/console и сверить с authenticated GetBucketAcl/GetBucketPolicy. В PRIVATE_MEDIA_PRINCIPALS записать **заранее утверждённые** owner/service IDs. Не считать любой ID из ответа автоматически доверенным.
+8. Проверить доступность bucket/prefix и отрицательные случаи из раздела smoke. Если GetBucketPolicy/HEAD/PUT не проходит — остановиться; не выдавать admin и не отключать preflight.
 
-## 6. Консистентная резервная копия
+Официальные источники (проверка 28.11.2026): [создание bucket](https://yandex.cloud/en/docs/storage/operations/buckets/create), [bucket IAM bindings](https://yandex.cloud/en/docs/storage/operations/buckets/iam-access), [IAM/ACL/policy взаимодействие](https://yandex.cloud/en/docs/storage/security/overview), [policy principal/resource](https://yandex.cloud/en/docs/storage/concepts/policy), [просмотр policy — minimum storage.configViewer](https://yandex.cloud/en/docs/storage/operations/buckets/policy), [S3 actions](https://yandex.cloud/en/docs/storage/s3/api-ref/policy/actions).
 
-Только после отдельного согласования окна:
+IAM роли назначаются на bucket, **не prefix**. Prefix для данных ограничивает bucket policy. S3 GetBucketPolicy документирован как отдельный метод, но отсутствует в опубликованной таблице policy actions: здесь не придуман `s3:GetBucketPolicy` Allow; право просмотра обеспечивается bucket IAM storage.configViewer и проверяется живым GET в smoke.
 
-1. Дождаться прекращения новых paid submissions и разобрать неопределённые jobs. Если это нельзя гарантировать — отложить update.
-2. Штатно остановить **только `botmax.service`**, дождаться фактического `inactive`. Не убивать процесс во время неизвестного POST. Не трогать Small Talk/Nginx/другие unit.
-3. Сделать актуальные защищённые копии business SQLite через SQLite backup API, private registry если уже существует, `.env`/service environment, `venv` inventory, `studio_files`, пользовательских материалов, startup/config и exact old SHA. Проверить целостность SQLite copies. Учесть WAL/journal: простое копирование живого `.sqlite3` не гарантирует консистентность.
-4. Сохранить permissions/owner. Копии и журнал контроля содержат персональные/секретные данные, хранить вне web root/Git/общего чата. Retention backup согласовать отдельно.
-5. Не выполнять business schema migration. Private registry имеет собственную схему и создаётся отдельно только при приватной записи.
+## 4. Минимальный policy template
 
-## 7. Обновление кода и старт
+Заменить все `<...>` до использования. Runtime создаёт только media/v1; объектные данные вне prefix и Delete/PutAcl/PutBucketPolicy не разрешены этим policy. CanonicalUser — формат Yandex, а не AWS ARN. Owner ACL также обязан совпасть с allowlist приложения.
 
-* Использовать заранее проверенный clean checkout exact release SHA. Не делать `git reset --hard` по неосмотренному рабочему каталогу, не удалять untracked `.env`, `venv`, DB, media или studio_files. Код и данные должны оставаться раздельными.
-* Не выполнять `git clean`, pip upgrade, Nginx reload, Node/backend/frontend install, migration сторонней финансовой ветки.
-* Для первого reader-compatible запуска оставить private writes off. Запустить только `botmax.service` штатным `systemctl start` после проверки config.
-* Проверить systemd active/substate, MAX polling без дубля второго consumer, доступность существующего webhook, отсутствие startup/registry/storage errors. Не выводить реальные API responses и traceback в общий журнал.
-* Проверить доставку уже готового legacy результата без новой генерации. Если private refs уже существуют — проверить scoped delivery сохранённого результата тем же владельцем без нового POST.
-* Не включать private writes, пока не закрыты все пункты раздела 2. Включение/owner smoke/миграция — отдельные согласования, а не часть этого draft.
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "RuntimeObjectIO",
+      "Effect": "Allow",
+      "Principal": {"CanonicalUser": "<runtime-service-account-id>"},
+      "Action": ["s3:GetObject", "s3:PutObject"],
+      "Resource": "arn:aws:s3:::<new-private-bucket>/media/v1/*",
+      "Condition": {"Bool": {"aws:SecureTransport": "true"}}
+    },
+    {
+      "Sid": "ReadBucketMetadata",
+      "Effect": "Allow",
+      "Principal": {"CanonicalUser": ["<runtime-service-account-id>", "<approved-owner-canonical-id>"]},
+      "Action": ["s3:GetBucketAcl", "s3:ListBucket"],
+      "Resource": "arn:aws:s3:::<new-private-bucket>",
+      "Condition": {"Bool": {"aws:SecureTransport": "true"}}
+    },
+    {
+      "Sid": "DenyInsecureTransport",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:*",
+      "Resource": ["arn:aws:s3:::<new-private-bucket>", "arn:aws:s3:::<new-private-bucket>/*"],
+      "Condition": {"Bool": {"aws:SecureTransport": "false"}}
+    }
+  ]
+}
+```
 
-## 8. Платежи и доставка после окна
+ListBucket на выделенном bucket нужен для проверки отсутствующего ключа/отличения 404 от запрета HEAD в S3-совместимом поведении. Код bucket listing не выполняет. Он раскрывает service account имена ключей этого выделенного бакета; данные всё равно ограничены media/v1. Если требуется дополнительно ограничить list по s3:prefix, допустимая форма preflight — StringLike s3:prefix=media/v1/*. Сначала проверить HEAD отсутствующего key: он может стать 403. В таком случае **не включать продукт** и согласовать отдельную IAM/HEAD схему; не отправлять PUT вслепую. Не выдавать полный доступ ради устранения 403.
 
-HTTP health/200 не доказывает зачисление каждой оплаты. Сверить provider payment/order identifiers и текущие статусы БД в закрытом операционном контуре. Проверить политику повторной доставки webhook у Prodamus по фактической конфигурации; из кода нельзя гарантировать, что все уведомления будут повторены поставщиком.
+Этот template — проверяемая минимальная исходная конфигурация, не утверждение об уже проверенном реальном IAM. KMS, VPC, CDN, account-level IAM и новые особенности облака здесь не настраивались. Если есть KMS, отдельно согласовать необходимые key permissions и повторить smoke.
 
-Для оплаты в окно недоступности проверить provider status и существующий idempotent webhook/order workflow. Не воспроизводить наугад POST и не начислять вручную второй раз. Если уведомление потеряно — использовать отдельно согласованный способ reconciliation с проверкой подписи/ID/суммы и защитой от дубля.
+## 5. Реальный synthetic smoke для владельца
 
-Убедиться: ранее paid не стали pending; нет повторных списаний/кредитов; существующие task IDs не заменены новыми; готовые файлы доставлены/ожидают повторной доставки, а не повторной генерации. Наличие MAX upload без подтверждённой send_message не считать доставкой. Все ручные действия записать в защищённом журнале без raw media URLs.
+Проводить вне production потока, с отдельным тестовым MAX admin аккаунтом и **только искусственными** PNG/JPEG, коротким сгенерированным локально WAV/MP3, MP4 тестовой сеткой и TXT. Ни фотографий людей/детей, ни платёжных данных. Эта задача smoke не выполняла.
 
-## 9. Критерии успеха и основания остановки
+### A. S3 и авторизация — без платных AI API
 
-Успех reader-compatible update: exact SHA, старые зависимости, один работающий polling consumer, webhook принимает валидные уведомления и reconciliation не показывает пропусков/дублей; legacy и уже сохранённые private результаты читаются только правильными адресатами; нет неожиданных платных POST; все активные IDs сохранены; safe logging/TLS остаются строгими. Private writes off — ожидаемый результат первого этапа, а не ошибка.
+1. На проверенном release SHA в изолированном окружении владельца передать dedicated credentials безопасным способом. Проверить SDK preflight: owner, каждый CanonicalUser и весь Allow rule входят в согласованный шаблон/allowlist. Непонятное правило = остановка.
+2. Через PrivateMedia выполнить PUT под synthetic owner и стабильной operation ID. Сохранить только технический результат/SHA в закрытом журнале; не публиковать credentials, URL и owner mapping.
+3. SDK HEAD/GET проверяют bytes/hash. Тот же operation ID повторно возвращает ref без нового PUT. Искусственно оборванный/неизвестный PUT не должен создать второй PUT без подтверждённого HEAD.
+4. Anonymous GET и HEAD без подписи должны отказать. Проверить также все CDN/website endpoints, если они когда-либо настроены: SDK ACL check сам по себе их не доказывает.
+5. Выдать signed GET непосредственно перед проверкой с коротким TTL, получить файл, после expiry получить отказ. Чужой owner/account namespace должен отказать **до** SDK network call. Подписанный URL не копировать в общий журнал.
+6. Попытки runtime вне media/v1, DeleteObject, PutObjectAcl/PutBucketPolicy должны отказать. Реальный bucket policy не изменять ради negative test: достаточно безопасного запроса к несуществующему тестовому ресурсу/операции без изменения политики; destructive проверки выполнять только по отдельному решению.
+7. Проверить права registry, journal/WAL/SHM и `.required` — service UID, 0600; каталог вне web root. На копии проверить corrupt/unknown/missing registry: отказ, отсутствие нового счёта/PUT.
 
-Основания остановки/rollback: anonymous доступ, чужой owner может читать, private ref попал в публичную публикацию, S3 policy нельзя подтвердить, credential/URL/PII оказался в логах, SDK TLS failure, неизвестные дубли provider POST/списаний, нарушения доставки/платёжного учёта, несовместимые refs в recovery. Сначала остановить затронутую обработку, не запускать новую генерацию для диагностики.
+### B. MAX и память — без платных генераций
 
-## 10. Безопасный rollback
+Из authenticated тестового MAX диалога отправить сохранённые synthetic image/audio/video/TXT через private reader. Проверить получателя, media type и bytes, неизвестного owner и нажатие из группы (файл приходит лично либо отказ). Проверить file path больших файлов, временные permissions/cleanup и одновременные доставки. Начать с малого файла, затем не превышать лимиты приложения 8/16/32/8 MiB.
 
-**Не делать private объекты публичными и не восстанавливать автоматически старую БД.** Новые оплаты/заказы важнее соответствия старому snapshot.
+На VPS с 1 GiB/1 vCPU контролировать RSS всего botmax, native ffmpeg/Pillow процессы, swap/OOM, очереди и latency. Синтетическое измерение Python 32,4 MiB не включает эти процессы. При неприемлемом потреблении снизить нагрузку/остановить пилот, не повышать автоматически лимит размера. Установленный SDK file upload буферизует целый файл, несмотря на streaming S3 reader.
 
-* Выключить новые private writes. Reader-capable код, private registry и private keys/bucket сохранить. Приватная зависимость/маркер заказа блокирует новые paid/private-derived операции при флаге off, но допускает чтение сохранённого файла.
-* После первых private refs возврат к чистому `57744a0` или `196d577` **несовместим**: эти версии не понимают новые ссылки. Нужен заранее проверенный reader backport либо остановка соответствующей обработки. Не считать эти SHA универсальным rollback для нового формата данных.
-* При проблеме с safe_logging не возвращать небезопасные логи. При TLS ошибке не возвращать `ssl=False` и не разрешать HTTP. Подготовить отдельную проверенную безопасную версию, сохраняя формат refs/registry.
-* Если безопасный reader/fallback не работает — остановить затронутую обработку, сохранить DB/registry/materials/IDs, выполнить reconciliation оплат и устранить причину отдельно. Не сбрасывать submitting markers и не повторять платные POST.
-* Старые backup использовать для расследования/точечного согласованного восстановления, а не заменить ими текущую DB. Никакого автоматического отката финансовой истории.
+### C. Провайдеры — сначала evidence, потом отдельный допуск
 
-## 11. Локальные проверки разработки
+Без платной генерации можно отдельно проверить documented upload/asset APIs на искусственном файле, **если владелец это разрешил и подтвердил, что сам upload не тарифицируется**. HeyGen asset имеет публичный URL и отдельный lifecycle: это требует отдельного решения о передаче, не становится автоматически private из-за asset_id.
 
-Сравнение делается с неизменённым Security 1.0 SHA в отдельном worktree, теми же Python/test tools и без внешних API. В Cloud Python **3.12.14**, а не заявленный VPS 3.12.3; это ограничение тестирования. Два существующих изолированных venv: maxapi **1.2.3** с aiohttp **3.13.5**, и maxapi **1.2.3** с aiohttp **3.14.5**. Production dependencies не устанавливались/не обновлялись.
+Перед каким-либо paid smoke для HeyGen/Kling владелец отдельно подтверждает бюджет и тип задачи; сейчас он **не разрешён**. Требуемый план:
 
-Внешний локальный test runner удаляет inherited secrets, оставляет синтетический MAX token и системные CA settings, блокирует non-loopback socket connections. Требуемые частью TLS-тестов локальные HTTPS sockets допускаются. Test timeout 90 сек предотвращает зависание старого теста. Сам runner и junit/raw logs не являются runtime изменениями этого PR.
+* Зафиксировать exact endpoint/version, входные asset IDs/URLs, максимальные ограничения файла и серверные request IDs без raw API body в обычных логах.
+* Записывать фактические первое/повторные GET/HEAD по signed URL в защищённый тестовый контур. Проверить очередь, позднее получение, retries/refetch, URL expiry до fetch и во время выполнения, 403/404 и malformed MIME.
+* Получить от провайдера документированную верхнюю границу queue+fetch+refetch либо изменить интеграцию на подтверждённый asset ID путь с согласованной privacy/lifecycle. **Один успешный smoke не доказывает максимальное окно.**
+* При ошибке сохранить task/asset/request ID, опрашивать существующий task GET. Новый paid POST автоматически не запускать. Не подменять Kling version 3.0 на 4.0 или model endpoint без отдельного решения о поведении/цене.
 
-Результаты полного сравнительного прогона:
+Пока evidence не получен, четыре private продукта остаются BLOCKED независимо от успешно загруженного test file.
 
-| Окружение | Неизменённая база 57744a0, 3356 cases | Security 1.1 checkpoint, 3428 cases | Сравнение |
-|---|---|---|---|
-| maxapi 1.2.3 / aiohttp 3.13.5 | 3343 passed, 13 failed | 3416 passed, 12 failed | 72 добавленных tests passed, исходные cases не удалены; новых падений нет. Исходный 90-секундный timeout `test_customer_complete_flow_two_audios_choose_first_and_next_invoice` в новой версии не повторился |
-| maxapi 1.2.3 / aiohttp 3.14.5 | 3206 passed, 150 failed | 3277 passed, 151 failed | 72 добавленных tests passed, исходные cases не удалены. Дополнительный timeout старого render-теста разобран ниже |
+## 6. Настройки staged pilot
 
-Из 150 исходных падений в окружении 3.14.5 в 121 traceback присутствует несовместимость aioresponses 0.7.9 с `ClientResponse.__init__`: отсутствует обязательный `stream_writer`. Остальные исходные падения включают старые проверки меню/цен/статистики и последствия неработающих HTTP mocks; они не исправлялись этим PR. В 3.13.5 двенадцать устойчивых исходных failures относятся к avatar restore, custom-order menu/flow, family stats, photo-payment expectations и welcome/stats; дополнительный тринадцатый baseline failure — timeout. Полный suite **не зелёный**.
+Пример структуры environment, не готовые секреты и не действие с VPS:
 
-Единственное дополнительное падение checkpoint 3.14.5 — timeout 90 секунд в неизменённом `test_ded_moroz_render::test_render_follows_actual_narration_duration_after_provider_change[2.2-0.7]`. Отдельный повтор после завершения параллельных full suites: **1 passed** на базе и **1 passed** на новой версии. Воспроизводимой новой регрессии не получено; факт timeout не скрыт и лимит ради него не увеличивался.
+```dotenv
+PRIVATE_MEDIA_ENABLED=false
+PRIVATE_MEDIA_PRODUCTS=postcards
+PRIVATE_MEDIA_PILOT_USER_ID=<test-admin-max-id>
+PRIVATE_MEDIA_STORAGE_VERIFIED=false
+PRIVATE_MEDIA_READ_ONLY=false
+PRIVATE_MEDIA_BUCKET=<new-private-bucket>
+PRIVATE_MEDIA_REGISTRY=/secure/botmax/private_media.sqlite3
+PRIVATE_MEDIA_PRINCIPALS=<approved-owner-canonical-id>,<runtime-service-account-id>
+PRIVATE_MEDIA_ACCESS_KEY_ID=<separate-static-key-id>
+PRIVATE_MEDIA_SECRET_ACCESS_KEY=<separate-secret>
+```
 
-После полного checkpoint выполнена одна узкая корректировка: photo worker получает разрешённые refs не только из `photo_orders`, но и из сохранённых `photo_results` этого заказа. Добавлен 73-й тест: результат, созданный личной сессией, доставляется worker-ом; чужой результат отвергается до S3 HEAD. Для окончательного кода повторены затронутые проверки:
+Все новые поля по умолчанию off/empty. Pilot ID обязан совпадать с настроенным ADMIN_USER_ID этого изолированного экземпляра. Сначала завершить A/B smoke, затем записать его результат в защищённый operator record и явно поставить STORAGE_VERIFIED=true. Это attestation, не автоматическая гарантия. Новые private счета без него блокируются; существующие retained files могут читаться.
 
-| Окончательный код | aiohttp 3.13.5 | aiohttp 3.14.5 |
-|---|---|---|
-| Новые private storage / migration / integration tests | **73 passed** | **73 passed** |
-| Вместе с исходными TLS/MAX и safe-logging tests, 143 cases | **143 passed** | **142 passed, 1 failed** — тот же исходный aioresponses/TTAPI `stream_writer` failure |
-| Исходные photo/payment/delivery/promo tests (`test_repeat_promos.py`, `test_payment_audit.py`, `-k photo`) | **30 passed**, 52 deselected | Отдельно не повторялись; исходные cases присутствуют в полном сравнительном прогоне |
-| Повтор единственного дополнительного render-timeout | Не требовался | **1 passed**; та же проверка на базе — **1 passed** |
+Сначала postcards одному synthetic admin. Затем отдельно vision_board/photosession/song/musical_card/custom_order, каждый с собственной проверкой полной цепочки и обычного legacy пользователя. Не включать BLOCKED продукты и не переносить pilot на всех клиентов одним global=true. Изменение списка влияет только на новые операции. Для остановки начатых private mutations нужен READ_ONLY=true.
 
-Полный suite после этой последней узкой корректировки повторно не запускался: её private-ветка и изменённая доставка проверены перечисленными целевыми тестами; legacy fast path без registry не изменён. Это граница результатов, а не утверждение о live совместимости. Syntax/AST и `git diff --check` прошли. AST-сравнение бизнес SQL, неизменность старых тестов/requirements/TLS/logging и проверка отсутствия data/env/media artifacts выполнены. Зависимости production не менялись; live VPS/S3/MAX/provider checks остаются отдельным этапом.
+## 7. Future update window и оплаченные заказы
 
-Матрица провайдеров и ограничения: [private-media-storage.md](private-media-storage.md). План миграции: [private-media-migration.md](private-media-migration.md).
+До любого изменения: pin exact SHA; сравнить зависимости без установки; read-only inventory активных paid/pending/queued/polling/manual jobs, submitting/IDs и delivery backlog; проверить RAM-only FSM. Если неизвестен исход paid POST или нельзя сохранить сессию — отложить окно. Не считать backup SQLite сохранением RAM.
 
-## 12. Состав изменений
+После отдельного согласования остановить **только botmax.service**, дождаться inactive и консистентно снять SQLite backup API копии business DB + registry/sidecars/anchor, environment/config, venv inventory, studio_files и пользовательских материалов. Копии вне web root/Git, с ограниченными правами. Не использовать git clean/reset по неосмотренному каталогу, не удалять untracked данные. Код и данные сохранять раздельно.
 
-Полный список файлов этого этапа (33):
+Первый запуск reader-compatible SHA — с PRODUCTS пусто/global=false; private credentials/allowlist/registry оставить, если refs уже существуют. Не менять Nginx, основной домен, Small Talk или webhook route. Не запускать миграции другого проекта. Запустить только botmax.service, проверить один polling consumer, webhook health, доставку сохранённых legacy/private результатов без новых генераций.
 
-* Основа и конфигурация: `private_media.py`, `private_media_migration.py`, `config.py`, `bot.py`.
-* Приём, хранение и доставка: `handlers.py`, `database.py`, `image_service.py`, `media_service.py`, `audio_service.py`, `cartoon_avatar_archive.py`, `mother_recovery.py`.
-* Восстановление workers: `audio_orders.py`, `musical_orders.py`, `photo_orders.py`, `animation_orders.py`, `ded_moroz.py`.
-* Provider guards: `heygen.py`, `video_service.py`, `mother_story.py`, `song_alignment.py`, `elevenlabs_tts.py`.
-* Мультстудия: `multstudio/adapters.py`, `multstudio/assets.py`, `multstudio/heygen_video.py`, `multstudio/music.py`, `multstudio/uploads.py`, `multstudio/worker.py`.
-* Тесты: `tests/test_private_media.py`, `tests/test_private_media_integration.py`, `tests/test_private_media_migration.py`.
-* Документация: `docs/private-media-storage.md`, `docs/private-media-migration.md`, `docs/private-media-deployment-runbook.md`.
+Оплаты, пришедшие во время остановки: сверить provider/order/payment IDs и суммы через закрытый операционный контур. Не считать HTTP 200 или ожидание provider retries доказательством учёта всех платежей. Не воспроизводить наугад webhook POST и не начислять вручную второй раз. Reconciliation — по существующему idempotent механизму с проверкой подписи/привязок, после отдельного решения для пропущенного уведомления.
 
-Изменения `database.py` ограничены проверкой формата/владельца медиа и запретом приватного share. AST-сравнение SQL string literals с базой подтверждает отсутствие изменения прежних SQL операторов бизнес-БД. Ни один исходный тестовый файл не изменён и не удалён. В PR нет пользовательских материалов, test DB, registry, environment, credentials, venv, junit или raw logs.
+Проверить: paid не стали pending/cancelled; нет повторных счетов/списаний, IDs не заменены, выдача использует retained object. Новая technical availability ошибка сообщает о поддержке и сохраняет историю; она не является автоматическим возвратом или аннулированием заказа.
+
+## 8. Проверяемый reader-compatible rollback
+
+После private refs **не checkout 57744a0, 196d577 или старый e6ef3dc как универсальный fallback**: первые два не понимают формат, а Security 1.1 не содержит всех новых auth/registry ограничений.
+
+Проверенный reader baseline — immutable SHA этого PR в режиме:
+
+```dotenv
+PRIVATE_MEDIA_ENABLED=false
+PRIVATE_MEDIA_PRODUCTS=
+PRIVATE_MEDIA_READ_ONLY=true
+```
+
+Сохранить bucket/keys/allowlist, текущие business DB, registry/sidecars/anchor и local materials. [private_media_emergency.deliver_saved](../private_media_emergency.py) вызывается из существующего private download callback при read-only. Он читает только retained ref, обновляет пользовательские paid assertions и отправляет лично owner либо readonly admin; service/caller без authenticated scope отвергается. Нет генерации, payment, storage PUT, grant, signer или публичного URL. Это аварийная функция текущего приложения, не новый постоянный процесс/backend.
+
+Синтетические тесты проверяют: старые файлы доставляются; новый PUT/paid generation запрещены; чужой owner не получает upload; service scope не выдаётся за пользователя. Для будущих версий можно откатывать **код** к этому exact reader-compatible SHA после schema/refs comparison. Сейчас аварийное переключение — остановка mutations на том же проверенном коде, а не обещание исправить произвольную поломку этого reader-а сменой environment.
+
+Если reader небезопасен или не работает — остановить затронутую обработку, сохранить metadata/материалы/IDs, устранить отдельно. Не делать bucket public, не возвращать ssl=False/HTTP/сырые логи. Не восстанавливать старую бизнес-БД автоматически: потеряются новые оплаты. Потерянный registry восстанавливать только из согласованной проверенной копии/точечного mapping, не удалять `.required` для обхода ошибки.
+
+## 9. Тесты и границы подтверждения
+
+Исходные 73 теста PR №266 сохранены (fixture дополнен явным synthetic allowlist и synthetic storage verification). Новые rollout tests покрывают десять независимых продуктов, restart/policy immutability, admin pilot, invoice/credit/regeneration guards, legacy paid continuation, точные principals, cross-order song reuse/denial, повреждение registry, groups при flag off, no-network-in-write-transactions, MIME limits, SDK buffering/concurrency, emergency reader и полный synthetic musical flow.
+
+Финальные full comparison запускаются на **окончательном SHA** и публикуются в PR без последующего изменения исходников. Окружения: Python 3.12.14/maxapi 1.2.3 + aiohttp 3.13.5 либо 3.14.5; production requirements не изменяются. Runner убирает inherited credentials, использует synthetic token, сохраняет публичные CA settings и запрещает внешний network. Рабочая БД не подключается.
+
+Текущая среда запрещает даже localhost sockets: webhook/local-TLS cases могут завершиться PermissionError на базовом и новом коде. Такие результаты классифицируются как environmental blockers, не как доказательство работоспособности TLS/webhook. aioresponses 0.7.9/ClientResponse stream_writer несовместимость в 3.14.5 также учитывается отдельно. Полный suite не объявлять зелёным; без owner live smoke и локальных TLS/webhook проверок production допуск отсутствует.

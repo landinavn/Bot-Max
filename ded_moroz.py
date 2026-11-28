@@ -1,4 +1,5 @@
 """Administrative Ded Moroz workflow. SQLite survives restart; paid POSTs never auto-repeat."""
+from media_policy import private_enabled,configured,ded_action,ded_action_policy,policy_scope,bind_operation,restore_operation,PolicyStore,Policy,private_references
 from safe_logging import get_logger
 from private_media import job_scope
 import asyncio
@@ -213,6 +214,7 @@ async def update(key,**values):
 
 
 async def transition(key,user,status,new_status,*,version=None):
+    if configured() and new_status in ('audio_queued','video_queued'):await ded_action_policy(key,user)
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
         cur=await db.execute('UPDATE ded_moroz_orders SET status=? WHERE id=? AND user_id=? AND status=?'+
             (' AND version=?' if version is not None else ''),(new_status,key,user,status,*(() if version is None else (version,))))
@@ -220,6 +222,19 @@ async def transition(key,user,status,new_status,*,version=None):
 
 
 async def begin(user, *, details=None, new=False, creation_key=None):
+    if not configured():return await _begin_order(user,details=details,new=new,creation_key=creation_key)
+    variant='family' if details and family.is_family(details) else 'single'
+    prior=(await read('SELECT * FROM ded_moroz_orders WHERE user_id=? AND creation_key=?',(user,creation_key)) if creation_key else
+           await read("SELECT * FROM ded_moroz_orders WHERE user_id=? AND COALESCE(json_extract(details,'$.variant'),'single')=? AND status NOT IN ('done','cancelled') ORDER BY rowid DESC LIMIT 1",(user,variant)) if not new else None)
+    if prior:selected=await ded_action_policy(prior['id'],user,ready=False)
+    else:selected=await bind_operation('ded_moroz',user,'ded-begin:'+uuid4().hex)
+    with policy_scope(selected):result=await _begin_order(user,details=details,new=new,creation_key=creation_key)
+    from private_media import Owner
+    await asyncio.to_thread(PolicyStore(Config.from_env()).bind,Policy('ded_moroz',selected.mode,'max',str(user),'ded_moroz:'+result['id']))
+    return result
+
+
+async def _begin_order(user, *, details=None, new=False, creation_key=None):
     async with aiosqlite.connect(database.DATABASE_PATH,timeout=30) as db:
         await db.execute('BEGIN IMMEDIATE');db.row_factory=aiosqlite.Row
         variant='family' if details and family.is_family(details) else 'single'
@@ -269,6 +284,7 @@ def default_text_for_retry(row):
     return tagged_text(json.loads(row['details']))
 
 
+@ded_action
 async def regenerate(key, user, version, *, admin=None):
     """One accepted request per preview; admin unlimited, ordinary users one retry."""
     row=await get(key)
@@ -285,6 +301,7 @@ async def regenerate(key, user, version, *, admin=None):
         return await finish_regeneration(db,cur,key,user)
 
 
+@ded_action
 async def approve(key, user, version):
     row=await get(key)
     if row and (row.get('payment_order_id') or family.is_family(row['details'])):
@@ -299,6 +316,7 @@ async def approve(key, user, version):
         await db.commit();return cur.rowcount==1
 
 
+@ded_action
 async def choose_audio(key,user,version,take,admin=None):
     row=await get(key)
     if not row or row['user_id']!=user or not await sales.allowed(row,admin):return False
@@ -338,6 +356,7 @@ async def request_edit(key,user,version,*,admin=None):
         await db.commit();return cur.rowcount==1
 
 
+@ded_action
 async def revised(key,user,text,*,admin=None):
     row=await get(key)
     if not row or row['user_id']!=user or row['status']!='editing':return False
@@ -360,6 +379,7 @@ async def select_fact(key,user,version,field):
         await db.commit();return cur.rowcount==1
 
 
+@ded_action
 async def apply_facts(key,user,version,*,admin=None):
     row=await get(key)
     if not row or row['user_id']!=user or row['version']!=version or row['status']!='editing' or row['edit_field']:return False
@@ -425,6 +445,7 @@ def manual_audio_retry_allowed(row):
             and bool(row['text'] and (row['photo_path'] or family.is_family(row['details']))) and not any(row[x] for x in ('video_id','raw_path','output_path','output_url')))
 
 
+@ded_action
 async def retry_manual_audio(key,user,version,*,admin,config=None,settings=None):
     if admin is None or user!=admin:return False
     row=await get(key)
@@ -539,9 +560,9 @@ async def collect(event,context,admin,config=None,settings=None):
         source,_=await assets.download(source_url,'bin',job_id=row['id'],name='child-source-'+attempt+'.bin',limit=20*1024*1024,accept='image/jpeg, image/png, image/webp')
         png=await asyncio.to_thread(png_bytes,assets.path(source))
         path,_=await assets.write(png,'png',job_id=row['id'],name='child-photo-'+attempt+'.png')
-        alias=assets.path(f'ded_moroz_{user}/child_photo.png');alias.parent.mkdir(parents=True,exist_ok=True,mode=0o700 if getattr(assets.config,'private_media_enabled',False) else 0o777)
+        alias=assets.path(f'ded_moroz_{user}/child_photo.png');alias.parent.mkdir(parents=True,exist_ok=True,mode=0o700 if private_enabled(assets.config) else 0o777)
         tmp=alias.with_name('.child-'+uuid4().hex+'.png')
-        if getattr(assets.config,'private_media_enabled',False):
+        if private_enabled(assets.config):
             fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
             with os.fdopen(fd,'wb') as output:output.write(png)
         else:await asyncio.to_thread(tmp.write_bytes,png)

@@ -1,4 +1,5 @@
 """Retained originals, immutable outputs and content hashes; no temporary-only results."""
+from media_policy import private_enabled
 from safe_logging import get_logger
 import asyncio
 import hashlib
@@ -75,12 +76,12 @@ class Assets:
     async def write(self, data, suffix, *, job_id=None, name=None):
         relative = self.filename(suffix,job_id,name)
         path = self.path(relative)
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700 if getattr(self.config,'private_media_enabled',False) else 0o777)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700 if private_enabled(self.config) else 0o777)
         temporary=path.with_name('.part-'+uuid4().hex)
         checksum=hashlib.sha256(data).hexdigest()
         def save():
             try:
-                if getattr(self.config,'private_media_enabled',False):
+                if private_enabled(self.config):
                     fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
                     with os.fdopen(fd,'wb') as output: output.write(data)
                 else: temporary.write_bytes(data)
@@ -93,13 +94,20 @@ class Assets:
     async def download(self, url, suffix, limit=200*1024*1024, *, job_id=None, name=None, accept=None):
         from private_media import is_private, read_bytes
         if is_private(url):
-            data, _ = await read_bytes(url, limit=limit)
-            return await self.write(data, suffix, job_id=job_id, name=name)
+            from private_media import stream_to_path
+            relative=self.filename(suffix,job_id,name)
+            path=self.path(relative)
+            path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+            temporary=path.with_name('.private-'+uuid4().hex)
+            await stream_to_path(url,temporary,limit=limit)
+            checksum=await asyncio.to_thread(self.checksum,temporary)
+            await asyncio.to_thread(self.commit_file,temporary,path,checksum)
+            return relative,checksum
         await public_url(url)
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700 if getattr(self.config,'private_media_enabled',False) else 0o777)
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700 if private_enabled(self.config) else 0o777)
         relative = self.filename(suffix,job_id,name)
         path = self.path(relative)
-        path.parent.mkdir(parents=True,exist_ok=True,mode=0o700 if getattr(self.config,'private_media_enabled',False) else 0o777)
+        path.parent.mkdir(parents=True,exist_ok=True,mode=0o700 if private_enabled(self.config) else 0o777)
         temporary=path.with_name('.download-'+uuid4().hex)
         total, checksum = 0, hashlib.sha256()
         try:
@@ -111,7 +119,7 @@ class Assets:
                                     job_id,response.status_code,response.headers.get('content-type','')[:100],
                                     response.headers.get('content-length','')[:40])
                     with temporary.open('xb') as output:
-                        if getattr(self.config,'private_media_enabled',False): os.fchmod(output.fileno(),0o600)
+                        if private_enabled(self.config): os.fchmod(output.fileno(),0o600)
                         async for chunk in response.aiter_bytes():
                             total += len(chunk)
                             if total > limit:
@@ -136,10 +144,10 @@ class Assets:
         config = self.config
         from private_media import generation_policy
         generation_policy(config)
-        if getattr(config, 'private_media_enabled', False):
-            from private_media import store_bytes
+        if private_enabled(config):
+            from private_media import store_path,transfer_slot
             mime = mimetypes.guess_type(path.name)[0] or 'application/octet-stream'
-            return await asyncio.to_thread(store_bytes, config, path.read_bytes(), mime, purpose='studio-output')
+            async with transfer_slot():return await asyncio.to_thread(store_path,config,path,mime,purpose='studio-output')
         if not config.storage_bucket or not config.storage_public_base_url:
             raise ValueError('Настройте существующее Object Storage для файлов студии.')
         key = self.object_key(relative)

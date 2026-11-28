@@ -91,8 +91,10 @@ class SyntheticS3:
 def private_env(tmp_path, monkeypatch):
     c=Config(token='synthetic-max',photo_path=tmp_path/'unused',storage_bucket='synthetic-legacy',
         private_media_enabled=True,private_media_bucket='synthetic-private',
+        private_media_storage_verified=True,
         private_media_registry=tmp_path/'private.sqlite3',
         private_media_access_key_id='synthetic-key',private_media_secret_access_key='synthetic-secret',
+        private_media_principals=frozenset({'synthetic-owner'}),
         admin_user_id=99)
     backend=SyntheticS3()
     monkeypatch.setattr(Config,'from_env',classmethod(lambda cls:c))

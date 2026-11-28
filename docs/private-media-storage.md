@@ -1,128 +1,116 @@
-# Security 1.1 — Private Media Storage
+# Security 1.1.1 — private media, provider compatibility и staged rollout
 
-Статус: экспериментальная реализация в отдельной ветке, **не разрешение на включение в production**. База ветки — установленный Security 1.0, `57744a0b600a9736cbaf1d00a2ccb6660869c903`. `main`, frontend, VPS, реальные заказы, бакеты и материалы пользователей при разработке не использовались и не изменялись.
+Дата проверки документации: **28 ноября 2026, Москва**. Продолжение PR №266, ветка `security/private-media-storage`, исходный SHA `e6ef3dce87e0f67e2c7fb280f5e9901fabaccd4b`. Установленная база Security 1.0: `57744a0b600a9736cbaf1d00a2ccb6660869c903`. Точный проверенный итоговый SHA и результаты полного сравнения публикуются в описании [PR №266](https://github.com/landinavn/Bot-Max/pull/266).
 
-## Границы и решение
+**Не deployment и не разрешение на общий rollout.** Рабочие API, VPS, данные пользователей и реальные бакеты не использовались. Все режимы выключены по умолчанию. Legacy временно остаётся работоспособным; это не завершённая защита исторических персональных данных.
 
-Новый режим выключен по умолчанию. Новый объект записывается в **отдельный приватный бакет**, с отдельными учётными данными, без `ACL=public-read`. В прикладные поля вместо постоянного HTTPS URL возвращается стабильная ссылка `private-media:v1:<случайный UUID>`. UUID не является разрешением на чтение.
+## Что изменено относительно Security 1.1
 
-Отдельный локальный реестр `private_media.sqlite3` сопоставляет UUID с bucket/key, владельцем, заказом, SHA-256, MIME, размером и состоянием записи. Бизнес-БД и её схема не расширяются. Имена исторических полей `image_url`, `public_url`, `audioUrl` сохранены для совместимости; в новом режиме они могут содержать **не URL**, а приватную ссылку. Платёжные суммы, балансы, очереди и переходы состояний не переписаны.
+* Десять продуктов выбираются независимо; решение `private/legacy` сохраняется в media registry, а указатель операции и режим — в FSM. Изменение флагов не переписывает начатые операции.
+* Проверки доступности добавлены до новых счетов, списания кредитов/бонусов и прав повторной генерации. Уже оплаченные legacy-заказы сохраняют legacy, а не переоцениваются по новым флагам.
+* Runtime principal должен точно совпадать с утверждённым allowlist. Неизвестные principal/Allow rules, wildcard, AWS principal вместо Yandex CanonicalUser и неподтверждённые условия отвергаются.
+* Ограниченная песня требует права исходного заказа. Ссылка из другого оплаченного заказа сама по себе не даёт это право. Recipient grants для таких песен запрещены.
+* S3 HEAD/GET/PUT вынесены из SQLite write transactions. PUT имеет атомарный claim и сохраняет неопределённый исход без слепого повтора.
+* Поток S3 читается по 64 KiB. Крупная доставка использует временный файл 0600 и file-based путь MAX SDK; одновременно одна доставка. Размеры ограничены по типу.
+* Реализован отдельный аварийный reader без генераций, оплаты, публикации и signer. Потерянный registry нельзя автоматически пересоздать после появления `.required` marker.
 
-Эта работа не реализует сроки удаления, юридические согласия, аккаунты веб-версии, финансовые права или массовое закрытие исторических публичных объектов. Источник MAX и копии, полученные AI-провайдерами/MAX, не удаляются этим реестром.
+## Модель хранения и доступа
 
-**Общее включение заблокировано:** URL-входы PiAPI/Kling и HeyGen не имеют подтверждённого здесь контракта скачивания временных ссылок. Новый режим останавливает их до платного POST. Это не отменяет существующее выставление счетов: до общего включения необходим отдельно согласованный запрет продажи неподдерживаемых сценариев либо доказанная совместимость провайдеров. Включать флаг всем клиентам сейчас нельзя.
+[private_media.py](../private_media.py) хранит объект в отдельном бакете под случайным `media/v1/<uuid>.<ext>`, без public-read ACL. Бизнес-поля могут содержать стабильный `private-media:v1:<uuid>`; это **не URL и не право доступа**. Object key, owner/order, SHA-256, MIME, размер и state находятся в отдельном локальном SQLite. Подписанные URL туда не записываются.
 
-## Реализация и модель доступа
+`Owner('max', id)` и `Owner('account', id)` — разные пространства. Связывания веб-аккаунтов здесь нет. Пользовательская личность берётся из authenticated MAX SDK `event.get_ids()`. Приложение не десериализует Access/roles/entitlements из callback или JSON пользователя. `Access` — внутренний Python API доверенного сервера, не защита от выполнения произвольного кода на VPS.
 
-Основной модуль: [private_media.py](../private_media.py).
+Service scope восстанавливается по владельцу сохранённого заказа либо JOIN задания с проектом. Service references берутся из сохранённых строк/snapshot и `photo_results` именно данного заказа. Чужой owner запрещён независимо от списка refs. Для song `owner_access=order` нужны:
 
-* `Owner('max', id)` — текущая подтверждённая личность MAX. `Owner('account', id)` — отдельное пространство будущих веб-аккаунтов; связывания аккаунтов и веб-авторизации здесь нет.
-* `Access(role='user')` разрешает владельцу читать свои объекты. Полные песни с `owner_access='order'` дополнительно требуют свежего подтверждения существующего оплаченного/бесплатного заказа из бизнес-БД. Знание UUID неоплаченной песни не открывает её.
-* `Access(role='service')` ограничен владельцем и конкретным сохранённым заказом/заданием. Межзаказный исходник допускается только если его точная приватная ссылка уже находится в доверенном сохранённом snapshot этого владельца.
-* `Access(role='admin')` проверяет настроенный `admin_user_id` и причину `support`, `recovery` или `export`. Этот путь только читает; не публикует, не создаёт разрешения от имени клиента.
-* Глобальный middleware получает ID из `event.get_ids()`, а не callback payload. Worker scopes восстанавливаются из сохранённых заказов и владельца проекта; владелец из пользовательского JSON не считается доказательством.
-* Перед привязкой приватной ссылки к заказу `check_for_user` проверяет владельца и MIME. `database.py` не позволяет приватную или подписанную ссылку зарегистрировать в `shared_images`.
-* Получение приватного файла через callback отправляет его в **личный диалог** проверенному пользователю, а не в чат, где нажали кнопку. Новый режим не запускает личные сценарии из групп/каналов. Административный экспорт приватных материалов также отправляется лично администратору.
+* пользователю — свежая paid/free assertion исходного заказа из существующей бизнес-БД;
+* сервису того же заказа — его конкретный scope;
+* другому сервисному заказу — **и** сохранённый ref, **и** свежая assertion исходного оплаченного/free заказа.
 
-Доступ проверяется **до S3 HEAD/GET/подписания**. Чужая ссылка не вызывает обращения к объекту. Наличие права в приложении не ограничивает root VPS, облачного администратора, получателя уже скачанной копии или MAX как платформу доставки.
+Таким образом новая оплата музыкальной открытки не открывает неоплаченную исходную песню. Legitimate reuse ранее оплаченной песни остаётся возможным. Grant не обходят это правило: для restricted song они вообще не выдаются. Admin readonly export допускает только настроенный `admin_user_id` и причины support/recovery/export. Admin не создаёт owner grants от имени клиента.
 
-## Инвентаризация путей и сценариев
+MAX middleware работает и при выключенных новых записях. В группах выбранный private-сценарий не запускается; private upload требует явного персонального адресата. Callback скачивания и аварийный reader отправляют файл в личный диалог владельцу, admin export — администратору. Legacy-события в группах при флаге off не отключаются целиком.
 
-Это анализ кода установленной базы и изменений, а не описание содержимого production. В таблице «новый» означает `PRIVATE_MEDIA_ENABLED=true`; legacy продолжает использовать прежние HTTPS URL.
+## Независимые продукты и сохранённая политика
 
-| Сценарий / источник | Владелец и сохранение | Получатели / чтение | URL и восстановление |
+[media_policy.py](../media_policy.py): `PRIVATE_MEDIA_PRODUCTS` — список через запятую из таблицы ниже. Пустой список — все off. Старый `PRIVATE_MEDIA_ENABLED=true` оставлен как совместимый глобальный переключатель, но для staged rollout **не использовать**.
+
+`media_policies` в registry связывает `(owner_namespace, owner_id, operation_id)` с продуктом/режимом неизменно. Долговременный order/job имеет собственную запись. FSM хранит `media_operation_id`, `media_product`, `media_storage`; эти поля не являются доказательством доступа, policy повторно проверяется по registry и доверенному owner. Вложенные операции наследуют root policy: музыкальная открытка не меняет режим в середине генерации песни/изображения.
+
+Для pre-existing заказа без policy применяется legacy. Исключение — сохранённые private refs/предыдущий private marker: они требуют private; смешивание с legacy запрещено. Задание Деда Мороза наследует invoice policy; мультстудия фиксирует policy при новой оценке/подтверждении, а worker восстанавливает её по `studio:<job_id>`. Read-only recovery не создаёт повторный платный POST.
+
+| Продукт | Private readiness в этом PR | Legacy при private off |
+|---|---|---|
+| `postcards` | Условный synthetic pilot: файл OpenAI → private S3 → MAX | Сохранён |
+| `vision_board` | Условный synthetic pilot, тот же файловый путь | Сохранён |
+| `photosession` | Условный pilot: source/result refs, delivery по photo_results | Сохранён |
+| `song` | Условный pilot: text TTAPI, архив MP3, paid-origin gate | Сохранён |
+| `musical_card` | Условный pilot: scoped image/audio → локальный ffmpeg → private MP4; проверен synthetic paid flow | Сохранён |
+| `custom_order` | Условный pilot: private приём фото и readonly admin export; ручная услуга не превращается в автоматическую генерацию | Сохранён |
+| `animation` | **BLOCKED**: PiAPI/Kling fetch/refetch contract не подтверждён | Сохранён |
+| `cartoon` | **BLOCKED**: HeyGen URL path/asset publication и provider smoke не допущены | Сохранён |
+| `ded_moroz` | **BLOCKED** как полный продукт: TTS сам по себе не доказывает готовность Avatar/Video | Сохранён, включая старые оплаченные заказы |
+| `multstudio` | **BLOCKED** как полный продукт: несколько видео-провайдеров; отдельный image/TTS успех не даёт общего допуска | Сохранён |
+
+«Условный pilot» не означает production readiness: нужны закрытый бакет, IAM/allowlist, owner smoke и `PRIVATE_MEDIA_STORAGE_VERIFIED=true`. Значение false по умолчанию блокирует новые private счета/генерации. Это подтверждение оператора, не криптографическое доказательство будущей доступности облака. `PRIVATE_MEDIA_PILOT_USER_ID` должен совпадать с настроенным admin ID; только этот MAX owner получает новый private режим, остальные — legacy. Пилот проводить на отдельном тестовом административном аккаунте и синтетических материалах.
+
+## Матрица официальной документации провайдеров
+
+Только primary sources, проверены 28.11.2026. Никаких реальных API-запросов, генераций или загрузок этим исследованием не выполнено. Отсутствие численного окна в проверенных страницах означает «не установлено», а не «не существует нигде».
+
+| Интеграция / фактические endpoints | Direct file / provider ID | Signed HTTPS и timing | Решение |
 |---|---|---|---|
-| Фото пользователя из MAX, включая семейные фото | При принятии обработчиком сохраняются байты и owned source-image ref; FSM/заказ получает ref вместо временного MAX token/URL | SDK загрузка; затем OpenAI или поддержка в пределах сценария | [handlers.py](../handlers.py), `retain_photo_payload`, `retain_image_url`; не все незапрошенные вложения архивируются |
-| Фото ребёнка для Деда Мороза | Владелец заказа MAX; private source ref плюс локальный нормализованный PNG | Локальная сборка, сервис TTS; экспорт администратору по роли | [ded_moroz.py](../ded_moroz.py), child alias остаётся локальным материалом; закрытие локальной директории требует проверки VPS |
-| Открытки и карты желаний | `_store_image`: legacy `vision-boards/*`; новый — ключ `media/v1/*`, owned ref | OpenAI получает исходник; MAX получает результат байтами | [image_service.py](../image_service.py); private existence check — авторизованный HEAD, не публичный HTTP HEAD |
-| Нейрофотосессии | Source photos в FSM; результаты `photo_results.image_url`, владелец из заказа | OpenAI; доставка клиенту и уведомления администратору | [photo_orders.py](../photo_orders.py), [database.py](../database.py); повторная доставка читает сохранённый результат |
-| Оживление фотографии | Source ref привязан к владельцу animation job | PiAPI/Kling потребовал бы URL; в новом режиме POST блокируется | [animation_orders.py](../animation_orders.py), [video_service.py](../video_service.py); существующий task ID можно опрашивать GET |
-| Песня / два исполнения | TTAPI job ID сохранён существующим сценарием; готовые audioUrl скачиваются и заменяются ref; полная песня restricted-to-order | TTAPI/Suno получает текст/теги/название; MAX получает MP3 | [audio_service.py](../audio_service.py), [audio_orders.py](../audio_orders.py); повторное чтение результата использует существующий job ID |
-| Аудиопревью | Legacy `audio-previews/*`; новый приватный объект, локальный ffmpeg fragment | Клиент через MAX | `create_audio_preview`; исходная полная песня не открывается через preview callback |
-| Музыкальная открытка | Image/audio refs и результат в сохранённом musical order; legacy результат `videos/*` | Сервисы песни/изображения; локальный ffmpeg; MAX | [musical_orders.py](../musical_orders.py), [media_service.py](../media_service.py); приватные входы читаются SDK |
-| Мульт-открытки: День матери / день рождения мамы / другие | Song/image/story/task IDs остаются в существующем FSM snapshot; owned refs вместо URL | OpenAI/TTAPI; новые URL-вызовы HeyGen/Kling заблокированы | [mother_story.py](../mother_story.py), [mother_recovery.py](../mother_recovery.py), [cartoon_avatar_archive.py](../cartoon_avatar_archive.py), [heygen.py](../heygen.py); старые оплаченные task IDs не обнуляются |
-| Мультстудия: сцены, речь, изображения, видео, сборка | Assets: локальные неизменяемые версии и SHA; owner проекта из JOIN; private publication ref | OpenAI, Yandex TTS, HeyGen/Kling согласно матрице, MAX администратору | [multstudio/assets.py](../multstudio/assets.py), [worker.py](../multstudio/worker.py), [adapters.py](../multstudio/adapters.py); legacy `studio/*` / `multstudio/*` |
-| MP3 для фоновой музыки | Проверенный MP3 нормализуется; в новом режиме private ref и локальный MP3 | Локальный mixer, Object Storage; отдельно выбранная музыка не отправляется AI автоматически | [multstudio/music.py](../multstudio/music.py); публичная запись не используется |
-| Ручные материалы / поддержка | Source ref с владельцем MAX, admin readonly export | Только настроенный администратор в MAX + платформа MAX | [handlers.py](../handlers.py); приватный UUID убирается из видимого текста |
-| Временные файлы | `TemporaryDirectory` image/audio/media/alignment; новые Assets files 0600 и новые директории 0700 | Процесс бота, ffmpeg; данные могут попасть в OS backup/snapshot | Удаляются по выходу из temp context при нормальном завершении. Crash cleanup, все исторические права, резервные копии и retention не гарантируются |
-| `shared_images` и публикация | Legacy share tokens и URL остаются; автоматическая регистрация private/signed запрещена | Публикация legacy ранее могла открывать объект третьим лицам | Здесь нет массового отзыва старых ссылок и нет согласия на публикацию по факту генерации |
+| HeyGen Avatar: `POST /v3/avatars`, look/group GET | [Assets overview](https://developers.heygen.com/docs/assets) и [Create Avatar](https://developers.heygen.com/docs/reference/create-avatar) подтверждают asset input. [Upload](https://developers.heygen.com/docs/upload-assets): multipart `POST /v3/assets`, возвращает asset_id **и публичный URL**. Image limit simple upload 32 MB | Signed input разрешён на условиях URL input; численная верхняя граница queue/fetch/refetch не установлена | Предпочтительный будущий путь — file→asset_id с сохранением ID и контролем неизвестного исхода upload. Сейчас не подключён: публичная provider-copy и жизненный цикл требуют отдельного допуска/smoke. Avatar-creation может быть платной; не использовать для бесплатной проверки |
+| HeyGen Video: `POST /v3/videos`, `GET /v3/videos/{id}`; image/silent/scene variants в текущем коде | [Audio to Video](https://developers.heygen.com/docs/audio-to-video) подтверждает `audio_asset_id`, а `image` принимает asset_id. [Create Video](https://developers.heygen.com/docs/reference/create-video) — точная v3 reference. Существующие URL payload не заменялись на новые model endpoints | [URL requirements](https://developers.heygen.com/docs/assets): HTTPS, прямой файл, без extra headers/redirects, действителен до fetch. Максимальное время fetch/refetch не указано | Private mutations остаются заблокированы. GET существующего video ID допустим; истёкший output URL получать повторным GET, не новой генерацией |
+| HeyGen TTS: `POST /v3/models/audio/tts` | [TTS guide](https://developers.heygen.com/docs/voices/heygen-voice-speech): текст/voice/model, синхронный audio_url; есть отдельный stream endpoint. Текущий код использует completed MP3 path, stream API не вводился | S3 input URL не нужен. SLA получения/срок output URL не установлен здесь | Локальный MP3/manifest сохраняются до публикации; неизвестный paid POST не повторяется. Сам TTS не разблокирует полный ded_moroz |
+| PiAPI/Kling I2V: `POST /api/v1/task`, task_type video_generation, version 3.0; GET того же task | [Create Task](https://piapi.ai/docs/kling-api/create-task) подтверждает image_url. Не переносить свойства Kling 4.0/omni на используемую 3.0. [File upload](https://piapi.ai/docs/tools/file-upload): JSON base64 до 10 MB, provider возвращает URL, не asset ID | Ephemeral upload удаляется через 24 часа; это **срок хранения**, не maximum queue/fetch/refetch. Численная гарантия получения входного URL не установлена | **BLOCKED private**. Не увеличивать presign TTL до произвольных суток и не считать единичный успех гарантией |
+| Kling с аудио: task_type avatar, image_url + local_dubbing_url; также отдельный lip_sync с origin_task_id | [Avatar API](https://piapi.ai/docs/kling-api/kling-avatar-api) — фактическая схема. [Lipsync](https://piapi.ai/docs/kling-api/create-task) — другая операция; native enable_audio не означает приём произвольной песни | Direct provider asset ID для этого пути не подтверждён; максимальное refetch окно не установлено. HYA/PAYG service_mode private/public — способ обслуживания, не ACL наших файлов | **BLOCKED private**, оба входа защищены до POST; existing GET polling сохранён |
+| TTAPI/Suno: `POST /suno/v1/music`, `GET /suno/v2/fetch` | [Generate](https://docs.ttapi.io/api/en/suno/suno_music) подтверждает custom lyrics/tags/title и chirp-v6; [Fetch V2](https://docs.ttapi.io/api/en/suno/suno_fetch_v2) возвращает musics/audioUrl. Файл на вход этого endpoint не требуется | Input S3 TTL не нужен. Срок доступности output audioUrl не установлен по этим страницам | Supported song pilot: немедленно архивировать MP3, сохранить job ID. Download/expiry error — повторный fetch существующего job, не новый music POST. Upload/cover APIs не используются и не подменяют этот контракт |
 
-Новые файлы студии получают ограниченные права там, где они создаются этим адаптером; существующие каталоги и файлы автоматически не chmod-ятся. Администратор обязан проверить, что `studio_files`, private registry и его SQLite journal не раздаются веб-сервером. Приватность бакета не защищает локальный файл в публичной директории.
+[HeyGen asset lifetime](https://developers.heygen.com/docs/assets): ID повторно используется до удаления, а исходные assets не удаляются автоматически вместе с готовым avatar/video. Это не гарантия приватности URL или согласие на бессрочное хранение. 24 часа direct-upload URL относятся к входящему PUT в HeyGen, не к нашей signed GET ссылке. Не смешивать эти сроки.
 
-## Чтение, запись, восстановление
+Другие текущие пути: OpenAI Images получает multipart bytes, vision — data URI из авторизованных bytes, Whisper — локальный audio sample. Yandex SpeechKit и имеющийся ElevenLabs adapter принимают текст и возвращают audio bytes. Они не требуют signed S3 input. Отдельного работающего MiniMax клиента в этом checkout не обнаружено; упоминание сервиса/модели у посредника не доказывает прямой вызов MiniMax.
 
-`PrivateMedia.put` сохраняет метаданные операции **до** отправки объекта. Уникальная операция связана с владельцем, заказом, SHA и MIME. Перед повторным PUT проверяется существующий объект через SDK HEAD, размер и SHA metadata. Если предыдущий PUT имел неопределённый исход, отсутствие результата HEAD не разрешает слепую повторную отправку: `MediaWriteUncertain` требует проверки. Принятый объект с совпадающим SHA восстанавливается без нового PUT.
+## Где находятся медиа и кто читает
 
-`media_orders` в отдельном реестре сохраняет намерение приватной обработки сервисного заказа до нового платного вызова. При перезапуске workers/saved song flow восстанавливают это ограничение. Если флаг записи выключен, файлы читаются, но новая обработка приватного исходника/помеченного заказа прекращается до платного POST и до legacy PUT. Это не миграция очереди и не сброс статуса заказа.
+| Категория | Source/owner/хранение | Получатели и восстановление |
+|---|---|---|
+| Принятые фото пользователя/семьи | MAX payload → owned source ref; FSM хранит ref. Не все незапрошенные вложения архивируются | OpenAI по сценарию, MAX при доставке, scoped support. MAX сохраняет свою копию независимо |
+| Фото детей | Владелец verified Ded Moroz order; refs и локальный нормализованный PNG | Локальный renderer, owner/admin export; полный private продукт пока закрыт |
+| Открытки/карты желаний | image_service: private media/v1 вместо legacy vision-boards | Оригинал и preview — разные immutable objects; чтение SDK с owner check |
+| Фотосессии | Source в order/FSM; photo_results хранит private ref | Worker получает именно результаты заказа; сохранённый кадр доставляется без новой генерации |
+| Песни/preview | Full tracks restricted-to-order; preview — отдельный объект | TTAPI text, MAX MP3; job ID и tracks сохраняются, права исходного заказа проверяются заново |
+| Музыкальные подарки | Image/audio refs, локальный ffmpeg, retained MP4 | Root musical policy наследуется по всем стадиям, доставка не публикует S3 URL |
+| Мультфильмы/студия/Дед Мороз | Existing FSM/job IDs, Assets local paths/SHA; private outputs поддерживаются reader-ом | Новые неподтверждённые private POST блокируются; legacy paid jobs не пересоздаются из-за смены флагов |
+| Custom/support | Owned uploads, readonly admin export | Персональный MAX диалог, без автоматического consent/public share |
+| shared_images | Старые tokens/URL сохраняются | Private/signed refs не регистрируются; исторический public доступ этим PR не отзывается |
+| Local/temp/backup | TempDirectory, studio_files, registry/journal/anchor | Новые private temp files 0600/dirs 0700; crash cleanup, OS copies и backup retention не гарантируются |
 
-Обычные исключения доступа не добавляют повтор платной генерации. Вызовы S3 используют SigV4, `verify=True`, HTTPS endpoint и `max_attempts=0`; Security 1.0 `safe_logging.py` и `max_client.py` не менялись. Никаких fallback на `ssl=False` нет. Загрузка файлов с внешних HTTPS источников не следует redirect автоматически. Доступность S3 preflight проверяется до новых image/song POST; последующая поломка хранения всё ещё возможна, поэтому существующие provider IDs необходимо сохранить.
+Основные файлы: [media_policy.py](../media_policy.py), [media_registry.py](../media_registry.py), [private_media.py](../private_media.py), [private_media_emergency.py](../private_media_emergency.py), [handlers.py](../handlers.py), [database.py](../database.py), [prodamus.py](../prodamus.py), workers и [multstudio/assets.py](../multstudio/assets.py). Тарифы, webhook HMAC и финансовые SQL не переписаны; добавлены только технические guards перед соответствующими действиями.
 
-Ad hoc тест администратора без сохранённого order ID не имеет `media_orders` checkpoint до появления файла. Такие тесты и RAM-only сессии нужно завершить/остановить и отдельно проверить перед сменой режима; автоматическое восстановление всех произвольных административных действий не заявляется.
+## Долговечность и реестр
 
-## Временные ссылки и передача третьим лицам
+Registry schema version 111; version 0 от Security 1.1 допускается только при известной совместимой структуре. Неизвестная версия/таблица/повреждение — отказ, а не обнуление. Файл и SQLite sidecars должны принадлежать service UID и не иметь group/other прав. Symlink и доступные другим registry/journal отвергаются. `.required` marker (0600) сохраняется при первой записи: отсутствие самой DB при marker блокирует пересоздание и новые операции. Удаление DB и marker вместе или утрата всего диска не обнаруживаются магически: нужны backup и внешняя проверка.
 
-`presign` — низкоуровневая операция **после авторизации**, не публичная endpoint. Авторизованный SDK проверяет объект, затем создаётся SigV4 GET с HTTPS. По умолчанию TTL **300 секунд**, допустимый верхний предел **900 секунд**. Эти числа — выбранный срок доступа, не срок хранения и не подтверждённый контракт AI-провайдера. Срок grant повторно проверяется после сетевого HEAD.
+PUT: metadata prepared → короткий CAS submitting commit → SDK HEAD/PUT/HEAD вне write transaction → ready. Неизвестный PUT не повторяется автоматически; принятый объект восстанавливается HEAD/SHA без повторной записи. Изменённый content/order для той же операции отвергается. Чтение подтверждает размер и SHA. Никаких анонимных HEAD или fallback на public storage.
 
-Подписанный URL — bearer credential: любой получивший его может читать до истечения TTL. Он возвращается только вызывающему коду в `SignedGet` со скрытым repr; в SQLite сохраняется object key/ref, **не подписанный URL**. Его нельзя отправлять в логи, сохранять как `audio_url` или использовать в общем share endpoint. При отзыве grant уже выданный URL может жить до своего TTL; мгновенный отзыв всех S3 URL не реализован. Во встроенные платные provider mutations новый signer пока не подключён, потому что сроки загрузки не подтверждены.
+Runtime S3 использует отдельные credentials, HTTPS, SigV4, verify=True и отключённые автоматические SDK retries. Security 1.0 TLS/safe_logging не ослаблены. Новый код не пишет URL/API body/traceback в журнал; repr policy скрывает owner/operation. Registry/планы сами содержат чувствительные metadata и не должны раздаваться Nginx.
 
-`grant` требует пользовательскую роль владельца, конкретного получателя и срока не более 24 часов. `revoke` запрещает будущие чтения/выдачи ссылок получателю. Это технический API для отдельного явного действия; интерфейс массовой публикации не добавлен. Grant не означает юридическое согласие на рекламу, обучение моделей или публикацию фото ребёнка. Полученную/скачанную копию отозвать невозможно.
+## Память и ограничения VPS
 
-## Совместимость провайдеров
+* Input/output limits приложения: image 8 MiB, audio 16 MiB, video 32 MiB, document/octet-stream 8 MiB. Это наши консервативные пределы, не обещание полного покрытия лимитов MAX/провайдеров.
+* S3 GET читается блоками до 64 KiB в эксклюзивный файл 0600. Для крупных медиа MAX получает InputMedia(path); маленький buffer оставлен для SDK совместимости и image preparation.
+* Установленный maxapi 1.2.3 `BaseConnection.upload_file` **сам читает файл целиком**. Поэтому file-based путь не является end-to-end streaming. Один transfer slot и 32 MiB cap ограничивают этот SDK buffer; 200 MiB больше не используется как универсальный безопасный буфер.
+* Синтетический тест трёх одновременных 32 MiB доставок с реальным SDK upload_file и mocked HTTP: max active=1, Python tracemalloc peak около **32,4 MiB**. Это не общий RSS сервиса и не профилирование production VPS. Pillow/ffmpeg/native memory, OS cache и остальные задачи требуют отдельного owner monitoring на 1 GiB/1 vCPU.
+* SDK network calls выполняются через to_thread; write transactions содержат только metadata SQL. Синтетический конкурентный writer во время HEAD/GET/PUT подтверждает отсутствие SQLite write lock на сети.
 
-Сведения ниже подтверждены текущими call sites и синтетическими тестами. Реальных запросов, облачных ключей, платных API и пользовательских фото для проверки не было. Страны обработки и договорные сроки хранения не установлены.
+## Временные ссылки и добровольное предоставление
 
-| Провайдер | Фактический ввод / вывод | Передача private / временная ссылка | Окно скачивания, повторное получение, expiry | Решение и восстановление |
-|---|---|---|---|---|
-| OpenAI Images | Фото и style refs, prompt → изображение | `_download_photo` читает SDK bytes; реальный OpenAI SDK в mock transport отправляет multipart file bytes, без S3 URL | GET TTL не нужен для передаваемого файла; хранение OpenAI неизвестно | Допущен прямой файловый путь в тестовом режиме; base64 output сохраняется приватно; автоматического повторного paid POST нет |
-| OpenAI vision/text | Фото для count_people → data URI из SDK bytes; тексты/имена/brief → chat request | Фото не передаётся постоянным S3 URL в новом пути | Для text/data URI TTL не нужен; политика поставщика неизвестна | Текст/изображение всё равно уходят провайдеру; private storage не делает AI локальным |
-| OpenAI Whisper | Локальный MP3 sample, первая строка песни → word timestamps | `song_alignment.detect_song_start` передаёт file stream | URL не нужен; поставщик сохраняет данные на неизвестных здесь условиях | Только после получения scoped bytes; прежний alignment/checkpoint не сбрасывается |
-| TTAPI → Suno | Prompt/lyrics, title, tags; POST `/suno/v1/music`; GET `/suno/v2/fetch`; output audio URLs | Входной S3 файл не нужен. Готовые треки немедленно скачиваются bounded GET и архивируются private | Время жизни output URL, промежуточное хранение и возможная повторная загрузка поставщиком неизвестны | При ошибке скачивания сохранить job ID, повторить GET существующей задачи; новую песню автоматически не создавать |
-| PiAPI → Kling | JSON image_url, prompt, иногда local_dubbing_url; task ID, output URL | Direct-file upload и сроки signed GET этой интеграцией не доказаны | Максимальная очередь/fetch delay/refetch/expiry handling неизвестны | **BLOCKED** в новом режиме до POST, включая legacy URL вход нового задания; GET существующего task разрешён |
-| HeyGen | Photo/avatar/image/audio URL, текст и параметры; ID/video URL | Этот код передаёт URL; альтернативный upload и полный контракт signed GET не доказаны | Максимальная задержка и повторное чтение неизвестны | **BLOCKED** новые avatar/video POST; старые ID опрашивать GET, не пересоздавать |
-| HeyGen TTS | Подготовленный текст поздравления, включая имя/сведения из заказа; voice/model → provider audio URL, затем локальный MP3 | Фото/S3 input URL для TTS не нужен; output скачивается и обрабатывается локально | TTL provider output и хранение текста неизвестны | [heygen_tts.py](../heygen_tts.py), [heygen.py](../heygen.py); текущий Ded Moroz worker выбирает этот адаптер. Сохранённый MP3/manifest повторно используется без нового TTS POST; приватный rollback останавливает новые POST |
-| ElevenLabs | Текст, voice ID/model/settings → поток MP3 | Прямой текст/аудиобайты; S3 input URL не нужен | Retention неизвестен; signed GET не нужен | [elevenlabs_tts.py](../elevenlabs_tts.py) содержит адаптер; не считать доказанным, что он включён в текущем production. Локальный MP3 сохраняется до публикации |
-| MiniMax | В этом checkout не обнаружен самостоятельный вызов MiniMax API | Нельзя считать проверенным по названию продукта/модели | Неизвестно, включая возможный upstream посредника | Не заявляется совместимость; новая интеграция требует отдельной проверки |
-| Yandex SpeechKit | Текст, голос/emotion/speed → аудиобайты | Локальный file/bytes, S3 input URL не нужен | Signed GET не нужен, хранение SpeechKit из кода не установить | [multstudio/adapters.py](../multstudio/adapters.py); голосовой результат архивируется Assets |
-| Yandex Object Storage (S3 API) | Байты, MIME, SHA и технические случайные keys; owner mapping локально | Авторизованные HEAD/GET/PUT; signer HTTPS SigV4 | 300/900 сек — наш access TTL, фактический object retention не ограничен | Отдельные keys/bucket, нет анонимного fallback/ACL mutation |
-| MAX | Полученные фото и сообщения; image/audio/video/document bytes при upload; адресат ID | Для private не требуется публичный S3 URL | MAX SDK принимает upload buffer; его внутреннее хранение/URL вне контроля приложения | Проверено mock SDK для четырёх типов. Реальный private S3→MAX smoke владельцем **ещё не проведён** |
-| Prodamus | Существующие платёжные metadata | Private storage не добавляет передачу медиа | Не относится к signed-media TTL | Платежи/webhook/схема прав не изменены |
+Signer выдаёт HTTPS GET после owner/order checks, по умолчанию 300 секунд, максимум 900. Это **наше access policy**, не retention и не подтверждённое provider fetch окно. Signed URL — bearer credential; не хранить в БД/логах. Получатель с grant повторно проверяется после HEAD; уже выданный URL после revoke может действовать до TTL.
 
-В БД встречается историческое значение provider `fish_audio`; действующего отдельного Fish Audio клиента в этом checkout не обнаружено. Нельзя выводить текущую передачу данных этому сервису только из legacy значения поля.
+Recipient grant — только явное действие владельца для конкретного получателя, не более 24 часов; UI массовой публикации не добавлен. Для restricted songs grant запрещён. Генерация не означает согласие на рекламу, публикацию, обучение моделей или использование фото третьих лиц/детей.
 
-До разблокировки каждого URL-only провайдера нужны: документированный direct upload либо signed URL support; верхняя граница queue+fetch+refetch с запасом; проверка expiry/403 на тестовом объекте; сохранённый provider ID и read-only recovery; отсутствие платного повторного POST при ошибке доступа. Подставлять универсальные 15 минут в непроверенный сервис нельзя.
+## Что остаётся неизвестным / блокирует запуск
 
-## Логи, TLS и публичный доступ
+Live Yandex ACL/IAM/CDN/public flags, реальная media delivery через MAX, общий RSS VPS, договорные retention/страны обработки сторонних сервисов, queue/refetch upper bounds HeyGen/Kling, privacy implications provider assets и максимальные сроки output URLs не подтверждены по исходникам. Не давать этим параметрам выдуманные значения. Юридические согласия, retention/deletion и закрытие исторических URL — отдельные этапы.
 
-Секреты приватного SDK скрыты в repr конфигурации. Ошибки хранения преобразуются в фиксированные `MediaError` без URL/API response; safety layer Security 1.0 остаётся владельцем глобальных логов, stdout/stderr и необработанных исключений. Реестр и inventory plans сами содержат служебные персональные metadata и должны храниться вне публичной директории.
-
-Перед первым SDK object request выполняется read-only проверка bucket ACL и policy. Анонимные/групповые grants, wildcard/неоднозначные principal, duplicate JSON keys, неизвестные Allow principal и недоступная проверка приводят к отказу. Код не вызывает PutBucketPolicy/PutObjectAcl/DeleteObject. Такой preflight не доказывает отсутствие внешнего CDN, website/public flags конкретного облака, отдельной anonymous IAM-политики или будущего изменения настроек. Нужны действия владельца в консоли и реальный **синтетический** anonymous GET test. Подмена credentials/SDK конфигурации администратором находится вне модели защиты приложения.
-
-## Конфигурация
-
-| Переменная | Значение / назначение |
-|---|---|
-| `PRIVATE_MEDIA_ENABLED` | `false` по умолчанию; строгий bool `true`/`false`; включает новые записи |
-| `PRIVATE_MEDIA_BUCKET` | Новый, отличный от `STORAGE_BUCKET` приватный bucket |
-| `PRIVATE_MEDIA_REGISTRY` | Отдельный SQLite path, default `BASE_DIR/private_media.sqlite3`; родитель уже существует; не бизнес-БД |
-| `PRIVATE_MEDIA_ACCESS_KEY_ID` | Отдельный service key, скрывается repr |
-| `PRIVATE_MEDIA_SECRET_ACCESS_KEY` | Отдельный secret, скрывается repr |
-| `STORAGE_ENDPOINT_URL`, `STORAGE_REGION` | Текущая HTTPS S3 endpoint/region; TLS не отключается |
-
-Legacy `STORAGE_BUCKET`, base URL и credentials сохраняются для старых объектов. Подстановка legacy ключей при отсутствии private credentials запрещена. После появления private references выключение write flag не разрешает удалять private credentials/registry/bucket: они нужны читателям.
-
-## Проверки и пределы доказательств
-
-Новые тесты: [test_private_media.py](../tests/test_private_media.py), [test_private_media_migration.py](../tests/test_private_media_migration.py), [test_private_media_integration.py](../tests/test_private_media_integration.py). Только синтетические bytes/IDs/keys, mock S3, реальный локальный SigV4 signer и mock HTTP/OpenAI/MAX SDK. Проверяются anonymous deny в модели закрытого бакета, подпись/expiry, чужой owner, namespaces, paid song gate, scoped admin/service, grant/revoke, authenticated bytes→MAX для image/MP3/MP4/TXT, unknown PUT restart, нет повторного paid POST, storage failure, ACL/policy deny, миграция и режим чтения при rollback.
-
-Нельзя считать модель S3 доказательством production ACL. Не проводились: доступ к VPS, реальная бизнес-БД, реальные media, облачные операции, генерации, изменение доступа к legacy, отправка клиентам. Точные результаты сравнительного запуска и ограничения окружения приведены в deployment runbook.
-
-## Что остаётся подтвердить
-
-1. Реальные private bucket ACL/policy/public flags/CDN/IAM и доступ root/backup operators.
-2. Согласованный fetch/refetch/expiry контракт HeyGen/PiAPI/Kling и любой другой URL-only интеграции.
-3. Live smoke синтетических файлов через S3 и MAX с production SDK после отдельного разрешения.
-4. Наличие копий legacy в CDN, сторонних сервисах, логах, backup/snapshot и сроки хранения там.
-5. Retention/deletion/consents/legal policy — отдельный этап; эта реализация не выдаёт несуществующие гарантии удаления.
-6. Покупка неподдерживаемого продукта до блокировки генерации — препятствие общему включению до отдельно согласованного решения.
-
-Далее: [миграция](private-media-migration.md), [runbook](private-media-deployment-runbook.md).
+Дальше: [миграция](private-media-migration.md), [точный Yandex setup, smoke и rollback runbook](private-media-deployment-runbook.md).

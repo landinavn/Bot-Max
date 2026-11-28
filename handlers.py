@@ -1,6 +1,6 @@
 """Меню и FSM: режим → фото → мечта или готовый праздничный шаблон."""
 from safe_logging import get_logger, correlation_scope
-from private_media import download_button
+from private_media import download_button, is_private
 from private_media import retain_image_url, retain_photo_payload
 from private_media import song_context
 
@@ -1182,7 +1182,7 @@ def create_router(
             kwargs = {'theme_info': data[ROLE_CARD_FIELDS[mode]]} if mode in ROLE_CARD_FIELDS else {}
             # Превью содержит PREVIEW: для готового видео создаём чистую открытку.
             urls = await postcard_generator(photo['url'], mode, fixed_text, **kwargs)
-            if len(urls) != 1 or not isinstance(urls[0], str) or not urls[0].startswith('https://'):
+            if len(urls) != 1 or not isinstance(urls[0], str) or not (urls[0].startswith('https://') or is_private(urls[0])):
                 raise ValueError('Генератор открытки не вернул HTTPS-ссылку.')
             image_url = urls[0]
             data['video_source_image'] = image_url
@@ -1488,7 +1488,7 @@ def create_router(
                                               'style_reference_scope':'wardrobe' if index==3 else 'all'}
                             frame_kwargs['pose_instruction']=NY_RED_WOMAN_HEAD_POSES[index]
                         url = await photosession_generator(reference_url, prompt, **frame_kwargs)
-                        if not isinstance(url, str) or not url.startswith("https://"):
+                        if not isinstance(url, str) or not (url.startswith("https://") or is_private(url)):
                             raise RuntimeError("Генератор не вернул HTTPS-ссылку кадра.")
                         if (await context.get_data()).get("photosession_session_id") != session_id:
                             return
@@ -1628,7 +1628,7 @@ def create_router(
                         return
                 else:
                     urls = await generator(photo["url"], sphere)
-                if len(urls) != 1 or not all(isinstance(url, str) and url.startswith("https://") for url in urls):
+                if len(urls) != 1 or not all(isinstance(url, str) and (url.startswith("https://") or is_private(url)) for url in urls):
                     raise RuntimeError("Генератор должен вернуть один HTTPS URL.")
                 user = None
                 generation_event = GENERATION_EVENTS[mode]
@@ -1790,7 +1790,7 @@ def create_router(
                             # Старые и мульт-задачи сохраняют исходный адаптер Kling.
                             result = (await generate_video(job['avatar_url'], job['song_url'], mode=job.get('mode') or '')
                                       if default_cartoon_video else await cartoon_video_generator(job['avatar_url'], job['song_url']))
-                        if is_video_placeholder(result) or not isinstance(result, str) or not result.startswith('https://'):
+                        if is_video_placeholder(result) or not isinstance(result, str) or not (result.startswith('https://') or is_private(result)):
                             raise ValueError('Видеосервис пока не вернул готовое видео.')
                         await save_pending_video_result(job['id'], result)
                     attachments = [InlineKeyboardBuilder().row(download_button(text='⬇️ Скачать видео', url=result)).as_markup()]
@@ -3352,7 +3352,7 @@ def create_router(
             if not url:
                 await _reply(event, f'🎨 Создаю мульт-аватар {attempt} из 2... Пожалуйста, подождите.')
                 url = await avatar_generator(photo_url, data['cartoon_mode'])
-                if not isinstance(url, str) or not url.startswith('https://'):
+                if not isinstance(url, str) or not (url.startswith('https://') or is_private(url)):
                     raise ValueError('Генератор не вернул HTTPS-ссылку аватара.')
                 if (await context.get_data()).get('cartoon_session_id') != session:
                     return
@@ -3574,7 +3574,7 @@ def create_router(
             try:
                 if not item.get('preview_url'):
                     preview = await create_audio_preview(url)
-                    if not isinstance(preview, str) or not preview.startswith('https://'):
+                    if not isinstance(preview, str) or not (preview.startswith('https://') or is_private(preview)):
                         raise ValueError('Не получен фрагмент песни.')
                     item['preview_url'] = preview
                     await checkpoint()
@@ -3803,7 +3803,7 @@ def create_router(
             if (await context.get_data()).get('cartoon_session_id') != session:
                 return
             if (not isinstance(data.get('video_merged_url'), str)
-                    or not data['video_merged_url'].startswith('https://') or is_video_placeholder(data['video_merged_url'])):
+                    or not (data['video_merged_url'].startswith('https://') or is_private(data['video_merged_url'])) or is_video_placeholder(data['video_merged_url'])):
                 raise ValueError('Не получена HTTPS-ссылка на готовое мульт-видео.')
             await context.update_data(**video_cache(data))
             video = await upload_video_for_max(event.bot, data['video_merged_url'])
@@ -3935,7 +3935,7 @@ def create_router(
                     if (await context.get_data()).get('card_role_session') != session:
                         return
                     urls = await postcard_generator(data['photo']['url'], mode, fixed, theme_info=info, preview=True)
-                    if len(urls) != 1 or not isinstance(urls[0], str) or not urls[0].startswith('https://'):
+                    if len(urls) != 1 or not isinstance(urls[0], str) or not (urls[0].startswith('https://') or is_private(urls[0])):
                         raise ValueError('Генератор не вернул HTTPS-ссылку превью.')
                     if (await context.get_data()).get('card_role_session') != session:
                         return
@@ -4160,7 +4160,7 @@ def create_router(
                 await increment_counter('click_video_animate_199' if animate else 'click_video_full_249', user_id=user_id)
         data = await context.get_data()
         image_url = data.get('last_image_url')
-        if data.get('mode') not in POSTCARD_PROMPTS or not isinstance(image_url, str) or not image_url.startswith('https://'):
+        if data.get('mode') not in POSTCARD_PROMPTS or not isinstance(image_url, str) or not (image_url.startswith('https://') or is_private(image_url)):
             await _reply(event, 'Сначала создайте открытку, затем выберите её анимацию или видео.', attachments=[main_keyboard()])
             return
         await context.update_data(video_flow=True, video_source_image=image_url,
@@ -4367,7 +4367,7 @@ def create_router(
                     await _reply(event, PENDING_VIDEO_MESSAGE, attachments=[main_keyboard()])
                     await context.set_state(PosterStates.waiting_for_mode)
                     return
-                if not isinstance(result, str) or not result.startswith('https://'):
+                if not isinstance(result, str) or not (result.startswith('https://') or is_private(result)):
                     raise ValueError('Генератор видео не вернул HTTPS-ссылку.')
                 video_attachment = await upload_video_for_max(event.bot, result)
                 if (await context.get_data()).get('video_generation_id') != generation_id:
@@ -6255,7 +6255,7 @@ def create_router(
                 try:
                     if is_private(url):
                         access=Access(None,'admin',admin_id=admin_user_id,reason='export')
-                        attachment=await upload_for_max(event.bot,url,access,kind='image' if url==image else 'audio')
+                        attachment=await upload_for_max(event.bot,url,access,kind='image' if url==image else 'audio',destination_user=admin_user_id)
                         await event.bot.send_message(user_id=admin_user_id,text=caption,attachments=[attachment])
                         continue
                     else: attachment = await uploader(event.bot, url)
@@ -6729,11 +6729,15 @@ def create_router(
         access = await user_access(user_id)
         service = None
         try:
+            if Config.from_env().private_media_read_only:
+                from private_media_emergency import deliver_saved
+                await deliver_saved(event.bot,reference)
+                return
             service = PrivateMedia(Config.from_env())
             metadata = await asyncio.to_thread(service.stat, reference, access)
             family = metadata['content_type'].split('/')[0]
             kind = family if family in ('image','audio','video') else 'file'
-            attachment = await upload_for_max(event.bot, reference, access, kind=kind)
+            attachment = await upload_for_max(event.bot, reference, access, kind=kind,destination_user=user_id)
             await event.bot.send_message(user_id=user_id, text='Ваш файл', attachments=[attachment])
         except MediaError:
             await _reply(event, 'Файл недоступен. Обратитесь в поддержку.')

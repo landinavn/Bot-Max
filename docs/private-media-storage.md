@@ -1,4 +1,4 @@
-# Security 1.1.2 — private media, Yandex compatibility и staged rollout
+# Security 1.1.3 — private media, Yandex compatibility и staged rollout
 
 Дата проверки документации: **28 ноября 2026, Москва**. Продолжение PR №266, ветка `security/private-media-storage`, исходный SHA `e6ef3dce87e0f67e2c7fb280f5e9901fabaccd4b`. Установленная база Security 1.0: `57744a0b600a9736cbaf1d00a2ccb6660869c903`. Точный проверенный итоговый SHA и результаты полного сравнения публикуются в описании [PR №266](https://github.com/landinavn/Bot-Max/pull/266).
 
@@ -121,3 +121,10 @@ Live Yandex ACL/IAM/CDN/public flags, реальная media delivery через
 Исходный SHA: f5dd8de787cd1b407df16f3072a2f792598ccd6a. [Ограниченный профиль и owner smoke](private-media-yandex-smoke.md) заменяют предположение «непустой Owner.ID = субъект доступа» для Yandex. Default остаётся strict; в yandex-v1 пустой ACL допустим только при всех четырёх точных правилах и отдельном административном подтверждении public flags/identity/IAM. Owner.ID сверяется с folder ID, а allowlist — с CanonicalUser subjects. Case-normalized TLS keys не допускают дублей; оба обязательных Deny проверяются, включая Action "*" и отсутствие/null Condition legacy deny. Дополнительные Allow/ACL grants не допускаются.
 
 Это не аудит живого bucket: реальный ответ предоставлен владельцем; реализация проверялась только synthetic fixtures. Runtime IAM не расширен, schema/финансовые операции/зависимости не изменены. Provider readiness таблица выше сохраняется. Для реального Yandex нельзя использовать старый f5dd8de как reader fallback: нужен проверенный 1.1.2 с сохранёнными profile/controls при выключенных writes. Итоговый SHA и полное сравнение с f5dd8de — в PR №266.
+
+
+## Security 1.1.3 — metadata и read-only recovery smoke
+
+Исходный SHA: 337d485ceaf8787c3c505be831921d44cea49b71. [Новая инструкция](private-media-metadata.md) описывает общий строгий metadata helper, stage/error-code диагностику и resume существующего synthetic TXT без PUT. Case нормализуется только у имени SHA256; значение, ContentLength и фактический bytes digest проверяются строго, дубли запрещены, ETag не используется. Private destination migration использует тот же helper, неизвестный PUT не повторяется.
+
+Legacy probes теперь независимы: имеющийся bot-storage-user key можно проверить без speechkit static key. Speechkit помечается not tested/no_static_credentials, что не доказывает отсутствие IAM-token доступа; способы отдельной проверки без новых ключей/ролей описаны в инструкции. Read-only resume всегда частичный, не допуск пилота; controls и product flags автоматически не меняются. Формат private refs/schema 111/TLS/IAM/цены/dependencies сохранены.

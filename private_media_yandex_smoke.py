@@ -22,9 +22,9 @@ def denied(call):
         response=call()
     except ClientError as error:
         if error.response.get('ResponseMetadata',{}).get('HTTPStatusCode')==403:return
-        raise RuntimeError('Negative SDK probe did not establish access denial') from None
+        raise SmokeFailure('access_not_denied') from None
     if isinstance(response,dict) and response.get('Body') is not None:response['Body'].close()
-    raise RuntimeError('Negative SDK probe unexpectedly succeeded')
+    raise SmokeFailure('access_not_denied')
 
 
 def configuration():
@@ -48,122 +48,287 @@ def configuration():
         private_media_yandex_controls_verified=verified=='true')
 
 
-def run_smoke(config,client,http,*,save,sleep=time.sleep,ttl=10,legacy_clients=()):
-    from yandex_media_profile import check_bucket
-    if not 5<=ttl<=30:raise ValueError('Unsupported smoke TTL')
-    if legacy_clients and len(legacy_clients)!=2:raise ValueError('Both legacy accounts must be tested')
-    check_bucket(config,client)
-    bucket=config.private_media_bucket
-    record={'bucket':bucket,'objects':[],'result':'incomplete'}
-    payload=b'Bot-Max synthetic private storage smoke\n'
-    digest=hashlib.sha256(payload).hexdigest()
+PAYLOAD=b'Bot-Max synthetic private storage smoke\n'
+LEGACY_LABELS=('bot-storage-user','speechkit-user')
+STAGES=('preflight','put','head_integrity','get_integrity','anonymous_get_head',
+        'signed_get_head','signed_url_expiry','fresh_signed_access','out_of_prefix_put','legacy_probes')
+CODES=frozenset({'metadata_missing','metadata_invalid','metadata_duplicate_sha256','metadata_invalid_sha256',
+    'size_mismatch','sha256_mismatch','content_size_mismatch','content_sha256_mismatch',
+    'preflight_failed','sdk_access_denied','network_timeout','probe_failed','access_not_denied',
+    'signed_access_failed','expiry_not_established','fresh_access_failed','unexpected_endpoint',
+    'legacy_probe_failed','invalid_record','invalid_configuration','record_write_failed','interrupted'})
 
-    def attempt(key,producer,expect_denied=False):
-        entry={'key':key,'state':'submitting'}
-        record['objects'].append(entry);save(record)
-        call=lambda:producer.put_object(Bucket=bucket,Key=key,Body=payload,
-                  ContentType='text/plain',Metadata={'sha256':digest})
-        if expect_denied:denied(call);entry['state']='denied'
-        else:call();entry['state']='accepted'
-        save(record)
 
-    key='media/v1/smoke/'+uuid4().hex+'.txt'
-    attempt(key,client)
-    head=client.head_object(Bucket=bucket,Key=key)
-    if head.get('ContentLength')!=len(payload) or head.get('Metadata',{}).get('sha256')!=digest:
-        raise RuntimeError('Synthetic HEAD integrity failed')
-    body=client.get_object(Bucket=bucket,Key=key)['Body']
-    try:data=body.read(len(payload)+1)
-    finally:body.close()
-    if data!=payload:raise RuntimeError('Synthetic GET integrity failed')
+class SmokeFailure(RuntimeError):
+    def __init__(self,code):self.code=code;super().__init__(code)
 
+
+def error_code(error,stage):
+    from private_media_integrity import S3IntegrityError
+    from botocore.exceptions import ClientError
+    import httpx
+    if isinstance(error,(S3IntegrityError,SmokeFailure)) and error.code in CODES:return error.code
+    if isinstance(error,KeyboardInterrupt):return 'interrupted'
+    if isinstance(error,(TimeoutError,httpx.TimeoutException)):return 'network_timeout'
+    if isinstance(error,ClientError) and error.response.get('ResponseMetadata',{}).get('HTTPStatusCode')==403:
+        return 'sdk_access_denied'
+    return 'preflight_failed' if stage=='preflight' else 'probe_failed'
+
+
+class Progress:
+    def __init__(self,bucket,save,report=None,*,readonly=False):
+        self.save=save;self.report=report
+        self.record={'version':2,'bucket':bucket,'mode':'read-only' if readonly else 'synthetic-write',
+                     'stage':'configuration','stages':{},'objects':[],
+                     'legacy':{label:{'status':'not tested','reason':'not_reached'} for label in LEGACY_LABELS},'result':'incomplete'}
+    def emit(self,stage,status,code=None):
+        self.record['stage']=stage
+        self.record['stages'][stage]={'status':status}
+        if code:self.record['stages'][stage]['error_code']=code
+        if status=='failed':self.record['result']='failed'
+        self.commit()
+        if self.report:self.report({'stage':stage,'status':status,**({'error_code':code} if code else {})})
+    def commit(self):
+        try:self.save(self.record)
+        except Exception:raise SmokeFailure('record_write_failed') from None
+    def phase(self,stage):
+        from contextlib import contextmanager
+        @contextmanager
+        def context():
+            self.emit(stage,'running')
+            try:yield
+            except BaseException as error:
+                self.emit(stage,'failed',error_code(error,stage));raise
+            else:self.emit(stage,'passed')
+        return context()
+
+
+def _endpoint(url):
+    parts=urlsplit(url)
+    if (parts.scheme!='https' or parts.netloc!='storage.yandexcloud.net'
+            or parts.username or parts.password or parts.fragment):raise SmokeFailure('unexpected_endpoint')
+    return parts
+
+
+def _attempt(progress,client,bucket,key,*,negative=False):
+    entry={'key':key,'state':'submitting'}
+    progress.record['objects'].append(entry);progress.commit()
+    call=lambda:client.put_object(Bucket=bucket,Key=key,Body=PAYLOAD,
+        ContentType='text/plain',Metadata={'sha256':hashlib.sha256(PAYLOAD).hexdigest()})
+    if negative:denied(call);entry['state']='denied'
+    else:call();entry['state']='accepted'
+    progress.commit()
+
+
+def _read_checks(progress,config,client,http,key,*,sleep,ttl):
+    from private_media_integrity import verify_s3_integrity
+    bucket=config.private_media_bucket;digest=hashlib.sha256(PAYLOAD).hexdigest()
+    with progress.phase('head_integrity'):
+        verify_s3_integrity(client.head_object(Bucket=bucket,Key=key),len(PAYLOAD),digest)
+    with progress.phase('get_integrity'):
+        response=client.get_object(Bucket=bucket,Key=key);body=response.get('Body')
+        try:
+            verify_s3_integrity(response,len(PAYLOAD),digest)
+            data=body.read(len(PAYLOAD)+1)
+        finally:
+            if body is not None:body.close()
+        if len(data)!=len(PAYLOAD):raise SmokeFailure('content_size_mismatch')
+        if hashlib.sha256(data).hexdigest()!=digest:raise SmokeFailure('content_sha256_mismatch')
+        progress.record['objects'][0]['state']='accepted';progress.commit()
     signed={}
-    for method,operation in (('GET','get_object'),('HEAD','head_object')):
-        url=client.generate_presigned_url(operation,Params={'Bucket':bucket,'Key':key},ExpiresIn=ttl,HttpMethod=method)
-        parts=urlsplit(url)
-        if (parts.scheme!='https' or parts.hostname!='storage.yandexcloud.net'
-                or parts.port is not None or parts.username or parts.password or parts.fragment):
-            raise RuntimeError('Unexpected signed URL endpoint')
-        anonymous=urlunsplit((parts.scheme,parts.netloc,parts.path,'',''))
-        # Missing objects/redirects/network errors are not evidence of privacy.
-        if http.request(method,anonymous).status_code!=403:raise RuntimeError('Anonymous access was not denied')
-        response=http.request(method,url)
-        if response.status_code!=200 or (method=='GET' and response.content!=payload):
-            raise RuntimeError('Active signed access failed')
-        signed[method]=url
-    # Neither signed URL nor credentials are retained in the record or output.
-    sleep(ttl+3)
-    for method,url in signed.items():
-        if http.request(method,url).status_code!=403:raise RuntimeError('Signed URL expiry was not established')
-    # Distinguish expiry from revoked credentials, deleted objects or a broad
-    # access outage: the same credentials must still sign fresh working URLs.
-    for method,operation in (('GET','get_object'),('HEAD','head_object')):
-        fresh=client.generate_presigned_url(operation,Params={'Bucket':bucket,'Key':key},ExpiresIn=ttl,HttpMethod=method)
-        parts=urlsplit(fresh)
-        if parts.scheme!='https' or parts.netloc!='storage.yandexcloud.net':raise RuntimeError('Unexpected fresh signed endpoint')
-        response=http.request(method,fresh)
-        if response.status_code!=200 or (method=='GET' and response.content!=payload):
-            raise RuntimeError('Fresh signed access after expiry failed')
+    with progress.phase('anonymous_get_head'):
+        for method,operation in (('GET','get_object'),('HEAD','head_object')):
+            url=client.generate_presigned_url(operation,Params={'Bucket':bucket,'Key':key},ExpiresIn=ttl,HttpMethod=method)
+            parts=_endpoint(url)
+            anonymous=urlunsplit((parts.scheme,parts.netloc,parts.path,'',''))
+            if http.request(method,anonymous).status_code!=403:raise SmokeFailure('access_not_denied')
+            signed[method]=url
+    with progress.phase('signed_get_head'):
+        for method,url in signed.items():
+            response=http.request(method,url)
+            if response.status_code!=200 or (method=='GET' and response.content!=PAYLOAD):raise SmokeFailure('signed_access_failed')
+    with progress.phase('signed_url_expiry'):
+        sleep(ttl+3)
+        for method,url in signed.items():
+            if http.request(method,url).status_code!=403:raise SmokeFailure('expiry_not_established')
+    with progress.phase('fresh_signed_access'):
+        for method,operation in (('GET','get_object'),('HEAD','head_object')):
+            fresh=client.generate_presigned_url(operation,Params={'Bucket':bucket,'Key':key},ExpiresIn=ttl,HttpMethod=method)
+            _endpoint(fresh);response=http.request(method,fresh)
+            if response.status_code!=200 or (method=='GET' and response.content!=PAYLOAD):raise SmokeFailure('fresh_access_failed')
 
-    # This can create only a NEW synthetic object if the policy is wrong.
-    # Save its exact key BEFORE attempting PUT; never overwrite/delete anything.
-    attempt('security-smoke-outside/'+uuid4().hex+'.txt',client,expect_denied=True)
-    for legacy in legacy_clients:
-        denied(lambda:legacy.head_object(Bucket=bucket,Key=key))
-        denied(lambda:legacy.get_object(Bucket=bucket,Key=key))
-        attempt('media/v1/smoke/legacy-'+uuid4().hex+'.txt',legacy,expect_denied=True)
-    record['result']='passed' if len(legacy_clients)==2 else 'partial-legacy-not-tested'
-    save(record)
-    return record['result']
+
+def _legacy_checks(progress,config,key,clients,unavailable,*,readonly):
+    if isinstance(clients,(list,tuple)):
+        if len(clients)>2:raise SmokeFailure('invalid_configuration')
+        clients=dict(zip(LEGACY_LABELS,clients))
+    if not isinstance(clients,dict) or set(clients)-set(LEGACY_LABELS):raise SmokeFailure('invalid_configuration')
+    if set(unavailable)-set(LEGACY_LABELS) or any(x not in ('no_static_credentials','credentials_not_provided') for x in unavailable.values()):
+        raise SmokeFailure('invalid_configuration')
+    failed=False
+    try:
+        progress.emit('legacy_probes','running')
+        for label in LEGACY_LABELS:
+            client=clients.get(label)
+            if client is None:
+                progress.record['legacy'][label]={'status':'not tested','reason':unavailable.get(label,'credentials_not_provided'),
+                    'absence_is_not_authorization_proof':True}
+                progress.commit();continue
+            try:
+                denied(lambda:client.head_object(Bucket=config.private_media_bucket,Key=key))
+                denied(lambda:client.get_object(Bucket=config.private_media_bucket,Key=key))
+                if not readonly:_attempt(progress,client,config.private_media_bucket,'media/v1/smoke/legacy-'+uuid4().hex+'.txt',negative=True)
+            except Exception as error:
+                failed=True
+                progress.record['legacy'][label]={'status':'failed','error_code':error_code(error,'legacy_probes')}
+            else:
+                progress.record['legacy'][label]={'status':'passed','scope':'head-get' if readonly else 'head-get-put'}
+            progress.commit()
+        if failed:raise SmokeFailure('legacy_probe_failed')
+    except BaseException as error:
+        progress.emit('legacy_probes','failed',error_code(error,'legacy_probes'));raise
+    complete=all(progress.record['legacy'][label]['status']=='passed' for label in LEGACY_LABELS)
+    progress.emit('legacy_probes','passed' if complete else 'partial')
+    return complete
+
+
+def _run(config,client,http,*,save,sleep,ttl,legacy_clients,legacy_unavailable,report,existing=None):
+    from yandex_media_profile import check_bucket
+    if not 5<=ttl<=30:raise SmokeFailure('invalid_configuration')
+    progress=Progress(config.private_media_bucket,save,report,readonly=existing is not None)
+    with progress.phase('preflight'):check_bucket(config,client)
+    if existing is None:
+        key='media/v1/smoke/'+uuid4().hex+'.txt'
+        with progress.phase('put'):_attempt(progress,client,config.private_media_bucket,key)
+    else:
+        key=validate_record(existing,config.private_media_bucket)
+        progress.record['objects']=[{'key':key,'state':'submitting'}]
+        progress.emit('put','skipped-read-only')
+    _read_checks(progress,config,client,http,key,sleep=sleep,ttl=ttl)
+    if existing is None:
+        with progress.phase('out_of_prefix_put'):
+            _attempt(progress,client,config.private_media_bucket,'security-smoke-outside/'+uuid4().hex+'.txt',negative=True)
+    else:progress.emit('out_of_prefix_put','skipped-read-only')
+    full_legacy=_legacy_checks(progress,config,key,legacy_clients,legacy_unavailable or {},readonly=existing is not None)
+    progress.record['result']=('partial-read-only' if existing is not None else
+                              'passed' if full_legacy else 'partial-legacy-not-tested')
+    progress.commit()
+    return progress.record['result']
+
+
+def run_smoke(config,client,http,*,save,sleep=time.sleep,ttl=10,legacy_clients=(),legacy_unavailable=None,report=None):
+    return _run(config,client,http,save=save,sleep=sleep,ttl=ttl,legacy_clients=legacy_clients,
+                legacy_unavailable=legacy_unavailable,report=report)
+
+
+def resume_smoke(config,client,http,record,*,save,sleep=time.sleep,ttl=10,legacy_clients=(),legacy_unavailable=None,report=None):
+    validate_record(record,config.private_media_bucket)
+    return _run(config,client,http,save=save,sleep=sleep,ttl=ttl,legacy_clients=legacy_clients,
+                legacy_unavailable=legacy_unavailable,report=report,existing=record)
+
+
+def validate_record(record,bucket):
+    import re
+    if (not isinstance(record,dict) or record.get('bucket')!=bucket
+            or set(record)-{'version','bucket','mode','stage','stages','objects','legacy','result'}):raise SmokeFailure('invalid_record')
+    objects=record.get('objects')
+    if not isinstance(objects,list) or not 1<=len(objects)<=4:raise SmokeFailure('invalid_record')
+    keys=[]
+    for entry in objects:
+        if (not isinstance(entry,dict) or set(entry)!={'key','state'}
+                or entry['state'] not in ('submitting','accepted','denied')
+                or not isinstance(entry['key'],str)
+                or not re.fullmatch(r'(?:media/v1/smoke/(?:legacy-)?|security-smoke-outside/)[0-9a-f]{32}\.txt',entry['key'])):
+            raise SmokeFailure('invalid_record')
+        keys.append(entry['key'])
+    main=[k for k in keys if re.fullmatch(r'media/v1/smoke/[0-9a-f]{32}\.txt',k)]
+    if len(main)!=1 or keys[0]!=main[0] or len(keys)!=len(set(keys)):raise SmokeFailure('invalid_record')
+    if objects[0]['state'] not in ('accepted','submitting'):raise SmokeFailure('invalid_record')
+    if 'version' in record and (type(record['version']) is not int or record['version']!=2):raise SmokeFailure('invalid_record')
+    return main[0]
+
+
+def load_record(path,bucket):
+    import stat
+    from yandex_media_profile import unique
+    try:fd=os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
+    except OSError:raise SmokeFailure('invalid_record') from None
+    try:
+        info=os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_mode&0o077 or not 0<info.st_size<=65536:
+            raise SmokeFailure('invalid_record')
+        data=os.read(fd,65537)
+        if len(data)!=info.st_size:raise SmokeFailure('invalid_record')
+        try:record=json.loads(data,object_pairs_hook=unique)
+        except Exception:raise SmokeFailure('invalid_record') from None
+        validate_record(record,bucket)
+        return record
+    finally:os.close(fd)
+
+
+def legacy_configuration(config):
+    configs={};unavailable={};identities=set();access_keys=set()
+    for number,label in enumerate(LEGACY_LABELS,1):
+        prefix='PRIVATE_MEDIA_SMOKE_LEGACY_'+str(number)+'_'
+        identity=os.environ.get(prefix+'PRINCIPAL')
+        key=os.environ.get(prefix+'ACCESS_KEY_ID');secret=os.environ.get(prefix+'SECRET_ACCESS_KEY')
+        absent=os.environ.get(prefix+'NO_STATIC_CREDENTIALS','false').strip().lower()
+        if absent not in ('true','false') or bool(key)!=bool(secret):raise SmokeFailure('invalid_configuration')
+        if identity:
+            if identity not in config.private_media_legacy_principals or identity in identities:raise SmokeFailure('invalid_configuration')
+            identities.add(identity)
+        if absent=='true':
+            if not identity or key or secret:raise SmokeFailure('invalid_configuration')
+            unavailable[label]='no_static_credentials';continue
+        if not key:unavailable[label]='credentials_not_provided';continue
+        if not identity or key in access_keys:raise SmokeFailure('invalid_configuration')
+        access_keys.add(key)
+        configs[label]=replace(config,private_media_access_key_id=key,private_media_secret_access_key=secret)
+    return configs,unavailable
 
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--execute',action='store_true')
     parser.add_argument('--confirm-bucket',required=True)
-    parser.add_argument('--record',type=Path,required=True)
+    parser.add_argument('--record',type=Path,required=True,help='NEW protected output record; never overwritten')
+    parser.add_argument('--resume-record',type=Path,help='Existing protected synthetic record; READ ONLY, no PUT')
     parser.add_argument('--ttl',type=int,choices=range(5,31),default=10)
     parser.add_argument('--legacy-probes',action='store_true')
     args=parser.parse_args(argv)
-    # Suppress third-party request/exception logs even under inherited logging.
-    previous_logging_disable=logging.root.manager.disable
-    logging.disable(logging.CRITICAL)
-    clients=[]
+    previous_logging_disable=logging.root.manager.disable;logging.disable(logging.CRITICAL)
+    clients=[];current={'stage':'configuration'}
     try:
         from private_media import storage_client
         from yandex_media_profile import validate_configuration
         import httpx
-        config=configuration()
-        validate_configuration(config)
-        if not args.execute or args.confirm_bucket!=config.private_media_bucket:
-            raise ValueError('Explicit synthetic bucket confirmation is required')
-        # Check both identities before making ANY network request or PUT.
-        legacy_configs=[];identities=set()
-        if args.legacy_probes:
-            for number in (1,2):
-                prefix='PRIVATE_MEDIA_SMOKE_LEGACY_'+str(number)+'_'
-                identity=os.environ.get(prefix+'PRINCIPAL')
-                key=os.environ.get(prefix+'ACCESS_KEY_ID');secret=os.environ.get(prefix+'SECRET_ACCESS_KEY')
-                if identity not in config.private_media_legacy_principals or identity in identities or not key or not secret:
-                    raise ValueError('Verified distinct legacy probe credentials required')
-                identities.add(identity)
-                legacy_configs.append(replace(config,private_media_access_key_id=key,private_media_secret_access_key=secret))
-        # Exclusive 0600, no overwrite/symlink target; keep outside public/Git dirs.
+        config=configuration();validate_configuration(config)
+        if args.confirm_bucket!=config.private_media_bucket or (args.resume_record and args.execute) or (not args.resume_record and not args.execute):
+            raise SmokeFailure('invalid_configuration')
+        legacy_configs,unavailable=legacy_configuration(config) if args.legacy_probes else ({},{})
+        current['stage']='record'
+        source=load_record(args.resume_record,config.private_media_bucket) if args.resume_record else None
         fd=os.open(args.record,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
         with os.fdopen(fd,'w') as output:
             def save(record):
+                current['stage']=record['stage']
+                current['legacy']=record['legacy']
                 output.seek(0);json.dump(record,output);output.truncate();output.flush();os.fsync(output.fileno())
-            save({'result':'not-started','objects':[]})
-            client=storage_client(config);clients.append(client)
-            legacy=[]
-            for legacy_config in legacy_configs:
-                probe=storage_client(legacy_config);legacy.append(probe);clients.append(probe)
+            def report(event):print(json.dumps(event))
+            current['stage']='configuration'
+            client=storage_client(config);clients.append(client);legacy={}
+            for label,legacy_config in legacy_configs.items():
+                probe=storage_client(legacy_config);legacy[label]=probe;clients.append(probe)
             with httpx.Client(verify=True,trust_env=False,follow_redirects=False,timeout=10) as http:
-                result=run_smoke(config,client,http,save=save,ttl=args.ttl,legacy_clients=legacy)
-        print(json.dumps({'synthetic_smoke':result}))
+                options=dict(save=save,ttl=args.ttl,legacy_clients=legacy,legacy_unavailable=unavailable,report=report)
+                result=resume_smoke(config,client,http,source,**options) if source is not None else run_smoke(config,client,http,**options)
+        print(json.dumps({'synthetic_smoke':result,'legacy':current.get('legacy',{})}))
         return 0 if result=='passed' else 2
-    except Exception:
-        print(json.dumps({'synthetic_smoke':'failed','action':'stop; inspect the private record; do not retry an unknown PUT'}))
+    except (Exception,KeyboardInterrupt) as error:
+        code=error_code(error,current['stage'])
+        if current['stage']=='configuration' and code=='probe_failed':code='invalid_configuration'
+        if current['stage']=='record' and code=='probe_failed':code='invalid_record'
+        print(json.dumps({'synthetic_smoke':'failed','stage':current['stage'],'error_code':code,'legacy':current.get('legacy',{})}))
         return 1
     finally:
         for client in clients:

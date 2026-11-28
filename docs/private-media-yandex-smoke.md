@@ -1,4 +1,4 @@
-# Security 1.1.2 — ограниченный профиль Yandex и smoke владельца
+# Security 1.1.3 — профиль Yandex и smoke владельца
 
 Проверка источников: 28.11.2026 (Москва). База изменений: `f5dd8de787cd1b407df16f3072a2f792598ccd6a`, Draft PR №266. Production остаётся на `57744a0b600a9736cbaf1d00a2ccb6660869c903`. Здесь подготовлены код и инструкция; реальные bucket/VPS/keys не использовались. Команды ниже **не выполнялись** и не являются deployment.
 
@@ -103,7 +103,7 @@ venv/bin/python private_media_yandex_smoke.py \
 * `PRIVATE_MEDIA_SMOKE_LEGACY_1_PRINCIPAL`, `_1_ACCESS_KEY_ID`, `_1_SECRET_ACCESS_KEY`;
 * `PRIVATE_MEDIA_SMOKE_LEGACY_2_PRINCIPAL`, `_2_ACCESS_KEY_ID`, `_2_SECRET_ACCESS_KEY`.
 
-Идентификаторы должны быть разными и точно покрывать deny set. Эти ключи не переходят в конфигурацию runtime бота. Отсутствующие/неверные данные останавливают CLI до первого запроса. Не создавать/расширять права старых accounts ради теста.
+Предоставленные идентификаторы должны быть разными и входить в deny set; два доступных account покрывают его целиком, один — только свою часть. Эти ключи не переходят в конфигурацию runtime бота. Неверные/неполные пары credentials останавливают CLI до первого запроса. Отсутствие credentials одного account теперь оставляет его not tested, не блокируя имеющуюся пару другого. Для speechkit без static key использовать явный NO_STATIC_CREDENTIALS marker по [инструкции 1.1.3](private-media-metadata.md); не создавать ключи и не расширять права ради теста.
 
 Проверяется последовательно:
 
@@ -129,3 +129,10 @@ Exit 0 — все пробы прошли; exit 2 — базовые пробы 
 ## Reader-compatible rollback
 
 Формат refs и schema 111 не изменены. Но старый f5dd8de не понимает пустой ACL Yandex: он не является рабочим reader fallback для этого профиля. Для Yandex требуется текущий проверенный **Security 1.1.2 SHA** даже при PRIVATE_MEDIA_ENABLED=false/PRODUCTS пусто/READ_ONLY=true. Сохранить profile, expected folder, principals, административное подтверждение, bucket/keys, registry/anchor и согласованную business DB. Не восстанавливать старую DB, не делать bucket public. При неисправном reader остановить затронутую обработку и устранить проблему отдельно.
+
+
+## Уже созданный synthetic TXT / Security 1.1.3
+
+Не повторять PUT из-за ключа Metadata.Sha256. [Read-only resume и диагностика](private-media-metadata.md) принимают защищённый существующий record 1.1.2, не произвольный key/фото/файл. Входной record не меняется, новый diagnostic record создаётся 0600; все write probes пропускаются. Общий helper нормализует только регистр имени metadata key, не значение digest; GET metadata/length и bytes SHA также обязательны. Старый 337d485 не является рабочим reader fallback для фактического SDK Metadata.Sha256: сохранить проверенный 1.1.3 SHA и profile/identity/controls при отключении writes.
+
+Два static ключа больше не требуются для независимых legacy probes. Частичный результат или отсутствие speechkit static key не подтверждает полный запрет доступа. Проверки с IAM-token только владельцем, только через уже разрешённую аутентификацию и без выдачи дополнительных прав.

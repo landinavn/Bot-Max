@@ -1,4 +1,4 @@
-# Security 1.1.2 — staged deployment, Yandex setup, smoke и reader rollback
+# Security 1.1.3 — staged deployment, Yandex setup, smoke и reader rollback
 
 **Подготовка, не выполнение. Не запускать эти действия на VPS без отдельного согласования.** Production остаётся на `57744a0b600a9736cbaf1d00a2ccb6660869c903`. Разработка продолжается от `e6ef3dce87e0f67e2c7fb280f5e9901fabaccd4b` в Draft [PR №266](https://github.com/landinavn/Bot-Max/pull/266). Точный итоговый SHA, полный список файлов и результаты сравнительных запусков — в описании PR, привязанные к immutable commit. Merge/deployment не выполнялись.
 
@@ -201,3 +201,10 @@ PRIVATE_MEDIA_READ_ONLY=true
 Для reader rollback Yandex сохранить текущий проверенный 1.1.2 SHA и все profile/controls/identity настройки при READ_ONLY=true и отключённых writes. f5dd8de/57744a0/196d577 не являются совместимым Yandex reader fallback. Business DB не откатывать.
 
 Полный сравнительный прогон 1.1.2 выполняется относительно f5dd8de в обоих существующих venv; точные SHA/счётчики/классификация в PR. Предыдущие 136 private-media test ID сохраняются и сверяются отдельно; новые tests проверяют фактическую форму пустого ACL, четыре Deny/Allow контракта, TLS aliases/duplicates, operator gates и owner smoke без cloud/API calls. Dependencies и тарифы не изменяются.
+
+
+## Security 1.1.3 — metadata и read-only recovery smoke
+
+Исходный SHA: 337d485ceaf8787c3c505be831921d44cea49b71. [Новая инструкция](private-media-metadata.md) описывает общий строгий metadata helper, stage/error-code диагностику и resume существующего synthetic TXT без PUT. Case нормализуется только у имени SHA256; значение, ContentLength и фактический bytes digest проверяются строго, дубли запрещены, ETag не используется. Private destination migration использует тот же helper, неизвестный PUT не повторяется.
+
+Legacy probes теперь независимы: имеющийся bot-storage-user key можно проверить без speechkit static key. Speechkit помечается not tested/no_static_credentials, что не доказывает отсутствие IAM-token доступа; способы отдельной проверки без новых ключей/ролей описаны в инструкции. Read-only resume всегда частичный, не допуск пилота; controls и product flags автоматически не меняются. Формат private refs/schema 111/TLS/IAM/цены/dependencies сохранены.

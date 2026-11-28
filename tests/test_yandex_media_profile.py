@@ -171,7 +171,7 @@ class SmokeS3:
         d=self.data[kw['Key']];return {'ContentLength':len(d['Body']),'Metadata':d['Metadata']}
     def get_object(self,**kw):
         if self.legacy:self.deny()
-        return {'Body':io.BytesIO(self.data[kw['Key']]['Body'])}
+        return {**self.head_object(**kw),'Body':io.BytesIO(self.data[kw['Key']]['Body'])}
     def generate_presigned_url(self,*args,**kw):
         self.signatures+=1
         return 'https://storage.yandexcloud.net/synthetic-private/'+kw['Params']['Key']+'?synthetic-signature='+str(self.signatures)

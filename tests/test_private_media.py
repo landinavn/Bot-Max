@@ -61,8 +61,7 @@ class SyntheticS3:
 
     def get_object(self, Bucket, Key):
         self.gets += 1
-        self.head_object(Bucket,Key)
-        return {'Body':io.BytesIO(self.objects[Bucket,Key][0])}
+        return {**self.head_object(Bucket,Key),'Body':io.BytesIO(self.objects[Bucket,Key][0])}
 
     def generate_presigned_url(self,*args,**kwargs):
         return self.signer.generate_presigned_url(*args,**kwargs)

@@ -307,7 +307,7 @@ async def test_stream_and_max_sdk_file_path_bound_memory_and_concurrency(private
             return b'x'*take
         def close(self):pass
     monkeypatch.setattr(s,'head_object',lambda **kw:{'ContentLength':size,'Metadata':{'sha256':digest}})
-    monkeypatch.setattr(s,'get_object',lambda **kw:{'Body':Body()})
+    monkeypatch.setattr(s,'get_object',lambda **kw:{**s.head_object(**kw),'Body':Body()})
     active=peak=0;paths=[]
     class Response:
         async def __aenter__(self):return self

@@ -422,9 +422,9 @@ class PrivateMedia:
 
     @staticmethod
     def _verify_head(row, head):
-        if (not head or head.get('ContentLength') != row['size']
-                or head.get('Metadata', {}).get('sha256') != row['sha256']):
-            raise MediaUnavailable('Media integrity check failed')
+        from private_media_integrity import verify_s3_integrity,S3IntegrityError
+        try:verify_s3_integrity(head,row['size'],row['sha256'])
+        except S3IntegrityError:raise MediaUnavailable('Media integrity check failed') from None
 
     def put(self, data, content_type, access, *, operation_id, owner_access='owner',mark_order=True):
         if not private_enabled(self.config) or getattr(self.config,'private_media_read_only',False):raise MediaError('Private writes disabled')
@@ -487,7 +487,9 @@ class PrivateMedia:
             fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
             created=True
             with os.fdopen(fd,'wb') as output:
-                body=self._sdk().get_object(Bucket=row['bucket'],Key=row['object_key'])['Body']
+                response=self._sdk().get_object(Bucket=row['bucket'],Key=row['object_key'])
+                body=response.get('Body')
+                self._verify_head(row,response)
                 total=0;digest=hashlib.sha256()
                 while True:
                     chunk=body.read(min(65536,row['size']-total+1))

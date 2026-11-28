@@ -61,3 +61,6 @@ Emergency mode сохраняет авторизованные чтение/до
 
 
 Security 1.1.2: для Yandex empty ACL нужен [профиль yandex-v1](private-media-yandex-smoke.md), проверенные controls и точные четыре правила. Пустой ACL не подтверждает privacy исторических объектов или отсутствие унаследованного IAM/object ACL. Эта доработка не копирует/не переключает объекты. При rollback Yandex reader должен содержать 1.1.2; старый f5dd8de не принимает фактический empty ACL. Формат refs/schema 111 не изменены.
+
+
+Security 1.1.3: [общий metadata helper и диагностика](private-media-metadata.md) проверяют private destination SHA по case-insensitive имени ключа, сохраняя точное значение/размер. Legacy source bytes пересчитываются прежним copy, а повтор private PUT после неизвестного исхода запрещён. Исторические объекты, ACL и бизнес-БД не изменялись. Для SDK Sha256 reader требуется текущий 1.1.3; 337d485 не исправляет эту несовместимость.
